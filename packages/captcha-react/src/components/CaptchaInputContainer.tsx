@@ -5,7 +5,7 @@ import {
   CAPTCHA_INPUT_CONTAINER_ID,
   CAPTCHA_MODAL_INPUT_CONTAINER_ID,
 } from '../constants';
-import { Modal } from '@shared/ui/components';
+import { Modal } from '@supertokens/auth-ui/components';
 
 export const CaptchaInputContainer = forwardRef<
   HTMLDivElement,
