@@ -1,0 +1,12 @@
+{
+  "name": "@supertokens-plugin/captcha/python",
+  "version": "0.1.0",
+  "description": "SuperTokens plugin that adds CAPTCHA support in your python application.",
+  "main": "index.js",
+  "keywords": [],
+  "exports": {},
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  }
+}
