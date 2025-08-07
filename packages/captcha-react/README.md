@@ -6,47 +6,18 @@ This plugin integrates with **reCAPTCHA v2**, **reCAPTCHA v3**, and **Cloudflare
 ## Installation
 
 ```bash
-npm install supertokens-plugin-captcha
+npm install supertokens-plugin-captcha/react
 ```
 
 ## Quick Start
-
-### Backend Configuration
-
-Initialize the plugin in your SuperTokens backend configuration:
-
-```typescript
-import SuperTokens from "supertokens-node";
-import CaptchaPlugin from "supertokens-plugin-captcha/backend";
-
-SuperTokens.init({
-  supertokens: {
-    connectionURI: "...",
-  },
-  appInfo: {
-    // your app info
-  },
-  recipeList: [
-    // your recipes
-  ],
-  plugins: [
-    CaptchaPlugin.init({
-      type: "reCAPTCHAv3", // or "reCAPTCHAv2" or "turnstile"
-      captcha: {
-        secretKey: "your-secret-key",
-      },
-    }),
-  ],
-});
-```
 
 ### Frontend Configuration
 
 Initialize the plugin in your SuperTokens frontend configuration:
 
 ```typescript
-import SuperTokens from "supertokens-auth-react";
-import CaptchaPlugin from "supertokens-plugin-captcha/frontend";
+import SuperTokens from 'supertokens-auth-react';
+import CaptchaPlugin from 'supertokens-plugin-captcha/frontend';
 
 SuperTokens.init({
   appInfo: {
@@ -57,9 +28,9 @@ SuperTokens.init({
   ],
   plugins: [
     CaptchaPlugin.init({
-      type: "reCAPTCHAv3", // or "reCAPTCHAv2" or "turnstile"
+      type: 'reCAPTCHAv3', // or "reCAPTCHAv2" or "turnstile"
       captcha: {
-        sitekey: "your-site-key",
+        sitekey: 'your-site-key',
         // Additional configuration based on the captcha provider
       },
     }),
@@ -67,45 +38,26 @@ SuperTokens.init({
 });
 ```
 
+:::info
+You also have to install and configure the backend plugin.
+:::
+
 ## Protected Flows
 
 The plugin automatically protects these authentication flows:
 
-| Recipe          | Authentication Flow        | Forms                                                                                  | Pre-API Hook Action         | Backend API Function             |
-| --------------- | -------------------------- | -------------------------------------------------------------------------------------- | --------------------------- | -------------------------------- |
-| `EmailPassword` | User sign in               | `EmailPasswordSignInForm`                                                              | `EMAIL_PASSWORD_SIGN_IN`    | `signInPOST`                     |
-| `EmailPassword` | User registration          | `EmailPasswordSignUpForm`                                                              | `EMAIL_PASSWORD_SIGN_UP`    | `signUpPOST`                     |
-| `EmailPassword` | Password reset request     | `EmailPasswordResetPasswordEmail`                                                      | `SEND_RESET_PASSWORD_EMAIL` | `generatePasswordResetTokenPOST` |
-| `EmailPassword` | Password reset submission  | `EmailPasswordSubmitNewPassword`                                                       | `SUBMIT_NEW_PASSWORD`       | `passwordResetPOST`              |
-| `Passwordless`  | Generate verification code | `PasswordlessEmailForm` and `PasswordlessPhoneForm` and `PasswordlessEmailOrPhoneForm` | `PASSWORDLESS_CREATE_CODE`  | `createCodePOST`                 |
-| `Passwordless`  | Verify code and sign in    | `PasswordlessUserInputForm`                                                            | `PASSWORDLESS_CONSUME_CODE` | `consumeCodePOST`                |
+| Recipe          | Authentication Flow        | Forms                                                                                  | Pre-API Hook Action         |
+| --------------- | -------------------------- | -------------------------------------------------------------------------------------- | --------------------------- |
+| `EmailPassword` | User sign in               | `EmailPasswordSignInForm`                                                              | `EMAIL_PASSWORD_SIGN_IN`    |
+| `EmailPassword` | User registration          | `EmailPasswordSignUpForm`                                                              | `EMAIL_PASSWORD_SIGN_UP`    |
+| `EmailPassword` | Password reset request     | `EmailPasswordResetPasswordEmail`                                                      | `SEND_RESET_PASSWORD_EMAIL` |
+| `EmailPassword` | Password reset submission  | `EmailPasswordSubmitNewPassword`                                                       | `SUBMIT_NEW_PASSWORD`       |
+| `Passwordless`  | Generate verification code | `PasswordlessEmailForm` and `PasswordlessPhoneForm` and `PasswordlessEmailOrPhoneForm` | `PASSWORDLESS_CREATE_CODE`  |
+| `Passwordless`  | Verify code and sign in    | `PasswordlessUserInputForm`                                                            | `PASSWORDLESS_CONSUME_CODE` |
 
 ## Customization
 
-### Backend: Conditional Validation
-
-Control when CAPTCHA validation occurs using the `shouldValidate` function:
-
-```typescript
-import { ShouldValidate } from "supertokens-plugin-captcha/backend";
-
-const shouldValidate: ShouldValidate = (api, input) => {
-  // Only require CAPTCHA for sign up
-  if (api === "signUpPOST") {
-    return true;
-  }
-
-  // Check request headers for suspicious activity
-  if (api === "signInPOST") {
-    const userAgent = input.options.req.getHeaderValue("user-agent");
-    return !userAgent || userAgent.includes("bot");
-  }
-
-  return false;
-};
-```
-
-### Frontend: Custom Input Container
+### Conditional Validation
 
 Create a custom component to control CAPTCHA rendering:
 
