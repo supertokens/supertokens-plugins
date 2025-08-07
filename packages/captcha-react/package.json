@@ -27,10 +27,10 @@
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "supertokens-auth-react": "github:supertokens/supertokens-auth-react#feat/plugin/base"
+    "supertokens-auth-react": "github:supertokens/supertokens-auth-react#feat/plugin/base",
+    "@supertokens/auth-ui": "*"
   },
   "peerDependencies": {
-    "@shared/ui": "*",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
