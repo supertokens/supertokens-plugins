@@ -74,7 +74,7 @@ export type PasswordlessCaptchaPreAndPostAPIHookActions = Extract<
   PasswordlessPreAndPostAPIHookAction,
   | 'PASSWORDLESS_CONSUME_CODE'
   | 'PASSWORDLESS_CREATE_CODE'
-  | 'PASSWORDLESS_RESEND_CODE'
+  | 'PASSWORDLESS_RESEND_CODE' // We do not have a matching override in the backend, do we want this in the list?
 >;
 
 export function isPasswordlessCaptchaPreAndPostAPIHookAction(

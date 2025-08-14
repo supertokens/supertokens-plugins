@@ -24,10 +24,10 @@ Each plugin usually consists of separate packages for frontend and backend based
 
 ```bash
 # Backend (Node.js)
-npm install @supertokens-plugin/captcha/nodejs
+npm install @supertokens-plugin/captcha-nodejs
 
 # Frontend (React)
-npm install @supertokens-plugin/captcha/react
+npm install @supertokens-plugin/captcha-react
 ```
 
 ### Basic Usage

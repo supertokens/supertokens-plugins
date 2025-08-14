@@ -59,7 +59,7 @@ export async function validateCaptcha(body: Record<string, unknown>) {
 async function verifyReCaptchaV3(captcha: string): Promise<void> {
   const config = getPluginConfig();
   const reCAPTCHAv3Key = config.captcha.secretKey;
-  if (!reCAPTCHAv3Key) {
+  if (!reCAPTCHAv3Key) { //Don't we throw this during the config validation? Can this still happen?
     throw new CaptchaPluginError(
       "PLUGIN_CONFIG_ERROR",
       "reCAPTCHAv3 secretKey is required"

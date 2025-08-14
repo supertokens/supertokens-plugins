@@ -1,8 +1,9 @@
 import { SuperTokensPluginCaptchaConfig } from "./types";
 
 export const PLUGIN_ID = "supertokens-plugin-captcha";
-export const PLUGIN_SDK_VERSION = "22.1.0-canary-plugins.0";
+export const PLUGIN_SDK_VERSION = ">=23.0.0";
 
+// I don't really like this pattern, we should use dependency injection in some way (even if manual)
 let PluginConfig: SuperTokensPluginCaptchaConfig;
 
 export function getPluginConfig() {

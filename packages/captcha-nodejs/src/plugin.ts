@@ -25,6 +25,8 @@ export const init = (
                   input
                 );
                 let shouldValidate = validateResult;
+                // We can just always await, no need to check if it's a promise
+                // is there any reason for this check?
                 if (validateResult instanceof Promise) {
                   shouldValidate = await validateResult;
                 }

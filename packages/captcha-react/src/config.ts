@@ -14,6 +14,7 @@ export function enableLogging(): void {
 }
 
 export function logDebugMessage(message: string): void {
+  // ??
   // if(!__debugLogsEnabled) return;
   console.log(
     `${SUPERTOKENS_DEBUG_NAMESPACE} {t: "${new Date().toISOString()}", message: "${message}", supertokens-plugin-captcha: ""}`
