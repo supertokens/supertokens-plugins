@@ -1,12 +1,12 @@
 import { SuperTokensPlugin } from 'supertokens-node/types';
-import { PLUGIN_ID, PLUGIN_SDK_VERSION, setPluginConfig } from './config';
+import { PLUGIN_ID, PLUGIN_SDK_VERSION, validatePluginConfig } from './config';
 import { SuperTokensPluginCaptchaConfig } from './types';
 import { validateCaptcha } from './captcha';
 
 export const init = (
   config: SuperTokensPluginCaptchaConfig
 ): SuperTokensPlugin => {
-  setPluginConfig(config);
+  validatePluginConfig(config);
   return {
     id: PLUGIN_ID,
     compatibleSDKVersions: [PLUGIN_SDK_VERSION],
@@ -20,16 +20,10 @@ export const init = (
             ...originalImplementation,
             signUpPOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = config.shouldValidate(
+                const shouldValidate = await config.shouldValidate(
                   'signUpPOST',
                   input
                 );
-                let shouldValidate = validateResult;
-                // We can just always await, no need to check if it's a promise
-                // is there any reason for this check?
-                if (validateResult instanceof Promise) {
-                  shouldValidate = await validateResult;
-                }
                 if (!shouldValidate) {
                   return originalImplementation.signUpPOST!(input);
                 }
@@ -37,7 +31,7 @@ export const init = (
 
               const body = await input.options.req.getJSONBody();
               try {
-                await validateCaptcha(body);
+                await validateCaptcha(body, config);
               } catch (e) {
                 return {
                   status: 'GENERAL_ERROR',
@@ -62,7 +56,7 @@ export const init = (
               }
               const body = await input.options.req.getJSONBody();
               try {
-                await validateCaptcha(body);
+                await validateCaptcha(body, config);
               } catch (e) {
                 return {
                   status: 'GENERAL_ERROR',
@@ -89,7 +83,7 @@ export const init = (
               }
               const body = await input.options.req.getJSONBody();
               try {
-                await validateCaptcha(body);
+                await validateCaptcha(body, config);
               } catch (e) {
                 return {
                   status: 'GENERAL_ERROR',
@@ -117,7 +111,7 @@ export const init = (
 
               const body = await input.options.req.getJSONBody();
               try {
-                await validateCaptcha(body);
+                await validateCaptcha(body, config);
               } catch (e) {
                 return {
                   status: 'GENERAL_ERROR',
@@ -155,7 +149,7 @@ export const init = (
 
               const body = await input.options.req.getJSONBody();
               try {
-                await validateCaptcha(body);
+                await validateCaptcha(body, config);
               } catch (e) {
                 return {
                   status: 'GENERAL_ERROR',
@@ -181,7 +175,7 @@ export const init = (
 
               const body = await input.options.req.getJSONBody();
               try {
-                await validateCaptcha(body);
+                await validateCaptcha(body, config);
               } catch (e) {
                 return {
                   status: 'GENERAL_ERROR',

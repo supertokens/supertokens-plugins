@@ -8,10 +8,6 @@ import {
 import { CAPTCHA_INPUT_CONTAINER_ID } from './constants';
 import { SuperTokensPluginCaptchaConfig } from './types';
 
-vi.mock('./config', () => ({
-  logDebugMessage: vi.fn(),
-}));
-
 describe('Captcha', () => {
   let captcha: Captcha;
 

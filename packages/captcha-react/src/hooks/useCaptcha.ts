@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import { Captcha, captcha } from '../captcha';
-import { getPluginConfig, logDebugMessage } from '../config';
+import { getPluginConfig } from '../config';
 import { CAPTCHA_INPUT_CONTAINER_ID } from '../constants';
 import { SuperTokensPluginCaptchaConfig } from '../types';
 
@@ -96,9 +96,6 @@ class CaptchaStore {
     configOverride: Partial<SuperTokensPluginCaptchaConfig> = {}
   ) => {
     if (this.state.isLoading || this.state.isRendering) {
-      logDebugMessage(
-        `CaptchaStore load skipped: isLoading=${this.state.isLoading}, isRendering=${this.state.isRendering}`
-      );
       return;
     }
 
@@ -114,7 +111,6 @@ class CaptchaStore {
       this.state = { ...this.state, isLoading: false, error: undefined };
       this.notifyListeners();
     } catch (err) {
-      logDebugMessage(`CaptchaStore load error - ${getErrorMessage(err)}`);
       this.state = {
         ...this.state,
         error: getErrorMessage(err),
@@ -126,9 +122,6 @@ class CaptchaStore {
 
   render = async () => {
     if (this.state.isRendering || this.state.isLoading) {
-      logDebugMessage(
-        `CaptchaStore render skipped - isRendering=${this.state.isRendering}, isLoading=${this.state.isLoading}`
-      );
       return;
     }
 
@@ -136,7 +129,6 @@ class CaptchaStore {
       this.state = { ...this.state, isRendering: true };
       this.notifyListeners();
       const onSubmit = (token: string) => {
-        logDebugMessage(`Captcha token received`);
         this.state = {
           ...this.state,
           isRendering: false,
@@ -146,7 +138,6 @@ class CaptchaStore {
         this.notifyListeners();
       };
       const onError = (error: Error) => {
-        logDebugMessage(`Captcha render error - ${getErrorMessage(error)}`);
         this.state = {
           ...this.state,
           error: getErrorMessage(error),
@@ -155,7 +146,6 @@ class CaptchaStore {
       };
       this.captcha.render(onSubmit, onError);
     } catch (err) {
-      logDebugMessage(`CaptchaStore render error - ${getErrorMessage(err)}`);
       this.state = {
         ...this.state,
         error: getErrorMessage(err),
