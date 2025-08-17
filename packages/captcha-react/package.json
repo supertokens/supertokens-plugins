@@ -1,5 +1,5 @@
 {
-  "name": "@supertokens-plugin/captcha-react",
+  "name": "@supertokens-plugins/captcha-react",
   "version": "0.1.0",
   "description": "SuperTokens plugin that adds CAPTCHA support in your React application.",
   "main": "index.js",

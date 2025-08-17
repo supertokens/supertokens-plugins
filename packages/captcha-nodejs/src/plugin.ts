@@ -1,12 +1,12 @@
 import { SuperTokensPlugin } from 'supertokens-node/types';
-import { PLUGIN_ID, PLUGIN_SDK_VERSION, setPluginConfig } from './config';
+import { PLUGIN_ID, PLUGIN_SDK_VERSION, validatePluginConfig } from './config';
 import { SuperTokensPluginCaptchaConfig } from './types';
 import { validateCaptcha } from './captcha';
 
 export const init = (
   config: SuperTokensPluginCaptchaConfig
 ): SuperTokensPlugin => {
-  setPluginConfig(config);
+  validatePluginConfig(config);
   return {
     id: PLUGIN_ID,
     compatibleSDKVersions: [PLUGIN_SDK_VERSION],
@@ -20,14 +20,10 @@ export const init = (
             ...originalImplementation,
             signUpPOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = config.shouldValidate(
+                const shouldValidate = await config.shouldValidate(
                   'signUpPOST',
                   input
                 );
-                let shouldValidate = validateResult;
-                if (validateResult instanceof Promise) {
-                  shouldValidate = await validateResult;
-                }
                 if (!shouldValidate) {
                   return originalImplementation.signUpPOST!(input);
                 }
@@ -35,7 +31,7 @@ export const init = (
 
               const body = await input.options.req.getJSONBody();
               try {
-                await validateCaptcha(body);
+                await validateCaptcha(body, config);
               } catch (e) {
                 return {
                   status: 'GENERAL_ERROR',
@@ -46,21 +42,17 @@ export const init = (
             },
             passwordResetPOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = config.shouldValidate(
+                const shouldValidate = await config.shouldValidate(
                   'passwordResetPOST',
                   input
                 );
-                let shouldValidate = validateResult;
-                if (validateResult instanceof Promise) {
-                  shouldValidate = await validateResult;
-                }
                 if (!shouldValidate) {
                   return originalImplementation.passwordResetPOST!(input);
                 }
               }
               const body = await input.options.req.getJSONBody();
               try {
-                await validateCaptcha(body);
+                await validateCaptcha(body, config);
               } catch (e) {
                 return {
                   status: 'GENERAL_ERROR',
@@ -71,15 +63,11 @@ export const init = (
             },
             generatePasswordResetTokenPOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = config.shouldValidate(
+                const validateResult = await config.shouldValidate(
                   'generatePasswordResetTokenPOST',
                   input
                 );
-                let shouldValidate = validateResult;
-                if (validateResult instanceof Promise) {
-                  shouldValidate = await validateResult;
-                }
-                if (!shouldValidate) {
+                if (!validateResult) {
                   return originalImplementation.generatePasswordResetTokenPOST!(
                     input
                   );
@@ -87,7 +75,7 @@ export const init = (
               }
               const body = await input.options.req.getJSONBody();
               try {
-                await validateCaptcha(body);
+                await validateCaptcha(body, config);
               } catch (e) {
                 return {
                   status: 'GENERAL_ERROR',
@@ -100,22 +88,18 @@ export const init = (
             },
             signInPOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = config.shouldValidate(
+                const validateResult = await config.shouldValidate(
                   'signInPOST',
                   input
                 );
-                let shouldValidate = validateResult;
-                if (validateResult instanceof Promise) {
-                  shouldValidate = await validateResult;
-                }
-                if (!shouldValidate) {
+                if (!validateResult) {
                   return originalImplementation.signInPOST!(input);
                 }
               }
 
               const body = await input.options.req.getJSONBody();
               try {
-                await validateCaptcha(body);
+                await validateCaptcha(body, config);
               } catch (e) {
                 return {
                   status: 'GENERAL_ERROR',
@@ -133,15 +117,11 @@ export const init = (
             ...originalImplementation,
             consumeCodePOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = config.shouldValidate(
+                const validateResult = await config.shouldValidate(
                   'consumeCodePOST',
                   input
                 );
-                let shouldValidate = validateResult;
-                if (validateResult instanceof Promise) {
-                  shouldValidate = await validateResult;
-                }
-                if (!shouldValidate) {
+                if (!validateResult) {
                   return originalImplementation.consumeCodePOST!(input);
                 }
               }
@@ -153,7 +133,7 @@ export const init = (
 
               const body = await input.options.req.getJSONBody();
               try {
-                await validateCaptcha(body);
+                await validateCaptcha(body, config);
               } catch (e) {
                 return {
                   status: 'GENERAL_ERROR',
@@ -164,22 +144,18 @@ export const init = (
             },
             createCodePOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = config.shouldValidate(
+                const validateResult = await config.shouldValidate(
                   'createCodePOST',
                   input
                 );
-                let shouldValidate = validateResult;
-                if (validateResult instanceof Promise) {
-                  shouldValidate = await validateResult;
-                }
-                if (!shouldValidate) {
+                if (!validateResult) {
                   return originalImplementation.createCodePOST!(input);
                 }
               }
 
               const body = await input.options.req.getJSONBody();
               try {
-                await validateCaptcha(body);
+                await validateCaptcha(body, config);
               } catch (e) {
                 return {
                   status: 'GENERAL_ERROR',

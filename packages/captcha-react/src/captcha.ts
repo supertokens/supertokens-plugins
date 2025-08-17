@@ -4,115 +4,107 @@ import {
   ReCAPTCHAv3Config,
   SuperTokensPluginCaptchaConfig,
   TurnstileConfig,
-} from "./types";
-import { RecipePreAPIHookContext } from "supertokens-auth-react/lib/build/recipe/recipeModule/types";
-import { PreAndPostAPIHookAction as EmailPasswordPreAndPostAPIHookAction } from "supertokens-auth-react/lib/build/recipe/emailpassword/types";
-import { PreAndPostAPIHookAction as PasswordlessPreAndPostAPIHookAction } from "supertokens-auth-react/lib/build/recipe/passwordless/types";
-import { CAPTCHA_INPUT_CONTAINER_ID } from "./constants";
-import { logDebugMessage } from "./config";
+} from './types';
+import { RecipePreAPIHookContext } from 'supertokens-auth-react/lib/build/recipe/recipeModule/types';
+import { PreAndPostAPIHookAction as EmailPasswordPreAndPostAPIHookAction } from 'supertokens-auth-react/lib/build/recipe/emailpassword/types';
+import { PreAndPostAPIHookAction as PasswordlessPreAndPostAPIHookAction } from 'supertokens-auth-react/lib/build/recipe/passwordless/types';
+import { CAPTCHA_INPUT_CONTAINER_ID } from './constants';
 
 type CaptchaEvent =
   | {
-      name: "token-submitted";
+      name: 'token-submitted';
       payload: string;
     }
   | {
-      name: "render-failed";
+      name: 'render-failed';
       payload: Error;
     }
   | {
-      name: "get-token-failed";
+      name: 'get-token-failed';
       payload: Error;
     };
 
-type CaptchaEventListener<T extends CaptchaEvent["name"]> = (
-  payload: Extract<CaptchaEvent, { name: T }>["payload"]
+type CaptchaEventListener<T extends CaptchaEvent['name']> = (
+  payload: Extract<CaptchaEvent, { name: T }>['payload']
 ) => void;
 
 export class Captcha {
   private provider: CaptchaProvider | null = null;
-  public state: "uninitialised" | "initialised" | "loaded" | "rendered" =
-    "uninitialised";
+  public state: 'uninitialised' | 'initialised' | 'loaded' | 'rendered' =
+    'uninitialised';
   private config: SuperTokensPluginCaptchaConfig | null = null;
   private eventListeners: {
-    [K in CaptchaEvent["name"]]: Set<CaptchaEventListener<K>>;
+    [K in CaptchaEvent['name']]: Set<CaptchaEventListener<K>>;
   } = {
-    "token-submitted": new Set<CaptchaEventListener<"token-submitted">>(),
-    "render-failed": new Set<CaptchaEventListener<"render-failed">>(),
-    "get-token-failed": new Set<CaptchaEventListener<"get-token-failed">>(),
+    'token-submitted': new Set<CaptchaEventListener<'token-submitted'>>(),
+    'render-failed': new Set<CaptchaEventListener<'render-failed'>>(),
+    'get-token-failed': new Set<CaptchaEventListener<'get-token-failed'>>(),
   };
 
   init(config: SuperTokensPluginCaptchaConfig) {
     // Different components/autentication flows might have different ways to render the captcha
     if (
-      this.state !== "uninitialised" &&
+      this.state !== 'uninitialised' &&
       this.config &&
       config.inputContainerId !== this.config?.inputContainerId
     ) {
-      logDebugMessage(`Updating the input container id - ${this.state}`);
       this.config.inputContainerId = config.inputContainerId;
       return;
     }
-    if (this.state !== "uninitialised") {
-      logDebugMessage(`Captcha already initialised - ${this.state}`);
+    if (this.state !== 'uninitialised') {
       return;
     }
-    logDebugMessage(`Initializing captcha`);
     this.config = config;
-    if (config.type === "turnstile") {
+    if (config.type === 'turnstile') {
       this.provider = new TurnstileProvider(config.captcha);
-    } else if (config.type === "reCAPTCHAv2") {
+    } else if (config.type === 'reCAPTCHAv2') {
       this.provider = new ReCAPTCHAv2Provider(config.captcha);
-    } else if (config.type === "reCAPTCHAv3") {
+    } else if (config.type === 'reCAPTCHAv3') {
       this.provider = new ReCAPTCHAv3Provider(config.captcha);
     } else {
-      throw new Error("Unsupported CAPTCHA type");
+      throw new Error('Unsupported CAPTCHA type');
     }
-    this.state = "initialised";
+    this.state = 'initialised';
   }
 
   async getInputContainer(): Promise<HTMLDivElement> {
     if (!this.config) {
-      throw new Error("Captcha config is not initialised");
+      throw new Error('Captcha config is not initialised');
     }
     const containerId =
       this.config.inputContainerId || CAPTCHA_INPUT_CONTAINER_ID;
 
     let elementId: string;
-    if (typeof containerId === "function") {
+    if (typeof containerId === 'function') {
       elementId = await containerId();
     } else {
       elementId = containerId;
     }
     const element = document.getElementById(elementId);
     if (!element) {
-      throw new Error("Captcha input container element not found");
+      throw new Error('Captcha input container element not found');
     }
     return element as HTMLDivElement;
   }
 
   async load() {
-    logDebugMessage(`Loading captcha`);
-    if (this.state === "uninitialised") {
-      throw new Error("Captcha has not been initialised");
+    if (this.state === 'uninitialised') {
+      throw new Error('Captcha has not been initialised');
     }
     if (!this.provider) {
-      throw new Error("Captcha provider is not initialised");
+      throw new Error('Captcha provider is not initialised');
     }
     if (!this.config) {
-      throw new Error("Captcha config is not initialised");
+      throw new Error('Captcha config is not initialised');
     }
 
-    if (this.state !== "initialised") {
-      logDebugMessage(
-        `Captcha already loaded or in wrong state - ${this.state}`
-      );
+    if (this.state !== 'initialised') {
       return;
     }
 
     try {
       await this.provider.load();
-      this.state = "loaded";
+      this.state = 'loaded';
     } catch (error) {
       const loadError =
         error instanceof Error ? error : new Error(String(error));
@@ -135,28 +127,26 @@ export class Captcha {
     onSubmit?: (token: string) => void,
     onError?: (error: Error) => void
   ) {
-    logDebugMessage(`Rendering captcha`);
     if (!this.provider) {
-      throw new Error("Captcha provider is not initialised");
+      throw new Error('Captcha provider is not initialised');
     }
 
     if (!this.provider.render) {
-      logDebugMessage("Provider does not support rendering");
       return;
     }
     if (!this.config) {
-      throw new Error("Captcha config is not initialised");
+      throw new Error('Captcha config is not initialised');
     }
 
     const handleSubmit = (token: string) => {
-      this.emit({ name: "token-submitted", payload: token });
+      this.emit({ name: 'token-submitted', payload: token });
       if (onSubmit) {
         onSubmit(token);
       }
     };
 
     const handleError = (error: Error) => {
-      this.emit({ name: "render-failed", payload: error });
+      this.emit({ name: 'render-failed', payload: error });
       if (onError) {
         onError(error);
       }
@@ -164,27 +154,24 @@ export class Captcha {
 
     const containerId = await this.getInputContainer();
     this.provider.render(containerId, handleSubmit, handleError);
-    this.state = "rendered";
+    this.state = 'rendered';
   }
 
   async getToken(): Promise<string> {
-    if (this.state === "uninitialised") {
-      logDebugMessage("Captcha was not initialised, skipping");
-      return "";
+    if (this.state === 'uninitialised') {
+      return '';
     }
-    if (this.state !== "loaded" && this.state !== "rendered") {
-      logDebugMessage(`Invalid captcha state for preAPIHook - ${this.state}`);
+    if (this.state !== 'loaded' && this.state !== 'rendered') {
       throw new Error(`Invalid captcha state: ${this.state}`);
     }
 
     if (!this.provider) {
-      throw new Error("Captcha provider is not initialised");
+      throw new Error('Captcha provider is not initialised');
     }
     if (!this.config) {
-      throw new Error("Captcha config is not initialised");
+      throw new Error('Captcha config is not initialised');
     }
-    if (this.state !== "rendered" && this.provider.render) {
-      logDebugMessage("Rendering captcha before token retrieval");
+    if (this.state !== 'rendered' && this.provider.render) {
       const token = await new Promise<string>((resolve, reject) => {
         this.render(
           (token) => {
@@ -203,19 +190,19 @@ export class Captcha {
     } catch (error) {
       const getTokenError =
         error instanceof Error ? error : new Error(String(error));
-      this.emit({ name: "get-token-failed", payload: getTokenError });
+      this.emit({ name: 'get-token-failed', payload: getTokenError });
       throw getTokenError;
     }
   }
 
-  addEventListener<T extends CaptchaEvent["name"]>(
+  addEventListener<T extends CaptchaEvent['name']>(
     event: T,
     listener: CaptchaEventListener<T>
   ): void {
     this.eventListeners[event].add(listener);
   }
 
-  removeEventListener<T extends CaptchaEvent["name"]>(
+  removeEventListener<T extends CaptchaEvent['name']>(
     event: T,
     listener: CaptchaEventListener<T>
   ): void {
@@ -252,7 +239,7 @@ export class ReCAPTCHAv2Provider implements CaptchaProvider {
 
   async load() {
     if (!this.config.sitekey) {
-      throw new Error("reCAPTCHAv2 site key is required");
+      throw new Error('reCAPTCHAv2 site key is required');
     }
 
     return new Promise<void>(async (resolve, reject) => {
@@ -264,8 +251,8 @@ export class ReCAPTCHAv2Provider implements CaptchaProvider {
           `https://www.google.com/recaptcha/api.js?onload=onLoadReCAPTCHAv2&render=explicit`
         );
       } catch (error) {
-        console.error("Failed to load reCAPTCHA v2:", error);
-        reject("Failed to load reCAPTCHA v2 script");
+        console.error('Failed to load reCAPTCHA v2:', error);
+        reject('Failed to load reCAPTCHA v2 script');
       }
     });
   }
@@ -276,10 +263,10 @@ export class ReCAPTCHAv2Provider implements CaptchaProvider {
     onError: (error: Error) => void
   ) {
     if (!this.config.sitekey) {
-      throw new Error("reCAPTCHAv2 site key is required");
+      throw new Error('reCAPTCHAv2 site key is required');
     }
     if (!window.grecaptcha) {
-      throw new Error("ReCAPTCHAv2 is not loaded");
+      throw new Error('ReCAPTCHAv2 is not loaded');
     }
 
     try {
@@ -293,15 +280,15 @@ export class ReCAPTCHAv2Provider implements CaptchaProvider {
           this.token = token;
           onSubmit(token);
         },
-        "error-callback": () => {
-          if (this.config["error-callback"]) {
-            this.config["error-callback"]();
+        'error-callback': () => {
+          if (this.config['error-callback']) {
+            this.config['error-callback']();
           }
-          onError(new Error("reCAPTCHA v2 verification failed"));
+          onError(new Error('reCAPTCHA v2 verification failed'));
         },
-        "expired-callback": () => {
+        'expired-callback': () => {
           this.token = null;
-          const error = new Error("reCAPTCHA v2 token expired");
+          const error = new Error('reCAPTCHA v2 token expired');
           onError(error);
         },
       });
@@ -312,7 +299,7 @@ export class ReCAPTCHAv2Provider implements CaptchaProvider {
 
   async getToken(): Promise<string> {
     if (!this.token) {
-      throw new Error("No CAPTCHA token available");
+      throw new Error('No CAPTCHA token available');
     }
     return Promise.resolve(this.token);
   }
@@ -323,7 +310,7 @@ export class ReCAPTCHAv3Provider implements CaptchaProvider {
 
   async load() {
     if (!this.config.sitekey) {
-      throw new Error("reCAPTCHAv3 site key is required");
+      throw new Error('reCAPTCHAv3 site key is required');
     }
 
     await loadScript(
@@ -334,12 +321,12 @@ export class ReCAPTCHAv3Provider implements CaptchaProvider {
   async getToken(): Promise<string> {
     const captchaConfig = this.config;
     if (!captchaConfig.sitekey) {
-      throw new Error("reCAPTCHAv3 site key is required");
+      throw new Error('reCAPTCHAv3 site key is required');
     }
     if (!window.grecaptcha) {
-      throw new Error("ReCAPTCHAv3 is not loaded");
+      throw new Error('ReCAPTCHAv3 is not loaded');
     }
-    const actionName = captchaConfig.action || "submit";
+    const actionName = captchaConfig.action || 'submit';
     const token: string = await new Promise((resolve) => {
       window.grecaptcha.ready(function () {
         window.grecaptcha
@@ -362,7 +349,7 @@ export class TurnstileProvider implements CaptchaProvider {
 
   async load() {
     if (!this.config.sitekey) {
-      throw new Error("Turnstile site key is required");
+      throw new Error('Turnstile site key is required');
     }
 
     return new Promise<void>(async (resolve, reject) => {
@@ -374,8 +361,8 @@ export class TurnstileProvider implements CaptchaProvider {
           `https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onLoadTurnstile`
         );
       } catch (error) {
-        console.error("Failed to load Turnstile:", error);
-        reject("Failed to load Turnstile script");
+        console.error('Failed to load Turnstile:', error);
+        reject('Failed to load Turnstile script');
       }
     });
   }
@@ -386,13 +373,13 @@ export class TurnstileProvider implements CaptchaProvider {
     onError: (error: Error) => void
   ) {
     if (!container) {
-      throw new Error("Container element is required");
+      throw new Error('Container element is required');
     }
     if (!this.config.sitekey) {
-      throw new Error("Turnstile site key is required");
+      throw new Error('Turnstile site key is required');
     }
     if (!window.turnstile) {
-      throw new Error("Turnstile is not loaded");
+      throw new Error('Turnstile is not loaded');
     }
 
     const widgetId = window.turnstile.render(container, {
@@ -404,70 +391,67 @@ export class TurnstileProvider implements CaptchaProvider {
         }
         onSubmit(token);
       },
-      "expired-callback": (token: string) => {
+      'expired-callback': (token: string) => {
         this.token = null;
-        if (this.config["expired-callback"]) {
-          this.config["expired-callback"](token);
+        if (this.config['expired-callback']) {
+          this.config['expired-callback'](token);
         }
-        const error = new Error("Turnstile token expired");
+        const error = new Error('Turnstile token expired');
         onError(error);
       },
-      "error-callback": (error: string) => {
+      'error-callback': (error: string) => {
         this.token = null;
-        if (this.config["error-callback"]) {
-          this.config["error-callback"](error);
+        if (this.config['error-callback']) {
+          this.config['error-callback'](error);
         }
         onError(new Error(`Turnstile verification failed - ${error}`));
       },
-      "timeout-callback": () => {
+      'timeout-callback': () => {
         this.token = null;
-        if (this.config["timeout-callback"]) {
-          this.config["timeout-callback"]();
+        if (this.config['timeout-callback']) {
+          this.config['timeout-callback']();
         }
-        const error = new Error("Turnstile verification timed out");
+        const error = new Error('Turnstile verification timed out');
         onError(error);
       },
-      "unsupported-callback": () => {
+      'unsupported-callback': () => {
         this.token = null;
-        if (this.config["unsupported-callback"]) {
-          this.config["unsupported-callback"]();
+        if (this.config['unsupported-callback']) {
+          this.config['unsupported-callback']();
         }
-        const error = new Error("Turnstile is not supported by your browser");
+        const error = new Error('Turnstile is not supported by your browser');
         onError(error);
       },
     });
-    if (widgetId === "undefined") {
-      throw new Error("Turnstile widget rendering failed");
+    if (widgetId === 'undefined') {
+      throw new Error('Turnstile widget rendering failed');
     }
   }
 
   async getToken(): Promise<string> {
     if (!this.token) {
-      throw new Error("No CAPTCHA token available");
+      throw new Error('No CAPTCHA token available');
     }
     return Promise.resolve(this.token);
   }
 }
 
-const LoadedScripts: Record<string, "loading" | "loaded"> = {};
+const LoadedScripts: Record<string, 'loading' | 'loaded'> = {};
 async function loadScript(url: string): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    logDebugMessage(`Loading script - ${url}`);
     if (LoadedScripts[url]) {
-      logDebugMessage(`Script already loaded - ${url}`);
       return resolve();
     }
-    LoadedScripts[url] = "loading";
+    LoadedScripts[url] = 'loading';
 
-    const script = document.createElement("script");
-    script.type = "application/javascript";
+    const script = document.createElement('script');
+    script.type = 'application/javascript';
     script.async = true;
     script.defer = true;
     script.src = url;
 
     const timeout = setTimeout(() => {
-      if (LoadedScripts[url] === "loading") {
-        logDebugMessage(`Script loading timeout - ${url}`);
+      if (LoadedScripts[url] === 'loading') {
         delete LoadedScripts[url];
         document.head.removeChild(script);
         reject(new Error(`Script loading timeout: ${url}`));
@@ -476,14 +460,12 @@ async function loadScript(url: string): Promise<void> {
 
     script.onload = () => {
       clearTimeout(timeout);
-      LoadedScripts[url] = "loaded";
-      logDebugMessage(`Script loaded successfully - ${url}`);
+      LoadedScripts[url] = 'loaded';
       resolve();
     };
     script.onerror = (e) => {
       clearTimeout(timeout);
       delete LoadedScripts[url];
-      logDebugMessage(`Script loading error`);
       reject(e);
     };
 

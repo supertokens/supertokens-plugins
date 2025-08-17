@@ -12,8 +12,6 @@ import { PreAndPostAPIHookAction as PasswordlessPreAndPostAPIHookAction } from '
 import {
   setPluginConfig,
   validatePublicConfig,
-  enableLogging,
-  logDebugMessage,
   getPluginConfig,
 } from './config';
 import { RecipePreAPIHookContext } from 'supertokens-auth-react/lib/build/recipe/recipeModule/types';
@@ -25,7 +23,6 @@ export const init = (
   return {
     id: PLUGIN_ID,
     init: (config) => {
-      if (config.enableDebugLogs) enableLogging();
       validatePublicConfig(config);
     },
     overrideMap: {
@@ -70,30 +67,19 @@ async function preAPIHook(
 ) {
   const { action } = context;
   const config = getPluginConfig();
-  logDebugMessage(`PreAPIHook called`);
   if (
     !isEmailPasswordCaptchaPreAndPostAPIHookAction(action) &&
     !isPasswordlessCaptchaPreAndPostAPIHookAction(action)
   ) {
-    logDebugMessage(`Action does not have captcha support - ${action}`);
     return context;
   }
 
-  // if (action === 'PASSWORDLESS_CONSUME_CODE') {
-  //   console.log('#######');
-  //   console.log(context);
-  //   logDebugMessage(`Captcha validation does not apply to - ${action}`);
-  //   return context;
-  // }
-
   if (config.shouldValidate && !config.shouldValidate(context)) {
-    logDebugMessage('Captcha validation skipped');
     return context;
   }
 
   const token = await captcha.getToken();
   if (!token) {
-    logDebugMessage('Empty captcha token returned');
     return context;
   }
 

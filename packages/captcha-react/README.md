@@ -6,7 +6,7 @@ This plugin integrates with **reCAPTCHA v2**, **reCAPTCHA v3**, and **Cloudflare
 ## Installation
 
 ```bash
-npm install supertokens-plugin-captcha/react
+npm install @supertokens-plugin/captcha-react
 ```
 
 ## Quick Start
@@ -38,9 +38,8 @@ SuperTokens.init({
 });
 ```
 
-:::info
-You also have to install and configure the backend plugin.
-:::
+> [!IMPORTANT]  
+> You also have to install and configure the backend plugin.
 
 ## Protected Flows
 

@@ -13,8 +13,8 @@ Each plugin is designed to work seamlessly with SuperTokens recipes and can be e
 
 Protect your authentication endpoints from automated attacks with CAPTCHA verification.
 
-- **[@supertokens-plugin/captcha-nodejs](./packages/captcha-nodejs)** - Backend CAPTCHA validation for Node.js applications
-- **[@supertokens-plugin/captcha-react](./packages/captcha-react)** - Frontend CAPTCHA integration for React applications
+- **[@supertokens-plugins/captcha-nodejs](./packages/captcha-nodejs)** - Backend CAPTCHA validation for Node.js applications
+- **[@supertokens-plugins/captcha-react](./packages/captcha-react)** - Frontend CAPTCHA integration for React applications
 
 ## Quick Start
 
@@ -24,10 +24,10 @@ Each plugin usually consists of separate packages for frontend and backend based
 
 ```bash
 # Backend (Node.js)
-npm install @supertokens-plugin/captcha/nodejs
+npm install @supertokens-plugins/captcha-nodejs
 
 # Frontend (React)
-npm install @supertokens-plugin/captcha/react
+npm install @supertokens-plugins/captcha-react
 ```
 
 ### Basic Usage
@@ -36,7 +36,7 @@ npm install @supertokens-plugin/captcha/react
 
 ```typescript
 import SuperTokens from "supertokens-node";
-import CaptchaPlugin from "@supertokens-plugin/captcha-nodejs";
+import CaptchaPlugin from "@supertokens-plugins/captcha-nodejs";
 
 SuperTokens.init({
   // ... your SuperTokens config
@@ -55,7 +55,7 @@ SuperTokens.init({
 
 ```typescript
 import SuperTokens from "supertokens-auth-react";
-import CaptchaPlugin from "@supertokens-plugin/captcha-react";
+import CaptchaPlugin from "@supertokens-plugins/captcha-react";
 
 SuperTokens.init({
   // ... your SuperTokens config
@@ -106,13 +106,13 @@ You can also run commands for specific packages:
 
 ```bash
 # Build only the Node.js CAPTCHA plugin
-npm run build --workspace=@supertokens-plugin/captcha-nodejs
+npm run build --workspace=@supertokens-plugins/captcha-nodejs
 
 # Test only the React CAPTCHA plugin
-npm run test --workspace=@supertokens-plugin/captcha-react
+npm run test --workspace=@supertokens-plugins/captcha-react
 
 # Lint a specific package
-npm run lint --workspace=@supertokens-plugin/captcha-react
+npm run lint --workspace=@supertokens-plugins/captcha-react
 ```
 
 ### Project Structure
