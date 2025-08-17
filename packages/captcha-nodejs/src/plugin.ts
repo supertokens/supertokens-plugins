@@ -9,7 +9,7 @@ export const init = (
   validatePluginConfig(config);
   return {
     id: PLUGIN_ID,
-    compatibleSDKVersions: [PLUGIN_SDK_VERSION],
+    compatibleSDKVersions: [PLUGIN_SDK_VERSION, '23.0.0', '23.0.1'],
     overrideMap: {
       emailpassword: {
         apis: (originalImplementation) => {
