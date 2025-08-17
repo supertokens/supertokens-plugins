@@ -1,5 +1,11 @@
 # @supertokens-plugins/captcha-react
 
+## 0.1.2
+
+### Patch Changes
+
+- b2522cc: refactor: formatting and dependency version fixes
+
 ## 0.1.1
 
 ### Patch Changes
