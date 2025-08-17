@@ -1,4 +1,4 @@
-# @supertokens-plugin/captcha-nodejs
+# @supertokens-plugins/captcha-nodejs
 
 ## 0.1.0
 

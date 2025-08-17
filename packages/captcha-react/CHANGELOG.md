@@ -1,4 +1,4 @@
-# @supertokens-plugin/captcha-react
+# @supertokens-plugins/captcha-react
 
 ## 0.1.0
 

@@ -42,14 +42,10 @@ export const init = (
             },
             passwordResetPOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = config.shouldValidate(
+                const shouldValidate = await config.shouldValidate(
                   'passwordResetPOST',
                   input
                 );
-                let shouldValidate = validateResult;
-                if (validateResult instanceof Promise) {
-                  shouldValidate = await validateResult;
-                }
                 if (!shouldValidate) {
                   return originalImplementation.passwordResetPOST!(input);
                 }
@@ -67,15 +63,11 @@ export const init = (
             },
             generatePasswordResetTokenPOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = config.shouldValidate(
+                const validateResult = await config.shouldValidate(
                   'generatePasswordResetTokenPOST',
                   input
                 );
-                let shouldValidate = validateResult;
-                if (validateResult instanceof Promise) {
-                  shouldValidate = await validateResult;
-                }
-                if (!shouldValidate) {
+                if (!validateResult) {
                   return originalImplementation.generatePasswordResetTokenPOST!(
                     input
                   );
@@ -96,15 +88,11 @@ export const init = (
             },
             signInPOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = config.shouldValidate(
+                const validateResult = await config.shouldValidate(
                   'signInPOST',
                   input
                 );
-                let shouldValidate = validateResult;
-                if (validateResult instanceof Promise) {
-                  shouldValidate = await validateResult;
-                }
-                if (!shouldValidate) {
+                if (!validateResult) {
                   return originalImplementation.signInPOST!(input);
                 }
               }
@@ -129,15 +117,11 @@ export const init = (
             ...originalImplementation,
             consumeCodePOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = config.shouldValidate(
+                const validateResult = await config.shouldValidate(
                   'consumeCodePOST',
                   input
                 );
-                let shouldValidate = validateResult;
-                if (validateResult instanceof Promise) {
-                  shouldValidate = await validateResult;
-                }
-                if (!shouldValidate) {
+                if (!validateResult) {
                   return originalImplementation.consumeCodePOST!(input);
                 }
               }
@@ -160,15 +144,11 @@ export const init = (
             },
             createCodePOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = config.shouldValidate(
+                const validateResult = await config.shouldValidate(
                   'createCodePOST',
                   input
                 );
-                let shouldValidate = validateResult;
-                if (validateResult instanceof Promise) {
-                  shouldValidate = await validateResult;
-                }
-                if (!shouldValidate) {
+                if (!validateResult) {
                   return originalImplementation.createCodePOST!(input);
                 }
               }
