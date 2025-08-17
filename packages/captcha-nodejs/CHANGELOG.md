@@ -1,5 +1,11 @@
 # @supertokens-plugins/captcha-nodejs
 
+## 0.1.2
+
+### Patch Changes
+
+- f5ad1ae: added explicit version numbers to compatible sdk versions
+
 ## 0.1.1
 
 ### Patch Changes
