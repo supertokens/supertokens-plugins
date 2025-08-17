@@ -6,7 +6,7 @@ This plugin integrates with **reCAPTCHA v2**, **reCAPTCHA v3**, and **Cloudflare
 ## Installation
 
 ```bash
-npm install @supertokens-plugin/captcha-nodejs
+npm install @supertokens-plugins/captcha-nodejs
 ```
 
 ## Quick Start
@@ -15,7 +15,7 @@ Initialize the plugin in your SuperTokens backend configuration:
 
 ```typescript
 import SuperTokens from 'supertokens-node';
-import CaptchaPlugin from 'supertokens-plugin-captcha/backend';
+import CaptchaPlugin from '@supertokens-plugins/captcha-nodejs';
 
 SuperTokens.init({
   supertokens: {
@@ -61,7 +61,7 @@ The plugin automatically protects these authentication flows:
 Control when CAPTCHA validation occurs using the `shouldValidate` function:
 
 ```typescript
-import { ShouldValidate } from 'supertokens-plugin-captcha/backend';
+import { ShouldValidate } from '@supertokens-plugins/captcha-nodejs';
 
 const shouldValidate: ShouldValidate = (api, input) => {
   // Only require CAPTCHA for sign up

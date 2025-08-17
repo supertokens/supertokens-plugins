@@ -6,7 +6,7 @@ This plugin integrates with **reCAPTCHA v2**, **reCAPTCHA v3**, and **Cloudflare
 ## Installation
 
 ```bash
-npm install @supertokens-plugin/captcha-react
+npm install @supertokens-plugins/captcha-react
 ```
 
 ## Quick Start
@@ -17,7 +17,7 @@ Initialize the plugin in your SuperTokens frontend configuration:
 
 ```typescript
 import SuperTokens from 'supertokens-auth-react';
-import CaptchaPlugin from 'supertokens-plugin-captcha/frontend';
+import CaptchaPlugin from '@supertokens-plugins/captcha-react';
 
 SuperTokens.init({
   appInfo: {
@@ -66,7 +66,7 @@ import {
   CaptchInputContainerProps,
   captchaStore,
   useCaptchaInputContainerId,
-} from 'supertokens-plugin-captcha/frontend';
+} from '@supertokens-plugins/captcha-react';
 
 const CustomCaptchaContainer = forwardRef<
   HTMLDivElement,
@@ -99,7 +99,7 @@ const CustomCaptchaContainer = forwardRef<
 Monitor CAPTCHA state in your components:
 
 ```typescript
-import { useCaptcha } from 'supertokens-plugin-captcha/frontend';
+import { useCaptcha } from '@supertokens-plugins/captcha-react';
 
 function MyComponent() {
   const captcha = useCaptcha();
