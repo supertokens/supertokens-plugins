@@ -25,7 +25,7 @@ type CaptchaEvent =
     };
 
 type CaptchaEventListener<T extends CaptchaEvent['name']> = (
-  payload: Extract<CaptchaEvent, { name: T }>['payload']
+  payload: Extract<CaptchaEvent, { name: T }>['payload'],
 ) => void;
 
 export class Captcha {
@@ -125,7 +125,7 @@ export class Captcha {
    */
   async render(
     onSubmit?: (token: string) => void,
-    onError?: (error: Error) => void
+    onError?: (error: Error) => void,
   ) {
     if (!this.provider) {
       throw new Error('Captcha provider is not initialised');
@@ -179,7 +179,7 @@ export class Captcha {
           },
           (error) => {
             reject(error);
-          }
+          },
         );
       });
       return token;
@@ -197,14 +197,14 @@ export class Captcha {
 
   addEventListener<T extends CaptchaEvent['name']>(
     event: T,
-    listener: CaptchaEventListener<T>
+    listener: CaptchaEventListener<T>,
   ): void {
     this.eventListeners[event].add(listener);
   }
 
   removeEventListener<T extends CaptchaEvent['name']>(
     event: T,
-    listener: CaptchaEventListener<T>
+    listener: CaptchaEventListener<T>,
   ): void {
     const listeners = this.eventListeners[event];
     if (listeners) {
@@ -220,7 +220,7 @@ export class Captcha {
           listener(event.payload);
         } catch (error) {
           console.error(
-            `Error in captcha ${event.name} event listener - ${error}`
+            `Error in captcha ${event.name} event listener - ${error}`,
           );
         }
       });
@@ -248,7 +248,7 @@ export class ReCAPTCHAv2Provider implements CaptchaProvider {
       };
       try {
         await loadScript(
-          `https://www.google.com/recaptcha/api.js?onload=onLoadReCAPTCHAv2&render=explicit`
+          `https://www.google.com/recaptcha/api.js?onload=onLoadReCAPTCHAv2&render=explicit`,
         );
       } catch (error) {
         console.error('Failed to load reCAPTCHA v2:', error);
@@ -260,7 +260,7 @@ export class ReCAPTCHAv2Provider implements CaptchaProvider {
   render(
     containerElement: HTMLDivElement,
     onSubmit: (token: string) => void,
-    onError: (error: Error) => void
+    onError: (error: Error) => void,
   ) {
     if (!this.config.sitekey) {
       throw new Error('reCAPTCHAv2 site key is required');
@@ -314,7 +314,7 @@ export class ReCAPTCHAv3Provider implements CaptchaProvider {
     }
 
     await loadScript(
-      `https://www.google.com/recaptcha/api.js?render=${this.config.sitekey}`
+      `https://www.google.com/recaptcha/api.js?render=${this.config.sitekey}`,
     );
   }
 
@@ -358,7 +358,7 @@ export class TurnstileProvider implements CaptchaProvider {
       };
       try {
         await loadScript(
-          `https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onLoadTurnstile`
+          `https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onLoadTurnstile`,
         );
       } catch (error) {
         console.error('Failed to load Turnstile:', error);
@@ -370,7 +370,7 @@ export class TurnstileProvider implements CaptchaProvider {
   render(
     container: HTMLDivElement,
     onSubmit: (token: string) => void,
-    onError: (error: Error) => void
+    onError: (error: Error) => void,
   ) {
     if (!container) {
       throw new Error('Container element is required');

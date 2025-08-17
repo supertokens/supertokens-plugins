@@ -13,7 +13,7 @@ export function useCaptcha(onError?: (error: string) => void) {
   const captchaState = useSyncExternalStore(
     captchaStore.subscribe,
     captchaStore.getSnapshot,
-    () => DefaultCaptchaState
+    () => DefaultCaptchaState,
   );
 
   const { error } = captchaState;
@@ -93,7 +93,7 @@ class CaptchaStore {
   };
 
   load = async (
-    configOverride: Partial<SuperTokensPluginCaptchaConfig> = {}
+    configOverride: Partial<SuperTokensPluginCaptchaConfig> = {},
   ) => {
     if (this.state.isLoading || this.state.isRendering) {
       return;

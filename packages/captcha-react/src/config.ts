@@ -42,7 +42,7 @@ export function validatePublicConfig(config: SuperTokensPublicConfig) {
   const pluginConfig = getPluginConfig();
   if (config.useShadowDom && pluginConfig.type !== 'reCAPTCHAv3') {
     throw new Error(
-      'The captcha input cannot be rendered when using shadow dom'
+      'The captcha input cannot be rendered when using shadow dom',
     );
   }
 }

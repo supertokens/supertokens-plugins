@@ -35,4 +35,3 @@ global.fetch = vi.fn();
 afterEach(() => {
   vi.clearAllMocks();
 });
-

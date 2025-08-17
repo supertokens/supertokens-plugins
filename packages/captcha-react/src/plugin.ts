@@ -17,7 +17,7 @@ import {
 import { RecipePreAPIHookContext } from 'supertokens-auth-react/lib/build/recipe/recipeModule/types';
 
 export const init = (
-  config: SuperTokensPluginCaptchaConfig
+  config: SuperTokensPluginCaptchaConfig,
 ): SuperTokensPlugin => {
   setPluginConfig(config);
   return {
@@ -34,10 +34,14 @@ export const init = (
           };
         },
         components: {
-          EmailPasswordSignInForm_Override: ComponentOverrides.EmailPasswordSignInForm(),
-          EmailPasswordSignUpForm_Override: ComponentOverrides.EmailPasswordSignUpForm(),
-          EmailPasswordResetPasswordEmail_Override: ComponentOverrides.EmailPasswordResetPasswordEmail(),
-          EmailPasswordSubmitNewPassword_Override: ComponentOverrides.EmailPasswordSubmitNewPassword(),
+          EmailPasswordSignInForm_Override:
+            ComponentOverrides.EmailPasswordSignInForm(),
+          EmailPasswordSignUpForm_Override:
+            ComponentOverrides.EmailPasswordSignUpForm(),
+          EmailPasswordResetPasswordEmail_Override:
+            ComponentOverrides.EmailPasswordResetPasswordEmail(),
+          EmailPasswordSubmitNewPassword_Override:
+            ComponentOverrides.EmailPasswordSubmitNewPassword(),
         },
       },
       passwordless: {
@@ -48,12 +52,18 @@ export const init = (
           };
         },
         components: {
-          PasswordlessEmailForm_Override: ComponentOverrides.PasswordlessEmailForm(),
-          PasswordlessPhoneForm_Override: ComponentOverrides.PasswordlessPhoneForm(),
-          PasswordlessEmailOrPhoneForm_Override: ComponentOverrides.PasswordlessEmailOrPhoneForm(),
-          PasswordlessEPComboEmailForm_Override: ComponentOverrides.PasswordlessEPComboEmailForm(),
-          PasswordlessEPComboEmailOrPhoneForm_Override: ComponentOverrides.PasswordlessEPComboEmailOrPhoneForm(),
-          PasswordlessUserInputCodeForm_Override: ComponentOverrides.PasswordlessUserInputCodeForm(),
+          PasswordlessEmailForm_Override:
+            ComponentOverrides.PasswordlessEmailForm(),
+          PasswordlessPhoneForm_Override:
+            ComponentOverrides.PasswordlessPhoneForm(),
+          PasswordlessEmailOrPhoneForm_Override:
+            ComponentOverrides.PasswordlessEmailOrPhoneForm(),
+          PasswordlessEPComboEmailForm_Override:
+            ComponentOverrides.PasswordlessEPComboEmailForm(),
+          PasswordlessEPComboEmailOrPhoneForm_Override:
+            ComponentOverrides.PasswordlessEPComboEmailOrPhoneForm(),
+          PasswordlessUserInputCodeForm_Override:
+            ComponentOverrides.PasswordlessUserInputCodeForm(),
         },
       },
     },
@@ -63,7 +73,7 @@ export const init = (
 async function preAPIHook(
   context:
     | RecipePreAPIHookContext<EmailPasswordPreAndPostAPIHookAction>
-    | RecipePreAPIHookContext<PasswordlessPreAndPostAPIHookAction>
+    | RecipePreAPIHookContext<PasswordlessPreAndPostAPIHookAction>,
 ) {
   const { action } = context;
   const config = getPluginConfig();

@@ -148,7 +148,7 @@ describe('Captcha', () => {
       captcha['config']!.inputContainerId = 'non-existent';
 
       await expect(captcha.getInputContainer()).rejects.toThrow(
-        'Captcha input container element not found'
+        'Captcha input container element not found',
       );
     });
 
@@ -156,7 +156,7 @@ describe('Captcha', () => {
       captcha['config'] = null;
 
       await expect(captcha.getInputContainer()).rejects.toThrow(
-        'Captcha config is not initialised'
+        'Captcha config is not initialised',
       );
     });
   });
@@ -164,7 +164,7 @@ describe('Captcha', () => {
   describe('load', () => {
     it('should throw error if not initialized', async () => {
       await expect(captcha.load()).rejects.toThrow(
-        'Captcha has not been initialised'
+        'Captcha has not been initialised',
       );
     });
 
@@ -172,7 +172,7 @@ describe('Captcha', () => {
       captcha['state'] = 'initialised';
 
       await expect(captcha.load()).rejects.toThrow(
-        'Captcha provider is not initialised'
+        'Captcha provider is not initialised',
       );
     });
 
@@ -181,7 +181,7 @@ describe('Captcha', () => {
       captcha['provider'] = {} as any;
 
       await expect(captcha.load()).rejects.toThrow(
-        'Captcha config is not initialised'
+        'Captcha config is not initialised',
       );
     });
 
@@ -247,7 +247,7 @@ describe('Captcha', () => {
       captcha['provider'] = null;
 
       await expect(captcha.render()).rejects.toThrow(
-        'Captcha provider is not initialised'
+        'Captcha provider is not initialised',
       );
     });
 
@@ -265,7 +265,7 @@ describe('Captcha', () => {
       captcha['config'] = null;
 
       await expect(captcha.render()).rejects.toThrow(
-        'Captcha config is not initialised'
+        'Captcha config is not initialised',
       );
     });
 
@@ -330,7 +330,7 @@ describe('Captcha', () => {
       captcha['state'] = 'initialised';
 
       await expect(captcha.getToken()).rejects.toThrow(
-        'Invalid captcha state: initialised'
+        'Invalid captcha state: initialised',
       );
     });
 
@@ -339,7 +339,7 @@ describe('Captcha', () => {
       captcha['provider'] = null;
 
       await expect(captcha.getToken()).rejects.toThrow(
-        'Captcha provider is not initialised'
+        'Captcha provider is not initialised',
       );
     });
 
@@ -349,7 +349,7 @@ describe('Captcha', () => {
       captcha['config'] = null;
 
       await expect(captcha.getToken()).rejects.toThrow(
-        'Captcha config is not initialised'
+        'Captcha config is not initialised',
       );
     });
 

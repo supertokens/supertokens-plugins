@@ -30,7 +30,7 @@ describe('captcha', () => {
       const body = {};
 
       await expect(validateCaptcha(body, config)).rejects.toThrow(
-        "The 'captcha' field is required"
+        "The 'captcha' field is required",
       );
     });
 
@@ -40,7 +40,7 @@ describe('captcha', () => {
       };
 
       await expect(validateCaptcha(body, config)).rejects.toThrow(
-        "The 'captchaType' field is required"
+        "The 'captchaType' field is required",
       );
     });
 
@@ -51,7 +51,7 @@ describe('captcha', () => {
       };
 
       await expect(validateCaptcha(body, config)).rejects.toThrow(
-        'Invalid captcha type'
+        'Invalid captcha type',
       );
     });
 
@@ -67,7 +67,7 @@ describe('captcha', () => {
       };
 
       await expect(validateCaptcha(body, config)).rejects.toThrow(
-        'CAPTCHA verification failed'
+        'CAPTCHA verification failed',
       );
     });
   });

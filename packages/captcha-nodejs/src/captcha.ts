@@ -23,7 +23,7 @@ const CaptchaValidators: Record<
 
 export async function validateCaptcha(
   body: Record<string, unknown>,
-  config: SuperTokensPluginCaptchaConfig
+  config: SuperTokensPluginCaptchaConfig,
 ) {
   const captcha = 'captcha' in body ? (body.captcha as string) : null;
   const type = 'captchaType' in body ? body.captchaType : null;
@@ -31,21 +31,21 @@ export async function validateCaptcha(
   if (!captcha) {
     throw new CaptchaPluginError(
       'CAPTCHA_VERIFICATION_ERROR',
-      "The 'captcha' field is required"
+      "The 'captcha' field is required",
     );
   }
 
   if (!type) {
     throw new CaptchaPluginError(
       'CAPTCHA_VERIFICATION_ERROR',
-      "The 'captchaType' field is required"
+      "The 'captchaType' field is required",
     );
   }
 
   if (type !== config.type) {
     throw new CaptchaPluginError(
       'CAPTCHA_VERIFICATION_ERROR',
-      `Invalid captcha type. Expected ${config.type} but got ${type}`
+      `Invalid captcha type. Expected ${config.type} but got ${type}`,
     );
   }
 
@@ -55,7 +55,7 @@ export async function validateCaptcha(
       'CAPTCHA_VERIFICATION_ERROR',
       `Unsupported captcha type: ${
         config.type
-      }. Must be one of ${SupportedCaptchaTypes.join(', ')}`
+      }. Must be one of ${SupportedCaptchaTypes.join(', ')}`,
     );
   }
 
@@ -64,18 +64,18 @@ export async function validateCaptcha(
 
 async function verifyReCaptchaV3(
   captcha: string,
-  config: SuperTokensPluginCaptchaConfig
+  config: SuperTokensPluginCaptchaConfig,
 ): Promise<void> {
   const reCAPTCHAv3Key = config.captcha.secretKey;
 
   const response = await fetch(
     `https://www.google.com/recaptcha/api/siteverify?secret=${reCAPTCHAv3Key}&response=${captcha}`,
-    { method: 'POST' }
+    { method: 'POST' },
   );
   if (!response.ok) {
     throw new CaptchaPluginError(
       'CAPTCHA_VERIFICATION_ERROR',
-      'CAPTCHA verification failed'
+      'CAPTCHA verification failed',
     );
   }
 
@@ -83,25 +83,25 @@ async function verifyReCaptchaV3(
   if (!data.success) {
     throw new CaptchaPluginError(
       'CAPTCHA_VERIFICATION_ERROR',
-      'CAPTCHA verification failed'
+      'CAPTCHA verification failed',
     );
   }
 }
 
 async function verifyReCaptchaV2(
   captcha: string,
-  config: SuperTokensPluginCaptchaConfig
+  config: SuperTokensPluginCaptchaConfig,
 ): Promise<void> {
   const reCAPTCHAv2Key = config.captcha.secretKey;
 
   const response = await fetch(
     `https://www.google.com/recaptcha/api/siteverify?secret=${reCAPTCHAv2Key}&response=${captcha}`,
-    { method: 'POST' }
+    { method: 'POST' },
   );
   if (!response.ok) {
     throw new CaptchaPluginError(
       'CAPTCHA_VERIFICATION_ERROR',
-      'CAPTCHA verification failed'
+      'CAPTCHA verification failed',
     );
   }
 
@@ -109,14 +109,14 @@ async function verifyReCaptchaV2(
   if (!data.success) {
     throw new CaptchaPluginError(
       'CAPTCHA_VERIFICATION_ERROR',
-      'CAPTCHA verification failed'
+      'CAPTCHA verification failed',
     );
   }
 }
 
 async function verifyTurnstile(
   captcha: string,
-  config: SuperTokensPluginCaptchaConfig
+  config: SuperTokensPluginCaptchaConfig,
 ): Promise<void> {
   const turnstileKey = config.captcha?.secretKey;
 
@@ -131,12 +131,12 @@ async function verifyTurnstile(
         secret: turnstileKey,
         response: captcha,
       }),
-    }
+    },
   );
   if (!response.ok) {
     throw new CaptchaPluginError(
       'CAPTCHA_VERIFICATION_ERROR',
-      'CAPTCHA verification failed'
+      'CAPTCHA verification failed',
     );
   }
 
@@ -144,7 +144,7 @@ async function verifyTurnstile(
   if (!data.success) {
     throw new CaptchaPluginError(
       'CAPTCHA_VERIFICATION_ERROR',
-      'CAPTCHA verification failed'
+      'CAPTCHA verification failed',
     );
   }
 }

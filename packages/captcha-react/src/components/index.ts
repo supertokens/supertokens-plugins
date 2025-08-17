@@ -1,1 +1,1 @@
-export * as ComponentOverrides from "./ComponentOverrides";
+export * as ComponentOverrides from './ComponentOverrides';

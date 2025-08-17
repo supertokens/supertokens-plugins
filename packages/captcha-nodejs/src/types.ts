@@ -4,41 +4,41 @@ import { APIInterface as PasswordlessAPIInterface } from 'supertokens-node/recip
 export interface ShouldValidate {
   (
     api: 'signInPOST',
-    input: Parameters<NonNullable<EmailPasswordAPIInterface['signInPOST']>>[0]
+    input: Parameters<NonNullable<EmailPasswordAPIInterface['signInPOST']>>[0],
   ): boolean | Promise<boolean>;
   (
     api: 'signUpPOST',
-    input: Parameters<NonNullable<EmailPasswordAPIInterface['signUpPOST']>>[0]
+    input: Parameters<NonNullable<EmailPasswordAPIInterface['signUpPOST']>>[0],
   ): boolean | Promise<boolean>;
   (
     api: 'passwordResetPOST',
     input: Parameters<
       NonNullable<EmailPasswordAPIInterface['passwordResetPOST']>
-    >[0]
+    >[0],
   ): boolean | Promise<boolean>;
   (
     api: 'generatePasswordResetTokenPOST',
     input: Parameters<
       NonNullable<EmailPasswordAPIInterface['generatePasswordResetTokenPOST']>
-    >[0]
+    >[0],
   ): boolean | Promise<boolean>;
   (
     api: 'consumeCodePOST',
     input: Parameters<
       NonNullable<PasswordlessAPIInterface['consumeCodePOST']>
-    >[0]
+    >[0],
   ): boolean | Promise<boolean>;
   (
     api: 'createCodePOST',
     input: Parameters<
       NonNullable<PasswordlessAPIInterface['createCodePOST']>
-    >[0]
+    >[0],
   ): boolean | Promise<boolean>;
   (
     api: 'consumeCodePOST',
     input: Parameters<
       NonNullable<PasswordlessAPIInterface['consumeCodePOST']>
-    >[0]
+    >[0],
   ): boolean | Promise<boolean>;
 }
 

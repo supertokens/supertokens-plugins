@@ -19,7 +19,7 @@ export interface CaptchaProvider {
   render?: (
     container: HTMLDivElement,
     onSubmit: (token: string) => void,
-    onError: (error: Error) => void
+    onError: (error: Error) => void,
   ) => void;
   getToken: () => Promise<string>;
 }
@@ -60,7 +60,7 @@ export type EmailPasswordCaptchaPreAndPostAPIHookActions = Extract<
 >;
 
 export function isEmailPasswordCaptchaPreAndPostAPIHookAction(
-  action: string
+  action: string,
 ): action is EmailPasswordCaptchaPreAndPostAPIHookActions {
   return (
     action === 'EMAIL_PASSWORD_SIGN_UP' ||
@@ -76,7 +76,7 @@ export type PasswordlessCaptchaPreAndPostAPIHookActions = Extract<
 >;
 
 export function isPasswordlessCaptchaPreAndPostAPIHookAction(
-  action: string
+  action: string,
 ): action is PasswordlessCaptchaPreAndPostAPIHookActions {
   return (
     action === 'PASSWORDLESS_CONSUME_CODE' ||
@@ -92,7 +92,7 @@ export type SuperTokensPluginCaptchaConfig = CaptchaConfig & {
   shouldValidate?: (
     contenxt:
       | RecipePreAPIHookContext<EmailPasswordPreAndPostAPIHookAction>
-      | RecipePreAPIHookContext<PasswordlessPreAndPostAPIHookAction>
+      | RecipePreAPIHookContext<PasswordlessPreAndPostAPIHookAction>,
   ) => boolean;
 };
 

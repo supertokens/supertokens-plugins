@@ -1,6 +1,6 @@
-import { useMemo } from "react";
-import { getPluginConfig } from "../config";
-import { CaptchaInputContainer } from "../components/CaptchaInputContainer";
+import { useMemo } from 'react';
+import { getPluginConfig } from '../config';
+import { CaptchaInputContainer } from '../components/CaptchaInputContainer';
 
 export function useCaptchaInputContainer() {
   return useMemo(() => {
