@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useRef } from 'react';
 import { useCaptcha } from '../hooks';
 import { CaptchInputContainerProps } from '../types';
 import {

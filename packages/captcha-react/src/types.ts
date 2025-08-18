@@ -90,7 +90,7 @@ export type SuperTokensPluginCaptchaConfig = CaptchaConfig & {
   >;
   inputContainerId?: string | (() => Promise<string>);
   shouldValidate?: (
-    contenxt:
+    context:
       | RecipePreAPIHookContext<EmailPasswordPreAndPostAPIHookAction>
       | RecipePreAPIHookContext<PasswordlessPreAndPostAPIHookAction>,
   ) => boolean;
