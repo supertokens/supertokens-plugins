@@ -1,5 +1,11 @@
 # @supertokens-plugins/captcha-react
 
+## 0.2.0
+
+### Minor Changes
+
+- 7782eee: Render the captcha input in all the forms
+
 ## 0.1.2
 
 ### Patch Changes
