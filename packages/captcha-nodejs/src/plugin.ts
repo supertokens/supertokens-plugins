@@ -4,7 +4,7 @@ import { SuperTokensPluginCaptchaConfig } from './types';
 import { validateCaptcha } from './captcha';
 
 export const init = (
-  config: SuperTokensPluginCaptchaConfig
+  config: SuperTokensPluginCaptchaConfig,
 ): SuperTokensPlugin => {
   validatePluginConfig(config);
   return {
@@ -22,7 +22,7 @@ export const init = (
               if (config.shouldValidate) {
                 const shouldValidate = await config.shouldValidate(
                   'signUpPOST',
-                  input
+                  input,
                 );
                 if (!shouldValidate) {
                   return originalImplementation.signUpPOST!(input);
@@ -44,7 +44,7 @@ export const init = (
               if (config.shouldValidate) {
                 const shouldValidate = await config.shouldValidate(
                   'passwordResetPOST',
-                  input
+                  input,
                 );
                 if (!shouldValidate) {
                   return originalImplementation.passwordResetPOST!(input);
@@ -65,11 +65,11 @@ export const init = (
               if (config.shouldValidate) {
                 const validateResult = await config.shouldValidate(
                   'generatePasswordResetTokenPOST',
-                  input
+                  input,
                 );
                 if (!validateResult) {
                   return originalImplementation.generatePasswordResetTokenPOST!(
-                    input
+                    input,
                   );
                 }
               }
@@ -83,14 +83,14 @@ export const init = (
                 };
               }
               return originalImplementation.generatePasswordResetTokenPOST!(
-                input
+                input,
               );
             },
             signInPOST: async (input) => {
               if (config.shouldValidate) {
                 const validateResult = await config.shouldValidate(
                   'signInPOST',
-                  input
+                  input,
                 );
                 if (!validateResult) {
                   return originalImplementation.signInPOST!(input);
@@ -119,7 +119,7 @@ export const init = (
               if (config.shouldValidate) {
                 const validateResult = await config.shouldValidate(
                   'consumeCodePOST',
-                  input
+                  input,
                 );
                 if (!validateResult) {
                   return originalImplementation.consumeCodePOST!(input);
@@ -146,7 +146,7 @@ export const init = (
               if (config.shouldValidate) {
                 const validateResult = await config.shouldValidate(
                   'createCodePOST',
-                  input
+                  input,
                 );
                 if (!validateResult) {
                   return originalImplementation.createCodePOST!(input);
