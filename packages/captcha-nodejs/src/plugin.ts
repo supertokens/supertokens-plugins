@@ -32,7 +32,7 @@ export const init = (
               const body = await input.options.req.getJSONBody();
               try {
                 await validateCaptcha(body, config);
-              } catch (e) {
+              } catch {
                 return {
                   status: 'GENERAL_ERROR',
                   message: 'CAPTCHA verification failed',
@@ -53,7 +53,7 @@ export const init = (
               const body = await input.options.req.getJSONBody();
               try {
                 await validateCaptcha(body, config);
-              } catch (e) {
+              } catch {
                 return {
                   status: 'GENERAL_ERROR',
                   message: 'CAPTCHA verification failed',
@@ -76,7 +76,7 @@ export const init = (
               const body = await input.options.req.getJSONBody();
               try {
                 await validateCaptcha(body, config);
-              } catch (e) {
+              } catch {
                 return {
                   status: 'GENERAL_ERROR',
                   message: 'CAPTCHA verification failed',
@@ -100,7 +100,7 @@ export const init = (
               const body = await input.options.req.getJSONBody();
               try {
                 await validateCaptcha(body, config);
-              } catch (e) {
+              } catch {
                 return {
                   status: 'GENERAL_ERROR',
                   message: 'CAPTCHA verification failed',
@@ -134,7 +134,7 @@ export const init = (
               const body = await input.options.req.getJSONBody();
               try {
                 await validateCaptcha(body, config);
-              } catch (e) {
+              } catch {
                 return {
                   status: 'GENERAL_ERROR',
                   message: 'CAPTCHA verification failed',
@@ -156,7 +156,7 @@ export const init = (
               const body = await input.options.req.getJSONBody();
               try {
                 await validateCaptcha(body, config);
-              } catch (e) {
+              } catch {
                 return {
                   status: 'GENERAL_ERROR',
                   message: 'CAPTCHA verification failed',

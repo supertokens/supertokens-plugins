@@ -41,8 +41,7 @@ export const EmailPasswordResetPasswordEmail =
         <DefaultComponent
           {...props}
           error={state.error}
-          // TODO: Uncomment this when the feat/plugin/base branch gets merged
-          // footer={<CaptchaContainer form="EmailPasswordResetPasswordEmail" />}
+          footer={<CaptchaContainer form="EmailPasswordResetPasswordEmail" />}
         />
       );
     };
@@ -57,8 +56,7 @@ export const EmailPasswordSubmitNewPassword =
         <DefaultComponent
           {...props}
           error={state.error}
-          // TODO: Uncomment this when the feat/plugin/base branch gets merged
-          // footer={<CaptchaContainer form="EmailPasswordSubmitNewPassword" />}
+          footer={<CaptchaContainer form="EmailPasswordSubmitNewPassword" />}
         />
       );
     };
@@ -118,8 +116,7 @@ export const PasswordlessEPComboEmailForm =
         <DefaultComponent
           {...props}
           error={state.error}
-          // TODO: Uncomment this when the feat/plugin/base branch gets merged
-          // footer={<CaptchaContainer form="PasswordlessEPComboEmailForm" />}
+          footer={<CaptchaContainer form="PasswordlessEPComboEmailForm" />}
         />
       );
     };
@@ -134,8 +131,9 @@ export const PasswordlessEPComboEmailOrPhoneForm =
         <DefaultComponent
           {...props}
           error={state.error}
-          // TODO: Uncomment this when the feat/plugin/base branch gets merged
-          // footer={<CaptchaContainer form="PasswordlessEPComboEmailOrPhoneForm" />}
+          footer={
+            <CaptchaContainer form="PasswordlessEPComboEmailOrPhoneForm" />
+          }
         />
       );
     };

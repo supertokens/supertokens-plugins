@@ -2,7 +2,7 @@
 module.exports = {
   root: true,
   extends: ["eslint:recommended"],
-  plugins: ["turbo"],
+  plugins: ["turbo", "@typescript-eslint"],
   parser: "@typescript-eslint/parser",
   parserOptions: {
     ecmaVersion: 2020,
@@ -10,6 +10,9 @@ module.exports = {
   },
   rules: {
     "turbo/no-undeclared-env-vars": "warn",
+    // Disable the base no-unused-vars rule and use the TypeScript-specific one
+    "no-unused-vars": "off",
+    "@typescript-eslint/no-unused-vars": "error",
   },
   ignorePatterns: [
     ".*.js",

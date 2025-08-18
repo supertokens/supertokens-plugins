@@ -38,6 +38,7 @@ const ModalContent = React.forwardRef<HTMLDivElement, ModalProps>(
     return (
       <div
         ref={ref}
+        className={className}
         style={{
           backgroundColor: 'white',
           padding: '40px 20px',
@@ -59,7 +60,7 @@ ModalContent.displayName = 'ModalContent';
 const ModalTitle = React.forwardRef<HTMLDivElement, ModalProps>(
   ({ children, className }, ref) => {
     return (
-      <h2 ref={ref} style={{ margin: '0' }}>
+      <h2 ref={ref} className={className} style={{ margin: '0' }}>
         {children}
       </h2>
     );
