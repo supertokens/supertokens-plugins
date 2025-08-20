@@ -1,7 +1,7 @@
-import '@testing-library/jest-dom';
-import { vi } from 'vitest';
+import "@testing-library/jest-dom";
+import { vi } from "vitest";
 
-Object.defineProperty(window, 'grecaptcha', {
+Object.defineProperty(window, "grecaptcha", {
   writable: true,
   value: {
     ready: vi.fn(),
@@ -11,7 +11,7 @@ Object.defineProperty(window, 'grecaptcha', {
   },
 });
 
-Object.defineProperty(window, 'turnstile', {
+Object.defineProperty(window, "turnstile", {
   writable: true,
   value: {
     render: vi.fn(),
@@ -20,12 +20,12 @@ Object.defineProperty(window, 'turnstile', {
   },
 });
 
-Object.defineProperty(window, 'onLoadReCAPTCHAv2', {
+Object.defineProperty(window, "onLoadReCAPTCHAv2", {
   writable: true,
   value: vi.fn(),
 });
 
-Object.defineProperty(window, 'onLoadTurnstile', {
+Object.defineProperty(window, "onLoadTurnstile", {
   writable: true,
   value: vi.fn(),
 });

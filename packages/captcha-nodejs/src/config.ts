@@ -8,17 +8,11 @@ export function validatePluginConfig(config: SuperTokensPluginCaptchaConfig) {
     throw new Error("The captcha type is required");
   }
 
-  if (
-    config.type === "reCAPTCHAv3" &&
-    config.captcha?.secretKey === undefined
-  ) {
+  if (config.type === "reCAPTCHAv3" && config.captcha?.secretKey === undefined) {
     throw new Error("reCAPTCHAv3 secretKey is required");
   }
 
-  if (
-    config.type === "reCAPTCHAv2" &&
-    config.captcha?.secretKey === undefined
-  ) {
+  if (config.type === "reCAPTCHAv2" && config.captcha?.secretKey === undefined) {
     throw new Error("reCAPTCHAv2 secretKey is required");
   }
 

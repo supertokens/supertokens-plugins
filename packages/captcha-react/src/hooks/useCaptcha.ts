@@ -93,9 +93,7 @@ class CaptchaStore {
     return () => this.listeners.delete(listener);
   };
 
-  load = async (
-    configOverride: Partial<SuperTokensPluginCaptchaConfig> = {},
-  ) => {
+  load = async (configOverride: Partial<SuperTokensPluginCaptchaConfig> = {}) => {
     if (this.state.isLoading || this.state.isRendering) {
       return;
     }

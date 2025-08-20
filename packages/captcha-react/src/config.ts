@@ -2,7 +2,6 @@ import { SuperTokensPublicConfig } from "supertokens-auth-react/lib/build/types"
 
 import { SuperTokensPluginCaptchaConfig } from "./types";
 
-
 let PluginConfig: SuperTokensPluginCaptchaConfig;
 const SupportedCaptchaTypes = ["reCAPTCHAv3", "reCAPTCHAv2", "turnstile"];
 
@@ -42,8 +41,6 @@ export function getPluginConfig(): SuperTokensPluginCaptchaConfig {
 export function validatePublicConfig(config: SuperTokensPublicConfig) {
   const pluginConfig = getPluginConfig();
   if (config.useShadowDom && pluginConfig.type !== "reCAPTCHAv3") {
-    throw new Error(
-      "The captcha input cannot be rendered when using shadow dom",
-    );
+    throw new Error("The captcha input cannot be rendered when using shadow dom");
   }
 }

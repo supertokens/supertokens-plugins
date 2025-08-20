@@ -3,9 +3,7 @@ import { PLUGIN_ID, PLUGIN_SDK_VERSION, validatePluginConfig } from "./config";
 import { SuperTokensPluginCaptchaConfig } from "./types";
 import { validateCaptcha } from "./captcha";
 
-export const init = (
-  config: SuperTokensPluginCaptchaConfig,
-): SuperTokensPlugin => {
+export const init = (config: SuperTokensPluginCaptchaConfig): SuperTokensPlugin => {
   validatePluginConfig(config);
   return {
     id: PLUGIN_ID,
@@ -20,10 +18,7 @@ export const init = (
             ...originalImplementation,
             signUpPOST: async (input) => {
               if (config.shouldValidate) {
-                const shouldValidate = await config.shouldValidate(
-                  "signUpPOST",
-                  input,
-                );
+                const shouldValidate = await config.shouldValidate("signUpPOST", input);
                 if (!shouldValidate) {
                   return originalImplementation.signUpPOST!(input);
                 }
@@ -42,10 +37,7 @@ export const init = (
             },
             passwordResetPOST: async (input) => {
               if (config.shouldValidate) {
-                const shouldValidate = await config.shouldValidate(
-                  "passwordResetPOST",
-                  input,
-                );
+                const shouldValidate = await config.shouldValidate("passwordResetPOST", input);
                 if (!shouldValidate) {
                   return originalImplementation.passwordResetPOST!(input);
                 }
@@ -63,14 +55,9 @@ export const init = (
             },
             generatePasswordResetTokenPOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = await config.shouldValidate(
-                  "generatePasswordResetTokenPOST",
-                  input,
-                );
+                const validateResult = await config.shouldValidate("generatePasswordResetTokenPOST", input);
                 if (!validateResult) {
-                  return originalImplementation.generatePasswordResetTokenPOST!(
-                    input,
-                  );
+                  return originalImplementation.generatePasswordResetTokenPOST!(input);
                 }
               }
               const body = await input.options.req.getJSONBody();
@@ -82,16 +69,11 @@ export const init = (
                   message: "CAPTCHA verification failed",
                 };
               }
-              return originalImplementation.generatePasswordResetTokenPOST!(
-                input,
-              );
+              return originalImplementation.generatePasswordResetTokenPOST!(input);
             },
             signInPOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = await config.shouldValidate(
-                  "signInPOST",
-                  input,
-                );
+                const validateResult = await config.shouldValidate("signInPOST", input);
                 if (!validateResult) {
                   return originalImplementation.signInPOST!(input);
                 }
@@ -117,10 +99,7 @@ export const init = (
             ...originalImplementation,
             consumeCodePOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = await config.shouldValidate(
-                  "consumeCodePOST",
-                  input,
-                );
+                const validateResult = await config.shouldValidate("consumeCodePOST", input);
                 if (!validateResult) {
                   return originalImplementation.consumeCodePOST!(input);
                 }
@@ -144,10 +123,7 @@ export const init = (
             },
             createCodePOST: async (input) => {
               if (config.shouldValidate) {
-                const validateResult = await config.shouldValidate(
-                  "createCodePOST",
-                  input,
-                );
+                const validateResult = await config.shouldValidate("createCodePOST", input);
                 if (!validateResult) {
                   return originalImplementation.createCodePOST!(input);
                 }

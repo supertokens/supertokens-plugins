@@ -14,12 +14,12 @@ npm install @supertokens-plugins/captcha-nodejs
 Initialize the plugin in your SuperTokens backend configuration:
 
 ```typescript
-import SuperTokens from 'supertokens-node';
-import CaptchaPlugin from '@supertokens-plugins/captcha-nodejs';
+import SuperTokens from "supertokens-node";
+import CaptchaPlugin from "@supertokens-plugins/captcha-nodejs";
 
 SuperTokens.init({
   supertokens: {
-    connectionURI: '...',
+    connectionURI: "...",
   },
   appInfo: {
     // your app info
@@ -29,9 +29,9 @@ SuperTokens.init({
   ],
   plugins: [
     CaptchaPlugin.init({
-      type: 'reCAPTCHAv3', // or "reCAPTCHAv2" or "turnstile"
+      type: "reCAPTCHAv3", // or "reCAPTCHAv2" or "turnstile"
       captcha: {
-        secretKey: 'your-secret-key',
+        secretKey: "your-secret-key",
       },
     }),
   ],
@@ -61,18 +61,18 @@ The plugin automatically protects these authentication flows:
 Control when CAPTCHA validation occurs using the `shouldValidate` function:
 
 ```typescript
-import { ShouldValidate } from '@supertokens-plugins/captcha-nodejs';
+import { ShouldValidate } from "@supertokens-plugins/captcha-nodejs";
 
 const shouldValidate: ShouldValidate = (api, input) => {
   // Only require CAPTCHA for sign up
-  if (api === 'signUpPOST') {
+  if (api === "signUpPOST") {
     return true;
   }
 
   // Check request headers for suspicious activity
-  if (api === 'signInPOST') {
-    const userAgent = input.options.req.getHeaderValue('user-agent');
-    return !userAgent || userAgent.includes('bot');
+  if (api === "signInPOST") {
+    const userAgent = input.options.req.getHeaderValue("user-agent");
+    return !userAgent || userAgent.includes("bot");
   }
 
   return false;

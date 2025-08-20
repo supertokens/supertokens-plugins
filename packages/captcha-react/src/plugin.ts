@@ -8,88 +8,81 @@ import { ComponentOverrides } from "./components";
 import { setPluginConfig, validatePublicConfig, getPluginConfig } from "./config";
 import { PLUGIN_ID } from "./constants";
 import {
-    isEmailPasswordCaptchaPreAndPostAPIHookAction,
-    isPasswordlessCaptchaPreAndPostAPIHookAction,
-    SuperTokensPluginCaptchaConfig,
+  isEmailPasswordCaptchaPreAndPostAPIHookAction,
+  isPasswordlessCaptchaPreAndPostAPIHookAction,
+  SuperTokensPluginCaptchaConfig,
 } from "./types";
 
 export const init = (config: SuperTokensPluginCaptchaConfig): SuperTokensPlugin => {
-    setPluginConfig(config);
-    return {
-        id: PLUGIN_ID,
-        init: (config) => {
-            validatePublicConfig(config);
+  setPluginConfig(config);
+  return {
+    id: PLUGIN_ID,
+    init: (config) => {
+      validatePublicConfig(config);
+    },
+    overrideMap: {
+      emailpassword: {
+        config: (config) => {
+          return {
+            ...config,
+            preAPIHook,
+          };
         },
-        overrideMap: {
-            emailpassword: {
-                config: (config) => {
-                    return {
-                        ...config,
-                        preAPIHook,
-                    };
-                },
-                components: {
-                    EmailPasswordSignInForm_Override: ComponentOverrides.EmailPasswordSignInForm(),
-                    EmailPasswordSignUpForm_Override: ComponentOverrides.EmailPasswordSignUpForm(),
-                    EmailPasswordResetPasswordEmail_Override: ComponentOverrides.EmailPasswordResetPasswordEmail(),
-                    EmailPasswordSubmitNewPassword_Override: ComponentOverrides.EmailPasswordSubmitNewPassword(),
-                },
-            },
-            passwordless: {
-                config: (config) => {
-                    return {
-                        ...config,
-                        preAPIHook,
-                    };
-                },
-                components: {
-                    PasswordlessEmailForm_Override: ComponentOverrides.PasswordlessEmailForm(),
-                    PasswordlessPhoneForm_Override: ComponentOverrides.PasswordlessPhoneForm(),
-                    PasswordlessEmailOrPhoneForm_Override: ComponentOverrides.PasswordlessEmailOrPhoneForm(),
-                    PasswordlessEPComboEmailForm_Override: ComponentOverrides.PasswordlessEPComboEmailForm(),
-                    PasswordlessEPComboEmailOrPhoneForm_Override: ComponentOverrides.PasswordlessEPComboEmailOrPhoneForm(),
-                    PasswordlessUserInputCodeForm_Override: ComponentOverrides.PasswordlessUserInputCodeForm(),
-                },
-            },
+        components: {
+          EmailPasswordSignInForm_Override: ComponentOverrides.EmailPasswordSignInForm(),
+          EmailPasswordSignUpForm_Override: ComponentOverrides.EmailPasswordSignUpForm(),
+          EmailPasswordResetPasswordEmail_Override: ComponentOverrides.EmailPasswordResetPasswordEmail(),
+          EmailPasswordSubmitNewPassword_Override: ComponentOverrides.EmailPasswordSubmitNewPassword(),
         },
-    };
+      },
+      passwordless: {
+        config: (config) => {
+          return {
+            ...config,
+            preAPIHook,
+          };
+        },
+        components: {
+          PasswordlessEmailForm_Override: ComponentOverrides.PasswordlessEmailForm(),
+          PasswordlessPhoneForm_Override: ComponentOverrides.PasswordlessPhoneForm(),
+          PasswordlessEmailOrPhoneForm_Override: ComponentOverrides.PasswordlessEmailOrPhoneForm(),
+          PasswordlessEPComboEmailForm_Override: ComponentOverrides.PasswordlessEPComboEmailForm(),
+          PasswordlessEPComboEmailOrPhoneForm_Override: ComponentOverrides.PasswordlessEPComboEmailOrPhoneForm(),
+          PasswordlessUserInputCodeForm_Override: ComponentOverrides.PasswordlessUserInputCodeForm(),
+        },
+      },
+    },
+  };
 };
 
 async function preAPIHook(
-    context:
-        | RecipePreAPIHookContext<EmailPasswordPreAndPostAPIHookAction>
-        | RecipePreAPIHookContext<PasswordlessPreAndPostAPIHookAction>
+  context:
+    | RecipePreAPIHookContext<EmailPasswordPreAndPostAPIHookAction>
+    | RecipePreAPIHookContext<PasswordlessPreAndPostAPIHookAction>,
 ) {
-    const { action } = context;
-    const config = getPluginConfig();
-    if (
-        !isEmailPasswordCaptchaPreAndPostAPIHookAction(action) &&
-        !isPasswordlessCaptchaPreAndPostAPIHookAction(action)
-    ) {
-        return context;
-    }
-
-    if (config.shouldValidate && !config.shouldValidate(context)) {
-        return context;
-    }
-
-    const token = await captcha.getToken();
-    if (!token) {
-        return context;
-    }
-
-    let payload: Record<string, any> & {
-        captcha: string;
-        captchaType: SuperTokensPluginCaptchaConfig["type"];
-    };
-    try {
-        payload = JSON.parse(context.requestInit.body as string);
-    } catch (e) {
-        throw new Error("Error setting CAPTCHA token");
-    }
-
-    payload.captcha = token;
-    payload.captchaType = config.type;
-    context.requestInit.body = JSON.stringify(payload);
+  const { action } = context;
+  const config = getPluginConfig();
+  if (!isEmailPasswordCaptchaPreAndPostAPIHookAction(action) && !isPasswordlessCaptchaPreAndPostAPIHookAction(action)) {
     return context;
+  }
+
+  const token = await captcha.getToken();
+  if (!token) {
+    return context;
+  }
+
+  let payload: Record<string, any> & {
+    captcha: string;
+    captchaType: SuperTokensPluginCaptchaConfig["type"];
+  };
+  try {
+    payload = JSON.parse(context.requestInit.body as string);
+  } catch (e) {
+    throw new Error("Error setting CAPTCHA token");
+  }
+
+  payload.captcha = token;
+  payload.captchaType = config.type;
+  context.requestInit.body = JSON.stringify(payload);
+  return context;
 }

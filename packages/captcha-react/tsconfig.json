@@ -10,10 +10,5 @@
     "noImplicitAny": false
   },
   "include": ["src/**/*"],
-  "exclude": [
-    "src/**/*.test.tsx",
-    "src/**/*.spec.tsx",
-    "src/**/*.test.ts",
-    "src/**/*.spec.ts"
-  ]
+  "exclude": ["src/**/*.test.tsx", "src/**/*.spec.tsx", "src/**/*.test.ts", "src/**/*.spec.ts"]
 }

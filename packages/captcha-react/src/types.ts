@@ -16,11 +16,7 @@ declare global {
 
 export interface CaptchaProvider {
   load: (onLoad?: () => void) => Promise<void>;
-  render?: (
-    container: HTMLDivElement,
-    onSubmit: (token: string) => void,
-    onError: (error: Error) => void,
-  ) => void;
+  render?: (container: HTMLDivElement, onSubmit: (token: string) => void, onError: (error: Error) => void) => void;
   getToken: () => Promise<string>;
 }
 
@@ -53,10 +49,7 @@ type CaptchaConfig =
 
 export type EmailPasswordCaptchaPreAndPostAPIHookActions = Extract<
   EmailPasswordPreAndPostAPIHookAction,
-  | "EMAIL_PASSWORD_SIGN_UP"
-  | "EMAIL_PASSWORD_SIGN_IN"
-  | "SUBMIT_NEW_PASSWORD"
-  | "SEND_RESET_PASSWORD_EMAIL"
+  "EMAIL_PASSWORD_SIGN_UP" | "EMAIL_PASSWORD_SIGN_IN" | "SUBMIT_NEW_PASSWORD" | "SEND_RESET_PASSWORD_EMAIL"
 >;
 
 export function isEmailPasswordCaptchaPreAndPostAPIHookAction(
@@ -78,22 +71,12 @@ export type PasswordlessCaptchaPreAndPostAPIHookActions = Extract<
 export function isPasswordlessCaptchaPreAndPostAPIHookAction(
   action: string,
 ): action is PasswordlessCaptchaPreAndPostAPIHookActions {
-  return (
-    action === "PASSWORDLESS_CONSUME_CODE" ||
-    action === "PASSWORDLESS_CREATE_CODE"
-  );
+  return action === "PASSWORDLESS_CONSUME_CODE" || action === "PASSWORDLESS_CREATE_CODE";
 }
 
 export type SuperTokensPluginCaptchaConfig = CaptchaConfig & {
-  InputContainer?: React.ForwardRefExoticComponent<
-    CaptchInputContainerProps & React.RefAttributes<HTMLDivElement>
-  >;
+  InputContainer?: React.ForwardRefExoticComponent<CaptchInputContainerProps & React.RefAttributes<HTMLDivElement>>;
   inputContainerId?: string | (() => Promise<string>);
-  shouldValidate?: (
-    context:
-      | RecipePreAPIHookContext<EmailPasswordPreAndPostAPIHookAction>
-      | RecipePreAPIHookContext<PasswordlessPreAndPostAPIHookAction>,
-  ) => boolean;
 };
 
 export type CaptchInputContainerProps = {
