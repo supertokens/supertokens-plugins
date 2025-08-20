@@ -1,49 +1,49 @@
-import { APIInterface as EmailPasswordAPIInterface } from 'supertokens-node/recipe/emailpassword/types';
-import { APIInterface as PasswordlessAPIInterface } from 'supertokens-node/recipe/passwordless/types';
+import { APIInterface as EmailPasswordAPIInterface } from "supertokens-node/recipe/emailpassword/types";
+import { APIInterface as PasswordlessAPIInterface } from "supertokens-node/recipe/passwordless/types";
 
 export interface ShouldValidate {
   (
-    api: 'signInPOST',
-    input: Parameters<NonNullable<EmailPasswordAPIInterface['signInPOST']>>[0],
+    api: "signInPOST",
+    input: Parameters<NonNullable<EmailPasswordAPIInterface["signInPOST"]>>[0],
   ): boolean | Promise<boolean>;
   (
-    api: 'signUpPOST',
-    input: Parameters<NonNullable<EmailPasswordAPIInterface['signUpPOST']>>[0],
+    api: "signUpPOST",
+    input: Parameters<NonNullable<EmailPasswordAPIInterface["signUpPOST"]>>[0],
   ): boolean | Promise<boolean>;
   (
-    api: 'passwordResetPOST',
+    api: "passwordResetPOST",
     input: Parameters<
-      NonNullable<EmailPasswordAPIInterface['passwordResetPOST']>
+      NonNullable<EmailPasswordAPIInterface["passwordResetPOST"]>
     >[0],
   ): boolean | Promise<boolean>;
   (
-    api: 'generatePasswordResetTokenPOST',
+    api: "generatePasswordResetTokenPOST",
     input: Parameters<
-      NonNullable<EmailPasswordAPIInterface['generatePasswordResetTokenPOST']>
+      NonNullable<EmailPasswordAPIInterface["generatePasswordResetTokenPOST"]>
     >[0],
   ): boolean | Promise<boolean>;
   (
-    api: 'consumeCodePOST',
+    api: "consumeCodePOST",
     input: Parameters<
-      NonNullable<PasswordlessAPIInterface['consumeCodePOST']>
+      NonNullable<PasswordlessAPIInterface["consumeCodePOST"]>
     >[0],
   ): boolean | Promise<boolean>;
   (
-    api: 'createCodePOST',
+    api: "createCodePOST",
     input: Parameters<
-      NonNullable<PasswordlessAPIInterface['createCodePOST']>
+      NonNullable<PasswordlessAPIInterface["createCodePOST"]>
     >[0],
   ): boolean | Promise<boolean>;
   (
-    api: 'consumeCodePOST',
+    api: "consumeCodePOST",
     input: Parameters<
-      NonNullable<PasswordlessAPIInterface['consumeCodePOST']>
+      NonNullable<PasswordlessAPIInterface["consumeCodePOST"]>
     >[0],
   ): boolean | Promise<boolean>;
 }
 
 export type SuperTokensPluginCaptchaConfig = {
-  type: 'reCAPTCHAv3' | 'reCAPTCHAv2' | 'turnstile';
+  type: "reCAPTCHAv3" | "reCAPTCHAv2" | "turnstile";
   captcha: {
     secretKey: string;
   };
@@ -54,7 +54,7 @@ export type SuperTokensPluginCaptchaConfig = {
 
 export type ReCaptchaV3Response = {
   success: boolean;
-  'error-codes': string[];
+  "error-codes": string[];
   hostname: string;
   action: string;
   score: number;
@@ -64,13 +64,13 @@ export type ReCaptchaV3Response = {
 export type ReCaptchaV2Response = {
   success: boolean;
   action: string;
-  'error-codes': string[];
+  "error-codes": string[];
   challenge_ts: string;
 };
 
 export type TurnstileResponse = {
   success: boolean;
-  'error-codes': string[];
+  "error-codes": string[];
   hostname: string;
   challenge_ts: string;
 };

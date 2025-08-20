@@ -1,9 +1,9 @@
 /// <reference types="@types/cloudflare-turnstile" />
 /// <reference types="@types/grecaptcha" />
 
-import { RecipePreAPIHookContext } from 'supertokens-auth-react/lib/build/recipe/recipeModule/types';
-import { PreAndPostAPIHookAction as EmailPasswordPreAndPostAPIHookAction } from 'supertokens-auth-react/lib/build/recipe/emailpassword/types';
-import { PreAndPostAPIHookAction as PasswordlessPreAndPostAPIHookAction } from 'supertokens-auth-react/lib/build/recipe/passwordless/types';
+import { PreAndPostAPIHookAction as EmailPasswordPreAndPostAPIHookAction } from "supertokens-auth-react/lib/build/recipe/emailpassword/types";
+import { PreAndPostAPIHookAction as PasswordlessPreAndPostAPIHookAction } from "supertokens-auth-react/lib/build/recipe/passwordless/types";
+import { RecipePreAPIHookContext } from "supertokens-auth-react/lib/build/recipe/recipeModule/types";
 
 declare global {
   interface Window {
@@ -39,48 +39,48 @@ export type TurnstileConfig = Turnstile.RenderParameters;
 
 type CaptchaConfig =
   | {
-      type: 'reCAPTCHAv3';
+      type: "reCAPTCHAv3";
       captcha: ReCAPTCHAv3Config;
     }
   | {
-      type: 'reCAPTCHAv2';
+      type: "reCAPTCHAv2";
       captcha: ReCAPTCHAv2Config;
     }
   | {
-      type: 'turnstile';
+      type: "turnstile";
       captcha: TurnstileConfig;
     };
 
 export type EmailPasswordCaptchaPreAndPostAPIHookActions = Extract<
   EmailPasswordPreAndPostAPIHookAction,
-  | 'EMAIL_PASSWORD_SIGN_UP'
-  | 'EMAIL_PASSWORD_SIGN_IN'
-  | 'SUBMIT_NEW_PASSWORD'
-  | 'SEND_RESET_PASSWORD_EMAIL'
+  | "EMAIL_PASSWORD_SIGN_UP"
+  | "EMAIL_PASSWORD_SIGN_IN"
+  | "SUBMIT_NEW_PASSWORD"
+  | "SEND_RESET_PASSWORD_EMAIL"
 >;
 
 export function isEmailPasswordCaptchaPreAndPostAPIHookAction(
   action: string,
 ): action is EmailPasswordCaptchaPreAndPostAPIHookActions {
   return (
-    action === 'EMAIL_PASSWORD_SIGN_UP' ||
-    action === 'EMAIL_PASSWORD_SIGN_IN' ||
-    action === 'SEND_RESET_PASSWORD_EMAIL' ||
-    action === 'SUBMIT_NEW_PASSWORD'
+    action === "EMAIL_PASSWORD_SIGN_UP" ||
+    action === "EMAIL_PASSWORD_SIGN_IN" ||
+    action === "SEND_RESET_PASSWORD_EMAIL" ||
+    action === "SUBMIT_NEW_PASSWORD"
   );
 }
 
 export type PasswordlessCaptchaPreAndPostAPIHookActions = Extract<
   PasswordlessPreAndPostAPIHookAction,
-  'PASSWORDLESS_CONSUME_CODE' | 'PASSWORDLESS_CREATE_CODE'
+  "PASSWORDLESS_CONSUME_CODE" | "PASSWORDLESS_CREATE_CODE"
 >;
 
 export function isPasswordlessCaptchaPreAndPostAPIHookAction(
   action: string,
 ): action is PasswordlessCaptchaPreAndPostAPIHookActions {
   return (
-    action === 'PASSWORDLESS_CONSUME_CODE' ||
-    action === 'PASSWORDLESS_CREATE_CODE'
+    action === "PASSWORDLESS_CONSUME_CODE" ||
+    action === "PASSWORDLESS_CREATE_CODE"
   );
 }
 
@@ -98,14 +98,14 @@ export type SuperTokensPluginCaptchaConfig = CaptchaConfig & {
 
 export type CaptchInputContainerProps = {
   form:
-    | 'EmailPasswordSignInForm'
-    | 'EmailPasswordSignUpForm'
-    | 'EmailPasswordResetPasswordEmail'
-    | 'EmailPasswordSubmitNewPassword'
-    | 'PasswordlessEmailForm'
-    | 'PasswordlessPhoneForm'
-    | 'PasswordlessEmailOrPhoneForm'
-    | 'PasswordlessEPComboEmailForm'
-    | 'PasswordlessEPComboEmailOrPhoneForm'
-    | 'PasswordlessUserInputForm';
+    | "EmailPasswordSignInForm"
+    | "EmailPasswordSignUpForm"
+    | "EmailPasswordResetPasswordEmail"
+    | "EmailPasswordSubmitNewPassword"
+    | "PasswordlessEmailForm"
+    | "PasswordlessPhoneForm"
+    | "PasswordlessEmailOrPhoneForm"
+    | "PasswordlessEPComboEmailForm"
+    | "PasswordlessEPComboEmailOrPhoneForm"
+    | "PasswordlessUserInputForm";
 } & React.HTMLAttributes<HTMLDivElement>;

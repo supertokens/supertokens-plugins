@@ -1,7 +1,7 @@
-import { SuperTokensPlugin } from 'supertokens-node/types';
-import { PLUGIN_ID, PLUGIN_SDK_VERSION, validatePluginConfig } from './config';
-import { SuperTokensPluginCaptchaConfig } from './types';
-import { validateCaptcha } from './captcha';
+import { SuperTokensPlugin } from "supertokens-node/types";
+import { PLUGIN_ID, PLUGIN_SDK_VERSION, validatePluginConfig } from "./config";
+import { SuperTokensPluginCaptchaConfig } from "./types";
+import { validateCaptcha } from "./captcha";
 
 export const init = (
   config: SuperTokensPluginCaptchaConfig,
@@ -9,7 +9,7 @@ export const init = (
   validatePluginConfig(config);
   return {
     id: PLUGIN_ID,
-    compatibleSDKVersions: [PLUGIN_SDK_VERSION, '23.0.0', '23.0.1'],
+    compatibleSDKVersions: [PLUGIN_SDK_VERSION, "23.0.0", "23.0.1"],
     overrideMap: {
       emailpassword: {
         apis: (originalImplementation) => {
@@ -21,7 +21,7 @@ export const init = (
             signUpPOST: async (input) => {
               if (config.shouldValidate) {
                 const shouldValidate = await config.shouldValidate(
-                  'signUpPOST',
+                  "signUpPOST",
                   input,
                 );
                 if (!shouldValidate) {
@@ -34,8 +34,8 @@ export const init = (
                 await validateCaptcha(body, config);
               } catch {
                 return {
-                  status: 'GENERAL_ERROR',
-                  message: 'CAPTCHA verification failed',
+                  status: "GENERAL_ERROR",
+                  message: "CAPTCHA verification failed",
                 };
               }
               return originalImplementation.signUpPOST!(input);
@@ -43,7 +43,7 @@ export const init = (
             passwordResetPOST: async (input) => {
               if (config.shouldValidate) {
                 const shouldValidate = await config.shouldValidate(
-                  'passwordResetPOST',
+                  "passwordResetPOST",
                   input,
                 );
                 if (!shouldValidate) {
@@ -55,8 +55,8 @@ export const init = (
                 await validateCaptcha(body, config);
               } catch {
                 return {
-                  status: 'GENERAL_ERROR',
-                  message: 'CAPTCHA verification failed',
+                  status: "GENERAL_ERROR",
+                  message: "CAPTCHA verification failed",
                 };
               }
               return originalImplementation.passwordResetPOST!(input);
@@ -64,7 +64,7 @@ export const init = (
             generatePasswordResetTokenPOST: async (input) => {
               if (config.shouldValidate) {
                 const validateResult = await config.shouldValidate(
-                  'generatePasswordResetTokenPOST',
+                  "generatePasswordResetTokenPOST",
                   input,
                 );
                 if (!validateResult) {
@@ -78,8 +78,8 @@ export const init = (
                 await validateCaptcha(body, config);
               } catch {
                 return {
-                  status: 'GENERAL_ERROR',
-                  message: 'CAPTCHA verification failed',
+                  status: "GENERAL_ERROR",
+                  message: "CAPTCHA verification failed",
                 };
               }
               return originalImplementation.generatePasswordResetTokenPOST!(
@@ -89,7 +89,7 @@ export const init = (
             signInPOST: async (input) => {
               if (config.shouldValidate) {
                 const validateResult = await config.shouldValidate(
-                  'signInPOST',
+                  "signInPOST",
                   input,
                 );
                 if (!validateResult) {
@@ -102,8 +102,8 @@ export const init = (
                 await validateCaptcha(body, config);
               } catch {
                 return {
-                  status: 'GENERAL_ERROR',
-                  message: 'CAPTCHA verification failed',
+                  status: "GENERAL_ERROR",
+                  message: "CAPTCHA verification failed",
                 };
               }
               return originalImplementation.signInPOST!(input);
@@ -118,7 +118,7 @@ export const init = (
             consumeCodePOST: async (input) => {
               if (config.shouldValidate) {
                 const validateResult = await config.shouldValidate(
-                  'consumeCodePOST',
+                  "consumeCodePOST",
                   input,
                 );
                 if (!validateResult) {
@@ -127,7 +127,7 @@ export const init = (
               }
 
               // Skip captcha validation if magic link was used
-              if ('linkCode' in input) {
+              if ("linkCode" in input) {
                 return originalImplementation.consumeCodePOST!(input);
               }
 
@@ -136,8 +136,8 @@ export const init = (
                 await validateCaptcha(body, config);
               } catch {
                 return {
-                  status: 'GENERAL_ERROR',
-                  message: 'CAPTCHA verification failed',
+                  status: "GENERAL_ERROR",
+                  message: "CAPTCHA verification failed",
                 };
               }
               return originalImplementation.consumeCodePOST!(input);
@@ -145,7 +145,7 @@ export const init = (
             createCodePOST: async (input) => {
               if (config.shouldValidate) {
                 const validateResult = await config.shouldValidate(
-                  'createCodePOST',
+                  "createCodePOST",
                   input,
                 );
                 if (!validateResult) {
@@ -158,8 +158,8 @@ export const init = (
                 await validateCaptcha(body, config);
               } catch {
                 return {
-                  status: 'GENERAL_ERROR',
-                  message: 'CAPTCHA verification failed',
+                  status: "GENERAL_ERROR",
+                  message: "CAPTCHA verification failed",
                 };
               }
               return originalImplementation.createCodePOST!(input);
