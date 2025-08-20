@@ -1,21 +1,21 @@
 import React from 'react';
 import { useCallback, useState } from 'react';
-import { useQuerier } from '../utils/querier';
 import { SessionAuth } from 'supertokens-auth-react/recipe/session';
 import { PermissionClaim } from 'supertokens-auth-react/recipe/userroles';
 // @ts-ignore
 import styles from './style.css?inline';
 import { getErrorMessage, ThemeBase } from '../utils';
+import { usePlugin } from '../use-plugin';
 
 // todo: feedback: it would be useful to be able to use the supertokens components (buttons, inputs, boxes, cards, forms, etc).
 
-export function BanUserPage(props: { apiDomain: string }) {
+export function BanUserPage() {
+  const { api, pluginConfig } = usePlugin();
+
   const [error, setError] = useState<string | undefined>();
   const [tenantId, setTenantId] = useState('public');
   const [email, setEmail] = useState<string | undefined>();
   const [banStatus, setBanStatus] = useState<boolean | null>(null);
-
-  const querier = useQuerier(props.apiDomain);
 
   const scheduleErrorReset = useCallback(() => {
     setTimeout(() => {
@@ -28,44 +28,43 @@ export function BanUserPage(props: { apiDomain: string }) {
       setError(getErrorMessage(error));
       scheduleErrorReset();
     },
-    [scheduleErrorReset],
+    [scheduleErrorReset]
   );
 
   const getBanStatus = useCallback(
     (email: string) =>
-      querier
-        .get<{ status: 'OK'; banned: boolean }>('/plugin/supertokens-plugin-user-banning/ban', {
-          withSession: true,
-          params: { tenantId, email },
-        })
+      api
+        .getBanStatus(tenantId, email)
         .then((res) => {
-          setError(undefined);
-          setBanStatus(res.banned);
+          if (res.status === 'OK') {
+            setError(undefined);
+            setBanStatus(res.banned);
+          } else {
+            setError(res.message);
+            scheduleErrorReset();
+          }
         })
         .catch(onError),
-    [querier, tenantId],
+    [tenantId]
   );
 
   const updateBanStatus = useCallback(
-    (isBanned: boolean) =>
-      querier
-        .post(
-          '/plugin/supertokens-plugin-user-banning/ban',
-          {
-            email,
-            isBanned,
-          },
-          {
-            withSession: true,
-            params: { tenantId },
-          },
-        )
+    (isBanned: boolean) => {
+      if (!email) {
+        setError('Email is required');
+        scheduleErrorReset();
+        return;
+      }
+
+      return api
+        .updateBanStatus(tenantId, email, isBanned)
         .then(() => {
           setError(undefined);
           setBanStatus(isBanned);
         })
-        .catch(onError),
-    [querier, tenantId, email],
+        .catch(onError);
+    },
+    [tenantId, email]
   );
 
   const onCheckStatus = useCallback(
@@ -79,7 +78,7 @@ export function BanUserPage(props: { apiDomain: string }) {
 
       getBanStatus(email);
     },
-    [getBanStatus, email],
+    [getBanStatus, email]
   );
 
   const onBanUser = useCallback(
@@ -87,7 +86,7 @@ export function BanUserPage(props: { apiDomain: string }) {
       e.preventDefault();
       updateBanStatus(true);
     },
-    [updateBanStatus, email],
+    [updateBanStatus, email]
   );
 
   const onUnbanUser = useCallback(
@@ -101,7 +100,7 @@ export function BanUserPage(props: { apiDomain: string }) {
 
       updateBanStatus(false);
     },
-    [updateBanStatus, email],
+    [updateBanStatus, email]
   );
 
   return (
@@ -109,10 +108,9 @@ export function BanUserPage(props: { apiDomain: string }) {
       overrideGlobalClaimValidators={(globalValidators) => [
         ...globalValidators,
         {
-          ...PermissionClaim.validators.includes('ban-user'),
-          onFailureRedirection: () => {
-            return '/'; // go back home
-          },
+          ...PermissionClaim.validators.includes(pluginConfig.permissionName),
+          onFailureRedirection: () =>
+            pluginConfig.onPermissionFailureRedirectPath,
         },
       ]}
     >
@@ -122,8 +120,8 @@ export function BanUserPage(props: { apiDomain: string }) {
             <div className="row">
               <div className="headerTitle">Ban User</div>
               <p>
-                This page is used to ban and unban users. It is useful for preventing users from accessing your
-                application.
+                This page is used to ban and unban users. It is useful for
+                preventing users from accessing your application.
               </p>
 
               <div className="divider"></div>
@@ -163,7 +161,11 @@ export function BanUserPage(props: { apiDomain: string }) {
                 </div>
 
                 <div className="formRow">
-                  <button className="button" onClick={onCheckStatus} disabled={!(!!tenantId && !!email)}>
+                  <button
+                    className="button"
+                    onClick={onCheckStatus}
+                    disabled={!(!!tenantId && !!email)}
+                  >
                     Check Status (
                     {typeof banStatus === 'boolean' ? (
                       banStatus ? (
@@ -180,11 +182,20 @@ export function BanUserPage(props: { apiDomain: string }) {
 
                 {typeof banStatus === 'boolean' && (
                   <div className="formRow" style={{ flexDirection: 'row' }}>
-                    <button className="button" disabled={banStatus} onClick={onBanUser} style={{ marginRight: '20px' }}>
+                    <button
+                      className="button"
+                      disabled={banStatus}
+                      onClick={onBanUser}
+                      style={{ marginRight: '20px' }}
+                    >
                       Ban
                     </button>
 
-                    <button className="button" disabled={!banStatus} onClick={onUnbanUser}>
+                    <button
+                      className="button"
+                      disabled={!banStatus}
+                      onClick={onUnbanUser}
+                    >
                       Unban
                     </button>
                   </div>

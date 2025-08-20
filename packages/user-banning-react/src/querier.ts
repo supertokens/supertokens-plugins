@@ -1,11 +1,14 @@
-import { useMemo } from 'react';
-
 const post = (basePath: string) => async <T>(
   path: string,
   body: any,
-  { withSession, params }: { withSession: boolean; params?: Record<string, string> },
+  {
+    withSession,
+    params,
+  }: { withSession: boolean; params?: Record<string, string> }
 ): Promise<T> => {
-  const queryParams = params ? `?${new URLSearchParams(params).toString()}` : '';
+  const queryParams = params
+    ? `?${new URLSearchParams(params).toString()}`
+    : '';
 
   const url = `${basePath}${path}${queryParams}`;
 
@@ -48,26 +51,27 @@ const post = (basePath: string) => async <T>(
     throw newError;
   }
 
-  return response.json();
+  return response.json() as Promise<T>;
 };
 
 const get = (basePath: string) => async <T>(
   path: string,
-  { withSession, params }: { withSession: boolean; params?: Record<string, string> },
+  {
+    withSession,
+    params,
+  }: { withSession: boolean; params?: Record<string, string> }
 ): Promise<T> => {
-  const queryParams = params ? `?${new URLSearchParams(params).toString()}` : '';
+  const queryParams = params
+    ? `?${new URLSearchParams(params).toString()}`
+    : '';
 
   const url = `${basePath}${path}${queryParams}`;
-
-  const credentials: { credentials?: 'include' } = {};
-  if (withSession) {
-    credentials.credentials = 'include';
-  }
 
   let response;
   try {
     response = await fetch(url, {
-      ...credentials,
+      cache: 'no-cache',
+      credentials: withSession ? 'include' : 'omit',
       method: 'GET',
       headers: {
         'Content-type': 'application/json',
@@ -97,14 +101,9 @@ const get = (basePath: string) => async <T>(
     throw newError;
   }
 
-  return response.json();
+  return response.json() as Promise<T>;
 };
 
 export const getQuerier = (basePath: string) => {
   return { get: get(basePath), post: post(basePath) };
-};
-
-export const useQuerier = (basePath: string) => {
-  const querier = useMemo(() => getQuerier(basePath), [basePath]);
-  return querier;
 };

@@ -1,4 +1,4 @@
 import { init } from './plugin';
 export { init };
-export { PLUGIN_ID } from './config';
+export { PLUGIN_ID } from './constants';
 export default { init };
