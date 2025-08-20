@@ -1,0 +1,124 @@
+.supertokens-plugin-user-banning .container {
+  margin: 12px auto;
+  margin-top: 26px;
+  margin-bottom: 26px;
+  width: 420px;
+  text-align: center;
+  border-radius: 8px;
+  box-shadow: 1px 1px 10px rgba(0, 0, 0, 0.16);
+  background-color: rgb(255, 255, 255);
+}
+
+.supertokens-plugin-user-banning .row {
+  margin: 0 auto;
+  width: 76%;
+  padding-top: 30px;
+  padding-bottom: 10px;
+}
+
+.supertokens-plugin-user-banning .headerTitle {
+  font-size: 24px;
+  line-height: 27.6px;
+  letter-spacing: 0.58px;
+  font-weight: 700;
+  margin-bottom: 20px;
+  color: rgb(0, 0, 0);
+}
+
+.supertokens-plugin-user-banning .divider {
+  margin-top: 1.5em;
+  margin-bottom: 1.5em;
+  border-bottom: 0.3px solid #dddddd;
+  align-items: center;
+  padding-bottom: 5px;
+}
+
+.supertokens-plugin-user-banning .formRow {
+  display: flex;
+  flex-direction: column;
+  padding-top: 0px;
+  padding-bottom: 20px;
+}
+
+.supertokens-plugin-user-banning .formRow .label {
+  text-align: left;
+  font-weight: 700;
+  font-size: 12px;
+  line-height: 24px;
+  color: rgb(0, 0, 0);
+}
+
+.supertokens-plugin-user-banning .formRow .inputContainer {
+  margin-top: 6px;
+}
+
+.supertokens-plugin-user-banning .formRow .inputWrapper {
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  background-color: rgb(250, 250, 250);
+  height: 34px;
+  border-radius: 6px;
+  border: 1px solid rgb(224, 224, 224);
+}
+
+.supertokens-plugin-user-banning .formRow input {
+  box-sizing: border-box;
+  padding-left: 15px;
+  filter: none;
+  color: rgb(0, 0, 0);
+  background-color: transparent;
+  border-radius: 6px;
+  font-size: 14px;
+  border: none;
+  padding-right: 25px;
+  letter-spacing: 1.2px;
+  flex: 9 1 75%;
+  width: 75%;
+  height: 32px;
+  -webkit-text-fill-color: rgb(0, 0, 0);
+}
+.supertokens-plugin-user-banning .formRow input:focus {
+  border: none;
+  outline: none;
+}
+
+.supertokens-plugin-user-banning .button {
+  font-family: 'Arial', sans-serif;
+  background-color: rgb(28, 34, 42);
+  color: rgb(255, 255, 255);
+  width: 100%;
+  height: 34px;
+  font-weight: 600;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 6px;
+  border-color: rgb(45, 54, 68);
+  background-position: center;
+  transition: all 0.4s;
+  background-size: 12000%;
+  cursor: pointer;
+}
+
+.supertokens-plugin-user-banning .button:disabled {
+  border: none;
+  cursor: no-drop;
+  opacity: 0.7;
+}
+
+.generalError {
+  background: rgb(255, 241, 235);
+  padding-top: 10px;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  margin-top: 24px;
+  padding-left: 18px;
+  padding-right: 18px;
+  letter-spacing: 0.2px;
+  font-size: 14px;
+  border-radius: 8px;
+  color: rgb(255, 23, 23);
+  animation: swing-in-top-fwd 1s cubic-bezier(0.175, 0.885, 0.32, 1.275) both;
+  word-wrap: break-word;
+}

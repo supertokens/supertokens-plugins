@@ -1,0 +1,43 @@
+{
+  "name": "@supertokens-plugins/user-banning-nodejs",
+  "version": "0.0.1",
+  "description": "User Banning Plugin for SuperTokens",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "pretty": "npx pretty-quick .",
+    "pretty-check": "npx pretty-quick --check ."
+  },
+  "keywords": [
+    "user-banning",
+    "plugin",
+    "supertokens"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "supertokens-node": ">=23.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^17.0.20",
+    "prettier": "2.0.5",
+    "pretty-quick": "^3.1.1",
+    "typescript": "^5.8.3"
+  },
+  "browser": {
+    "fs": false
+  },
+  "main": "index.js",
+  "exports": {
+    ".": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    },
+    "./index": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    },
+    "./index.js": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    }
+  }
+}

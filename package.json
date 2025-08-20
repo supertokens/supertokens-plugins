@@ -16,8 +16,11 @@
     "@changesets/cli": "^2.27.1",
     "@typescript-eslint/eslint-plugin": "^8.39.1",
     "eslint": "^8.57.0",
-    "prettier": "^3.2.5",
-    "turbo": "^2.5.5"
+    "turbo": "^2.5.5",
+    "@vitejs/plugin-react": "^4.5.2",
+    "rollup-plugin-peer-deps-external": "^2.2.4",
+    "vite": "^6.3.5",
+    "vite-plugin-dts": "^4.5.4"
   },
   "engines": {
     "node": ">=18"
