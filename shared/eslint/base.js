@@ -15,9 +15,10 @@ module.exports = {
     "@typescript-eslint/no-unused-vars": "error",
   },
   ignorePatterns: [
-    ".*.js",
     "*.setup.js",
     "*.config.js",
+    ".eslintrc.js",
+    ".prettierrc.js",
     ".turbo/",
     "dist/",
     "coverage/",
