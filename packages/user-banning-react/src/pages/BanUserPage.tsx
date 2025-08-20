@@ -7,8 +7,6 @@ import styles from './style.css?inline';
 import { getErrorMessage, ThemeBase } from '../utils';
 import { usePlugin } from '../use-plugin';
 
-// todo: feedback: it would be useful to be able to use the supertokens components (buttons, inputs, boxes, cards, forms, etc).
-
 export function BanUserPage() {
   const { api, pluginConfig } = usePlugin();
 
@@ -28,7 +26,7 @@ export function BanUserPage() {
       setError(getErrorMessage(error));
       scheduleErrorReset();
     },
-    [scheduleErrorReset]
+    [scheduleErrorReset],
   );
 
   const getBanStatus = useCallback(
@@ -45,7 +43,7 @@ export function BanUserPage() {
           }
         })
         .catch(onError),
-    [tenantId]
+    [tenantId],
   );
 
   const updateBanStatus = useCallback(
@@ -64,7 +62,7 @@ export function BanUserPage() {
         })
         .catch(onError);
     },
-    [tenantId, email]
+    [tenantId, email],
   );
 
   const onCheckStatus = useCallback(
@@ -78,7 +76,7 @@ export function BanUserPage() {
 
       getBanStatus(email);
     },
-    [getBanStatus, email]
+    [getBanStatus, email],
   );
 
   const onBanUser = useCallback(
@@ -86,7 +84,7 @@ export function BanUserPage() {
       e.preventDefault();
       updateBanStatus(true);
     },
-    [updateBanStatus, email]
+    [updateBanStatus, email],
   );
 
   const onUnbanUser = useCallback(
@@ -100,7 +98,7 @@ export function BanUserPage() {
 
       updateBanStatus(false);
     },
-    [updateBanStatus, email]
+    [updateBanStatus, email],
   );
 
   return (
@@ -109,8 +107,7 @@ export function BanUserPage() {
         ...globalValidators,
         {
           ...PermissionClaim.validators.includes(pluginConfig.permissionName),
-          onFailureRedirection: () =>
-            pluginConfig.onPermissionFailureRedirectPath,
+          onFailureRedirection: () => pluginConfig.onPermissionFailureRedirectPath,
         },
       ]}
     >
@@ -120,8 +117,8 @@ export function BanUserPage() {
             <div className="row">
               <div className="headerTitle">Ban User</div>
               <p>
-                This page is used to ban and unban users. It is useful for
-                preventing users from accessing your application.
+                This page is used to ban and unban users. It is useful for preventing users from accessing your
+                application.
               </p>
 
               <div className="divider"></div>
@@ -161,11 +158,7 @@ export function BanUserPage() {
                 </div>
 
                 <div className="formRow">
-                  <button
-                    className="button"
-                    onClick={onCheckStatus}
-                    disabled={!(!!tenantId && !!email)}
-                  >
+                  <button className="button" onClick={onCheckStatus} disabled={!(!!tenantId && !!email)}>
                     Check Status (
                     {typeof banStatus === 'boolean' ? (
                       banStatus ? (
@@ -182,20 +175,11 @@ export function BanUserPage() {
 
                 {typeof banStatus === 'boolean' && (
                   <div className="formRow" style={{ flexDirection: 'row' }}>
-                    <button
-                      className="button"
-                      disabled={banStatus}
-                      onClick={onBanUser}
-                      style={{ marginRight: '20px' }}
-                    >
+                    <button className="button" disabled={banStatus} onClick={onBanUser} style={{ marginRight: '20px' }}>
                       Ban
                     </button>
 
-                    <button
-                      className="button"
-                      disabled={!banStatus}
-                      onClick={onUnbanUser}
-                    >
+                    <button className="button" disabled={!banStatus} onClick={onUnbanUser}>
                       Unban
                     </button>
                   </div>
