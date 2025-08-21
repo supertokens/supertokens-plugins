@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useSyncExternalStore } from 'react';
-import { Captcha, captcha } from '../captcha';
-import { getPluginConfig } from '../config';
-import { CAPTCHA_INPUT_CONTAINER_ID } from '../constants';
-import { SuperTokensPluginCaptchaConfig } from '../types';
+import { useEffect, useMemo, useSyncExternalStore } from "react";
+
+import { Captcha, captcha } from "../captcha";
+import { getPluginConfig } from "../config";
+import { CAPTCHA_INPUT_CONTAINER_ID } from "../constants";
+import { SuperTokensPluginCaptchaConfig } from "../types";
 
 export function useCaptcha(onError?: (error: string) => void) {
   const captchaInputContainerId = useMemo(() => {
@@ -59,7 +60,7 @@ class CaptchaStore {
     this.state = DefaultCaptchaState;
     this.captcha = captcha;
     this.listeners = new Set();
-    this.captcha.addEventListener('token-submitted', (token) => {
+    this.captcha.addEventListener("token-submitted", (token) => {
       this.state = {
         ...this.state,
         error: undefined,
@@ -67,14 +68,14 @@ class CaptchaStore {
       };
       this.notifyListeners();
     });
-    this.captcha.addEventListener('render-failed', (error) => {
+    this.captcha.addEventListener("render-failed", (error) => {
       this.state = {
         ...this.state,
         error: getErrorMessage(error),
       };
       this.notifyListeners();
     });
-    this.captcha.addEventListener('get-token-failed', (error) => {
+    this.captcha.addEventListener("get-token-failed", (error) => {
       this.state = {
         ...this.state,
         error: getErrorMessage(error),
@@ -92,9 +93,7 @@ class CaptchaStore {
     return () => this.listeners.delete(listener);
   };
 
-  load = async (
-    configOverride: Partial<SuperTokensPluginCaptchaConfig> = {},
-  ) => {
+  load = async (configOverride: Partial<SuperTokensPluginCaptchaConfig> = {}) => {
     if (this.state.isLoading || this.state.isRendering) {
       return;
     }
@@ -166,11 +165,11 @@ function getErrorMessage(error: unknown): string {
     return error.message;
   }
 
-  if (typeof error === 'string') {
+  if (typeof error === "string") {
     return error;
   }
 
-  if (error && typeof error === 'object' && 'message' in error) {
+  if (error && typeof error === "object" && "message" in error) {
     return String((error as { message: unknown }).message);
   }
 
