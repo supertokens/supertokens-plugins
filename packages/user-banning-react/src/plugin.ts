@@ -1,9 +1,18 @@
 import { createContext } from 'react';
 import { SuperTokensPlugin } from 'supertokens-auth-react/lib/build/types';
-import { API_PATH, DEFAULT_ON_PERMISSION_FAILURE_REDIRECT_PATH, DEFAULT_PERMISSION_NAME, PLUGIN_ID } from './constants';
+import {
+  API_PATH,
+  DEFAULT_ON_PERMISSION_FAILURE_REDIRECT_PATH,
+  DEFAULT_PERMISSION_NAME,
+  PLUGIN_ID,
+} from './constants';
 import { BanUserPage } from './pages';
-import { createPluginInitFunction } from './createPluginInit';
-import { SuperTokensPublicConfig, SuperTokensPublicPlugin, getTranslationFunction } from 'supertokens-auth-react';
+import { createPluginInitFunction } from '@shared/js';
+import {
+  SuperTokensPublicConfig,
+  SuperTokensPublicPlugin,
+  getTranslationFunction,
+} from 'supertokens-auth-react';
 import {
   SuperTokensPluginUserBanningPluginConfig,
   TranslationKeys,
@@ -35,9 +44,11 @@ export const init = createPluginInitFunction<
       permissionName: DEFAULT_PERMISSION_NAME,
       onPermissionFailureRedirectPath: DEFAULT_ON_PERMISSION_FAILURE_REDIRECT_PATH,
     },
-    implementation,
+    implementation
   ) => {
-    const log = implementation.logger((...args) => console.log(`[${PLUGIN_ID}]`, ...args));
+    const log = implementation.logger((...args) =>
+      console.log(`[${PLUGIN_ID}]`, ...args)
+    );
 
     return {
       id: PLUGIN_ID,
@@ -48,9 +59,16 @@ export const init = createPluginInitFunction<
         },
       ],
       init: async (appConfig, plugins, sdkVersion) => {
-        const querier = getQuerier(new URL(API_PATH, appConfig.appInfo.apiDomain.getAsStringDangerous()).toString());
+        const querier = getQuerier(
+          new URL(
+            API_PATH,
+            appConfig.appInfo.apiDomain.getAsStringDangerous()
+          ).toString()
+        );
         const api = getApi(querier);
-        const t = getTranslationFunction<TranslationKeys>(defaultTranslationsUserBanning);
+        const t = getTranslationFunction<TranslationKeys>(
+          defaultTranslationsUserBanning
+        );
 
         PluginContext = createContext({
           plugins,
@@ -72,5 +90,5 @@ export const init = createPluginInitFunction<
   },
   {
     logger: (originalImplementation) => originalImplementation,
-  },
+  }
 );
