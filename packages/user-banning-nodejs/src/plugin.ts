@@ -20,7 +20,10 @@ export const init = (): SuperTokensPlugin => {
         verifySessionOptions: {
           sessionRequired: true,
           overrideGlobalClaimValidators: (globalClaimValidators) => {
-            return [...globalClaimValidators, PermissionClaim.validators.includes('ban-user')];
+            return [
+              ...globalClaimValidators,
+              PermissionClaim.validators.includes('ban-user'),
+            ];
           },
         },
         handler: async (req, res, _, userContext) => {
@@ -76,7 +79,11 @@ export const init = (): SuperTokensPlugin => {
           }
 
           // set the ban status
-          const result = await userBanningService.setBanStatus(userId, body.isBanned, userContext);
+          const result = await userBanningService.setBanStatus(
+            userId,
+            body.isBanned,
+            userContext
+          );
 
           // revoke all sessions if the user is banned
           if (body.isBanned) {
@@ -99,8 +106,15 @@ export const init = (): SuperTokensPlugin => {
         method: 'get',
         verifySessionOptions: {
           sessionRequired: true,
-          overrideGlobalClaimValidators: (globalClaimValidators, session, userContext) => {
-            return [...globalClaimValidators, PermissionClaim.validators.includes('ban-user')];
+          overrideGlobalClaimValidators: (
+            globalClaimValidators,
+            session,
+            userContext
+          ) => {
+            return [
+              ...globalClaimValidators,
+              PermissionClaim.validators.includes('ban-user'),
+            ];
           },
         },
         handler: async (req, res, _, userContext) => {
@@ -121,8 +135,12 @@ export const init = (): SuperTokensPlugin => {
           }
 
           // make sure the request is valid
-          let userId: string | undefined = await req.getKeyValueFromQuery('userId');
-          let email: string | undefined = await req.getKeyValueFromQuery('email');
+          let userId: string | undefined = await req.getKeyValueFromQuery(
+            'userId'
+          );
+          let email: string | undefined = await req.getKeyValueFromQuery(
+            'email'
+          );
 
           if (email) {
             const user = await SuperTokens.listUsersByAccountInfo(tenantId, {
@@ -143,7 +161,10 @@ export const init = (): SuperTokensPlugin => {
           }
 
           // get the ban status
-          const result = await userBanningService.getBanStatus(userId, userContext);
+          const result = await userBanningService.getBanStatus(
+            userId,
+            userContext
+          );
 
           if (result.status === 'OK') {
             res.setStatusCode(200);
@@ -164,7 +185,10 @@ export const init = (): SuperTokensPlugin => {
             ...originalImplementation,
 
             createNewSession: async (input) => {
-              const result = await userBanningService.getBanStatus(input.userId, input.userContext);
+              const result = await userBanningService.getBanStatus(
+                input.userId,
+                input.userContext
+              );
               if (result.status !== 'OK') {
                 throw new Error('Failed to get user metadata');
               }
