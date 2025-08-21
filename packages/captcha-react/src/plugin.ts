@@ -1,24 +1,19 @@
-import { SuperTokensPlugin } from 'supertokens-auth-react/lib/build/types';
-import { PLUGIN_ID } from './constants';
-import { ComponentOverrides } from './components';
-import { captcha } from './captcha';
+import { PreAndPostAPIHookAction as EmailPasswordPreAndPostAPIHookAction } from "supertokens-auth-react/lib/build/recipe/emailpassword/types";
+import { PreAndPostAPIHookAction as PasswordlessPreAndPostAPIHookAction } from "supertokens-auth-react/lib/build/recipe/passwordless/types";
+import { RecipePreAPIHookContext } from "supertokens-auth-react/lib/build/recipe/recipeModule/types";
+import { SuperTokensPlugin } from "supertokens-auth-react/lib/build/types";
+
+import { captcha } from "./captcha";
+import { ComponentOverrides } from "./components";
+import { setPluginConfig, validatePublicConfig, getPluginConfig } from "./config";
+import { PLUGIN_ID } from "./constants";
 import {
   isEmailPasswordCaptchaPreAndPostAPIHookAction,
   isPasswordlessCaptchaPreAndPostAPIHookAction,
   SuperTokensPluginCaptchaConfig,
-} from './types';
-import { PreAndPostAPIHookAction as EmailPasswordPreAndPostAPIHookAction } from 'supertokens-auth-react/lib/build/recipe/emailpassword/types';
-import { PreAndPostAPIHookAction as PasswordlessPreAndPostAPIHookAction } from 'supertokens-auth-react/lib/build/recipe/passwordless/types';
-import {
-  setPluginConfig,
-  validatePublicConfig,
-  getPluginConfig,
-} from './config';
-import { RecipePreAPIHookContext } from 'supertokens-auth-react/lib/build/recipe/recipeModule/types';
+} from "./types";
 
-export const init = (
-  config: SuperTokensPluginCaptchaConfig,
-): SuperTokensPlugin => {
+export const init = (config: SuperTokensPluginCaptchaConfig): SuperTokensPlugin => {
   setPluginConfig(config);
   return {
     id: PLUGIN_ID,
@@ -34,14 +29,10 @@ export const init = (
           };
         },
         components: {
-          EmailPasswordSignInForm_Override:
-            ComponentOverrides.EmailPasswordSignInForm(),
-          EmailPasswordSignUpForm_Override:
-            ComponentOverrides.EmailPasswordSignUpForm(),
-          EmailPasswordResetPasswordEmail_Override:
-            ComponentOverrides.EmailPasswordResetPasswordEmail(),
-          EmailPasswordSubmitNewPassword_Override:
-            ComponentOverrides.EmailPasswordSubmitNewPassword(),
+          EmailPasswordSignInForm_Override: ComponentOverrides.EmailPasswordSignInForm(),
+          EmailPasswordSignUpForm_Override: ComponentOverrides.EmailPasswordSignUpForm(),
+          EmailPasswordResetPasswordEmail_Override: ComponentOverrides.EmailPasswordResetPasswordEmail(),
+          EmailPasswordSubmitNewPassword_Override: ComponentOverrides.EmailPasswordSubmitNewPassword(),
         },
       },
       passwordless: {
@@ -52,18 +43,12 @@ export const init = (
           };
         },
         components: {
-          PasswordlessEmailForm_Override:
-            ComponentOverrides.PasswordlessEmailForm(),
-          PasswordlessPhoneForm_Override:
-            ComponentOverrides.PasswordlessPhoneForm(),
-          PasswordlessEmailOrPhoneForm_Override:
-            ComponentOverrides.PasswordlessEmailOrPhoneForm(),
-          PasswordlessEPComboEmailForm_Override:
-            ComponentOverrides.PasswordlessEPComboEmailForm(),
-          PasswordlessEPComboEmailOrPhoneForm_Override:
-            ComponentOverrides.PasswordlessEPComboEmailOrPhoneForm(),
-          PasswordlessUserInputCodeForm_Override:
-            ComponentOverrides.PasswordlessUserInputCodeForm(),
+          PasswordlessEmailForm_Override: ComponentOverrides.PasswordlessEmailForm(),
+          PasswordlessPhoneForm_Override: ComponentOverrides.PasswordlessPhoneForm(),
+          PasswordlessEmailOrPhoneForm_Override: ComponentOverrides.PasswordlessEmailOrPhoneForm(),
+          PasswordlessEPComboEmailForm_Override: ComponentOverrides.PasswordlessEPComboEmailForm(),
+          PasswordlessEPComboEmailOrPhoneForm_Override: ComponentOverrides.PasswordlessEPComboEmailOrPhoneForm(),
+          PasswordlessUserInputCodeForm_Override: ComponentOverrides.PasswordlessUserInputCodeForm(),
         },
       },
     },
@@ -77,14 +62,7 @@ async function preAPIHook(
 ) {
   const { action } = context;
   const config = getPluginConfig();
-  if (
-    !isEmailPasswordCaptchaPreAndPostAPIHookAction(action) &&
-    !isPasswordlessCaptchaPreAndPostAPIHookAction(action)
-  ) {
-    return context;
-  }
-
-  if (config.shouldValidate && !config.shouldValidate(context)) {
+  if (!isEmailPasswordCaptchaPreAndPostAPIHookAction(action) && !isPasswordlessCaptchaPreAndPostAPIHookAction(action)) {
     return context;
   }
 
@@ -95,12 +73,12 @@ async function preAPIHook(
 
   let payload: Record<string, any> & {
     captcha: string;
-    captchaType: SuperTokensPluginCaptchaConfig['type'];
+    captchaType: SuperTokensPluginCaptchaConfig["type"];
   };
   try {
     payload = JSON.parse(context.requestInit.body as string);
   } catch (e) {
-    throw new Error('Error setting CAPTCHA token');
+    throw new Error("Error setting CAPTCHA token");
   }
 
   payload.captcha = token;

@@ -16,8 +16,8 @@ npm install @supertokens-plugins/captcha-react
 Initialize the plugin in your SuperTokens frontend configuration:
 
 ```typescript
-import SuperTokens from 'supertokens-auth-react';
-import CaptchaPlugin from '@supertokens-plugins/captcha-react';
+import SuperTokens from "supertokens-auth-react";
+import CaptchaPlugin from "@supertokens-plugins/captcha-react";
 
 SuperTokens.init({
   appInfo: {
@@ -28,9 +28,9 @@ SuperTokens.init({
   ],
   plugins: [
     CaptchaPlugin.init({
-      type: 'reCAPTCHAv3', // or "reCAPTCHAv2" or "turnstile"
+      type: "reCAPTCHAv3", // or "reCAPTCHAv2" or "turnstile"
       captcha: {
-        sitekey: 'your-site-key',
+        sitekey: "your-site-key",
         // Additional configuration based on the captcha provider
       },
     }),
@@ -61,34 +61,26 @@ The plugin automatically protects these authentication flows:
 Create a custom component to control CAPTCHA rendering:
 
 ```typescript
-import { forwardRef, useCallback, useEffect } from 'react';
+import { forwardRef, useCallback, useEffect } from "react";
 import {
   CaptchInputContainerProps,
   captchaStore,
   useCaptchaInputContainerId,
-} from '@supertokens-plugins/captcha-react';
+} from "@supertokens-plugins/captcha-react";
 
-const CustomCaptchaContainer = forwardRef<
-  HTMLDivElement,
-  CaptchInputContainerProps
->((props, ref) => {
+const CustomCaptchaContainer = forwardRef<HTMLDivElement, CaptchInputContainerProps>((props, ref) => {
   const { form, ...rest } = props;
   const { loadAndRender, containerId } = useCaptcha();
 
   useEffect(() => {
     // Captcha will apply/render only for the EmailPasswordSignUpForm
     // and the EmailPasswordSignInForm
-    if (
-      form === 'EmailPasswordSignUpForm' ||
-      form === 'EmailPasswordResetPasswordEmail'
-    ) {
+    if (form === "EmailPasswordSignUpForm" || form === "EmailPasswordResetPasswordEmail") {
       loadAndRender();
     }
   }, [form]);
 
-  return (
-    <div ref={ref} id={containerId} className="captcha-container" {...rest} />
-  );
+  return <div ref={ref} id={containerId} className="captcha-container" {...rest} />;
 });
 ```
 
@@ -99,16 +91,16 @@ const CustomCaptchaContainer = forwardRef<
 Monitor CAPTCHA state in your components:
 
 ```typescript
-import { useCaptcha } from '@supertokens-plugins/captcha-react';
+import { useCaptcha } from "@supertokens-plugins/captcha-react";
 
 function MyComponent() {
   const captcha = useCaptcha();
 
-  if (captcha.state === 'loading') {
+  if (captcha.state === "loading") {
     return <div>Loading CAPTCHA...</div>;
   }
 
-  if (captcha.state === 'error') {
+  if (captcha.state === "error") {
     return <div>Error: {captcha.error}</div>;
   }
 
