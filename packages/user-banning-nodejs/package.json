@@ -13,6 +13,7 @@
     "supertokens"
   ],
   "dependencies": {
+    "@shared/nodejs": "*"
   },
   "peerDependencies": {
     "supertokens-node": ">=23.0.0"

@@ -1,39 +1,105 @@
-import { UserContext } from 'supertokens-node/types';
-import UserMetadata from 'supertokens-node/recipe/usermetadata';
-import { USER_METADATA_BAN_STATUS_KEY } from './config';
+import { UserContext } from "supertokens-node/types";
+import {
+  addRoleToUser,
+  removeUserRole,
+  getRolesForUser,
+  getAllRoles,
+  createNewRoleOrAddPermissions,
+  UserRoleClaim,
+} from "supertokens-node/recipe/userroles";
+import { SuperTokensPluginUserBanningPluginNormalisedConfig } from "./types";
+import SuperTokensError from "supertokens-node/lib/build/error";
+import { SessionContainer } from "supertokens-node/recipe/session";
+import Session from "supertokens-node/recipe/session";
 
 export class UserBanningService {
   protected cache: Map<string, boolean> = new Map();
 
-  constructor() {}
+  constructor(protected pluginConfig: SuperTokensPluginUserBanningPluginNormalisedConfig) {}
 
-  async getBanStatus(
-    userId: string,
-    userContext?: UserContext,
-  ): Promise<{ status: 'OK'; banned: boolean | undefined }> {
-    const result = await UserMetadata.getUserMetadata(userId, userContext);
+  async assertAndRevokeBannedSession(session?: SessionContainer, userContext?: UserContext): Promise<void> {
+    if (!session) return;
 
-    this.setBanStatusToCache(userId, result.metadata[USER_METADATA_BAN_STATUS_KEY]);
+    const claim = await session.getClaimValue(UserRoleClaim, userContext);
+    if (!claim) return;
+
+    if (claim.includes(this.pluginConfig.bannedUserRole)) {
+      await session.revokeSession();
+      throw new SuperTokensError({
+        message: "User banned",
+        type: "PLUGIN_ERROR",
+      });
+    }
+  }
+
+  async checkAndAddBannedUserRole(userContext?: UserContext) {
+    const result = await getAllRoles(userContext);
+    if (result.status !== "OK") {
+      return {
+        status: "UNKNOWN_ERROR",
+        message: "Could not update roles",
+      };
+    }
+
+    const bannedRole = result.roles.find((role) => role === this.pluginConfig.bannedUserRole);
+    if (!bannedRole) {
+      return createNewRoleOrAddPermissions(this.pluginConfig.bannedUserRole, [], userContext);
+    }
 
     return {
-      status: 'OK',
-      banned: result.metadata[USER_METADATA_BAN_STATUS_KEY] ?? false,
+      status: "OK",
     };
   }
 
-  async setBanStatus(userId: string, isBanned: boolean, userContext?: UserContext): Promise<{ status: 'OK' }> {
-    await UserMetadata.updateUserMetadata(userId, { [USER_METADATA_BAN_STATUS_KEY]: !!isBanned }, userContext);
+  async getBanStatus(
+    tenantId: string,
+    userId: string,
+    userContext?: UserContext
+  ): Promise<{ status: "OK"; banned: boolean | undefined } | { status: "UNKNOWN_ERROR"; message: string }> {
+    const result = await getRolesForUser(tenantId, userId, userContext);
 
-    this.setBanStatusToCache(userId, !!isBanned);
+    if (result.status !== "OK") {
+      return {
+        status: "UNKNOWN_ERROR",
+        message: "Could not get ban status",
+      };
+    }
 
-    return { status: 'OK' };
+    const banned = result.roles.includes(this.pluginConfig.bannedUserRole);
+
+    return {
+      status: "OK",
+      banned,
+    };
   }
 
-  setBanStatusToCache(userId: string, isBanned: boolean): void {
-    this.cache.set(userId, isBanned);
-  }
+  async setBanStatusAndRefreshSessions(
+    tenantId: string,
+    userId: string,
+    isBanned: boolean,
+    userContext?: UserContext
+  ): Promise<{ status: "OK" } | { status: "UNKNOWN_ROLE_ERROR" }> {
+    await this.checkAndAddBannedUserRole(userContext);
 
-  getBanStatusFromCache(userId: string): boolean | undefined {
-    return this.cache.get(userId);
+    if (isBanned) {
+      const result = await addRoleToUser(tenantId, userId, "banned", userContext);
+      if (result.status !== "OK") return result;
+    } else {
+      const result = await removeUserRole(tenantId, userId, "banned", userContext);
+      if (result.status !== "OK") return result;
+    }
+
+    if (isBanned) {
+      await Session.revokeAllSessionsForUser(userId);
+    } else {
+      const userSessions = await Session.getAllSessionHandlesForUser(userId, true, tenantId);
+      for (const userSession of userSessions) {
+        await Session.fetchAndSetClaim(userSession, UserRoleClaim, userContext);
+      }
+    }
+
+    return {
+      status: "OK",
+    };
   }
 }
