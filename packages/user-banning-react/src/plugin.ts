@@ -44,6 +44,7 @@ export const init = createPluginInitFunction<
 
     return {
       id: PLUGIN_ID,
+      compatibleAuthReactSDKVersions: [">=0.50.0"],
       routeHandlers: [
         {
           path: "/admin/ban-user",

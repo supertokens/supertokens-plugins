@@ -3,9 +3,6 @@ import { useCallback, useState } from "react";
 import { SessionAuth } from "supertokens-auth-react/recipe/session";
 import { PermissionClaim } from "supertokens-auth-react/recipe/userroles";
 
-import { usePlugin } from "../use-plugin";
-import { getErrorMessage, ThemeBase } from "../utils";
-
 // @ts-ignore
 import styles from "./style.css?inline";
 
