@@ -35,6 +35,8 @@
     "shared/*"
   ],
   "dependencies": {
+    "@shared/js": "*",
+    "@shared/nodejs": "*",
     "tsup": "^8.5.0"
   }
 }
