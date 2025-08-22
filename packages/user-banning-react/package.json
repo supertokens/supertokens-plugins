@@ -2,6 +2,7 @@
   "name": "@supertokens-plugins/user-banning-react",
   "version": "0.0.1",
   "description": "User Banning Plugin for SuperTokens",
+  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/user-banning-react/README.md",
   "scripts": {
     "build": "vite build && npm run pretty",
     "pretty": "npx pretty-quick .",

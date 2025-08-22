@@ -163,7 +163,7 @@ export function BanUserPage() {
                 )}
 
                 <div className="formRow">
-                  <button className="button" onClick={onCheckStatus} disabled={!(Boolean(tenantId) && Boolean(email))}>
+                  <button className="button" onClick={onCheckStatus} disabled={!tenantId || !email}>
                     {t("PL_UB_BAN_PAGE_CHECK_STATUS_BUTTON")}
                   </button>
                 </div>
