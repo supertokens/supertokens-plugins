@@ -1,33 +1,32 @@
-import { createContext } from 'react';
-import { SuperTokensPlugin } from 'supertokens-auth-react/lib/build/types';
+import { createPluginInitFunction } from "@shared/js";
+import { getQuerier } from "@shared/react";
+import { createContext } from "react";
+import { SuperTokensPublicConfig, SuperTokensPublicPlugin, getTranslationFunction } from "supertokens-auth-react";
+import { SuperTokensPlugin } from "supertokens-auth-react/lib/build/types";
+import { UserRoleClaim } from "supertokens-auth-react/recipe/userroles";
+
+import { getApi } from "./api";
 import {
   API_PATH,
+  DEFAULT_BANNED_USER_ROLE,
   DEFAULT_ON_PERMISSION_FAILURE_REDIRECT_PATH,
   DEFAULT_PERMISSION_NAME,
   PLUGIN_ID,
-} from './constants';
-import { BanUserPage } from './pages';
-import { createPluginInitFunction } from '@shared/js';
-import {
-  SuperTokensPublicConfig,
-  SuperTokensPublicPlugin,
-  getTranslationFunction,
-} from 'supertokens-auth-react';
+} from "./constants";
+import { BanUserPage } from "./pages";
+import { defaultTranslationsUserBanning } from "./translations";
 import {
   SuperTokensPluginUserBanningPluginConfig,
   TranslationKeys,
   SuperTokensPluginUserBanningImplementation,
-} from './types';
-import { getQuerier } from './querier';
-import { getApi } from './api';
-import { defaultTranslationsUserBanning } from './translations';
+  SuperTokensPluginUserBanningPluginNormalisedConfig,
+} from "./types";
 
-// todo: feedback: need some util for calling the custom plugin api
 export let PluginContext: React.Context<{
   plugins: SuperTokensPublicPlugin[];
   sdkVersion: string;
   appConfig: SuperTokensPublicConfig;
-  pluginConfig: SuperTokensPluginUserBanningPluginConfig;
+  pluginConfig: SuperTokensPluginUserBanningPluginNormalisedConfig;
   log: (...args: any[]) => void;
   querier: ReturnType<typeof getQuerier>;
   api: ReturnType<typeof getApi>;
@@ -37,38 +36,25 @@ export let PluginContext: React.Context<{
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
   SuperTokensPluginUserBanningPluginConfig,
-  SuperTokensPluginUserBanningImplementation
+  SuperTokensPluginUserBanningImplementation,
+  SuperTokensPluginUserBanningPluginNormalisedConfig
 >(
-  (
-    pluginConfig = {
-      permissionName: DEFAULT_PERMISSION_NAME,
-      onPermissionFailureRedirectPath: DEFAULT_ON_PERMISSION_FAILURE_REDIRECT_PATH,
-    },
-    implementation
-  ) => {
-    const log = implementation.logger((...args) =>
-      console.log(`[${PLUGIN_ID}]`, ...args)
-    );
+  (pluginConfig, implementation) => {
+    const log = implementation.logger((...args) => console.log(`[${PLUGIN_ID}]`, ...args));
 
     return {
       id: PLUGIN_ID,
       routeHandlers: [
         {
-          path: '/admin/ban-user',
+          path: "/admin/ban-user",
           handler: () => BanUserPage.call(null),
         },
       ],
+
       init: async (appConfig, plugins, sdkVersion) => {
-        const querier = getQuerier(
-          new URL(
-            API_PATH,
-            appConfig.appInfo.apiDomain.getAsStringDangerous()
-          ).toString()
-        );
+        const querier = getQuerier(new URL(API_PATH, appConfig.appInfo.apiDomain.getAsStringDangerous()).toString());
         const api = getApi(querier);
-        const t = getTranslationFunction<TranslationKeys>(
-          defaultTranslationsUserBanning
-        );
+        const t = getTranslationFunction<TranslationKeys>(defaultTranslationsUserBanning);
 
         PluginContext = createContext({
           plugins,
@@ -84,11 +70,26 @@ export const init = createPluginInitFunction<
       overrideMap: {
         session: {
           recipeInitRequired: true,
+          functions: (originalImplementation) => {
+            return {
+              ...originalImplementation,
+              getGlobalClaimValidators: (input) => [
+                ...originalImplementation.getGlobalClaimValidators(input),
+                UserRoleClaim.validators.excludes(pluginConfig.bannedUserRole),
+              ],
+            };
+          },
         },
       },
     };
   },
   {
     logger: (originalImplementation) => originalImplementation,
-  }
+  },
+  (pluginConfig) => ({
+    userBanningPermission: pluginConfig.userBanningPermission ?? DEFAULT_PERMISSION_NAME,
+    bannedUserRole: pluginConfig.bannedUserRole ?? DEFAULT_BANNED_USER_ROLE,
+    onPermissionFailureRedirectPath:
+      pluginConfig.onPermissionFailureRedirectPath ?? DEFAULT_ON_PERMISSION_FAILURE_REDIRECT_PATH,
+  })
 );

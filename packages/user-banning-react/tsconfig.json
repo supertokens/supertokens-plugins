@@ -2,7 +2,6 @@
   "extends": "@shared/tsconfig/react.json",
   "compilerOptions": {
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "jsx": "react-jsx",
     "outDir": "./dist",
     "declaration": true,
     "declarationDir": "./dist",

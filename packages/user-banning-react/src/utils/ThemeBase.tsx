@@ -13,10 +13,10 @@
  * under the License.
  */
 
-import React from 'react';
-import { Fragment } from 'react';
+import React from "react";
+import { Fragment } from "react";
 
-import type { PropsWithChildren } from 'react';
+import type { PropsWithChildren } from "react";
 
 export const ThemeBase: React.FC<PropsWithChildren<{
   userStyles: Array<string | undefined>;
@@ -24,7 +24,7 @@ export const ThemeBase: React.FC<PropsWithChildren<{
   return (
     <Fragment>
       {children}
-      <style>{userStyles.join('\n')}</style>
+      <style>{userStyles.join("\n")}</style>
     </Fragment>
   );
 };

@@ -1,5 +1,6 @@
-import { PluginContext } from './plugin';
-import { useContext } from 'react';
+import { useContext } from "react";
+
+import { PluginContext } from "./plugin";
 
 export const usePlugin = () => {
   return useContext(PluginContext);

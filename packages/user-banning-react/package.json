@@ -14,7 +14,8 @@
   ],
   "dependencies": {
     "supertokens-js-override": "^0.0.4",
-    "@shared/js": "*"
+    "@shared/js": "*",
+    "@shared/react": "*"
   },
   "peerDependencies": {
     "react": ">=18.3.1",

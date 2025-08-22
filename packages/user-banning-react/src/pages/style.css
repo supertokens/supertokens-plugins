@@ -85,7 +85,7 @@
 }
 
 .supertokens-plugin-user-banning .button {
-  font-family: 'Arial', sans-serif;
+  font-family: "Arial", sans-serif;
   background-color: rgb(28, 34, 42);
   color: rgb(255, 255, 255);
   width: 100%;
@@ -107,7 +107,7 @@
   opacity: 0.7;
 }
 
-.generalError {
+.errorMessage {
   background: rgb(255, 241, 235);
   padding-top: 10px;
   padding-bottom: 10px;
@@ -119,6 +119,22 @@
   font-size: 14px;
   border-radius: 8px;
   color: rgb(255, 23, 23);
+  animation: swing-in-top-fwd 1s cubic-bezier(0.175, 0.885, 0.32, 1.275) both;
+  word-wrap: break-word;
+}
+
+.successMessage {
+  background: rgb(235, 255, 235);
+  padding-top: 10px;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  margin-top: 24px;
+  padding-left: 18px;
+  padding-right: 18px;
+  letter-spacing: 0.2px;
+  font-size: 14px;
+  border-radius: 8px;
+  color: rgb(23, 255, 23);
   animation: swing-in-top-fwd 1s cubic-bezier(0.175, 0.885, 0.32, 1.275) both;
   word-wrap: break-word;
 }

@@ -1,17 +1,19 @@
-import React from 'react';
-import { useCallback, useState } from 'react';
-import { SessionAuth } from 'supertokens-auth-react/recipe/session';
-import { PermissionClaim } from 'supertokens-auth-react/recipe/userroles';
+import React from "react";
+import { useCallback, useState } from "react";
+import { SessionAuth } from "supertokens-auth-react/recipe/session";
+import { PermissionClaim } from "supertokens-auth-react/recipe/userroles";
+
+import { usePlugin } from "../use-plugin";
+import { getErrorMessage, ThemeBase } from "../utils";
+
 // @ts-ignore
-import styles from './style.css?inline';
-import { getErrorMessage, ThemeBase } from '../utils';
-import { usePlugin } from '../use-plugin';
+import styles from "./style.css?inline";
 
 export function BanUserPage() {
-  const { api, pluginConfig } = usePlugin();
+  const { api, pluginConfig, t } = usePlugin();
 
   const [error, setError] = useState<string | undefined>();
-  const [tenantId, setTenantId] = useState('public');
+  const [tenantId, setTenantId] = useState("public");
   const [email, setEmail] = useState<string | undefined>();
   const [banStatus, setBanStatus] = useState<boolean | null>(null);
 
@@ -26,7 +28,7 @@ export function BanUserPage() {
       setError(getErrorMessage(error));
       scheduleErrorReset();
     },
-    [scheduleErrorReset],
+    [scheduleErrorReset]
   );
 
   const getBanStatus = useCallback(
@@ -34,7 +36,7 @@ export function BanUserPage() {
       api
         .getBanStatus(tenantId, email)
         .then((res) => {
-          if (res.status === 'OK') {
+          if (res.status === "OK") {
             setError(undefined);
             setBanStatus(res.banned);
           } else {
@@ -43,13 +45,13 @@ export function BanUserPage() {
           }
         })
         .catch(onError),
-    [tenantId],
+    [tenantId]
   );
 
   const updateBanStatus = useCallback(
     (isBanned: boolean) => {
       if (!email) {
-        setError('Email is required');
+        setError("Email is required");
         scheduleErrorReset();
         return;
       }
@@ -62,7 +64,7 @@ export function BanUserPage() {
         })
         .catch(onError);
     },
-    [tenantId, email],
+    [tenantId, email]
   );
 
   const onCheckStatus = useCallback(
@@ -70,13 +72,13 @@ export function BanUserPage() {
       e.preventDefault();
 
       if (!email) {
-        setError('Email is required');
+        setError("Email is required");
         return;
       }
 
       getBanStatus(email);
     },
-    [getBanStatus, email],
+    [getBanStatus, email]
   );
 
   const onBanUser = useCallback(
@@ -84,7 +86,7 @@ export function BanUserPage() {
       e.preventDefault();
       updateBanStatus(true);
     },
-    [updateBanStatus, email],
+    [updateBanStatus]
   );
 
   const onUnbanUser = useCallback(
@@ -92,13 +94,13 @@ export function BanUserPage() {
       e.preventDefault();
 
       if (!email) {
-        setError('Email is required');
+        setError("Email is required");
         return;
       }
 
       updateBanStatus(false);
     },
-    [updateBanStatus, email],
+    [updateBanStatus, email]
   );
 
   return (
@@ -106,35 +108,31 @@ export function BanUserPage() {
       overrideGlobalClaimValidators={(globalValidators) => [
         ...globalValidators,
         {
-          ...PermissionClaim.validators.includes(pluginConfig.permissionName),
+          ...PermissionClaim.validators.includes(pluginConfig.userBanningPermission),
           onFailureRedirection: () => pluginConfig.onPermissionFailureRedirectPath,
         },
-      ]}
-    >
+      ]}>
       <ThemeBase userStyles={[styles]}>
         <div className="supertokens-plugin-user-banning">
           <div className="container">
             <div className="row">
-              <div className="headerTitle">Ban User</div>
-              <p>
-                This page is used to ban and unban users. It is useful for preventing users from accessing your
-                application.
-              </p>
+              <div className="headerTitle">{t("PL_UB_BAN_PAGE_TITLE")}</div>
+              <p>{t("PL_UB_BAN_PAGE_DESCRIPTION")}</p>
 
               <div className="divider"></div>
 
-              {!!error && <div className="generalError">{error}</div>}
+              {Boolean(error) && <div className="errorMessage">{error}</div>}
 
               <form noValidate>
                 <div className="formRow">
-                  <div className="label">Tenant ID</div>
+                  <div className="label">{t("PL_UB_BAN_PAGE_TENANT_ID_LABEL")}</div>
                   <div className="inputContainer">
                     <div className="inputWrapper">
                       <input
                         type="text"
                         value={tenantId}
                         autoComplete="on"
-                        placeholder="Tenant ID"
+                        placeholder={t("PL_UB_BAN_PAGE_TENANT_ID_PLACEHOLDER")}
                         onChange={(e) => setTenantId(e.target.value)}
                       />
                     </div>
@@ -142,7 +140,7 @@ export function BanUserPage() {
                 </div>
 
                 <div className="formRow">
-                  <div className="label">User Email</div>
+                  <div className="label">{t("PL_UB_BAN_PAGE_EMAIL_LABEL")}</div>
                   <div className="inputContainer">
                     <div className="inputWrapper">
                       <input
@@ -150,37 +148,37 @@ export function BanUserPage() {
                         value={email}
                         disabled={!tenantId}
                         autoComplete="on"
-                        placeholder="User Email"
+                        placeholder={t("PL_UB_BAN_PAGE_EMAIL_PLACEHOLDER")}
                         onChange={(e) => setEmail(e.target.value)}
                       />
                     </div>
                   </div>
                 </div>
 
-                <div className="formRow">
-                  <button className="button" onClick={onCheckStatus} disabled={!(!!tenantId && !!email)}>
-                    Check Status (
-                    {typeof banStatus === 'boolean' ? (
-                      banStatus ? (
-                        <span style={{ color: 'red' }}>Banned</span>
-                      ) : (
-                        <span style={{ color: 'green' }}>Not Banned</span>
-                      )
+                {typeof banStatus === "boolean" && (
+                  <div className="formRow">
+                    {banStatus ? (
+                      <div className="errorMessage">{t("PL_UB_BAN_PAGE_BANNED_STATUS")}</div>
                     ) : (
-                      ' - '
+                      <div className="successMessage">{t("PL_UB_BAN_PAGE_NOT_BANNED_STATUS")}</div>
                     )}
-                    )
+                  </div>
+                )}
+
+                <div className="formRow">
+                  <button className="button" onClick={onCheckStatus} disabled={!(Boolean(tenantId) && Boolean(email))}>
+                    {t("PL_UB_BAN_PAGE_CHECK_STATUS_BUTTON")}
                   </button>
                 </div>
 
-                {typeof banStatus === 'boolean' && (
-                  <div className="formRow" style={{ flexDirection: 'row' }}>
-                    <button className="button" disabled={banStatus} onClick={onBanUser} style={{ marginRight: '20px' }}>
-                      Ban
+                {typeof banStatus === "boolean" && (
+                  <div className="formRow" style={{ flexDirection: "row" }}>
+                    <button className="button" disabled={banStatus} onClick={onBanUser} style={{ marginRight: "20px" }}>
+                      {t("PL_UB_BAN_PAGE_BAN_BUTTON")}
                     </button>
 
                     <button className="button" disabled={!banStatus} onClick={onUnbanUser}>
-                      Unban
+                      {t("PL_UB_BAN_PAGE_UNBAN_BUTTON")}
                     </button>
                   </div>
                 )}

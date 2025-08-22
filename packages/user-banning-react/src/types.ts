@@ -1,14 +1,19 @@
-import { defaultTranslationsUserBanning } from './translations';
+import { defaultTranslationsUserBanning } from "./translations";
 
 export type SuperTokensPluginUserBanningPluginConfig = {
-  permissionName: string;
+  userBanningPermission?: string;
+  bannedUserRole?: string;
+  onPermissionFailureRedirectPath?: string;
+};
+
+export type SuperTokensPluginUserBanningPluginNormalisedConfig = {
+  userBanningPermission: string;
+  bannedUserRole: string;
   onPermissionFailureRedirectPath: string;
 };
 
 export type SuperTokensPluginUserBanningImplementation = {
-  logger: (
-    originalImplementation: (...args: any[]) => void
-  ) => (...args: any[]) => void;
+  logger: (originalImplementation: (...args: any[]) => void) => (...args: any[]) => void;
 };
 
-export type TranslationKeys = keyof typeof defaultTranslationsUserBanning['en'];
+export type TranslationKeys = keyof typeof defaultTranslationsUserBanning["en"];
