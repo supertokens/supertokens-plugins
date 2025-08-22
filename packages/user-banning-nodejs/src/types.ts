@@ -8,6 +8,10 @@ export type SuperTokensPluginUserBanningPluginNormalisedConfig = {
   bannedUserRole: string;
 };
 
+export type SuperTokensPluginUserBanningPluginLogger = (...args: any[]) => void;
+
 export type SuperTokensPluginUserBanningImplementation = {
-  logger: (originalImplementation: (...args: any[]) => void) => (...args: any[]) => void;
+  logger: (
+    originalImplementation: SuperTokensPluginUserBanningPluginLogger
+  ) => SuperTokensPluginUserBanningPluginLogger;
 };

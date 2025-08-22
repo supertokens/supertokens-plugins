@@ -7,7 +7,7 @@ import {
   createNewRoleOrAddPermissions,
   UserRoleClaim,
 } from "supertokens-node/recipe/userroles";
-import { SuperTokensPluginUserBanningPluginNormalisedConfig } from "./types";
+import { SuperTokensPluginUserBanningPluginLogger, SuperTokensPluginUserBanningPluginNormalisedConfig } from "./types";
 import SuperTokensError from "supertokens-node/lib/build/error";
 import { SessionContainer } from "supertokens-node/recipe/session";
 import Session from "supertokens-node/recipe/session";
@@ -15,7 +15,10 @@ import Session from "supertokens-node/recipe/session";
 export class UserBanningService {
   protected cache: Map<string, boolean> = new Map();
 
-  constructor(protected pluginConfig: SuperTokensPluginUserBanningPluginNormalisedConfig) {}
+  constructor(
+    protected pluginConfig: SuperTokensPluginUserBanningPluginNormalisedConfig,
+    protected log: SuperTokensPluginUserBanningPluginLogger
+  ) {}
 
   async assertAndRevokeBannedSession(session?: SessionContainer, userContext?: UserContext): Promise<void> {
     if (!session) return;
@@ -90,7 +93,7 @@ export class UserBanningService {
     }
 
     if (isBanned) {
-      await Session.revokeAllSessionsForUser(userId);
+      await Session.revokeAllSessionsForUser(userId, true, tenantId);
     } else {
       const userSessions = await Session.getAllSessionHandlesForUser(userId, true, tenantId);
       for (const userSession of userSessions) {

@@ -26,7 +26,7 @@ export const init = createPluginInitFunction<
   (pluginConfig, implementation): SuperTokensPlugin => {
     const log = implementation.logger((...args) => console.log(`[${PLUGIN_ID}]`, ...args));
 
-    const userBanningService = new UserBanningService(pluginConfig);
+    const userBanningService = new UserBanningService(pluginConfig, log);
 
     return {
       id: PLUGIN_ID,
