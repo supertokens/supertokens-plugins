@@ -1,1 +1,1 @@
-export * from './BanUserPage';
+export * from "./BanUserPage";

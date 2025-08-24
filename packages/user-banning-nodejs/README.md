@@ -75,15 +75,29 @@ The plugin automatically creates these protected endpoints:
 
 ### Session Management
 
-- **Banned Users**: All sessions are immediately revoked when a user is banned
-- **Unbanned Users**: Existing sessions are refreshed with updated role claims
-- **Session Validation**: Every session access automatically checks if the user has the banned role
+- **Banned Users**: All sessions are immediately revoked when a user is banned and no further session creation is allowed
+- **Session Validation**: Every session access automatically checks if the user has the banned role \*\*this can be overridden if
 
 ### Role-Based Protection
 
 - Banned users are assigned the configured `bannedUserRole`
 - The plugin adds a global claim validator that rejects sessions with the banned role
 - Attempts to access protected resources with a banned session will fail automatically
+
+### Caching
+
+- We are using an in-memory cache for the ban status of users to avoid making extra network calls during session verification
+- We are re-loading the cache during the first session verification after a server start to avoid a "bypass" of banning verification after server crashes
+- This implies the following compromises:
+  - The in-memory is very simple and we avoid setting a TTL entries for now - however, this is unlikely to grow large as overall the number of banned users is usually very low.
+  - The first few requests incoming after a server crash/startup can be slow, which could cause issues in serverless environments
+  - If there are multiple backends running for a single application, the ban statuses may get de-synced
+- The above can be resolved, by specifying your own cache (e.g.: a redis instance) by overriding these functions:
+  - `addBanToCache`
+  - `removeBanFromCache`
+  - `getBanStatusFromCache`
+  - `preLoadCacheIfNeeded`
+- Please tell us more about your usecase if this is a blocker for you by opening an issue in https://github.com/supertokens/supertokens-plugins
 
 ## Ways to Ban Users
 
@@ -146,7 +160,7 @@ const statusResponse = await fetch(
     headers: {
       // Include session tokens in headers
     },
-  }
+  },
 );
 const status = await statusResponse.json();
 console.log(status.banned); // true/false

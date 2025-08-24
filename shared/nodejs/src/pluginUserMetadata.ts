@@ -2,7 +2,7 @@ import UserMetadata from "supertokens-node/recipe/usermetadata";
 
 export const getPluginUserMetadata = async <T extends any>(
   metadataPluginKey: string,
-  userId: string
+  userId: string,
 ): Promise<T> => {
   const result = await UserMetadata.getUserMetadata(userId);
   if (result.status !== "OK") {
@@ -15,7 +15,7 @@ export const getPluginUserMetadata = async <T extends any>(
 export const setPluginUserMetadata = async <T extends any>(
   metadataPluginKey: string,
   userId: string,
-  metadata: T
+  metadata: T,
 ) => {
   const result = await UserMetadata.getUserMetadata(userId);
   if (result.status !== "OK") {
@@ -29,7 +29,7 @@ export const setPluginUserMetadata = async <T extends any>(
 };
 
 export const pluginUserMetadata = <T extends any>(
-  metadataKey: string
+  metadataKey: string,
 ): {
   get: (userId: string) => Promise<T>;
   set: (userId: string, metadata: T) => Promise<void>;

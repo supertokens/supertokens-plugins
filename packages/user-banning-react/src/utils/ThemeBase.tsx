@@ -18,9 +18,11 @@ import { Fragment } from "react";
 
 import type { PropsWithChildren } from "react";
 
-export const ThemeBase: React.FC<PropsWithChildren<{
-  userStyles: Array<string | undefined>;
-}>> = ({ children, userStyles }) => {
+export const ThemeBase: React.FC<
+  PropsWithChildren<{
+    userStyles: Array<string | undefined>;
+  }>
+> = ({ children, userStyles }) => {
   return (
     <Fragment>
       {children}

@@ -6,36 +6,67 @@ import {
   getAllRoles,
   createNewRoleOrAddPermissions,
   UserRoleClaim,
+  getUsersThatHaveRole,
 } from "supertokens-node/recipe/userroles";
-import { SuperTokensPluginUserBanningPluginLogger, SuperTokensPluginUserBanningPluginNormalisedConfig } from "./types";
-import SuperTokensError from "supertokens-node/lib/build/error";
-import { SessionContainer } from "supertokens-node/recipe/session";
+import { SuperTokensPluginUserBanningPluginNormalisedConfig } from "./types";
 import Session from "supertokens-node/recipe/session";
+import { getUser } from "supertokens-node";
+import { listAllTenants } from "supertokens-node/recipe/multitenancy";
+import { PLUGIN_ID } from "./constants";
 
 export class UserBanningService {
   protected cache: Map<string, boolean> = new Map();
+  protected cachePreLoadPromise: Promise<void> | undefined = undefined;
 
-  constructor(
-    protected pluginConfig: SuperTokensPluginUserBanningPluginNormalisedConfig,
-    protected log: SuperTokensPluginUserBanningPluginLogger
-  ) {}
+  constructor(protected pluginConfig: SuperTokensPluginUserBanningPluginNormalisedConfig) {}
 
-  async assertAndRevokeBannedSession(session?: SessionContainer, userContext?: UserContext): Promise<void> {
-    if (!session) return;
+  log = function (this: UserBanningService, message: string) {
+    console.log(`[${PLUGIN_ID}] ${message}`);
+  };
 
-    const claim = await session.getClaimValue(UserRoleClaim, userContext);
-    if (!claim) return;
-
-    if (claim.includes(this.pluginConfig.bannedUserRole)) {
-      await session.revokeSession();
-      throw new SuperTokensError({
-        message: "User banned",
-        type: "PLUGIN_ERROR",
-      });
+  preLoadCacheIfNeeded = async function (this: UserBanningService) {
+    if (this.cachePreLoadPromise === undefined) {
+      this.cachePreLoadPromise = this.preLoadCache();
     }
-  }
+    await this.cachePreLoadPromise;
+  };
 
-  async checkAndAddBannedUserRole(userContext?: UserContext) {
+  addBanToCache = async function (this: UserBanningService, tenantId: string, userId: string) {
+    this.cache.set(`${tenantId}|${userId}`, true);
+  };
+
+  removeBanFromCache = async function (this: UserBanningService, tenantId: string, userId: string) {
+    this.cache.delete(`${tenantId}|${userId}`);
+  };
+
+  getBanStatusFromCache = async function (this: UserBanningService, tenantId: string, userId: string) {
+    return this.cache.get(`${tenantId}|${userId}`);
+  };
+
+  preLoadCache = async function (this: UserBanningService) {
+    const tenants = await listAllTenants();
+    if (tenants.status !== "OK") {
+      this.log("Could not list tenants during preload");
+      return;
+    }
+    for (const { tenantId } of tenants.tenants) {
+      const bannedUsers = await getUsersThatHaveRole(tenantId, this.pluginConfig.bannedUserRole);
+      if (bannedUsers.status === "UNKNOWN_ROLE_ERROR") {
+        const result = await createNewRoleOrAddPermissions(this.pluginConfig.bannedUserRole, []);
+        if (result.status !== "OK") {
+          this.log("Could not create banned user role during preload");
+          throw new Error("Could not create banned user role during preload");
+        }
+        this.log("Created banned user role during preload");
+        return;
+      }
+      for (const userId of bannedUsers.users) {
+        await this.addBanToCache(tenantId, userId);
+      }
+    }
+  };
+
+  checkAndAddBannedUserRoleIfNeeded = async function (this: UserBanningService, userContext?: UserContext) {
     const result = await getAllRoles(userContext);
     if (result.status !== "OK") {
       return {
@@ -46,21 +77,27 @@ export class UserBanningService {
 
     const bannedRole = result.roles.find((role) => role === this.pluginConfig.bannedUserRole);
     if (!bannedRole) {
-      return createNewRoleOrAddPermissions(this.pluginConfig.bannedUserRole, [], userContext);
+      const result = await createNewRoleOrAddPermissions(this.pluginConfig.bannedUserRole, [], userContext);
+      if (result.status !== "OK") {
+        return {
+          status: "UNKNOWN_ERROR",
+          message: "Could not create banned user role",
+        };
+      }
     }
 
     return {
       status: "OK",
     };
-  }
+  };
 
-  async getBanStatus(
+  getBanStatus = async function (
+    this: UserBanningService,
     tenantId: string,
     userId: string,
-    userContext?: UserContext
+    userContext?: UserContext,
   ): Promise<{ status: "OK"; banned: boolean | undefined } | { status: "UNKNOWN_ERROR"; message: string }> {
     const result = await getRolesForUser(tenantId, userId, userContext);
-
     if (result.status !== "OK") {
       return {
         status: "UNKNOWN_ERROR",
@@ -74,35 +111,43 @@ export class UserBanningService {
       status: "OK",
       banned,
     };
-  }
+  };
 
-  async setBanStatusAndRefreshSessions(
-    tenantId: string,
+  setBanStatusAndUpdateSessions = async function (
+    this: UserBanningService,
     userId: string,
     isBanned: boolean,
-    userContext?: UserContext
-  ): Promise<{ status: "OK" } | { status: "UNKNOWN_ROLE_ERROR" }> {
-    await this.checkAndAddBannedUserRole(userContext);
+    userContext?: UserContext,
+  ): Promise<{ status: "OK" } | { status: "UNKNOWN_ROLE_ERROR" } | { status: "USER_NOT_FOUND" }> {
+    await this.checkAndAddBannedUserRoleIfNeeded(userContext);
 
-    if (isBanned) {
-      const result = await addRoleToUser(tenantId, userId, "banned", userContext);
-      if (result.status !== "OK") return result;
-    } else {
-      const result = await removeUserRole(tenantId, userId, "banned", userContext);
-      if (result.status !== "OK") return result;
+    const user = await getUser(userId, userContext);
+    if (!user) {
+      return {
+        status: "USER_NOT_FOUND",
+      };
     }
+    for (const tenantId of user.tenantIds) {
+      if (isBanned) {
+        const result = await addRoleToUser(tenantId, userId, "banned", userContext);
+        if (result.status !== "OK") return result;
+      } else {
+        const result = await removeUserRole(tenantId, userId, "banned", userContext);
+        if (result.status !== "OK") return result;
+      }
 
-    if (isBanned) {
-      await Session.revokeAllSessionsForUser(userId, true, tenantId);
-    } else {
-      const userSessions = await Session.getAllSessionHandlesForUser(userId, true, tenantId);
-      for (const userSession of userSessions) {
-        await Session.fetchAndSetClaim(userSession, UserRoleClaim, userContext);
+      if (isBanned) {
+        await Session.revokeAllSessionsForUser(userId, true, tenantId);
+      } else {
+        const userSessions = await Session.getAllSessionHandlesForUser(userId, true, tenantId);
+        for (const userSession of userSessions) {
+          await Session.fetchAndSetClaim(userSession, UserRoleClaim, userContext);
+        }
       }
     }
 
     return {
       status: "OK",
     };
-  }
+  };
 }

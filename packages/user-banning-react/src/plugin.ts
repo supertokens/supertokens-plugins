@@ -92,5 +92,5 @@ export const init = createPluginInitFunction<
     bannedUserRole: pluginConfig.bannedUserRole ?? DEFAULT_BANNED_USER_ROLE,
     onPermissionFailureRedirectPath:
       pluginConfig.onPermissionFailureRedirectPath ?? DEFAULT_ON_PERMISSION_FAILURE_REDIRECT_PATH,
-  })
+  }),
 );

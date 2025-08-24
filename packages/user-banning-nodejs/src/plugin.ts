@@ -6,28 +6,22 @@ import {
   PLUGIN_SDK_VERSION,
   DEFAULT_PERMISSION_NAME,
   DEFAULT_BANNED_USER_ROLE,
+  PLUGIN_ERROR_NAME,
 } from "./constants";
 import { UserBanningService } from "./userBanningService";
 import { PermissionClaim, UserRoleClaim } from "supertokens-node/recipe/userroles";
 import { createPluginInitFunction } from "@shared/js";
 import { withRequestHandler } from "@shared/nodejs";
-import {
-  SuperTokensPluginUserBanningImplementation,
-  SuperTokensPluginUserBanningPluginConfig,
-  SuperTokensPluginUserBanningPluginNormalisedConfig,
-} from "./types";
+import { SuperTokensPluginUserBanningPluginConfig, SuperTokensPluginUserBanningPluginNormalisedConfig } from "./types";
+import SuperTokensSessionError from "supertokens-node/lib/build/recipe/session/error";
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
   SuperTokensPluginUserBanningPluginConfig,
-  SuperTokensPluginUserBanningImplementation,
+  UserBanningService,
   SuperTokensPluginUserBanningPluginNormalisedConfig
 >(
-  (pluginConfig, implementation): SuperTokensPlugin => {
-    const log = implementation.logger((...args) => console.log(`[${PLUGIN_ID}]`, ...args));
-
-    const userBanningService = new UserBanningService(pluginConfig, log);
-
+  (pluginConfig, userBanningService): SuperTokensPlugin => {
     return {
       id: PLUGIN_ID,
       compatibleSDKVersions: PLUGIN_SDK_VERSION,
@@ -43,7 +37,7 @@ export const init = createPluginInitFunction<
             ],
           },
           handler: withRequestHandler(async (req, res, session, userContext) => {
-            let tenantId = await req.getKeyValueFromQuery("tenantId");
+            let tenantId = req.getKeyValueFromQuery("tenantId");
             if (!tenantId) {
               return {
                 status: "BAD_INPUT_ERROR",
@@ -87,12 +81,7 @@ export const init = createPluginInitFunction<
             }
 
             // set the ban status
-            const result = await userBanningService.setBanStatusAndRefreshSessions(
-              tenantId,
-              userId,
-              body.isBanned,
-              userContext
-            );
+            const result = await userBanningService.setBanStatusAndUpdateSessions(userId, body.isBanned, userContext);
             if (result.status !== "OK") {
               return {
                 status: "UNKNOWN_ERROR",
@@ -150,6 +139,21 @@ export const init = createPluginInitFunction<
       overrideMap: {
         userroles: {
           recipeInitRequired: true,
+          functions: (originalImplementation) => ({
+            ...originalImplementation,
+            removeUserRole: async (input) => {
+              if (input.role === pluginConfig.bannedUserRole) {
+                await userBanningService.removeBanFromCache(input.tenantId, input.userId);
+              }
+              return await originalImplementation.removeUserRole(input);
+            },
+            addRoleToUser: async (input) => {
+              if (input.role === pluginConfig.bannedUserRole) {
+                await userBanningService.addBanToCache(input.tenantId, input.userId);
+              }
+              return await originalImplementation.addRoleToUser(input);
+            },
+          }),
         },
         session: {
           recipeInitRequired: true,
@@ -159,35 +163,110 @@ export const init = createPluginInitFunction<
 
               getGlobalClaimValidators: async (input) => [
                 ...(await originalImplementation.getGlobalClaimValidators(input)),
+                // This shouldn't be needed, but it's good to have it as a backup (plus it'd be weird not to have it)
                 UserRoleClaim.validators.excludes(pluginConfig.bannedUserRole),
               ],
 
               getSession: async (input) => {
                 const session = await originalImplementation.getSession(input);
-
-                await userBanningService.assertAndRevokeBannedSession(session, input.userContext);
-
+                if (session) {
+                  await userBanningService.preLoadCacheIfNeeded();
+                  const banStatus = await userBanningService.getBanStatusFromCache(
+                    session.getTenantId(),
+                    session.getUserId(),
+                  );
+                  if (banStatus) {
+                    await session.revokeSession();
+                    throw new SuperTokensSessionError({
+                      message: "User banned",
+                      type: SuperTokensSessionError.UNAUTHORISED,
+                    });
+                  }
+                }
                 return session;
               },
 
               createNewSession: async (input) => {
-                const session = await originalImplementation.createNewSession(input);
-
-                await userBanningService.assertAndRevokeBannedSession(session, input.userContext);
-
-                return session;
+                const banStatus = await userBanningService.getBanStatus(
+                  input.tenantId,
+                  input.userId,
+                  input.userContext,
+                );
+                if (banStatus.status === "OK" && banStatus.banned) {
+                  const error = new Error("User banned");
+                  error.name = PLUGIN_ERROR_NAME;
+                  throw error;
+                }
+                return originalImplementation.createNewSession(input);
               },
             };
           },
         },
+        // These overrides are mostly "cosmetic", just ensuring that a nice error message is returned to the client
+        emailpassword: {
+          recipeInitRequired: false,
+          apis: (originalImplementation) => ({
+            ...originalImplementation,
+            signInPOST: overrideWithPluginErrorHandler(
+              originalImplementation.signInPOST?.bind(originalImplementation)!,
+            ),
+            signUpPOST: overrideWithPluginErrorHandler(
+              originalImplementation.signUpPOST?.bind(originalImplementation)!,
+            ),
+          }),
+        },
+        passwordless: {
+          recipeInitRequired: false,
+          apis: (originalImplementation) => ({
+            ...originalImplementation,
+            consumeCodePOST: overrideWithPluginErrorHandler(
+              originalImplementation.consumeCodePOST?.bind(originalImplementation)!,
+            ),
+          }),
+        },
+        thirdparty: {
+          recipeInitRequired: false,
+          apis: (originalImplementation) => ({
+            ...originalImplementation,
+            signInUpPOST: overrideWithPluginErrorHandler(
+              originalImplementation.signInUpPOST?.bind(originalImplementation)!,
+            ),
+          }),
+        },
+        webauthn: {
+          recipeInitRequired: false,
+          apis: (originalImplementation) => ({
+            ...originalImplementation,
+            signInPOST: overrideWithPluginErrorHandler(
+              originalImplementation.signInPOST?.bind(originalImplementation)!,
+            ),
+            signUpPOST: overrideWithPluginErrorHandler(
+              originalImplementation.signUpPOST?.bind(originalImplementation)!,
+            ),
+          }),
+        },
       },
     };
   },
-  {
-    logger: (originalImplementation) => originalImplementation,
-  },
+  (config) => new UserBanningService(config),
   (config) => ({
     userBanningPermission: config.userBanningPermission ?? DEFAULT_PERMISSION_NAME,
     bannedUserRole: config.bannedUserRole ?? DEFAULT_BANNED_USER_ROLE,
-  })
+  }),
 );
+
+function overrideWithPluginErrorHandler<I, O>(originalFunction: (input: I) => Promise<O>): (input: I) => Promise<O> {
+  return async (input: I) => {
+    try {
+      return (await originalFunction(input)) as O;
+    } catch (error) {
+      if (error instanceof Error && error.name === PLUGIN_ERROR_NAME) {
+        return {
+          status: "GENERAL_ERROR",
+          message: error.message,
+        } as any;
+      }
+      throw error;
+    }
+  };
+}

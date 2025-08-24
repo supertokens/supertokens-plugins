@@ -15,7 +15,7 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
       {
         withSession: true,
         params: { tenantId },
-      }
+      },
     );
   };
 

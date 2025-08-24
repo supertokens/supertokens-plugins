@@ -1,1 +1,1 @@
-export * from './createPluginInit';
+export * from "./createPluginInit";
