@@ -24,9 +24,9 @@ export class UserBanningService {
     console.log(`[${PLUGIN_ID}] ${message}`);
   };
 
-  preLoadCacheIfNeeded = async function (this: UserBanningService) {
+  preLoadCacheIfNeeded = async function (this: UserBanningService, userContext?: UserContext) {
     if (this.cachePreLoadPromise === undefined) {
-      this.cachePreLoadPromise = this.preLoadCache();
+      this.cachePreLoadPromise = this.preLoadCache(userContext);
     }
     await this.cachePreLoadPromise;
   };
@@ -43,16 +43,16 @@ export class UserBanningService {
     return this.cache.get(`${tenantId}|${userId}`);
   };
 
-  preLoadCache = async function (this: UserBanningService) {
-    const tenants = await listAllTenants();
+  preLoadCache = async function (this: UserBanningService, userContext?: UserContext) {
+    const tenants = await listAllTenants(userContext);
     if (tenants.status !== "OK") {
       this.log("Could not list tenants during preload");
       return;
     }
     for (const { tenantId } of tenants.tenants) {
-      const bannedUsers = await getUsersThatHaveRole(tenantId, this.pluginConfig.bannedUserRole);
+      const bannedUsers = await getUsersThatHaveRole(tenantId, this.pluginConfig.bannedUserRole, userContext);
       if (bannedUsers.status === "UNKNOWN_ROLE_ERROR") {
-        const result = await createNewRoleOrAddPermissions(this.pluginConfig.bannedUserRole, []);
+        const result = await createNewRoleOrAddPermissions(this.pluginConfig.bannedUserRole, [], userContext);
         if (result.status !== "OK") {
           this.log("Could not create banned user role during preload");
           throw new Error("Could not create banned user role during preload");
@@ -121,9 +121,9 @@ export class UserBanningService {
     userContext?: UserContext
   ) {
     if (isBanned) {
-      await Session.revokeAllSessionsForUser(userId, true, tenantId);
+      await Session.revokeAllSessionsForUser(userId, true, tenantId, userContext);
     } else {
-      const userSessions = await Session.getAllSessionHandlesForUser(userId, true, tenantId);
+      const userSessions = await Session.getAllSessionHandlesForUser(userId, true, tenantId, userContext);
       for (const userSession of userSessions) {
         await Session.fetchAndSetClaim(userSession, UserRoleClaim, userContext);
       }

@@ -1,7 +1,7 @@
 export type SuperTokensPluginUserBanningPluginConfig = {
   userBanningPermission?: string;
   bannedUserRole?: string;
-  globalBanning: boolean;
+  globalBanning?: boolean;
 };
 
 export type SuperTokensPluginUserBanningPluginNormalisedConfig = {

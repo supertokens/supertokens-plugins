@@ -63,9 +63,14 @@ export const init = createPluginInitFunction<
             if (body.userId) {
               userId = body.userId;
             } else if (body.email) {
-              const user = await SuperTokens.listUsersByAccountInfo(tenantId, {
-                email: body.email.toLowerCase(),
-              });
+              const user = await SuperTokens.listUsersByAccountInfo(
+                tenantId,
+                {
+                  email: body.email.toLowerCase(),
+                },
+                false,
+                userContext
+              );
               userId = user?.[0]?.id;
             } else {
               return {
@@ -122,9 +127,14 @@ export const init = createPluginInitFunction<
             let email: string | undefined = await req.getKeyValueFromQuery("email");
 
             if (email) {
-              const user = await SuperTokens.listUsersByAccountInfo(tenantId, {
-                email: email.toLowerCase(),
-              });
+              const user = await SuperTokens.listUsersByAccountInfo(
+                tenantId,
+                {
+                  email: email.toLowerCase(),
+                },
+                false,
+                userContext
+              );
               userId = user?.[0]?.id;
             }
 
@@ -155,7 +165,7 @@ export const init = createPluginInitFunction<
                 const tenantIds = [input.tenantId];
 
                 if (pluginConfig.globalBanning) {
-                  const user = await SuperTokens.getUser(input.userId);
+                  const user = await SuperTokens.getUser(input.userId, input.userContext);
 
                   for (const tenantId of user?.tenantIds ?? []) {
                     if (tenantId === input.tenantId) continue; // already added for this tenant
@@ -173,7 +183,7 @@ export const init = createPluginInitFunction<
                   }
 
                   await userBanningService.removeBanFromCache(tenantId, input.userId);
-                  await userBanningService.updateSessions(input.userId, tenantId, false);
+                  await userBanningService.updateSessions(input.userId, tenantId, false, input.userContext);
                 }
               }
 
@@ -188,7 +198,7 @@ export const init = createPluginInitFunction<
                 const tenantIds = [input.tenantId];
 
                 if (pluginConfig.globalBanning) {
-                  const user = await SuperTokens.getUser(input.userId);
+                  const user = await SuperTokens.getUser(input.userId, input.userContext);
 
                   for (const tenantId of user?.tenantIds ?? []) {
                     if (tenantId === input.tenantId) continue; // already added for this tenant
@@ -206,7 +216,7 @@ export const init = createPluginInitFunction<
                   }
 
                   await userBanningService.addBanToCache(tenantId, input.userId);
-                  await userBanningService.updateSessions(input.userId, tenantId, true);
+                  await userBanningService.updateSessions(input.userId, tenantId, true, input.userContext);
                 }
               }
 
@@ -229,13 +239,13 @@ export const init = createPluginInitFunction<
               getSession: async (input) => {
                 const session = await originalImplementation.getSession(input);
                 if (session) {
-                  await userBanningService.preLoadCacheIfNeeded();
+                  await userBanningService.preLoadCacheIfNeeded(input.userContext);
                   const banStatus = await userBanningService.getBanStatusFromCache(
                     session.getTenantId(),
                     session.getUserId()
                   );
                   if (banStatus) {
-                    await session.revokeSession();
+                    await session.revokeSession(input.userContext);
                     throw new SuperTokensSessionError({
                       message: "User banned",
                       type: SuperTokensSessionError.UNAUTHORISED,
