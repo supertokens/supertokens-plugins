@@ -7,6 +7,7 @@ import {
   DEFAULT_PERMISSION_NAME,
   DEFAULT_BANNED_USER_ROLE,
   PLUGIN_ERROR_NAME,
+  DEFAULT_GLOBAL_BANNING,
 } from "./constants";
 import { UserBanningService } from "./userBanningService";
 import { PermissionClaim, UserRoleClaim } from "supertokens-node/recipe/userroles";
@@ -14,7 +15,7 @@ import { createPluginInitFunction } from "@shared/js";
 import { withRequestHandler } from "@shared/nodejs";
 import { SuperTokensPluginUserBanningPluginConfig, SuperTokensPluginUserBanningPluginNormalisedConfig } from "./types";
 import SuperTokensSessionError from "supertokens-node/lib/build/recipe/session/error";
-import { enableDebugLogs } from "./logger";
+import { enableDebugLogs, logDebugMessage } from "./logger";
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
@@ -68,9 +69,14 @@ export const init = createPluginInitFunction<
             if (body.userId) {
               userId = body.userId;
             } else if (body.email) {
-              const user = await SuperTokens.listUsersByAccountInfo(tenantId, {
-                email: body.email.toLowerCase(),
-              });
+              const user = await SuperTokens.listUsersByAccountInfo(
+                tenantId,
+                {
+                  email: body.email.toLowerCase(),
+                },
+                false,
+                userContext
+              );
               userId = user?.[0]?.id;
             } else {
               return {
@@ -87,7 +93,12 @@ export const init = createPluginInitFunction<
             }
 
             // set the ban status
-            const result = await userBanningService.setBanStatusAndUpdateSessions(userId, body.isBanned, userContext);
+            const result = await userBanningService.setBanStatusAndUpdateSessions(
+              tenantId,
+              userId,
+              body.isBanned,
+              userContext
+            );
             if (result.status !== "OK") {
               return {
                 status: "UNKNOWN_ERROR",
@@ -122,9 +133,14 @@ export const init = createPluginInitFunction<
             let email: string | undefined = await req.getKeyValueFromQuery("email");
 
             if (email) {
-              const user = await SuperTokens.listUsersByAccountInfo(tenantId, {
-                email: email.toLowerCase(),
-              });
+              const user = await SuperTokens.listUsersByAccountInfo(
+                tenantId,
+                {
+                  email: email.toLowerCase(),
+                },
+                false,
+                userContext
+              );
               userId = user?.[0]?.id;
             }
 
@@ -148,16 +164,69 @@ export const init = createPluginInitFunction<
           functions: (originalImplementation) => ({
             ...originalImplementation,
             removeUserRole: async (input) => {
+              const results: Record<string, Awaited<ReturnType<typeof originalImplementation.removeUserRole>>> = {};
+              results[input.tenantId] = await originalImplementation.removeUserRole(input);
+
               if (input.role === pluginConfig.bannedUserRole) {
-                await userBanningService.removeBanFromCache(input.tenantId, input.userId);
+                const tenantIds = [input.tenantId];
+
+                if (pluginConfig.globalBanning) {
+                  const user = await SuperTokens.getUser(input.userId, input.userContext);
+
+                  for (const tenantId of user?.tenantIds ?? []) {
+                    if (tenantId === input.tenantId) continue; // already added for this tenant
+
+                    results[tenantId] = await originalImplementation.removeUserRole({ ...input, tenantId });
+                    tenantIds.push(tenantId);
+                  }
+                }
+
+                for (const tenantId of tenantIds) {
+                  if (results[tenantId]?.status !== "OK") {
+                    logDebugMessage(
+                      `Failed to remove banned user role from tenant ${tenantId}. Status: ${results[tenantId]?.status}`
+                    );
+                  }
+
+                  await userBanningService.removeBanFromCache(tenantId, input.userId);
+                  await userBanningService.updateSessions(input.userId, tenantId, false, input.userContext);
+                }
               }
-              return await originalImplementation.removeUserRole(input);
+
+              return results[input.tenantId]!;
             },
             addRoleToUser: async (input) => {
+              const results: Record<string, Awaited<ReturnType<typeof originalImplementation.addRoleToUser>>> = {};
+
+              results[input.tenantId] = await originalImplementation.addRoleToUser(input);
+
               if (input.role === pluginConfig.bannedUserRole) {
-                await userBanningService.addBanToCache(input.tenantId, input.userId);
+                const tenantIds = [input.tenantId];
+
+                if (pluginConfig.globalBanning) {
+                  const user = await SuperTokens.getUser(input.userId, input.userContext);
+
+                  for (const tenantId of user?.tenantIds ?? []) {
+                    if (tenantId === input.tenantId) continue; // already added for this tenant
+
+                    results[tenantId] = await originalImplementation.addRoleToUser({ ...input, tenantId });
+                    tenantIds.push(tenantId);
+                  }
+                }
+
+                for (const tenantId of tenantIds) {
+                  if (results[tenantId]?.status !== "OK") {
+                    logDebugMessage(
+                      `Failed to add banned user role to tenant ${tenantId}. Status: ${results[tenantId]?.status}`
+                    );
+                  }
+
+                  await userBanningService.addBanToCache(tenantId, input.userId);
+                  await userBanningService.updateSessions(input.userId, tenantId, true, input.userContext);
+                }
               }
-              return await originalImplementation.addRoleToUser(input);
+
+              return results[input.tenantId]!;
             },
           }),
         },
@@ -176,13 +245,13 @@ export const init = createPluginInitFunction<
               getSession: async (input) => {
                 const session = await originalImplementation.getSession(input);
                 if (session) {
-                  await userBanningService.preLoadCacheIfNeeded();
+                  await userBanningService.preLoadCacheIfNeeded(input.userContext);
                   const banStatus = await userBanningService.getBanStatusFromCache(
                     session.getTenantId(),
                     session.getUserId()
                   );
                   if (banStatus) {
-                    await session.revokeSession();
+                    await session.revokeSession(input.userContext);
                     throw new SuperTokensSessionError({
                       message: "User banned",
                       type: SuperTokensSessionError.UNAUTHORISED,
@@ -258,6 +327,7 @@ export const init = createPluginInitFunction<
   (config) => ({
     userBanningPermission: config.userBanningPermission ?? DEFAULT_PERMISSION_NAME,
     bannedUserRole: config.bannedUserRole ?? DEFAULT_BANNED_USER_ROLE,
+    globalBanning: config.globalBanning ?? DEFAULT_GLOBAL_BANNING,
   })
 );
 

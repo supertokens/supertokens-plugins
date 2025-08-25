@@ -20,9 +20,9 @@ export class UserBanningService {
 
   constructor(protected pluginConfig: SuperTokensPluginUserBanningPluginNormalisedConfig) {}
 
-  preLoadCacheIfNeeded = async function (this: UserBanningService) {
+  preLoadCacheIfNeeded = async function (this: UserBanningService, userContext?: UserContext) {
     if (this.cachePreLoadPromise === undefined) {
-      this.cachePreLoadPromise = this.preLoadCache();
+      this.cachePreLoadPromise = this.preLoadCache(userContext);
     }
     await this.cachePreLoadPromise;
   };
@@ -39,16 +39,16 @@ export class UserBanningService {
     return this.cache.get(`${tenantId}|${userId}`);
   };
 
-  preLoadCache = async function (this: UserBanningService) {
-    const tenants = await listAllTenants();
+  preLoadCache = async function (this: UserBanningService, userContext?: UserContext) {
+    const tenants = await listAllTenants(userContext);
     if (tenants.status !== "OK") {
       logDebugMessage("Could not list tenants during preload");
       return;
     }
     for (const { tenantId } of tenants.tenants) {
-      const bannedUsers = await getUsersThatHaveRole(tenantId, this.pluginConfig.bannedUserRole);
+      const bannedUsers = await getUsersThatHaveRole(tenantId, this.pluginConfig.bannedUserRole, userContext);
       if (bannedUsers.status === "UNKNOWN_ROLE_ERROR") {
-        const result = await createNewRoleOrAddPermissions(this.pluginConfig.bannedUserRole, []);
+        const result = await createNewRoleOrAddPermissions(this.pluginConfig.bannedUserRole, [], userContext);
         if (result.status !== "OK") {
           logDebugMessage("Could not create banned user role during preload");
           throw new Error("Could not create banned user role during preload");
@@ -109,8 +109,26 @@ export class UserBanningService {
     };
   };
 
+  updateSessions = async function (
+    this: UserBanningService,
+    userId: string,
+    tenantId: string,
+    isBanned: boolean,
+    userContext?: UserContext
+  ) {
+    if (isBanned) {
+      await Session.revokeAllSessionsForUser(userId, true, tenantId, userContext);
+    } else {
+      const userSessions = await Session.getAllSessionHandlesForUser(userId, true, tenantId, userContext);
+      for (const userSession of userSessions) {
+        await Session.fetchAndSetClaim(userSession, UserRoleClaim, userContext);
+      }
+    }
+  };
+
   setBanStatusAndUpdateSessions = async function (
     this: UserBanningService,
+    tenantId: string,
     userId: string,
     isBanned: boolean,
     userContext?: UserContext
@@ -123,23 +141,15 @@ export class UserBanningService {
         status: "USER_NOT_FOUND",
       };
     }
-    for (const tenantId of user.tenantIds) {
-      if (isBanned) {
-        const result = await addRoleToUser(tenantId, userId, this.pluginConfig.bannedUserRole, userContext);
-        if (result.status !== "OK") return result;
-      } else {
-        const result = await removeUserRole(tenantId, userId, this.pluginConfig.bannedUserRole, userContext);
-        if (result.status !== "OK") return result;
-      }
 
-      if (isBanned) {
-        await Session.revokeAllSessionsForUser(userId, true, tenantId);
-      } else {
-        const userSessions = await Session.getAllSessionHandlesForUser(userId, true, tenantId);
-        for (const userSession of userSessions) {
-          await Session.fetchAndSetClaim(userSession, UserRoleClaim, userContext);
-        }
-      }
+    // if globalBanning is set to true, this will trigger banning on all tenants of the user
+    // if globalBanning is set to false, this will trigger banning on the tenantId provided
+    if (isBanned) {
+      const result = await addRoleToUser(tenantId, userId, this.pluginConfig.bannedUserRole, userContext);
+      if (result.status !== "OK") return result;
+    } else {
+      const result = await removeUserRole(tenantId, userId, this.pluginConfig.bannedUserRole, userContext);
+      if (result.status !== "OK") return result;
     }
 
     return {

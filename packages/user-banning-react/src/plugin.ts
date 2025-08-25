@@ -1,5 +1,5 @@
 import { createPluginInitFunction } from "@shared/js";
-import { getQuerier } from "@shared/react";
+import { buildContext, getQuerier } from "@shared/react";
 import { createContext } from "react";
 import { SuperTokensPublicConfig, SuperTokensPublicPlugin, getTranslationFunction } from "supertokens-auth-react";
 import { SuperTokensPlugin } from "supertokens-auth-react/lib/build/types";
@@ -22,7 +22,7 @@ import {
   SuperTokensPluginUserBanningPluginNormalisedConfig,
 } from "./types";
 
-export let PluginContext: React.Context<{
+const { usePluginContext, setContext } = buildContext<{
   plugins: SuperTokensPublicPlugin[];
   sdkVersion: string;
   appConfig: SuperTokensPublicConfig;
@@ -30,7 +30,8 @@ export let PluginContext: React.Context<{
   querier: ReturnType<typeof getQuerier>;
   api: ReturnType<typeof getApi>;
   t: (key: TranslationKeys) => string;
-}>;
+}>();
+export { usePluginContext };
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
@@ -58,7 +59,7 @@ export const init = createPluginInitFunction<
         const api = getApi(querier);
         const t = getTranslationFunction<TranslationKeys>(defaultTranslationsUserBanning);
 
-        PluginContext = createContext({
+        setContext({
           plugins,
           sdkVersion,
           appConfig,
