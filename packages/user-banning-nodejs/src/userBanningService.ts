@@ -20,7 +20,7 @@ export class UserBanningService {
 
   constructor(protected pluginConfig: SuperTokensPluginUserBanningPluginNormalisedConfig) {}
 
-  preLoadCacheIfNeeded = async function (this: UserBanningService) {
+  preLoadCacheIfNeeded = async function (this: UserBanningService, userContext?: UserContext) {
     if (this.cachePreLoadPromise === undefined) {
       this.cachePreLoadPromise = this.preLoadCache(userContext);
     }

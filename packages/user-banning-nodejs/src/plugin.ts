@@ -15,7 +15,7 @@ import { createPluginInitFunction } from "@shared/js";
 import { withRequestHandler } from "@shared/nodejs";
 import { SuperTokensPluginUserBanningPluginConfig, SuperTokensPluginUserBanningPluginNormalisedConfig } from "./types";
 import SuperTokensSessionError from "supertokens-node/lib/build/recipe/session/error";
-import { enableDebugLogs } from "./logger";
+import { enableDebugLogs, logDebugMessage } from "./logger";
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
@@ -183,7 +183,7 @@ export const init = createPluginInitFunction<
 
                 for (const tenantId of tenantIds) {
                   if (results[tenantId]?.status !== "OK") {
-                    userBanningService.log(
+                    logDebugMessage(
                       `Failed to remove banned user role from tenant ${tenantId}. Status: ${results[tenantId]?.status}`
                     );
                   }
@@ -216,7 +216,7 @@ export const init = createPluginInitFunction<
 
                 for (const tenantId of tenantIds) {
                   if (results[tenantId]?.status !== "OK") {
-                    userBanningService.log(
+                    logDebugMessage(
                       `Failed to add banned user role to tenant ${tenantId}. Status: ${results[tenantId]?.status}`
                     );
                   }
