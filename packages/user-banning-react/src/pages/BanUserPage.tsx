@@ -2,14 +2,15 @@ import React from "react";
 import { useCallback, useState } from "react";
 import { SessionAuth } from "supertokens-auth-react/recipe/session";
 import { PermissionClaim } from "supertokens-auth-react/recipe/userroles";
-import { usePlugin } from "../use-plugin";
+
+import { usePluginContext } from "../plugin";
 import { getErrorMessage, ThemeBase } from "../utils";
 
 // @ts-ignore
 import styles from "./style.css?inline";
 
 export function BanUserPage() {
-  const { api, pluginConfig, t } = usePlugin();
+  const { api, pluginConfig, t } = usePluginContext();
 
   const [error, setError] = useState<string | undefined>();
   const [tenantId, setTenantId] = useState("public");
