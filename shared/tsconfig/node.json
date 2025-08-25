@@ -3,8 +3,7 @@
   "extends": "./base.json",
   "compilerOptions": {
     "incremental": true,
-    "module": "ESNext",
-    "moduleResolution": "node",
+    "types": ["node"],
     "sourceMap": true,
     "esModuleInterop": true,
     "strict": true,

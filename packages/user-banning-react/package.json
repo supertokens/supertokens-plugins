@@ -1,0 +1,60 @@
+{
+  "name": "@supertokens-plugins/user-banning-react",
+  "version": "0.0.1",
+  "description": "User Banning Plugin for SuperTokens",
+  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/user-banning-react/README.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/supertokens/supertokens-plugins.git",
+    "directory": "packages/user-banning-react"
+  },
+  "scripts": {
+    "build": "vite build && npm run pretty",
+    "pretty": "npx pretty-quick .",
+    "pretty-check": "npx pretty-quick --check ."
+  },
+  "keywords": [
+    "user-banning",
+    "plugin",
+    "supertokens"
+  ],
+  "dependencies": {
+    "supertokens-js-override": "^0.0.4",
+    "@shared/js": "*",
+    "@shared/react": "*"
+  },
+  "peerDependencies": {
+    "react": ">=18.3.1",
+    "react-dom": ">=18.3.1",
+    "supertokens-auth-react": ">=0.50.0",
+    "supertokens-web-js": ">=0.16.0"
+  },
+  "devDependencies": {
+    "@shared/eslint": "*",
+    "@shared/tsconfig": "*",
+    "@types/react": "^17.0.20",
+    "prettier": "2.0.5",
+    "pretty-quick": "^3.1.1",
+    "typescript": "^5.8.3"
+  },
+  "browser": {
+    "fs": false
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    },
+    "./index": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    },
+    "./index.js": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    }
+  }
+}

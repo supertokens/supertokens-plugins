@@ -19,7 +19,11 @@
     "eslint-plugin-import": "^2.32.0",
     "eslint-plugin-react-hooks": "^5.2.0",
     "prettier": "^3.2.5",
-    "turbo": "^2.5.5"
+    "turbo": "^2.5.5",
+    "@vitejs/plugin-react": "^4.5.2",
+    "rollup-plugin-peer-deps-external": "^2.2.4",
+    "vite": "^6.3.5",
+    "vite-plugin-dts": "^4.5.4"
   },
   "engines": {
     "node": ">=18"
@@ -31,6 +35,9 @@
     "shared/*"
   ],
   "dependencies": {
+    "@shared/js": "*",
+    "@shared/nodejs": "*",
+    "@shared/react": "*",
     "tsup": "^8.5.0"
   }
 }

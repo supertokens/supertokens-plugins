@@ -1,0 +1,16 @@
+{
+  "name": "@shared/js",
+  "version": "0.0.1",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "peerDependencies": {
+    "supertokens-js-override": "^0.0.4"
+  },
+  "devDependencies": {
+    "@shared/eslint": "*",
+    "@shared/tsconfig": "*"
+  },
+  "dependencies": {}
+}
