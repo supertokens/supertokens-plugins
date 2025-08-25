@@ -13,7 +13,7 @@ import {
   DEFAULT_PERMISSION_NAME,
   PLUGIN_ID,
 } from "./constants";
-import { enableDebugLogs, logDebugMessage } from "./logger";
+import { enableDebugLogs } from "./logger";
 import { BanUserPage } from "./pages";
 import { defaultTranslationsUserBanning } from "./translations";
 import {

@@ -14,7 +14,7 @@ import { createPluginInitFunction } from "@shared/js";
 import { withRequestHandler } from "@shared/nodejs";
 import { SuperTokensPluginUserBanningPluginConfig, SuperTokensPluginUserBanningPluginNormalisedConfig } from "./types";
 import SuperTokensSessionError from "supertokens-node/lib/build/recipe/session/error";
-import { enableDebugLogs, logDebugMessage } from "./logger";
+import { enableDebugLogs } from "./logger";
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
