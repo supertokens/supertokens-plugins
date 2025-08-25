@@ -133,7 +133,10 @@ export function BanUserPage() {
                         value={tenantId}
                         autoComplete="on"
                         placeholder={t("PL_UB_BAN_PAGE_TENANT_ID_PLACEHOLDER")}
-                        onChange={(e) => setTenantId(e.target.value)}
+                        onChange={(e) => {
+                          setTenantId(e.target.value);
+                          setBanStatus(null);
+                        }}
                       />
                     </div>
                   </div>
@@ -149,7 +152,10 @@ export function BanUserPage() {
                         disabled={!tenantId}
                         autoComplete="on"
                         placeholder={t("PL_UB_BAN_PAGE_EMAIL_PLACEHOLDER")}
-                        onChange={(e) => setEmail(e.target.value)}
+                        onChange={(e) => {
+                          setEmail(e.target.value);
+                          setBanStatus(null);
+                        }}
                       />
                     </div>
                   </div>
