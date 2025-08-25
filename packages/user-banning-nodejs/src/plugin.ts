@@ -141,6 +141,12 @@ export const init = createPluginInitFunction<
                 false,
                 userContext
               );
+              if (!user) {
+                return {
+                  status: "BAD_INPUT_ERROR",
+                  message: "user not found",
+                };
+              }
               userId = user?.[0]?.id;
             }
 
