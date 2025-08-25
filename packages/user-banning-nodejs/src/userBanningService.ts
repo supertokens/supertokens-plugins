@@ -129,11 +129,11 @@ export class UserBanningService {
     }
     for (const tenantId of user.tenantIds) {
       if (isBanned) {
-        const result = await addRoleToUser(tenantId, userId, "banned", userContext);
+        const result = await addRoleToUser(tenantId, userId, this.pluginConfig.bannedUserRole, userContext);
         if (result.status !== "OK") return result;
         await this.addBanToCache(tenantId, userId);
       } else {
-        const result = await removeUserRole(tenantId, userId, "banned", userContext);
+        const result = await removeUserRole(tenantId, userId, this.pluginConfig.bannedUserRole, userContext);
         if (result.status !== "OK") return result;
         await this.removeBanFromCache(tenantId, userId);
       }

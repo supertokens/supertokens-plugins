@@ -3,6 +3,11 @@
   "version": "0.0.1",
   "description": "User Banning Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/user-banning-nodejs/README.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/supertokens/supertokens-plugins.git",
+    "directory": "packages/user-banning-nodejs"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "pretty": "npx pretty-quick .",
