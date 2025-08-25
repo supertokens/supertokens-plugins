@@ -2,6 +2,8 @@ import React from "react";
 import { useCallback, useState } from "react";
 import { SessionAuth } from "supertokens-auth-react/recipe/session";
 import { PermissionClaim } from "supertokens-auth-react/recipe/userroles";
+import { usePlugin } from "../use-plugin";
+import { getErrorMessage, ThemeBase } from "../utils";
 
 // @ts-ignore
 import styles from "./style.css?inline";
@@ -25,7 +27,7 @@ export function BanUserPage() {
       setError(getErrorMessage(error));
       scheduleErrorReset();
     },
-    [scheduleErrorReset],
+    [scheduleErrorReset]
   );
 
   const getBanStatus = useCallback(
@@ -42,7 +44,7 @@ export function BanUserPage() {
           }
         })
         .catch(onError),
-    [tenantId],
+    [tenantId]
   );
 
   const updateBanStatus = useCallback(
@@ -61,7 +63,7 @@ export function BanUserPage() {
         })
         .catch(onError);
     },
-    [tenantId, email],
+    [tenantId, email]
   );
 
   const onCheckStatus = useCallback(
@@ -75,7 +77,7 @@ export function BanUserPage() {
 
       getBanStatus(email);
     },
-    [getBanStatus, email],
+    [getBanStatus, email]
   );
 
   const onBanUser = useCallback(
@@ -83,7 +85,7 @@ export function BanUserPage() {
       e.preventDefault();
       updateBanStatus(true);
     },
-    [updateBanStatus],
+    [updateBanStatus]
   );
 
   const onUnbanUser = useCallback(
@@ -97,7 +99,7 @@ export function BanUserPage() {
 
       updateBanStatus(false);
     },
-    [updateBanStatus, email],
+    [updateBanStatus, email]
   );
 
   return (
@@ -108,8 +110,7 @@ export function BanUserPage() {
           ...PermissionClaim.validators.includes(pluginConfig.userBanningPermission),
           onFailureRedirection: () => pluginConfig.onPermissionFailureRedirectPath,
         },
-      ]}
-    >
+      ]}>
       <ThemeBase userStyles={[styles]}>
         <div className="supertokens-plugin-user-banning">
           <div className="container">
