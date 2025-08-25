@@ -16,6 +16,7 @@ import { DEFAULT_BANNED_USER_ROLE } from "./constants";
 import AccountLinkingRaw from "supertokens-node/lib/build/recipe/accountlinking/recipe";
 import MultitenancyRaw from "supertokens-node/lib/build/recipe/multitenancy/recipe";
 import UserMetadataRaw from "supertokens-node/lib/build/recipe/usermetadata/recipe";
+import Multitenancy from "supertokens-node/recipe/multitenancy";
 
 const testPORT = process.env.PORT || 3000;
 const testEmail = "user@test.com";
@@ -166,6 +167,66 @@ describe("user-banning-nodejs", () => {
         message: "unauthorised",
       });
       expect(response.headers.get("front-token")).toStrictEqual("remove");
+    });
+
+    it("should ban sessions across tenants by setting a role", async () => {
+      const { user, appId } = await setup();
+
+      await Multitenancy.createOrUpdateTenant("tenant1");
+      await Multitenancy.associateUserToTenant("tenant1", SuperTokens.convertToRecipeUserId(user.id));
+
+      const sessionOnAnotherTenant = await Session.createNewSessionWithoutRequestResponse(
+        "tenant1",
+        SuperTokens.convertToRecipeUserId(user.id),
+      );
+
+      await UserRoles.createNewRoleOrAddPermissions(DEFAULT_BANNED_USER_ROLE, []);
+      await UserRoles.addRoleToUser("public", user.id, DEFAULT_BANNED_USER_ROLE);
+
+      const response = await fetch(`http://localhost:${testPORT}/check-session`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${sessionOnAnotherTenant.getAccessToken()}`,
+        },
+      });
+
+      expect(response.status).toBe(401);
+      expect(await response.json()).toStrictEqual({
+        message: "unauthorised",
+      });
+      expect(response.headers.get("front-token")).toStrictEqual("remove");
+    });
+
+    it("should ban user by setting a role on a different tenant", async () => {
+      const { user } = await setup();
+
+      await Multitenancy.createOrUpdateTenant("tenant1", { firstFactors: null });
+      await Multitenancy.associateUserToTenant("tenant1", SuperTokens.convertToRecipeUserId(user.id));
+
+      await UserRoles.createNewRoleOrAddPermissions(DEFAULT_BANNED_USER_ROLE, []);
+      await UserRoles.addRoleToUser("public", user.id, DEFAULT_BANNED_USER_ROLE);
+
+      const response = await fetch(`http://localhost:${testPORT}/auth/tenant1/signin`, {
+        method: "POST",
+        body: JSON.stringify({
+          formFields: [
+            {
+              id: "password",
+              value: "test",
+            },
+            {
+              id: "email",
+              value: "user@test.com",
+            },
+          ],
+        }),
+      });
+
+      expect(response.status).toBeLessThan(500);
+      expect(await response.json()).toStrictEqual({
+        status: "GENERAL_ERROR",
+        message: "User banned",
+      });
     });
   });
 });
