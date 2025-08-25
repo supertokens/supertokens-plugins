@@ -95,7 +95,7 @@ export class UserBanningService {
     this: UserBanningService,
     tenantId: string,
     userId: string,
-    userContext?: UserContext,
+    userContext?: UserContext
   ): Promise<{ status: "OK"; banned: boolean | undefined } | { status: "UNKNOWN_ERROR"; message: string }> {
     const result = await getRolesForUser(tenantId, userId, userContext);
     if (result.status !== "OK") {
@@ -117,7 +117,7 @@ export class UserBanningService {
     this: UserBanningService,
     userId: string,
     isBanned: boolean,
-    userContext?: UserContext,
+    userContext?: UserContext
   ): Promise<{ status: "OK" } | { status: "UNKNOWN_ROLE_ERROR" } | { status: "USER_NOT_FOUND" }> {
     await this.checkAndAddBannedUserRoleIfNeeded(userContext);
 
@@ -131,9 +131,11 @@ export class UserBanningService {
       if (isBanned) {
         const result = await addRoleToUser(tenantId, userId, "banned", userContext);
         if (result.status !== "OK") return result;
+        await this.addBanToCache(tenantId, userId);
       } else {
         const result = await removeUserRole(tenantId, userId, "banned", userContext);
         if (result.status !== "OK") return result;
+        await this.removeBanFromCache(tenantId, userId);
       }
 
       if (isBanned) {
