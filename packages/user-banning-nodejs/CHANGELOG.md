@@ -1,5 +1,11 @@
 # @supertokens-plugins/user-banning-nodejs
 
+## 0.0.2-beta.1
+
+### Patch Changes
+
+- 311d6d8: Improve error message and try to make types work
+
 ## 0.0.2-beta.0
 
 ### Patch Changes
