@@ -173,7 +173,7 @@ export const init = createPluginInitFunction<
                   await userBanningService.preLoadCacheIfNeeded();
                   const banStatus = await userBanningService.getBanStatusFromCache(
                     session.getTenantId(),
-                    session.getUserId(),
+                    session.getUserId()
                   );
                   if (banStatus) {
                     await session.revokeSession();
@@ -190,7 +190,7 @@ export const init = createPluginInitFunction<
                 const banStatus = await userBanningService.getBanStatus(
                   input.tenantId,
                   input.userId,
-                  input.userContext,
+                  input.userContext
                 );
                 if (banStatus.status === "OK" && banStatus.banned) {
                   const error = new Error("User banned");
@@ -208,10 +208,10 @@ export const init = createPluginInitFunction<
           apis: (originalImplementation) => ({
             ...originalImplementation,
             signInPOST: overrideWithPluginErrorHandler(
-              originalImplementation.signInPOST?.bind(originalImplementation)!,
+              originalImplementation.signInPOST?.bind(originalImplementation)!
             ),
             signUpPOST: overrideWithPluginErrorHandler(
-              originalImplementation.signUpPOST?.bind(originalImplementation)!,
+              originalImplementation.signUpPOST?.bind(originalImplementation)!
             ),
           }),
         },
@@ -220,7 +220,7 @@ export const init = createPluginInitFunction<
           apis: (originalImplementation) => ({
             ...originalImplementation,
             consumeCodePOST: overrideWithPluginErrorHandler(
-              originalImplementation.consumeCodePOST?.bind(originalImplementation)!,
+              originalImplementation.consumeCodePOST?.bind(originalImplementation)!
             ),
           }),
         },
@@ -229,7 +229,7 @@ export const init = createPluginInitFunction<
           apis: (originalImplementation) => ({
             ...originalImplementation,
             signInUpPOST: overrideWithPluginErrorHandler(
-              originalImplementation.signInUpPOST?.bind(originalImplementation)!,
+              originalImplementation.signInUpPOST?.bind(originalImplementation)!
             ),
           }),
         },
@@ -238,10 +238,10 @@ export const init = createPluginInitFunction<
           apis: (originalImplementation) => ({
             ...originalImplementation,
             signInPOST: overrideWithPluginErrorHandler(
-              originalImplementation.signInPOST?.bind(originalImplementation)!,
+              originalImplementation.signInPOST?.bind(originalImplementation)!
             ),
             signUpPOST: overrideWithPluginErrorHandler(
-              originalImplementation.signUpPOST?.bind(originalImplementation)!,
+              originalImplementation.signUpPOST?.bind(originalImplementation)!
             ),
           }),
         },
@@ -252,7 +252,7 @@ export const init = createPluginInitFunction<
   (config) => ({
     userBanningPermission: config.userBanningPermission ?? DEFAULT_PERMISSION_NAME,
     bannedUserRole: config.bannedUserRole ?? DEFAULT_BANNED_USER_ROLE,
-  }),
+  })
 );
 
 function overrideWithPluginErrorHandler<I, O>(originalFunction: (input: I) => Promise<O>): (input: I) => Promise<O> {
