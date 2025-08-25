@@ -5,4 +5,6 @@ export const HANDLE_BASE_PATH = `/plugin/${PLUGIN_ID}`;
 
 export const DEFAULT_PERMISSION_NAME = "ban-user";
 export const DEFAULT_BANNED_USER_ROLE = "banned";
+export const DEFAULT_GLOBAL_BANNING = true;
+
 export const PLUGIN_ERROR_NAME = `${PLUGIN_ID}-error`;

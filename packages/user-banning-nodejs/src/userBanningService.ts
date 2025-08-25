@@ -113,8 +113,26 @@ export class UserBanningService {
     };
   };
 
+  updateSessions = async function (
+    this: UserBanningService,
+    userId: string,
+    tenantId: string,
+    isBanned: boolean,
+    userContext?: UserContext
+  ) {
+    if (isBanned) {
+      await Session.revokeAllSessionsForUser(userId, true, tenantId);
+    } else {
+      const userSessions = await Session.getAllSessionHandlesForUser(userId, true, tenantId);
+      for (const userSession of userSessions) {
+        await Session.fetchAndSetClaim(userSession, UserRoleClaim, userContext);
+      }
+    }
+  };
+
   setBanStatusAndUpdateSessions = async function (
     this: UserBanningService,
+    tenantId: string,
     userId: string,
     isBanned: boolean,
     userContext?: UserContext
@@ -127,23 +145,15 @@ export class UserBanningService {
         status: "USER_NOT_FOUND",
       };
     }
-    for (const tenantId of user.tenantIds) {
-      if (isBanned) {
-        const result = await addRoleToUser(tenantId, userId, this.pluginConfig.bannedUserRole, userContext);
-        if (result.status !== "OK") return result;
-      } else {
-        const result = await removeUserRole(tenantId, userId, this.pluginConfig.bannedUserRole, userContext);
-        if (result.status !== "OK") return result;
-      }
 
-      if (isBanned) {
-        await Session.revokeAllSessionsForUser(userId, true, tenantId);
-      } else {
-        const userSessions = await Session.getAllSessionHandlesForUser(userId, true, tenantId);
-        for (const userSession of userSessions) {
-          await Session.fetchAndSetClaim(userSession, UserRoleClaim, userContext);
-        }
-      }
+    // if globalBanning is set to true, this will trigger banning on all tenants of the user
+    // if globalBanning is set to false, this will trigger banning on the tenantId provided
+    if (isBanned) {
+      const result = await addRoleToUser(tenantId, userId, this.pluginConfig.bannedUserRole, userContext);
+      if (result.status !== "OK") return result;
+    } else {
+      const result = await removeUserRole(tenantId, userId, this.pluginConfig.bannedUserRole, userContext);
+      if (result.status !== "OK") return result;
     }
 
     return {
