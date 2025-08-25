@@ -12,8 +12,4 @@ export type SuperTokensPluginUserBanningPluginNormalisedConfig = {
   onPermissionFailureRedirectPath: string;
 };
 
-export type SuperTokensPluginUserBanningImplementation = {
-  logger: (originalImplementation: (...args: any[]) => void) => (...args: any[]) => void;
-};
-
-export type TranslationKeys = keyof (typeof defaultTranslationsUserBanning)["en"];
+export type TranslationKeys = keyof typeof defaultTranslationsUserBanning["en"];

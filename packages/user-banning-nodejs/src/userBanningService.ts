@@ -12,7 +12,7 @@ import { SuperTokensPluginUserBanningPluginNormalisedConfig } from "./types";
 import Session from "supertokens-node/recipe/session";
 import { getUser } from "supertokens-node";
 import { listAllTenants } from "supertokens-node/recipe/multitenancy";
-import { PLUGIN_ID } from "./constants";
+import { logDebugMessage } from "./logger";
 
 export class UserBanningService {
   protected cache: Map<string, boolean> = new Map();
@@ -20,11 +20,7 @@ export class UserBanningService {
 
   constructor(protected pluginConfig: SuperTokensPluginUserBanningPluginNormalisedConfig) {}
 
-  log = function (this: UserBanningService, message: string) {
-    console.log(`[${PLUGIN_ID}] ${message}`);
-  };
-
-  preLoadCacheIfNeeded = async function (this: UserBanningService, userContext?: UserContext) {
+  preLoadCacheIfNeeded = async function (this: UserBanningService) {
     if (this.cachePreLoadPromise === undefined) {
       this.cachePreLoadPromise = this.preLoadCache(userContext);
     }
@@ -46,7 +42,7 @@ export class UserBanningService {
   preLoadCache = async function (this: UserBanningService, userContext?: UserContext) {
     const tenants = await listAllTenants(userContext);
     if (tenants.status !== "OK") {
-      this.log("Could not list tenants during preload");
+      logDebugMessage("Could not list tenants during preload");
       return;
     }
     for (const { tenantId } of tenants.tenants) {
@@ -54,10 +50,10 @@ export class UserBanningService {
       if (bannedUsers.status === "UNKNOWN_ROLE_ERROR") {
         const result = await createNewRoleOrAddPermissions(this.pluginConfig.bannedUserRole, [], userContext);
         if (result.status !== "OK") {
-          this.log("Could not create banned user role during preload");
+          logDebugMessage("Could not create banned user role during preload");
           throw new Error("Could not create banned user role during preload");
         }
-        this.log("Created banned user role during preload");
+        logDebugMessage("Created banned user role during preload");
         return;
       }
       for (const userId of bannedUsers.users) {

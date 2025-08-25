@@ -15,6 +15,7 @@ import { createPluginInitFunction } from "@shared/js";
 import { withRequestHandler } from "@shared/nodejs";
 import { SuperTokensPluginUserBanningPluginConfig, SuperTokensPluginUserBanningPluginNormalisedConfig } from "./types";
 import SuperTokensSessionError from "supertokens-node/lib/build/recipe/session/error";
+import { enableDebugLogs } from "./logger";
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
@@ -26,6 +27,11 @@ export const init = createPluginInitFunction<
     return {
       id: PLUGIN_ID,
       compatibleSDKVersions: PLUGIN_SDK_VERSION,
+      init: async (appConfig) => {
+        if (appConfig.debug) {
+          enableDebugLogs();
+        }
+      },
       routeHandlers: [
         {
           path: `${HANDLE_BASE_PATH}/ban`,

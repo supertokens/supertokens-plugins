@@ -13,12 +13,12 @@ import {
   DEFAULT_PERMISSION_NAME,
   PLUGIN_ID,
 } from "./constants";
+import { enableDebugLogs } from "./logger";
 import { BanUserPage } from "./pages";
 import { defaultTranslationsUserBanning } from "./translations";
 import {
   SuperTokensPluginUserBanningPluginConfig,
   TranslationKeys,
-  SuperTokensPluginUserBanningImplementation,
   SuperTokensPluginUserBanningPluginNormalisedConfig,
 } from "./types";
 
@@ -27,7 +27,6 @@ export let PluginContext: React.Context<{
   sdkVersion: string;
   appConfig: SuperTokensPublicConfig;
   pluginConfig: SuperTokensPluginUserBanningPluginNormalisedConfig;
-  log: (...args: any[]) => void;
   querier: ReturnType<typeof getQuerier>;
   api: ReturnType<typeof getApi>;
   t: (key: TranslationKeys) => string;
@@ -36,12 +35,10 @@ export let PluginContext: React.Context<{
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
   SuperTokensPluginUserBanningPluginConfig,
-  SuperTokensPluginUserBanningImplementation,
+  undefined,
   SuperTokensPluginUserBanningPluginNormalisedConfig
 >(
-  (pluginConfig, implementation) => {
-    const log = implementation.logger((...args) => console.log(`[${PLUGIN_ID}]`, ...args));
-
+  (pluginConfig) => {
     return {
       id: PLUGIN_ID,
       compatibleAuthReactSDKVersions: [">=0.50.0"],
@@ -53,6 +50,10 @@ export const init = createPluginInitFunction<
       ],
 
       init: async (appConfig, plugins, sdkVersion) => {
+        if (appConfig.enableDebugLogs) {
+          enableDebugLogs();
+        }
+
         const querier = getQuerier(new URL(API_PATH, appConfig.appInfo.apiDomain.getAsStringDangerous()).toString());
         const api = getApi(querier);
         const t = getTranslationFunction<TranslationKeys>(defaultTranslationsUserBanning);
@@ -64,7 +65,6 @@ export const init = createPluginInitFunction<
           pluginConfig,
           querier,
           api,
-          log,
           t,
         });
       },
@@ -84,13 +84,11 @@ export const init = createPluginInitFunction<
       },
     };
   },
-  {
-    logger: (originalImplementation) => originalImplementation,
-  },
+  undefined,
   (pluginConfig) => ({
     userBanningPermission: pluginConfig.userBanningPermission ?? DEFAULT_PERMISSION_NAME,
     bannedUserRole: pluginConfig.bannedUserRole ?? DEFAULT_BANNED_USER_ROLE,
     onPermissionFailureRedirectPath:
       pluginConfig.onPermissionFailureRedirectPath ?? DEFAULT_ON_PERMISSION_FAILURE_REDIRECT_PATH,
-  }),
+  })
 );
