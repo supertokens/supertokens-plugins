@@ -19,9 +19,7 @@
     "supertokens"
   ],
   "dependencies": {
-    "supertokens-js-override": "^0.0.4",
-    "@shared/js": "*",
-    "@shared/react": "*"
+    "supertokens-js-override": "^0.0.4"
   },
   "peerDependencies": {
     "react": ">=18.3.1",
@@ -35,7 +33,9 @@
     "@types/react": "^17.0.20",
     "prettier": "2.0.5",
     "pretty-quick": "^3.1.1",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "@shared/js": "*",
+    "@shared/react": "*"
   },
   "browser": {
     "fs": false
