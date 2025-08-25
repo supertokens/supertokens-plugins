@@ -17,6 +17,7 @@ import AccountLinkingRaw from "supertokens-node/lib/build/recipe/accountlinking/
 import MultitenancyRaw from "supertokens-node/lib/build/recipe/multitenancy/recipe";
 import UserMetadataRaw from "supertokens-node/lib/build/recipe/usermetadata/recipe";
 import Multitenancy from "supertokens-node/recipe/multitenancy";
+import crypto from "node:crypto";
 
 const testPORT = process.env.PORT || 3000;
 const testEmail = "user@test.com";
@@ -243,14 +244,19 @@ function resetST() {
 
 async function setup(pluginConfig?: SuperTokensPluginUserBanningPluginConfig, appId?: string) {
   let isNewApp = false;
+  const coreBaseURL = process.env.CORE_BASE_URL || `http://localhost:3567`;
   if (appId === undefined) {
     isNewApp = true;
     appId = crypto.randomUUID();
-    const createAppResp = await fetch(`http://localhost:3567/recipe/multitenancy/app/v2`, {
+    const headers = {
+      "Content-Type": "application/json",
+    };
+    if (process.env.CORE_API_KEY) {
+      headers["api-key"] = process.env.CORE_API_KEY;
+    }
+    const createAppResp = await fetch(`${coreBaseURL}/recipe/multitenancy/app/v2`, {
       method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers,
       body: JSON.stringify({
         appId,
         coreConfig: {},
@@ -260,7 +266,8 @@ async function setup(pluginConfig?: SuperTokensPluginUserBanningPluginConfig, ap
 
   SuperTokens.init({
     supertokens: {
-      connectionURI: `http://localhost:3567/appid-${appId}`,
+      connectionURI: `${coreBaseURL}/appid-${appId}`,
+      apiKey: process.env.CORE_API_KEY,
     },
     appInfo: {
       appName: "Test App",
