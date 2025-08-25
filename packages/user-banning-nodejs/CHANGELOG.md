@@ -1,5 +1,11 @@
 # @supertokens-plugins/user-banning-nodejs
 
+## 0.0.2-beta.2
+
+### Patch Changes
+
+- 190f324: Improve built-in ui and error messages
+
 ## 0.0.2-beta.1
 
 ### Patch Changes
