@@ -1,0 +1,17 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap");
+
+:root {
+  /* Typography Tokens */
+  --wa-font-family-body: "Inter", sans-serif;
+
+  --wa-font-size-scale: 1;
+  --wa-font-size-2xs: round(calc(0.6875rem * var(--wa-font-size-scale)), 1px);
+  --wa-font-size-xs: round(calc(0.75rem * var(--wa-font-size-scale)), 1px);
+  --wa-font-size-s: round(calc(0.875rem * var(--wa-font-size-scale)), 1px);
+  --wa-font-size-m: calc(1rem * var(--wa-font-size-scale));
+  --wa-font-size-l: round(calc(1.125rem * var(--wa-font-size-scale)), 1px);
+  --wa-font-size-xl: round(calc(1.5625rem * var(--wa-font-size-scale)), 1px);
+  --wa-font-size-2xl: round(calc(2rem * var(--wa-font-size-scale)), 1px);
+  --wa-font-size-3xl: round(calc(var(--wa-font-size-2xl) * 1.125 * 1.125), 1px);
+  --wa-font-size-4xl: round(calc(var(--wa-font-size-3xl) * 1.125 * 1.125), 1px);
+}

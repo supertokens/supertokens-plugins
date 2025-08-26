@@ -1,0 +1,107 @@
+.plugin-profile {
+  /* Color palette */
+  --plugin-color-primary: #07c;
+  --plugin-color-primary-hover: #005fa3;
+  --plugin-color-primary-disabled: #ccc;
+
+  --plugin-color-success: #4caf50;
+  --plugin-color-success-light: #e8f5e8;
+  --plugin-color-success-text: #2e7d32;
+  --plugin-color-success-border: #c8e6c9;
+
+  --plugin-color-warning: #ff9800;
+  --plugin-color-warning-light: #fff3e0;
+  --plugin-color-warning-text: #ef6c00;
+  --plugin-color-warning-border: #ffcc02;
+
+  --plugin-color-error: #f44336;
+  --plugin-color-error-light: #ffebee;
+  --plugin-color-error-text: #c62828;
+  --plugin-color-error-border: #ffcdd2;
+
+  --plugin-color-info: #2196f3;
+  --plugin-color-info-light: #e3f2fd;
+  --plugin-color-info-text: #1565c0;
+  --plugin-color-info-border: #bbdefb;
+
+  /* Neutral colors */
+  --plugin-color-white: #ffffff;
+  --plugin-color-black: #000000;
+  --plugin-color-gray-50: #f9f9f9;
+  --plugin-color-gray-100: #f5f5f5;
+  --plugin-color-gray-200: #eeeeee;
+  --plugin-color-gray-300: #e0e0e0;
+  --plugin-color-gray-400: #bdbdbd;
+  --plugin-color-gray-500: #9e9e9e;
+  --plugin-color-gray-600: #757575;
+  --plugin-color-gray-700: #616161;
+  --plugin-color-gray-800: #424242;
+  --plugin-color-gray-900: #212121;
+
+  /* Text colors */
+  --plugin-text-primary: #212121;
+  --plugin-text-secondary: #666666;
+  --plugin-text-disabled: #999999;
+  --plugin-text-inverse: #ffffff;
+
+  /* Background colors */
+  --plugin-bg-primary: #ffffff;
+  --plugin-bg-secondary: #f5f5f5;
+  --plugin-bg-disabled: #f5f5f5;
+  --plugin-bg-hover: #f0f8ff;
+
+  /* Border colors */
+  --plugin-border-primary: #e0e0e0;
+  --plugin-border-secondary: #eeeeee;
+  --plugin-border-focus: #07c;
+
+  /* Spacing */
+  --plugin-spacing-xs: 2px;
+  --plugin-spacing-sm: 4px;
+  --plugin-spacing-md: 8px;
+  --plugin-spacing-lg: 12px;
+  --plugin-spacing-xl: 16px;
+  --plugin-spacing-2xl: 24px;
+  --plugin-spacing-3xl: 32px;
+
+  /* Border radius */
+  --plugin-radius-sm: 4px;
+  --plugin-radius-md: 6px;
+  --plugin-radius-lg: 8px;
+  --plugin-radius-xl: 12px;
+  --plugin-radius-full: 50%;
+
+  /* Shadows */
+  --plugin-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --plugin-shadow-md: 0 2px 4px rgba(0, 0, 0, 0.1);
+  --plugin-shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --plugin-shadow-xl: 0 8px 24px rgba(0, 0, 0, 0.2);
+
+  /* Typography */
+  --plugin-font-family: "Inter", sans-serif;
+  --plugin-font-size-xs: 11px;
+  --plugin-font-size-sm: 12px;
+  --plugin-font-size-md: 14px;
+  --plugin-font-size-lg: 16px;
+  --plugin-font-size-xl: 18px;
+  --plugin-font-weight-normal: 400;
+  --plugin-font-weight-medium: 500;
+  --plugin-font-weight-semibold: 600;
+  --plugin-font-weight-bold: 700;
+
+  /* Line heights */
+  --plugin-line-height-tight: 1.2;
+  --plugin-line-height-normal: 1.3;
+  --plugin-line-height-relaxed: 1.4;
+  --plugin-line-height-loose: 1.5;
+
+  /* Transitions */
+  --plugin-transition-fast: 0.2s ease;
+  --plugin-transition-normal: 0.3s ease-in-out;
+  --plugin-transition-slow: 0.5s ease-in-out;
+
+  /* Z-index */
+  --plugin-z-dropdown: 100;
+  --plugin-z-modal: 200;
+  --plugin-z-toast: 1000;
+}

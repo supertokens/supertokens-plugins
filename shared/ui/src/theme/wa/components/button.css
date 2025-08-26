@@ -1,0 +1,72 @@
+/* Button */
+wa-button[appearance~="accent"]:not([disabled]):not([loading])::part(base):hover {
+  background-color: var(
+    --st-color-fill-loud-hover,
+    color-mix(
+      in oklab,
+      var(--wa-color-fill-loud, var(--wa-color-neutral-fill-loud)),
+      var(--wa-color-mix-hover)
+    )
+  );
+}
+
+wa-button[appearance~="accent"]:not([disabled]):not([loading])::part(base):active {
+  background-color: var(
+    --st-color-fill-loud-active,
+    color-mix(
+      in oklab,
+      var(--wa-color-fill-loud, var(--wa-color-neutral-fill-loud)),
+      var(--wa-color-mix-active)
+    )
+  );
+}
+
+wa-button[appearance~="outlined"]:not([disabled]):not([loading])::part(base):hover {
+  background-color: var(--st-color-fill-quiet-hover, transparent);
+}
+
+wa-button[appearance~="outlined"]:not([disabled]):not([loading])::part(base):active {
+  background-color: var(--st-color-fill-quiet-active, transparent);
+}
+
+wa-button[appearance~="filled"]:not([disabled]):not([loading])::part(base):hover,
+wa-button[appearance~="filled"][appearance~="outlined"]:not([disabled]):not([loading])::part(base):hover {
+  background-color: var(
+    --st-color-fill-normal-hover,
+    color-mix(
+      in oklab,
+      var(--wa-color-fill-normal, var(--wa-color-neutral-fill-normal)),
+      var(--wa-color-mix-hover)
+    )
+  );
+}
+
+wa-button[appearance~="filled"]:not([disabled]):not([loading])::part(base):active,
+wa-button[appearance~="filled"][appearance~="outlined"]:not([disabled]):not([loading])::part(base):active {
+  background-color: var(
+    --st-color-fill-normal-active,
+    color-mix(
+      in oklab,
+      var(--wa-color-fill-normal, var(--wa-color-neutral-fill-normal)),
+      var(--wa-color-mix-active)
+    )
+  );
+}
+
+wa-button[appearance~="plain"]:not([disabled]):not([loading])::part(base):hover {
+  background-color: var(
+    --st-color-fill-quiet-hover,
+    var(--wa-color-fill-quiet, var(--wa-color-neutral-fill-quiet))
+  );
+}
+
+wa-button[appearance~="plain"]:not([disabled]):not([loading])::part(base):active {
+  background-color: var(
+    --st-color-fill-quiet-active,
+    color-mix(
+      in oklab,
+      var(--wa-color-fill-quiet, var(--wa-color-neutral-fill-quiet)),
+      var(--wa-color-mix-active)
+    )
+  );
+}

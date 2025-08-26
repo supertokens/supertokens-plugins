@@ -1,0 +1,19 @@
+wa-callout[size="xsmall"] {
+  padding: var(--wa-space-xs);
+  --wa-form-control-padding-inline: var(--wa-space-2xs);
+}
+
+wa-callout[size="small"] {
+  padding: var(--wa-space-s);
+  --wa-form-control-padding-inline: var(--wa-space-xs);
+}
+
+wa-callout[size="medium"] {
+  padding: var(--wa-space-m);
+  --wa-form-control-padding-inline: var(--wa-space-s);
+}
+
+wa-callout[size="large"] {
+  padding: var(--wa-space-l);
+  --wa-form-control-padding-inline: var(--wa-space-m);
+}

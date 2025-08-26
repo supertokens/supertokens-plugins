@@ -1,0 +1,51 @@
+@layer wa-utilities {
+  .wa-neutral,
+  [variant="neutral"] {
+    --st-color-fill-quiet-hover: var(--st-color-neutral-fill-quiet-hover);
+    --st-color-fill-quiet-active: var(--st-color-neutral-fill-quiet-active);
+    --st-color-fill-loud-hover: var(--st-color-neutral-fill-loud-hover);
+    --st-color-fill-loud-active: var(--st-color-neutral-fill-loud-active);
+    --st-color-fill-normal-hover: var(--st-color-neutral-fill-normal-hover);
+    --st-color-fill-normal-active: var(--st-color-neutral-fill-normal-active);
+  }
+
+  .wa-brand,
+  [variant="brand"] {
+    --st-color-fill-quiet-hover: var(--st-color-brand-fill-quiet-hover);
+    --st-color-fill-quiet-active: var(--st-color-brand-fill-quiet-active);
+    --st-color-fill-loud-hover: var(--st-color-brand-fill-loud-hover);
+    --st-color-fill-loud-active: var(--st-color-brand-fill-loud-active);
+    --st-color-fill-normal-hover: var(--st-color-brand-fill-normal-hover);
+    --st-color-fill-normal-active: var(--st-color-brand-fill-normal-active);
+  }
+
+  .wa-success,
+  [variant="success"] {
+    --st-color-fill-quiet-hover: var(--st-color-success-fill-quiet-hover);
+    --st-color-fill-quiet-active: var(--st-color-success-fill-quiet-active);
+    --st-color-fill-loud-hover: var(--st-color-success-fill-loud-hover);
+    --st-color-fill-loud-active: var(--st-color-success-fill-loud-active);
+    --st-color-fill-normal-hover: var(--st-color-success-fill-normal-hover);
+    --st-color-fill-normal-active: var(--st-color-success-fill-normal-active);
+  }
+
+  .wa-warning,
+  [variant="warning"] {
+    --st-color-fill-quiet-hover: var(--st-color-warning-fill-quiet-hover);
+    --st-color-fill-quiet-active: var(--st-color-warning-fill-quiet-active);
+    --st-color-fill-loud-hover: var(--st-color-warning-fill-loud-hover);
+    --st-color-fill-loud-active: var(--st-color-warning-fill-loud-active);
+    --st-color-fill-normal-hover: var(--st-color-warning-fill-normal-hover);
+    --st-color-fill-normal-active: var(--st-color-warning-fill-normal-active);
+  }
+
+  .wa-danger,
+  [variant="danger"] {
+    --st-color-fill-quiet-hover: var(--st-color-danger-fill-quiet-hover);
+    --st-color-fill-quiet-active: var(--st-color-danger-fill-quiet-active);
+    --st-color-fill-loud-hover: var(--st-color-danger-fill-loud-hover);
+    --st-color-fill-loud-active: var(--st-color-danger-fill-loud-active);
+    --st-color-fill-normal-hover: var(--st-color-danger-fill-normal-hover);
+    --st-color-fill-normal-active: var(--st-color-danger-fill-normal-active);
+  }
+}

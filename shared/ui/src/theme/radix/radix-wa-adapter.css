@@ -1,0 +1,618 @@
+:root {
+  /**
+    * Conditional tokens to check if the key color is >= 60
+    * Key colors are the most colorful tint in a scale, recorded as --wa-color-{hue} in each palette
+    * The numeric value of the key is isolated as --wa-color-{hue}-key
+    * If key < 60, the result is 0%
+    * If key >= 60, the result is 100%
+    * Intended to be used in the color-mix() functions below
+    */
+  --colors-tomato: var(--colors-tomato-5);
+  --colors-tomato-alpha: var(--colors-tomato-alpha-5);
+  --colors-tomato-key: 50;
+  --colors-tomato-alpha-key: 50;
+  --colors-red: var(--colors-red-5);
+  --colors-red-alpha: var(--colors-red-alpha-5);
+  --colors-red-key: 50;
+  --colors-red-alpha-key: 50;
+  --colors-ruby: var(--colors-ruby-5);
+  --colors-ruby-alpha: var(--colors-ruby-alpha-5);
+  --colors-ruby-key: 50;
+  --colors-ruby-alpha-key: 50;
+  --colors-crimson: var(--colors-crimson-5);
+  --colors-crimson-alpha: var(--colors-crimson-alpha-5);
+  --colors-crimson-key: 50;
+  --colors-crimson-alpha-key: 50;
+  --colors-pink: var(--colors-pink-5);
+  --colors-pink-alpha: var(--colors-pink-alpha-5);
+  --colors-pink-key: 50;
+  --colors-pink-alpha-key: 50;
+  --colors-plum: var(--colors-plum-5);
+  --colors-plum-alpha: var(--colors-plum-alpha-5);
+  --colors-plum-key: 50;
+  --colors-plum-alpha-key: 50;
+  --colors-purple: var(--colors-purple-5);
+  --colors-purple-alpha: var(--colors-purple-alpha-5);
+  --colors-purple-key: 50;
+  --colors-purple-alpha-key: 50;
+  --colors-violet: var(--colors-violet-5);
+  --colors-violet-alpha: var(--colors-violet-alpha-5);
+  --colors-violet-key: 50;
+  --colors-violet-alpha-key: 50;
+  --colors-iris: var(--colors-iris-5);
+  --colors-iris-alpha: var(--colors-iris-alpha-5);
+  --colors-iris-key: 50;
+  --colors-iris-alpha-key: 50;
+  --colors-indigo: var(--colors-indigo-5);
+  --colors-indigo-alpha: var(--colors-indigo-alpha-5);
+  --colors-indigo-key: 50;
+  --colors-indigo-alpha-key: 50;
+  --colors-blue: var(--colors-blue-5);
+  --colors-blue-alpha: var(--colors-blue-alpha-5);
+  --colors-blue-key: 50;
+  --colors-blue-alpha-key: 50;
+  --colors-cyan: var(--colors-cyan-5);
+  --colors-cyan-alpha: var(--colors-cyan-alpha-5);
+  --colors-cyan-key: 50;
+  --colors-cyan-alpha-key: 50;
+  --colors-teal: var(--colors-teal-5);
+  --colors-teal-alpha: var(--colors-teal-alpha-5);
+  --colors-teal-key: 50;
+  --colors-teal-alpha-key: 50;
+  --colors-jade: var(--colors-jade-5);
+  --colors-jade-alpha: var(--colors-jade-alpha-5);
+  --colors-jade-key: 50;
+  --colors-jade-alpha-key: 50;
+  --colors-green: var(--colors-green-5);
+  --colors-green-alpha: var(--colors-green-alpha-5);
+  --colors-green-key: 50;
+  --colors-green-alpha-key: 50;
+  --colors-grass: var(--colors-grass-5);
+  --colors-grass-alpha: var(--colors-grass-alpha-5);
+  --colors-grass-key: 50;
+  --colors-grass-alpha-key: 50;
+  --colors-brown: var(--colors-brown-5);
+  --colors-brown-alpha: var(--colors-brown-alpha-5);
+  --colors-brown-key: 50;
+  --colors-brown-alpha-key: 50;
+  --colors-bronze: var(--colors-bronze-5);
+  --colors-bronze-alpha: var(--colors-bronze-alpha-5);
+  --colors-bronze-key: 50;
+  --colors-bronze-alpha-key: 50;
+  --colors-gold: var(--colors-gold-5);
+  --colors-gold-alpha: var(--colors-gold-alpha-5);
+  --colors-gold-key: 50;
+  --colors-gold-alpha-key: 50;
+  --colors-sky: var(--colors-sky-5);
+  --colors-sky-alpha: var(--colors-sky-alpha-5);
+  --colors-sky-key: 50;
+  --colors-sky-alpha-key: 50;
+  --colors-mint: var(--colors-mint-5);
+  --colors-mint-alpha: var(--colors-mint-alpha-5);
+  --colors-mint-key: 50;
+  --colors-mint-alpha-key: 50;
+  --colors-lime: var(--colors-lime-5);
+  --colors-lime-alpha: var(--colors-lime-alpha-5);
+  --colors-lime-key: 50;
+  --colors-lime-alpha-key: 50;
+  --colors-yellow: var(--colors-yellow-5);
+  --colors-yellow-alpha: var(--colors-yellow-alpha-5);
+  --colors-yellow-key: 50;
+  --colors-yellow-alpha-key: 50;
+  --colors-amber: var(--colors-amber-5);
+  --colors-amber-alpha: var(--colors-amber-alpha-5);
+  --colors-amber-key: 50;
+  --colors-amber-alpha-key: 50;
+  --colors-gray: var(--colors-gray-5);
+  --colors-gray-alpha: var(--colors-gray-alpha-5);
+  --colors-gray-key: 50;
+  --colors-gray-alpha-key: 50;
+  --colors-mauve: var(--colors-mauve-5);
+  --colors-mauve-alpha: var(--colors-mauve-alpha-5);
+  --colors-mauve-key: 50;
+  --colors-mauve-alpha-key: 50;
+  --colors-slate: var(--colors-slate-5);
+  --colors-slate-alpha: var(--colors-slate-alpha-5);
+  --colors-slate-key: 50;
+  --colors-slate-alpha-key: 50;
+  --colors-sage: var(--colors-sage-5);
+  --colors-sage-alpha: var(--colors-sage-alpha-5);
+  --colors-sage-key: 50;
+  --colors-sage-alpha-key: 50;
+  --colors-olive: var(--colors-olive-5);
+  --colors-olive-alpha: var(--colors-olive-alpha-5);
+  --colors-olive-key: 50;
+  --colors-olive-alpha-key: 50;
+  --colors-sand: var(--colors-sand-5);
+  --colors-sand-alpha: var(--colors-sand-alpha-5);
+  --colors-sand-key: 50;
+  --colors-sand-alpha-key: 50;
+
+  --colors-tomato-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-tomato-key), 1) * 100%)
+  );
+  --colors-tomato-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-tomato-alpha-key), 1) * 100%)
+  );
+  --colors-red-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-red-key), 1) * 100%)
+  );
+  --colors-red-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-red-alpha-key), 1) * 100%)
+  );
+  --colors-ruby-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-ruby-key), 1) * 100%)
+  );
+  --colors-ruby-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-ruby-alpha-key), 1) * 100%)
+  );
+  --colors-crimson-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-crimson-key), 1) * 100%)
+  );
+  --colors-crimson-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-crimson-alpha-key), 1) * 100%)
+  );
+  --colors-pink-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-pink-key), 1) * 100%)
+  );
+  --colors-pink-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-pink-alpha-key), 1) * 100%)
+  );
+  --colors-plum-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-plum-key), 1) * 100%)
+  );
+  --colors-plum-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-plum-alpha-key), 1) * 100%)
+  );
+  --colors-purple-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-purple-key), 1) * 100%)
+  );
+  --colors-purple-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-purple-alpha-key), 1) * 100%)
+  );
+  --colors-violet-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-violet-key), 1) * 100%)
+  );
+  --colors-violet-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-violet-alpha-key), 1) * 100%)
+  );
+  --colors-iris-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-iris-key), 1) * 100%)
+  );
+  --colors-iris-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-iris-alpha-key), 1) * 100%)
+  );
+  --colors-indigo-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-indigo-key), 1) * 100%)
+  );
+  --colors-indigo-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-indigo-alpha-key), 1) * 100%)
+  );
+  --colors-blue-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-blue-key), 1) * 100%)
+  );
+  --colors-blue-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-blue-alpha-key), 1) * 100%)
+  );
+  --colors-cyan-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-cyan-key), 1) * 100%)
+  );
+  --colors-cyan-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-cyan-alpha-key), 1) * 100%)
+  );
+  --colors-teal-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-teal-key), 1) * 100%)
+  );
+  --colors-teal-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-teal-alpha-key), 1) * 100%)
+  );
+  --colors-jade-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-jade-key), 1) * 100%)
+  );
+  --colors-jade-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-jade-alpha-key), 1) * 100%)
+  );
+  --colors-green-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-green-key), 1) * 100%)
+  );
+  --colors-green-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-green-alpha-key), 1) * 100%)
+  );
+  --colors-grass-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-grass-key), 1) * 100%)
+  );
+  --colors-grass-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-grass-alpha-key), 1) * 100%)
+  );
+  --colors-brown-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-brown-key), 1) * 100%)
+  );
+  --colors-brown-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-brown-alpha-key), 1) * 100%)
+  );
+  --colors-bronze-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-bronze-key), 1) * 100%)
+  );
+  --colors-bronze-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-bronze-alpha-key), 1) * 100%)
+  );
+  --colors-gold-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-gold-key), 1) * 100%)
+  );
+  --colors-gold-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-gold-alpha-key), 1) * 100%)
+  );
+  --colors-sky-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-sky-key), 1) * 100%)
+  );
+  --colors-sky-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-sky-alpha-key), 1) * 100%)
+  );
+  --colors-mint-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-mint-key), 1) * 100%)
+  );
+  --colors-mint-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-mint-alpha-key), 1) * 100%)
+  );
+  --colors-lime-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-lime-key), 1) * 100%)
+  );
+  --colors-lime-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-lime-alpha-key), 1) * 100%)
+  );
+  --colors-yellow-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-yellow-key), 1) * 100%)
+  );
+  --colors-yellow-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-yellow-alpha-key), 1) * 100%)
+  );
+  --colors-amber-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-amber-key), 1) * 100%)
+  );
+  --colors-amber-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-amber-alpha-key), 1) * 100%)
+  );
+  --colors-gray-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-gray-key), 1) * 100%)
+  );
+  --colors-gray-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-gray-alpha-key), 1) * 100%)
+  );
+  --colors-mauve-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-mauve-key), 1) * 100%)
+  );
+  --colors-mauve-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-mauve-alpha-key), 1) * 100%)
+  );
+  --colors-slate-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-slate-key), 1) * 100%)
+  );
+  --colors-slate-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-slate-alpha-key), 1) * 100%)
+  );
+  --colors-sage-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-sage-key), 1) * 100%)
+  );
+  --colors-sage-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-sage-alpha-key), 1) * 100%)
+  );
+  --colors-olive-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-olive-key), 1) * 100%)
+  );
+  --colors-olive-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-olive-alpha-key), 1) * 100%)
+  );
+  --colors-sand-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-sand-key), 1) * 100%)
+  );
+  --colors-sand-alpha-gte-60: calc(
+    100% - (clamp(0, 60 - var(--colors-sand-alpha-key), 1) * 100%)
+  );
+
+  /**
+    * Tokens to set text color with appropriate WCAG 2.1 contrast
+    * If key < 60, the text color is white
+    * If key >= 60, the text color is {hue}-10
+    */
+
+  --colors-tomato-on: color-mix(
+    in oklab,
+    var(--colors-tomato-3) var(--colors-tomato-gte-60),
+    white
+  );
+  --colors-tomato-alpha-on: color-mix(
+    in oklab,
+    var(--colors-tomato-alpha-3) var(--colors-tomato-alpha-gte-60),
+    white
+  );
+  --colors-red-on: color-mix(
+    in oklab,
+    var(--colors-red-3) var(--colors-red-gte-60),
+    white
+  );
+  --colors-red-alpha-on: color-mix(
+    in oklab,
+    var(--colors-red-alpha-3) var(--colors-red-alpha-gte-60),
+    white
+  );
+  --colors-ruby-on: color-mix(
+    in oklab,
+    var(--colors-ruby-3) var(--colors-ruby-gte-60),
+    white
+  );
+  --colors-ruby-alpha-on: color-mix(
+    in oklab,
+    var(--colors-ruby-alpha-3) var(--colors-ruby-alpha-gte-60),
+    white
+  );
+  --colors-crimson-on: color-mix(
+    in oklab,
+    var(--colors-crimson-3) var(--colors-crimson-gte-60),
+    white
+  );
+  --colors-crimson-alpha-on: color-mix(
+    in oklab,
+    var(--colors-crimson-alpha-3) var(--colors-crimson-alpha-gte-60),
+    white
+  );
+  --colors-pink-on: color-mix(
+    in oklab,
+    var(--colors-pink-3) var(--colors-pink-gte-60),
+    white
+  );
+  --colors-pink-alpha-on: color-mix(
+    in oklab,
+    var(--colors-pink-alpha-3) var(--colors-pink-alpha-gte-60),
+    white
+  );
+  --colors-plum-on: color-mix(
+    in oklab,
+    var(--colors-plum-3) var(--colors-plum-gte-60),
+    white
+  );
+  --colors-plum-alpha-on: color-mix(
+    in oklab,
+    var(--colors-plum-alpha-3) var(--colors-plum-alpha-gte-60),
+    white
+  );
+  --colors-purple-on: color-mix(
+    in oklab,
+    var(--colors-purple-3) var(--colors-purple-gte-60),
+    white
+  );
+  --colors-purple-alpha-on: color-mix(
+    in oklab,
+    var(--colors-purple-alpha-3) var(--colors-purple-alpha-gte-60),
+    white
+  );
+  --colors-violet-on: color-mix(
+    in oklab,
+    var(--colors-violet-3) var(--colors-violet-gte-60),
+    white
+  );
+  --colors-violet-alpha-on: color-mix(
+    in oklab,
+    var(--colors-violet-alpha-3) var(--colors-violet-alpha-gte-60),
+    white
+  );
+  --colors-iris-on: color-mix(
+    in oklab,
+    var(--colors-iris-3) var(--colors-iris-gte-60),
+    white
+  );
+  --colors-iris-alpha-on: color-mix(
+    in oklab,
+    var(--colors-iris-alpha-3) var(--colors-iris-alpha-gte-60),
+    white
+  );
+  --colors-indigo-on: color-mix(
+    in oklab,
+    var(--colors-indigo-3) var(--colors-indigo-gte-60),
+    white
+  );
+  --colors-indigo-alpha-on: color-mix(
+    in oklab,
+    var(--colors-indigo-alpha-3) var(--colors-indigo-alpha-gte-60),
+    white
+  );
+  --colors-blue-on: color-mix(
+    in oklab,
+    var(--colors-blue-3) var(--colors-blue-gte-60),
+    white
+  );
+  --colors-blue-alpha-on: color-mix(
+    in oklab,
+    var(--colors-blue-alpha-3) var(--colors-blue-alpha-gte-60),
+    white
+  );
+  --colors-cyan-on: color-mix(
+    in oklab,
+    var(--colors-cyan-3) var(--colors-cyan-gte-60),
+    white
+  );
+  --colors-cyan-alpha-on: color-mix(
+    in oklab,
+    var(--colors-cyan-alpha-3) var(--colors-cyan-alpha-gte-60),
+    white
+  );
+  --colors-teal-on: color-mix(
+    in oklab,
+    var(--colors-teal-3) var(--colors-teal-gte-60),
+    white
+  );
+  --colors-teal-alpha-on: color-mix(
+    in oklab,
+    var(--colors-teal-alpha-3) var(--colors-teal-alpha-gte-60),
+    white
+  );
+  --colors-jade-on: color-mix(
+    in oklab,
+    var(--colors-jade-3) var(--colors-jade-gte-60),
+    white
+  );
+  --colors-jade-alpha-on: color-mix(
+    in oklab,
+    var(--colors-jade-alpha-3) var(--colors-jade-alpha-gte-60),
+    white
+  );
+  --colors-green-on: color-mix(
+    in oklab,
+    var(--colors-green-3) var(--colors-green-gte-60),
+    white
+  );
+  --colors-green-alpha-on: color-mix(
+    in oklab,
+    var(--colors-green-alpha-3) var(--colors-green-alpha-gte-60),
+    white
+  );
+  --colors-grass-on: color-mix(
+    in oklab,
+    var(--colors-grass-3) var(--colors-grass-gte-60),
+    white
+  );
+  --colors-grass-alpha-on: color-mix(
+    in oklab,
+    var(--colors-grass-alpha-3) var(--colors-grass-alpha-gte-60),
+    white
+  );
+  --colors-brown-on: color-mix(
+    in oklab,
+    var(--colors-brown-3) var(--colors-brown-gte-60),
+    white
+  );
+  --colors-brown-alpha-on: color-mix(
+    in oklab,
+    var(--colors-brown-alpha-3) var(--colors-brown-alpha-gte-60),
+    white
+  );
+  --colors-bronze-on: color-mix(
+    in oklab,
+    var(--colors-bronze-3) var(--colors-bronze-gte-60),
+    white
+  );
+  --colors-bronze-alpha-on: color-mix(
+    in oklab,
+    var(--colors-bronze-alpha-3) var(--colors-bronze-alpha-gte-60),
+    white
+  );
+  --colors-gold-on: color-mix(
+    in oklab,
+    var(--colors-gold-3) var(--colors-gold-gte-60),
+    white
+  );
+  --colors-gold-alpha-on: color-mix(
+    in oklab,
+    var(--colors-gold-alpha-3) var(--colors-gold-alpha-gte-60),
+    white
+  );
+  --colors-sky-on: color-mix(
+    in oklab,
+    var(--colors-sky-3) var(--colors-sky-gte-60),
+    white
+  );
+  --colors-sky-alpha-on: color-mix(
+    in oklab,
+    var(--colors-sky-alpha-3) var(--colors-sky-alpha-gte-60),
+    white
+  );
+  --colors-mint-on: color-mix(
+    in oklab,
+    var(--colors-mint-3) var(--colors-mint-gte-60),
+    white
+  );
+  --colors-mint-alpha-on: color-mix(
+    in oklab,
+    var(--colors-mint-alpha-3) var(--colors-mint-alpha-gte-60),
+    white
+  );
+  --colors-lime-on: color-mix(
+    in oklab,
+    var(--colors-lime-3) var(--colors-lime-gte-60),
+    white
+  );
+  --colors-lime-alpha-on: color-mix(
+    in oklab,
+    var(--colors-lime-alpha-3) var(--colors-lime-alpha-gte-60),
+    white
+  );
+  --colors-yellow-on: color-mix(
+    in oklab,
+    var(--colors-yellow-3) var(--colors-yellow-gte-60),
+    white
+  );
+  --colors-yellow-alpha-on: color-mix(
+    in oklab,
+    var(--colors-yellow-alpha-3) var(--colors-yellow-alpha-gte-60),
+    white
+  );
+  --colors-amber-on: color-mix(
+    in oklab,
+    var(--colors-amber-3) var(--colors-amber-gte-60),
+    white
+  );
+  --colors-amber-alpha-on: color-mix(
+    in oklab,
+    var(--colors-amber-alpha-3) var(--colors-amber-alpha-gte-60),
+    white
+  );
+  --colors-gray-on: color-mix(
+    in oklab,
+    var(--colors-gray-3) var(--colors-gray-gte-60),
+    white
+  );
+  --colors-gray-alpha-on: color-mix(
+    in oklab,
+    var(--colors-gray-alpha-3) var(--colors-gray-alpha-gte-60),
+    white
+  );
+  --colors-mauve-on: color-mix(
+    in oklab,
+    var(--colors-mauve-3) var(--colors-mauve-gte-60),
+    white
+  );
+  --colors-mauve-alpha-on: color-mix(
+    in oklab,
+    var(--colors-mauve-alpha-3) var(--colors-mauve-alpha-gte-60),
+    white
+  );
+  --colors-slate-on: color-mix(
+    in oklab,
+    var(--colors-slate-3) var(--colors-slate-gte-60),
+    white
+  );
+  --colors-slate-alpha-on: color-mix(
+    in oklab,
+    var(--colors-slate-alpha-3) var(--colors-slate-alpha-gte-60),
+    white
+  );
+  --colors-sage-on: color-mix(
+    in oklab,
+    var(--colors-sage-3) var(--colors-sage-gte-60),
+    white
+  );
+  --colors-sage-alpha-on: color-mix(
+    in oklab,
+    var(--colors-sage-alpha-3) var(--colors-sage-alpha-gte-60),
+    white
+  );
+  --colors-olive-on: color-mix(
+    in oklab,
+    var(--colors-olive-3) var(--colors-olive-gte-60),
+    white
+  );
+  --colors-olive-alpha-on: color-mix(
+    in oklab,
+    var(--colors-olive-alpha-3) var(--colors-olive-alpha-gte-60),
+    white
+  );
+  --colors-sand-on: color-mix(
+    in oklab,
+    var(--colors-sand-3) var(--colors-sand-gte-60),
+    white
+  );
+  --colors-sand-alpha-on: color-mix(
+    in oklab,
+    var(--colors-sand-alpha-3) var(--colors-sand-alpha-gte-60),
+    white
+  );
+}

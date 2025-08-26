@@ -1,0 +1,17 @@
+/* Target the body part when header exists - use separate selectors */
+wa-card {
+  --spacing: var(--st-card-spacing);
+}
+wa-card:has([slot="header"])::part(body) {
+  padding-top: calc(var(--spacing) / 2);
+}
+wa-card:has([slot="header"])::part(header) {
+  padding-top: var(--spacing);
+  padding-bottom: calc(var(--spacing) / 2);
+}
+wa-card:has([slot="footer"])::part(body) {
+  padding-bottom: calc(var(--spacing) / 2);
+}
+wa-card:has([slot="footer"])::part(footer) {
+  padding-top: calc(var(--spacing) / 2);
+}

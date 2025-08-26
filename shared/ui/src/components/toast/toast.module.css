@@ -1,0 +1,27 @@
+:global(.plugin-profile) {
+  .st-toast-container {
+    position: fixed;
+    top: 68px;
+    right: 20px;
+    z-index: var(--plugin-z-toast);
+    display: flex;
+    flex-direction: column;
+    gap: var(--plugin-spacing-lg);
+    max-width: 400px;
+    pointer-events: none;
+  }
+
+  .st-toast {
+    opacity: 0;
+  }
+
+  .st-toast--visible {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  .st-toast--removing {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+}

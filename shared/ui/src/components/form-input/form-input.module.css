@@ -1,0 +1,7 @@
+:global(.plugin-profile) {
+  .st-input .st-input-error {
+    color: var(--plugin-color-error-text);
+    font-size: 12px;
+    margin-top: 4px;
+  }
+}

@@ -1,0 +1,180 @@
+@layer wa-theme {
+  :where(:root),
+  .wa-theme-default,
+  .wa-light,
+  .wa-dark,
+  .wa-invert {
+    /* Font sizes use a ratio of 1.125 to scale sizes proportionally.
+     * For larger font sizes, each size is twice 1.125x larger to maximize impact.
+     * Each value uses `rem` units and is rounded to the nearest whole pixel when rendered. */
+
+    --wa-font-size-smaller: round(calc(1em / 1.125), 1px);
+    --wa-font-size-larger: round(calc(1em * 1.125 * 1.125), 1px);
+
+    --wa-font-weight-light: 300;
+    --wa-font-weight-normal: 400;
+    --wa-font-weight-semibold: 500;
+    --wa-font-weight-bold: 600;
+
+    --wa-font-weight-body: var(--wa-font-weight-normal);
+    --wa-font-weight-heading: var(--wa-font-weight-bold);
+    --wa-font-weight-code: var(--wa-font-weight-normal);
+    --wa-font-weight-longform: var(--wa-font-weight-normal);
+    --wa-font-weight-action: var(--wa-font-weight-semibold);
+
+    --wa-line-height-condensed: 1.2;
+    --wa-line-height-normal: 1.6;
+    --wa-line-height-expanded: 2;
+
+    --wa-link-decoration-default: underline
+      color-mix(in oklab, currentColor 70%, transparent) dotted;
+    --wa-link-decoration-hover: underline;
+    /* #endregion */
+
+    /* #region Space ~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+    --wa-space-scale: 1;
+    --wa-space-3xs: calc(var(--wa-space-scale) * 0.125rem); /* 2px */
+    --wa-space-2xs: calc(var(--wa-space-scale) * 0.25rem); /* 4px */
+    --wa-space-xs: calc(var(--wa-space-scale) * 0.5rem); /* 8px */
+    --wa-space-s: calc(var(--wa-space-scale) * 0.75rem); /* 12px */
+    --wa-space-m: calc(var(--wa-space-scale) * 1rem); /* 16px */
+    --wa-space-l: calc(var(--wa-space-scale) * 1.5rem); /* 24px */
+    --wa-space-xl: calc(var(--wa-space-scale) * 2rem); /* 32px */
+    --wa-space-2xl: calc(var(--wa-space-scale) * 2.5rem); /* 40px */
+    --wa-space-3xl: calc(var(--wa-space-scale) * 3rem); /* 48px */
+    --wa-space-4xl: calc(var(--wa-space-scale) * 4rem); /* 64px */
+
+    --wa-content-spacing: var(--wa-space-l);
+    /* #endregion */
+
+    /* #region Borders ~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+    --wa-border-style: solid;
+
+    --wa-border-width-scale: 1;
+    --wa-border-width-s: calc(var(--wa-border-width-scale) * 0.0625rem);
+    --wa-border-width-m: calc(var(--wa-border-width-scale) * 0.125rem);
+    --wa-border-width-l: calc(var(--wa-border-width-scale) * 0.1875rem);
+    /* #endregion */
+
+    /* #region Rounding ~~~~~~~~~~~~~~~~~~~~~~~~~ */
+    --wa-border-radius-scale: 1;
+    --wa-border-radius-s: calc(var(--wa-border-radius-scale) * 0.1875rem);
+    --wa-border-radius-m: calc(var(--wa-border-radius-scale) * 0.375rem);
+    --wa-border-radius-l: calc(var(--wa-border-radius-scale) * 0.75rem);
+
+    --wa-border-radius-pill: 9999px;
+    --wa-border-radius-circle: 50%;
+    --wa-border-radius-square: 0px;
+    /* #endregion */
+
+    /* #region Focus ~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+    --wa-focus-ring-style: solid;
+    --wa-focus-ring-width: 0.1875rem; /* 3px */
+    --wa-focus-ring: var(--wa-focus-ring-style) var(--wa-focus-ring-width)
+      var(--wa-color-focus);
+    --wa-focus-ring-offset: 0.0625rem; /* 1px */
+    /* #endregion */
+
+    /* #region Shadows ~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+    --wa-shadow-offset-x-scale: 0;
+    --wa-shadow-offset-x-m: calc(var(--wa-shadow-offset-x-scale) * 0.25rem);
+    --wa-shadow-offset-x-l: calc(var(--wa-shadow-offset-x-scale) * 0.5rem);
+
+    --wa-shadow-offset-y-scale: 1;
+    --wa-shadow-offset-y-m: calc(var(--wa-shadow-offset-y-scale) * 0.25rem);
+    --wa-shadow-offset-y-l: calc(var(--wa-shadow-offset-y-scale) * 0.5rem);
+
+    --wa-shadow-blur-scale: 1;
+    --wa-shadow-blur-m: calc(var(--wa-shadow-blur-scale) * 0.25rem);
+    --wa-shadow-blur-l: calc(var(--wa-shadow-blur-scale) * 0.5rem);
+
+    --wa-shadow-spread-scale: -0.5;
+    --wa-shadow-spread-m: calc(var(--wa-shadow-spread-scale) * 0.25rem);
+    --wa-shadow-spread-l: calc(var(--wa-shadow-spread-scale) * 0.5rem);
+
+    --wa-shadow-s: 0 1px 4px 0 rgba(0, 0, 61, 0.05),
+      0 2px 1px -1px rgba(0, 0, 61, 0.05), 0 1px 3px 0 rgba(0, 0, 0, 0.05); /* done */
+    --wa-shadow-m: var(--wa-shadow-offset-x-m) var(--wa-shadow-offset-y-m)
+      var(--wa-shadow-blur-m) var(--wa-shadow-spread-m) var(--wa-color-shadow);
+    --wa-shadow-l: 0 12px 32px -16px rgba(0, 0, 0, 0.05),
+      0 8px 40px 0 rgba(0, 0, 61, 0.05); /* done */
+    /* #endregion */
+
+    /* #region Transitions ~~~~~~~~~~~~~~~~~~~~~~ */
+    --wa-transition-easing: ease;
+    --wa-transition-slow: 300ms;
+    --wa-transition-normal: 150ms;
+    --wa-transition-fast: 75ms;
+    /* #endregion */
+
+    /* #region Components ~~~~~~~~~~~~~~~~~~~~~~~ */
+    /* Form Controls */
+    --wa-form-control-background-color: var(--wa-color-surface-default);
+
+    --wa-form-control-border-color: var(--wa-color-neutral-border-loud);
+    --wa-form-control-border-color-hover: var(
+      --st-color-neutral-border-loud-hover
+    ); /* done */
+    --wa-form-control-border-color-focus: var(
+      --st-color-neutral-border-loud-focus
+    ); /* done */
+    --wa-form-control-border-style: var(--wa-border-style);
+    --wa-form-control-border-width: var(--wa-border-width-s);
+    --wa-form-control-border-radius: var(--wa-border-radius-m);
+
+    --wa-form-control-activated-color: var(--wa-color-brand-fill-loud);
+
+    --wa-form-control-label-color: var(--wa-color-text-normal);
+    --wa-form-control-label-font-weight: var(--wa-font-weight-semibold);
+    --wa-form-control-label-line-height: var(--wa-line-height-condensed);
+
+    --wa-form-control-value-color: var(--wa-color-text-normal);
+    --wa-form-control-value-font-weight: var(--wa-font-weight-body);
+    --wa-form-control-value-line-height: var(--wa-line-height-condensed);
+
+    --wa-form-control-hint-color: var(--wa-color-text-quiet);
+    --wa-form-control-hint-font-weight: var(--wa-font-weight-body);
+    --wa-form-control-hint-line-height: var(--wa-line-height-normal);
+
+    --wa-form-control-placeholder-color: var(
+      --wa-color-neutral-alpha-80
+    ); /* done */
+
+    --wa-form-control-required-content: "*";
+    --wa-form-control-required-content-color: var(--wa-color-danger-90);
+    --wa-form-control-required-content-offset: -0.1em;
+
+    --wa-form-control-padding-block: 0.75em;
+    --wa-form-control-padding-inline: 1em;
+    --wa-form-control-height: round(
+      calc(
+        2 * var(--wa-form-control-padding-block) + 1em *
+          var(--wa-form-control-value-line-height)
+      ),
+      1px
+    );
+    --wa-form-control-toggle-size: round(1.25em, 1px);
+
+    /* Panels */
+    --wa-panel-border-style: var(--wa-border-style);
+    --wa-panel-border-width: var(--wa-border-width-s);
+    --wa-panel-border-radius: var(--wa-border-radius-l);
+
+    /* Tooltips */
+    --wa-tooltip-arrow-size: 0.375rem;
+
+    --wa-tooltip-background-color: var(--wa-color-text-normal);
+
+    --wa-tooltip-border-color: var(--wa-tooltip-background-color);
+    --wa-tooltip-border-style: var(--wa-border-style);
+    --wa-tooltip-border-width: var(--wa-border-width-s);
+    --wa-tooltip-border-radius: var(--wa-border-radius-s);
+
+    --wa-tooltip-content-color: var(--wa-color-surface-default);
+    --wa-tooltip-font-size: var(--wa-font-size-s);
+    --wa-tooltip-line-height: var(--wa-line-height-normal);
+
+    --st-card-spacing: calc(var(--wa-space-scale) * 1.875rem); /* 30px */
+    /* #endregion */
+  }
+}
