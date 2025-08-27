@@ -1,0 +1,24 @@
+{
+  "name": "@supertokens-plugin-profile/tenant-discovery-frontend",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0",
+    "supertokens-auth-react": ">=0.48.0",
+    "supertokens-web-js": ">=0.16.0"
+  },
+  "files": [
+    "dist/index.css"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  }
+}

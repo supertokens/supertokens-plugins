@@ -1,0 +1,22 @@
+{
+  "files": [],
+  "include": [],
+  "references": [
+    {
+      "path": "../../common/frontend"
+    },
+    {
+      "path": "../../common/shared"
+    },
+    {
+      "path": "./tsconfig.lib.json"
+    },
+    {
+      "path": "./tsconfig.spec.json"
+    },
+    {
+      "path": "./tsconfig.storybook.json"
+    }
+  ],
+  "extends": "../../../tsconfig.base.json"
+}
