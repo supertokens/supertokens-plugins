@@ -8,6 +8,7 @@ const meta: Meta<typeof Callout> = {
   parameters: {
     layout: "centered",
   },
+
   decorators: [
     (Story) => (
       <ThemeProvider>

@@ -7,9 +7,7 @@ import { BaseWaProps } from "../types";
 
 const cx = classNames.bind(style);
 
-interface DateInputProps
-  extends BaseInput<string>,
-    Pick<BaseWaProps, "size" | "appearance"> {
+interface DateInputProps extends BaseInput<string>, Pick<BaseWaProps, "size" | "appearance"> {
   name?: string;
   readonly?: boolean;
   autofocus?: boolean;
@@ -23,8 +21,7 @@ export const DateInput: React.FC<DateInputProps> = (_props) => {
     components: [
       {
         name: "wa-input",
-        importCallback: () =>
-          import("@awesome.me/webawesome/dist/components/input/input.js"),
+        importCallback: () => import("@awesome.me/webawesome/dist/components/input/input.js"),
       },
     ],
     className: cx("st-input"),

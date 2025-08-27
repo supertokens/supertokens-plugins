@@ -3,14 +3,9 @@ const post =
   async <T>(
     path: string,
     body: any,
-    {
-      withSession,
-      params,
-    }: { withSession: boolean; params?: Record<string, string> },
+    { withSession, params }: { withSession: boolean; params?: Record<string, string> },
   ): Promise<T> => {
-    const queryParams = params
-      ? `?${new URLSearchParams(params).toString()}`
-      : "";
+    const queryParams = params ? `?${new URLSearchParams(params).toString()}` : "";
 
     const url = `${basePath}${path}${queryParams}`;
 
@@ -60,14 +55,9 @@ const get =
   (basePath: string) =>
   async <T>(
     path: string,
-    {
-      withSession,
-      params,
-    }: { withSession: boolean; params?: Record<string, string> },
+    { withSession, params }: { withSession: boolean; params?: Record<string, string> },
   ): Promise<T> => {
-    const queryParams = params
-      ? `?${new URLSearchParams(params).toString()}`
-      : "";
+    const queryParams = params ? `?${new URLSearchParams(params).toString()}` : "";
 
     const url = `${basePath}${path}${queryParams}`;
 

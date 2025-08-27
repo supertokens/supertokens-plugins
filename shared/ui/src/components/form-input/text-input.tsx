@@ -28,8 +28,7 @@ export const TextInput = (_props: TextInputProps) => {
     components: [
       {
         name: "wa-input",
-        importCallback: () =>
-          import("@awesome.me/webawesome/dist/components/input/input.js"),
+        importCallback: () => import("@awesome.me/webawesome/dist/components/input/input.js"),
       },
     ],
     className: cx("st-input"),

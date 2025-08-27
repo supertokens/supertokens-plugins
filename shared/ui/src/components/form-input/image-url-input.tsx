@@ -68,9 +68,7 @@ export const ImageUrlInput = ({
     <div className={cx("plugin-profile-form-input-wrapper", className)}>
       <label htmlFor={id}>
         {label}
-        {required && (
-          <span className={cx("plugin-profile-form-required-label")}> *</span>
-        )}
+        {required && <span className={cx("plugin-profile-form-required-label")}> *</span>}
       </label>
       <input
         id={id}
@@ -83,9 +81,7 @@ export const ImageUrlInput = ({
         required={required}
         disabled={disabled}
       />
-      {error && (
-        <div className={cx("plugin-profile-form-error-message")}>{error}</div>
-      )}
+      {error && <div className={cx("plugin-profile-form-error-message")}>{error}</div>}
       {imageError && !error && (
         <div className={cx("plugin-profile-form-error-message")}>
           Please enter a valid image URL (jpg, png, gif, webp, bmp, or svg)

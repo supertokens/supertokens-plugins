@@ -7,9 +7,7 @@ import { BaseWaProps } from "../types";
 
 const cx = classNames.bind(style);
 
-interface TextareaInputProps
-  extends BaseInput<string>,
-    Pick<BaseWaProps, "size" | "appearance"> {
+interface TextareaInputProps extends BaseInput<string>, Pick<BaseWaProps, "size" | "appearance"> {
   name?: string;
   rows?: number;
   resize?: boolean;
@@ -27,8 +25,7 @@ export const TextareaInput = (_props: TextareaInputProps) => {
     components: [
       {
         name: "wa-textarea",
-        importCallback: () =>
-          import("@awesome.me/webawesome/dist/components/textarea/textarea.js"),
+        importCallback: () => import("@awesome.me/webawesome/dist/components/textarea/textarea.js"),
       },
     ],
     className: cx("st-input"),

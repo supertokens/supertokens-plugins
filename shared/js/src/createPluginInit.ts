@@ -6,18 +6,12 @@ type IfEquals<T, U, Y = unknown, N = never> =
 type InitFunction<Config, Implementation, Plugin> = IfEquals<
   Config,
   undefined,
-  (config?: {
-    override?: (originalImplementation: Implementation) => Implementation;
-  }) => Plugin,
+  (config?: { override?: (originalImplementation: Implementation) => Implementation }) => Plugin,
   IfEquals<
     Config,
     Partial<Config>,
-    (
-      config?: Config & { override?: (oI: Implementation) => Implementation },
-    ) => Plugin,
-    (
-      config: Config & { override?: (oI: Implementation) => Implementation },
-    ) => Plugin
+    (config?: Config & { override?: (oI: Implementation) => Implementation }) => Plugin,
+    (config: Config & { override?: (oI: Implementation) => Implementation }) => Plugin
   >
 >;
 
@@ -32,35 +26,18 @@ export const createPluginInitFunction = <
   PluginImplementation extends ImplType<PluginImplementation> = {},
   NormalisedPublicConfig = PluginConfig,
 >(
-  init: (
-    config: NormalisedPublicConfig,
-    implementation: PluginImplementation,
-  ) => SupertokensPlugin,
-  getImplementation?:
-    | PluginImplementation
-    | ((config: NormalisedPublicConfig) => PluginImplementation),
-  getNormalisedConfig: (config: PluginConfig) => NormalisedPublicConfig = (
-    config,
-  ) => config as unknown as NormalisedPublicConfig,
-): InitFunction<
-  PluginConfig,
-  OverridableFunctions<PluginImplementation>,
-  SupertokensPlugin
-> => {
-  const getNormalizedImplementation: (
-    config: NormalisedPublicConfig,
-  ) => PluginImplementation =
+  init: (config: NormalisedPublicConfig, implementation: PluginImplementation) => SupertokensPlugin,
+  getImplementation?: PluginImplementation | ((config: NormalisedPublicConfig) => PluginImplementation),
+  getNormalisedConfig: (config: PluginConfig) => NormalisedPublicConfig = (config) =>
+    config as unknown as NormalisedPublicConfig,
+): InitFunction<PluginConfig, OverridableFunctions<PluginImplementation>, SupertokensPlugin> => {
+  const getNormalizedImplementation: (config: NormalisedPublicConfig) => PluginImplementation =
     typeof getImplementation === "function"
       ? getImplementation
-      : (_config: NormalisedPublicConfig) =>
-          (getImplementation as PluginImplementation) || {};
+      : (_config: NormalisedPublicConfig) => (getImplementation as PluginImplementation) || {};
 
   // @ts-ignore
-  return (
-    inputConfig: Parameters<
-      InitFunction<PluginConfig, PluginImplementation, SupertokensPlugin>
-    >[0],
-  ) => {
+  return (inputConfig: Parameters<InitFunction<PluginConfig, PluginImplementation, SupertokensPlugin>>[0]) => {
     const config = getNormalisedConfig((inputConfig || {}) as PluginConfig);
     const baseImplementation = getNormalizedImplementation(config);
     const overrideBuilder = new OverrideableBuilder(baseImplementation);

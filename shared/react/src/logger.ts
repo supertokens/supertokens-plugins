@@ -4,10 +4,7 @@ export const buildLogger = (pluginId: string, version: string) => {
 
   function logDebugMessage(message: string) {
     if (enabled) {
-      console.log(
-        namespace,
-        `{t: "${new Date().toISOString()}", message: \"${message}\", version: "${version}"}`
-      );
+      console.log(namespace, `{t: "${new Date().toISOString()}", message: \"${message}\", version: "${version}"}`);
       console.log();
     }
   }

@@ -7,9 +7,7 @@ import { BaseWaProps } from "../types";
 
 const cx = classNames.bind(style);
 
-interface CheckboxInputProps
-  extends BaseInput<boolean>,
-    Pick<BaseWaProps, "size"> {
+interface CheckboxInputProps extends BaseInput<boolean>, Pick<BaseWaProps, "size"> {
   name?: string;
   checked?: boolean;
 }
@@ -22,8 +20,7 @@ export const CheckboxInput = (_props: CheckboxInputProps) => {
     components: [
       {
         name: "wa-checkbox",
-        importCallback: () =>
-          import("@awesome.me/webawesome/dist/components/checkbox/checkbox.js"),
+        importCallback: () => import("@awesome.me/webawesome/dist/components/checkbox/checkbox.js"),
       },
     ],
     className: cx("st-input"),

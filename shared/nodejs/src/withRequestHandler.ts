@@ -3,10 +3,7 @@ import { JSONObject, PluginRouteHandler } from "supertokens-node/types";
 export const withRequestHandler = (
   fn: (
     ...params: Parameters<PluginRouteHandler["handler"]>
-  ) => Promise<
-    | ({ status: "OK" } & JSONObject)
-    | ({ status: string; code?: number } & JSONObject)
-  >,
+  ) => Promise<({ status: "OK" } & JSONObject) | ({ status: string; code?: number } & JSONObject)>,
 ): PluginRouteHandler["handler"] => {
   return async (req, res, session, userContext) => {
     const result = await fn(req, res, session, userContext);

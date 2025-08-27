@@ -22,7 +22,7 @@ const getFileLocation = () => {
 export const buildLogger = (
   pluginId: string,
   version: string,
-  { fileLocation = true }: { fileLocation?: boolean } = {}
+  { fileLocation = true }: { fileLocation?: boolean } = {},
 ) => {
   const namespace = `com.supertokens.plugin.${pluginId}`;
 
@@ -31,7 +31,7 @@ export const buildLogger = (
       debug(namespace)(
         `{t: "${new Date().toISOString()}", message: \"${message}\", file: \"${
           fileLocation ? getFileLocation() : "N/A"
-        }\" version: "${version}"}`
+        }\" version: "${version}"}`,
       );
       console.log();
     }

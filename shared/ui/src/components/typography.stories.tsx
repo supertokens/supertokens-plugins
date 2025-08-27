@@ -1,9 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { ThemeProvider } from "./theme-provider/theme-provider";
 
-const TypographyComponent = (
-  props: React.HTMLAttributes<HTMLParagraphElement>
-) => (
+const TypographyComponent = (props: React.HTMLAttributes<HTMLParagraphElement>) => (
   <>
     <style>{`.typo-row { display: flex; flex-direction: row; align-items: center; gap: 1rem; }`}</style>
     <div className="typo-row">

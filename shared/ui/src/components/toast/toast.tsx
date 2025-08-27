@@ -41,8 +41,7 @@ export const Toast = (props: ToastProps) => {
       className={cx("st-toast", props.className, {
         "st-toast--visible": isVisible,
       })}
-      icon={getIcon()}
-    >
+      icon={getIcon()}>
       {props.message}
     </Callout>
   );

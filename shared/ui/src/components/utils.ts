@@ -7,9 +7,7 @@ type WebComponentProps<T extends ReactProps> = NonNullable<T> & {
   style?: Record<string, string | number>;
 };
 
-export const buildWebComponentProps = <T extends ReactProps>(
-  props: T
-): WebComponentProps<T> => {
+export const buildWebComponentProps = <T extends ReactProps>(props: T): WebComponentProps<T> => {
   if (!props) return {} as WebComponentProps<T>;
 
   const [boolProps, commonProps] = Object.keys(props).reduce(
@@ -22,7 +20,7 @@ export const buildWebComponentProps = <T extends ReactProps>(
         return [boolProps, { ...commonProps, [key]: value }];
       }
     },
-    [{} as Record<string, boolean>, {} as Record<string, any>]
+    [{} as Record<string, boolean>, {} as Record<string, any>],
   );
 
   const webComponentProps = {
@@ -34,10 +32,7 @@ export const buildWebComponentProps = <T extends ReactProps>(
   return webComponentProps as WebComponentProps<T>;
 };
 
-const loadComponent = async (
-  name: string,
-  importCallback?: () => Promise<any>
-) => {
+const loadComponent = async (name: string, importCallback?: () => Promise<any>) => {
   if (!customElements.get(name)) {
     if (importCallback) {
       await importCallback();

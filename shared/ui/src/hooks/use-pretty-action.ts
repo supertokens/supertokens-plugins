@@ -1,9 +1,7 @@
 import { useCallback } from "react";
 import { useToast } from "../components/toast";
 
-export const usePrettyAction = <
-  T extends (...args: any[]) => any | Promise<any>
->(
+export const usePrettyAction = <T extends (...args: any[]) => any | Promise<any>>(
   action: T,
   deps: any[] = [],
   options: {
@@ -12,7 +10,7 @@ export const usePrettyAction = <
     setLoading?: (isLoading: boolean) => void;
     onSuccess?: (...args: any[]) => Promise<any>;
     onError?: (e: any) => Promise<any>;
-  } = {}
+  } = {},
 ): ReturnType<T> extends Promise<any>
   ? (...args: Parameters<T>) => ReturnType<T>
   : (...args: Parameters<T>) => Promise<ReturnType<T>> => {
@@ -23,7 +21,7 @@ export const usePrettyAction = <
       const message =
         typeof options.successMessage === "function"
           ? options.successMessage(...args)
-          : options.successMessage ?? "Action completed successfully";
+          : (options.successMessage ?? "Action completed successfully");
 
       addToast({
         message,
@@ -31,7 +29,7 @@ export const usePrettyAction = <
         duration: 3000,
       });
     },
-    [addToast, options.successMessage]
+    [addToast, options.successMessage],
   );
 
   const handleError = useCallback(
@@ -39,7 +37,7 @@ export const usePrettyAction = <
       const message =
         typeof options.errorMessage === "function"
           ? options.errorMessage(e, ...args)
-          : options.errorMessage ?? "An error occurred";
+          : (options.errorMessage ?? "An error occurred");
 
       addToast({
         message,
@@ -47,7 +45,7 @@ export const usePrettyAction = <
         duration: 3000,
       });
     },
-    [addToast, options.errorMessage]
+    [addToast, options.errorMessage],
   );
 
   const handleAction = useCallback(
@@ -70,9 +68,7 @@ export const usePrettyAction = <
           await options.onSuccess();
         }
 
-        return res as ReturnType<T> extends Promise<any>
-          ? Awaited<ReturnType<T>>
-          : ReturnType<T>;
+        return res as ReturnType<T> extends Promise<any> ? Awaited<ReturnType<T>> : ReturnType<T>;
       } catch (e) {
         handleError(e, ...args);
 
@@ -85,7 +81,7 @@ export const usePrettyAction = <
         options.setLoading?.(false);
       }
     },
-    [handleSuccess, handleError, ...deps]
+    [handleSuccess, handleError, ...deps],
   );
 
   // @ts-expect-error should be fixed by using the correct type

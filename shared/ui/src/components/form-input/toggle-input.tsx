@@ -7,9 +7,7 @@ import { BaseWaProps } from "../types";
 
 const cx = classNames.bind(styles);
 
-interface ToggleInputProps
-  extends BaseInput<boolean>,
-    Pick<BaseWaProps, "size"> {
+interface ToggleInputProps extends BaseInput<boolean>, Pick<BaseWaProps, "size"> {
   checked?: boolean;
   name?: string;
 }
@@ -22,8 +20,7 @@ export const ToggleInput = (_props: ToggleInputProps) => {
     components: [
       {
         name: "wa-switch",
-        importCallback: () =>
-          import("@awesome.me/webawesome/dist/components/switch/switch.js"),
+        importCallback: () => import("@awesome.me/webawesome/dist/components/switch/switch.js"),
       },
     ],
     className: cx("st-input"),

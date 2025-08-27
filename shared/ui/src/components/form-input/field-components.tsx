@@ -11,13 +11,7 @@ import { BaseInput } from "./types";
 import { PasswordInput } from "./password-input";
 
 // String field component
-export const StringFieldComponent = ({
-  value,
-  onChange,
-  error,
-  className,
-  ...field
-}: BaseInput<string>) => (
+export const StringFieldComponent = ({ value, onChange, error, className, ...field }: BaseInput<string>) => (
   <TextInput
     id={field.id}
     label={field.label}
@@ -32,13 +26,7 @@ export const StringFieldComponent = ({
 );
 
 // Text field component (textarea)
-export const TextFieldComponent: React.FC<BaseInput<string>> = ({
-  value,
-  onChange,
-  error,
-  className,
-  ...field
-}) => (
+export const TextFieldComponent: React.FC<BaseInput<string>> = ({ value, onChange, error, className, ...field }) => (
   <TextareaInput
     id={field.id}
     label={field.label}
@@ -90,13 +78,7 @@ export const BooleanFieldComponent: React.FC<BaseInput<boolean>> = ({
 );
 
 // Email field component
-export const EmailFieldComponent: React.FC<BaseInput<string>> = ({
-  value,
-  onChange,
-  error,
-  className,
-  ...field
-}) => (
+export const EmailFieldComponent: React.FC<BaseInput<string>> = ({ value, onChange, error, className, ...field }) => (
   <TextInput
     id={field.id}
     label={field.label}
@@ -111,13 +93,7 @@ export const EmailFieldComponent: React.FC<BaseInput<string>> = ({
 );
 
 // Phone field component
-export const PhoneFieldComponent: React.FC<BaseInput<string>> = ({
-  value,
-  onChange,
-  error,
-  className,
-  ...field
-}) => (
+export const PhoneFieldComponent: React.FC<BaseInput<string>> = ({ value, onChange, error, className, ...field }) => (
   <TextInput
     id={field.id}
     label={field.label}
@@ -132,13 +108,7 @@ export const PhoneFieldComponent: React.FC<BaseInput<string>> = ({
 );
 
 // Date field component
-export const DateFieldComponent: React.FC<BaseInput<string>> = ({
-  value,
-  onChange,
-  error,
-  className,
-  ...field
-}) => (
+export const DateFieldComponent: React.FC<BaseInput<string>> = ({ value, onChange, error, className, ...field }) => (
   <DateInput
     id={field.id}
     label={field.label}
@@ -151,13 +121,7 @@ export const DateFieldComponent: React.FC<BaseInput<string>> = ({
 );
 
 // Select field component
-export const SelectFieldComponent: React.FC<BaseInput<string>> = ({
-  value,
-  onChange,
-  error,
-  className,
-  ...field
-}) => (
+export const SelectFieldComponent: React.FC<BaseInput<string>> = ({ value, onChange, error, className, ...field }) => (
   <SelectInput
     id={field.id}
     label={field.label}
@@ -223,13 +187,7 @@ export const PasswordFieldComponent: React.FC<BaseInput<string>> = ({
 };
 
 // URL field component
-export const UrlFieldComponent: React.FC<BaseInput<string>> = ({
-  value,
-  onChange,
-  error,
-  className,
-  ...field
-}) => (
+export const UrlFieldComponent: React.FC<BaseInput<string>> = ({ value, onChange, error, className, ...field }) => (
   <TextInput
     id={field.id}
     label={field.label}

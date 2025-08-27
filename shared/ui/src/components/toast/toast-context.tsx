@@ -1,11 +1,4 @@
-import React, {
-  createContext,
-  useContext,
-  useState,
-  useCallback,
-  ReactNode,
-  useEffect,
-} from "react";
+import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from "react";
 import { FlashToastKey, Toast, ToastContextValue } from "./types";
 import { useSearchParams } from "../../hooks";
 
@@ -25,10 +18,7 @@ interface ToastProviderProps {
   withFlash?: boolean;
 }
 
-export const ToastProvider = ({
-  children,
-  withFlash = false,
-}: ToastProviderProps) => {
+export const ToastProvider = ({ children, withFlash = false }: ToastProviderProps) => {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   const searchParams = useSearchParams();
@@ -92,9 +82,5 @@ export const ToastProvider = ({
     clearAllToasts,
   };
 
-  return (
-    <ToastContext.Provider value={contextValue}>
-      {children}
-    </ToastContext.Provider>
-  );
+  return <ToastContext.Provider value={contextValue}>{children}</ToastContext.Provider>;
 };

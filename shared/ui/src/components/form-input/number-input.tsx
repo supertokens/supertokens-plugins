@@ -7,9 +7,7 @@ import { BaseWaProps } from "../types";
 
 const cx = classNames.bind(style);
 
-interface NumberInputProps
-  extends BaseInput<number | "">,
-    Pick<BaseWaProps, "size" | "appearance"> {
+interface NumberInputProps extends BaseInput<number | "">, Pick<BaseWaProps, "size" | "appearance"> {
   name?: string;
   readonly?: boolean;
   autofocus?: boolean;
@@ -26,8 +24,7 @@ export const NumberInput = (_props: NumberInputProps) => {
     components: [
       {
         name: "wa-input",
-        importCallback: () =>
-          import("@awesome.me/webawesome/dist/components/input/input.js"),
+        importCallback: () => import("@awesome.me/webawesome/dist/components/input/input.js"),
       },
     ],
     className: cx("st-input"),

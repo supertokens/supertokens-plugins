@@ -2,12 +2,7 @@ import React from "react";
 import classNames from "classnames/bind";
 import style from "./callout.module.css";
 import { useWebComponent } from "../utils";
-import {
-  BaseWaAppearance,
-  BaseWaSize,
-  BaseWaVariant,
-  HTMLElementProps,
-} from "../types";
+import { BaseWaAppearance, BaseWaSize, BaseWaVariant, HTMLElementProps } from "../types";
 
 const cx = classNames.bind(style);
 
@@ -24,8 +19,7 @@ export const Callout = (_props: CalloutProps) => {
     components: [
       {
         name: "wa-callout",
-        importCallback: () =>
-          import("@awesome.me/webawesome/dist/components/callout/callout.js"),
+        importCallback: () => import("@awesome.me/webawesome/dist/components/callout/callout.js"),
       },
       // { name: 'wa-icon', importCallback: () => import('@awesome.me/webawesome/dist/components/icon/icon.js') },
     ],
@@ -38,9 +32,7 @@ export const Callout = (_props: CalloutProps) => {
   return (
     <wa-callout {...props}>
       {props.children}
-      {!!_props.icon && (
-        <wa-icon slot="icon" name={_props.icon} variant="regular" />
-      )}
+      {!!_props.icon && <wa-icon slot="icon" name={_props.icon} variant="regular" />}
     </wa-callout>
   );
 };

@@ -17,8 +17,7 @@ export const Card = (_props: CardProps) => {
     components: [
       {
         name: "wa-card",
-        importCallback: () =>
-          import("@awesome.me/webawesome/dist/components/card/card.js"),
+        importCallback: () => import("@awesome.me/webawesome/dist/components/card/card.js"),
       },
     ],
     props: _props,
@@ -33,9 +32,7 @@ export const Card = (_props: CardProps) => {
         <div slot="header">
           {props.title ? <h2 style={{ margin: 0 }}>{props.title}</h2> : null}
           {props.title && props.description ? <br /> : null}
-          {props.description ? (
-            <p style={{ margin: 0 }}>{props.description}</p>
-          ) : null}
+          {props.description ? <p style={{ margin: 0 }}>{props.description}</p> : null}
         </div>
       ) : null}
 

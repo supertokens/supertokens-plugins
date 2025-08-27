@@ -32,8 +32,7 @@ export const Button = (_props: ButtonProps) => {
     name: "wa-button",
     className: cx("st-button"),
     props: _props,
-    importCallback: () =>
-      import("@awesome.me/webawesome/dist/components/button/button.js"),
+    importCallback: () => import("@awesome.me/webawesome/dist/components/button/button.js"),
   });
 
   if (!isDefined) return null;

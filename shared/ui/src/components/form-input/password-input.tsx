@@ -8,9 +8,7 @@ import { BaseWaProps } from "../types";
 
 const cx = classNames.bind(style);
 
-interface PasswordInputProps
-  extends BaseInput<string>,
-    Pick<BaseWaProps, "size" | "appearance"> {
+interface PasswordInputProps extends BaseInput<string>, Pick<BaseWaProps, "size" | "appearance"> {
   name?: string;
   readonly?: boolean;
   pattern?: string;
@@ -27,8 +25,7 @@ export const PasswordInput = (_props: PasswordInputProps) => {
     components: [
       {
         name: "wa-input",
-        importCallback: () =>
-          import("@awesome.me/webawesome/dist/components/input/input.js"),
+        importCallback: () => import("@awesome.me/webawesome/dist/components/input/input.js"),
       },
     ],
     className: cx("st-input"),
