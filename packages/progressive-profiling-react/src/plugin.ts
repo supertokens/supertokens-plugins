@@ -4,9 +4,16 @@ import { getTranslationFunction, SuperTokensPlugin } from "supertokens-auth-reac
 import { BooleanClaim } from "supertokens-auth-react/recipe/session";
 
 import { getApi } from "./api";
-import { API_PATH, FIELD_TYPE_COMPONENT_MAP, PLUGIN_ID } from "./constants";
+import {
+  API_PATH,
+  DEFAULT_FIELD_TYPE_COMPONENT_MAP,
+  DEFAULT_ON_SUCCESS,
+  DEFAULT_REQUIRE_SETUP,
+  DEFAULT_SETUP_PAGE_PATH,
+  PLUGIN_ID,
+} from "./constants";
 import { enableDebugLogs } from "./logger";
-import { SetupProfilePage } from "./setup-profile-page";
+import { ProgressiveProfilingSetupPage } from "./progressive-profiling-setup-page";
 import { defaultTranslationsProgressiveProfiling } from "./translations";
 import {
   SuperTokensPluginProfileProgressiveProfilingConfig,
@@ -20,23 +27,24 @@ const { usePluginContext, setContext } = buildContext<{
   componentMap: FormInputComponentMap;
   querier: ReturnType<typeof getQuerier>;
   api: ReturnType<typeof getApi>;
-  t: (key: TranslationKeys, params?: Record<string, string>) => string;
+  t: (key: TranslationKeys, replacements?: Record<string, string>) => string;
 }>();
 export { usePluginContext };
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
   SuperTokensPluginProfileProgressiveProfilingConfig,
-  SuperTokensPluginProfileProgressiveProfilingImplementation
+  SuperTokensPluginProfileProgressiveProfilingImplementation,
+  Required<SuperTokensPluginProfileProgressiveProfilingConfig>
 >(
   (pluginConfig, implementation) => {
-    const componentMap = implementation.componentMap(FIELD_TYPE_COMPONENT_MAP);
+    const componentMap = implementation.componentMap();
 
     const ProgressiveProfilingCompletedClaim = new BooleanClaim({
       id: `${PLUGIN_ID}-completed`,
       refresh: async () => {},
-      onFailureRedirection: async ({ reason }) => {
-        return "/user/setup";
+      onFailureRedirection: async () => {
+        return pluginConfig.setupPagePath;
       },
     });
 
@@ -59,13 +67,13 @@ export const init = createPluginInitFunction<
           t,
         });
       },
-      routeHandlers: (appConfig: any, plugins: any, sdkVersion: any) => {
+      routeHandlers: () => {
         return {
           status: "OK",
           routeHandlers: [
             {
-              path: "/user/setup",
-              handler: () => SetupProfilePage.call(null),
+              path: pluginConfig.setupPagePath,
+              handler: () => ProgressiveProfilingSetupPage.call(null),
             },
           ],
         };
@@ -76,10 +84,12 @@ export const init = createPluginInitFunction<
             return {
               ...originalImplementation,
               getGlobalClaimValidators(input) {
-                return [
-                  ...input.claimValidatorsAddedByOtherRecipes,
-                  ProgressiveProfilingCompletedClaim.validators.isTrue(),
-                ];
+                return pluginConfig.requireSetup
+                  ? [
+                      ...input.claimValidatorsAddedByOtherRecipes,
+                      ProgressiveProfilingCompletedClaim.validators.isTrue(),
+                    ]
+                  : input.claimValidatorsAddedByOtherRecipes;
               },
             };
           },
@@ -88,6 +98,11 @@ export const init = createPluginInitFunction<
     };
   },
   {
-    componentMap: (originalImplementation) => originalImplementation,
+    componentMap: () => DEFAULT_FIELD_TYPE_COMPONENT_MAP,
   },
+  (config) => ({
+    onSuccess: config.onSuccess ?? DEFAULT_ON_SUCCESS,
+    requireSetup: config.requireSetup ?? DEFAULT_REQUIRE_SETUP,
+    setupPagePath: config.setupPagePath ?? DEFAULT_SETUP_PAGE_PATH,
+  }),
 );

@@ -2,11 +2,11 @@ import { ToastContainer, ToastProvider } from "@shared/ui";
 import { FormSection, ProfileFormData } from "@supertokens-plugins/progressive-profiling-shared";
 import { useCallback, useEffect, useState } from "react";
 
-import { ProfilingCard } from "./components";
+import { ProgressiveProfilingForm } from "./components";
 import { usePluginContext } from "./plugin";
 
-export const UserProfileWrapper = () => {
-  const { api, componentMap, t } = usePluginContext();
+export const ProgressiveProfilingWrapper = () => {
+  const { api, componentMap, t, pluginConfig } = usePluginContext();
 
   const [isLoading, setIsLoading] = useState(true);
   const [sections, setSections] = useState<FormSection[]>([]);
@@ -56,11 +56,6 @@ export const UserProfileWrapper = () => {
     return response;
   }, []);
 
-  const onSuccess = useCallback(async () => {
-    console.log("onSuccess");
-    // window.location.href = "/";
-  }, []);
-
   useEffect(() => {
     loadSections();
     loadProfile();
@@ -72,13 +67,13 @@ export const UserProfileWrapper = () => {
 
   return (
     <ToastProvider>
-      <ProfilingCard
+      <ProgressiveProfilingForm
         sections={sections}
         data={data}
         onSubmit={onSubmit}
         isLoading={isLoading}
         fetchFormData={loadProfile}
-        onSuccess={onSuccess}
+        onSuccess={pluginConfig.onSuccess}
         componentMap={componentMap}
       />
       <ToastContainer />

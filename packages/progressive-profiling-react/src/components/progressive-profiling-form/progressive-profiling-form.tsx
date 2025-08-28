@@ -6,21 +6,27 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePluginContext } from "../../plugin";
 import { FormInputComponentMap } from "../../types";
 
-import styles from "./profiling-card.module.css";
+import styles from "./progressive-profiling-form.module.css";
 
 const cx = classNames.bind(styles);
 
-interface ProfilingCardProps {
+interface ProgressiveProfilingFormProps {
   sections: FormSection[];
   data: ProfileFormData;
   onSubmit: (data: ProfileFormData) => Promise<{ status: "OK" } | { status: "ERROR"; message: string }>;
-  onSuccess: () => void;
+  onSuccess: (data: ProfileFormData) => Promise<void>;
   isLoading: boolean;
   fetchFormData: () => Promise<{ status: "OK"; data: ProfileFormData } | { status: "ERROR"; message: string }>;
   componentMap: FormInputComponentMap;
 }
 
-export const ProfilingCard = ({ data, onSubmit, onSuccess, isLoading, ...props }: ProfilingCardProps) => {
+export const ProgressiveProfilingForm = ({
+  data,
+  onSubmit,
+  onSuccess,
+  isLoading,
+  ...props
+}: ProgressiveProfilingFormProps) => {
   const { t } = usePluginContext();
 
   const sections = useMemo(() => {
@@ -149,7 +155,7 @@ export const ProfilingCard = ({ data, onSubmit, onSuccess, isLoading, ...props }
     if (result.status === "ERROR") {
       console.error(result);
     } else if (isLastSection && result.status === "OK") {
-      onSuccess();
+      await onSuccess(data);
     } else {
       moveToNextSection(activeSectionIndex);
     }
@@ -175,7 +181,7 @@ export const ProfilingCard = ({ data, onSubmit, onSuccess, isLoading, ...props }
 
   useEffect(() => {
     if (isComplete) {
-      onSuccess();
+      onSuccess(data);
     }
   }, []);
 
@@ -189,11 +195,11 @@ export const ProfilingCard = ({ data, onSubmit, onSuccess, isLoading, ...props }
 
   return (
     <div>
-      <div className={cx("profiling-card-bullets")}>
+      <div className={cx("progressive-profiling-form-bullets")}>
         {sections.map((section, index) => (
           <div
             key={section.id}
-            className={cx("profiling-card-bullet", {
+            className={cx("progressive-profiling-form-bullet", {
               active: index === activeSectionIndex,
               disabled: !isSectionEnabled(index),
             })}
@@ -204,7 +210,7 @@ export const ProfilingCard = ({ data, onSubmit, onSuccess, isLoading, ...props }
       </div>
 
       <Card title={currentSection.label} description={currentSection.description}>
-        <form className={cx("profiling-card-form")}>
+        <form className={cx("progressive-profiling-form-form")}>
           {currentSection.fields.map((field) => (
             <FormInput
               key={field.id}

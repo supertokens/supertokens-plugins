@@ -1,4 +1,4 @@
-.profiling-card-bullets {
+.progressive-profiling-form-bullets {
   display: flex;
   align-items: center;
   justify-content: space-evenly;
@@ -7,7 +7,7 @@
   margin-bottom: var(--plugin-spacing-2xl);
 }
 
-.profiling-card-bullets .profiling-card-bullet {
+.progressive-profiling-form-bullets .progressive-profiling-form-bullet {
   width: 36px;
   height: 36px;
   border-radius: 50%;
@@ -21,23 +21,23 @@
   color: var(--wa-color-brand-on-quiet);
 }
 
-.profiling-card-bullets .profiling-card-bullet.active {
+.progressive-profiling-form-bullets .progressive-profiling-form-bullet.active {
   font-weight: 700;
   background-color: var(--wa-color-brand-fill-loud);
   color: var(--wa-color-brand-on-loud);
   border-color: var(--wa-color-brand-fill-loud);
 }
-.profiling-card-bullets .profiling-card-bullet.disabled {
+.progressive-profiling-form-bullets .progressive-profiling-form-bullet.disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.profiling-card-bullets .profiling-card-bullet:hover {
+.progressive-profiling-form-bullets .progressive-profiling-form-bullet:hover {
   background-color: var(--st-color-brand-fill-loud-hover);
   color: var(--wa-color-brand-on-loud);
 }
 
-.profiling-card-form {
+.progressive-profiling-form-form {
   display: flex;
   flex-direction: column;
   gap: 20px;
