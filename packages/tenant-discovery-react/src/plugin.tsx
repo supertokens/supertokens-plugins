@@ -144,9 +144,17 @@ export const init = createPluginInitFunction<
                 }
 
                 const tenantId = response.tenant;
+                const formFields = input.formFields;
+
+                if (formFields.length < 1) {
+                  // Very unlikely since we are setting the field above
+                  // but we should still handle.
+                  throw new Error('Should never come here');
+                }
+                const tenantValueEntered = formFields[0]?.value;
 
                 // Set the tenantId in the current URL and refresh the page
-                implementation.setTenantId(tenantId, input.formFields[0].value);
+                implementation.setTenantId(tenantId, tenantValueEntered);
 
                 // return a SIGN_IN_NOT_ALLOWED error
                 // if the code reached this point.
