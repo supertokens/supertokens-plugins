@@ -1,4 +1,4 @@
-import { TenantConfig } from 'supertokens-node/lib/build/recipe/multitenancy/types';
+import { TenantConfig } from "supertokens-node/lib/build/recipe/multitenancy/types";
 
 export type SuperTokensPluginTenantDiscoveryPluginConfig = {
   emailDomainToTenantIdMap: Record<string, string>;

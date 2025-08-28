@@ -1,28 +1,28 @@
+import { createPluginInitFunction } from "@shared/js";
+import { buildContext, getQuerier } from "@shared/react";
+import { useLayoutEffect } from "react";
 import {
   SuperTokensPlugin,
   SuperTokensPublicConfig,
   SuperTokensPublicPlugin,
   getTranslationFunction,
-} from 'supertokens-auth-react';
+} from "supertokens-auth-react";
+import { AuthComponentProps } from "supertokens-auth-react/lib/build/types";
+import { EmailPasswordPreBuiltUI } from "supertokens-auth-react/recipe/emailpassword/prebuiltui";
 
-import { PLUGIN_ID, API_PATH } from './constants';
-import { createPluginInitFunction } from '@shared/js';
+import { getApi } from "./api";
+import { PLUGIN_ID, API_PATH } from "./constants";
+import { enableDebugLogs } from "./logger";
+import { SelectTenantPage } from "./pages";
+import { getOverrideableTenantFunctionImplementation } from "./recipeImplementation";
+import { defaultTranslationsTenantDiscovery } from "./translations";
 import {
   OverrideableTenantFunctionImplementation,
   SuperTokensPluginTenantDiscoveryPluginConfig,
   SuperTokensPluginTenantDiscoveryPluginNormalisedConfig,
   TranslationKeys,
-} from './types';
-import { hidePasswordInput, parseTenantId, populateEmailFromUrl, updateSignInSubmitBtn } from './util';
-import { useLayoutEffect } from 'react';
-import { getOverrideableTenantFunctionImplementation } from './recipeImplementation';
-import { getApi } from './api';
-import { buildContext, getQuerier } from '@shared/react';
-import { SelectTenantPage } from './pages';
-import { EmailPasswordPreBuiltUI } from 'supertokens-auth-react/recipe/emailpassword/prebuiltui';
-import { AuthComponentProps } from 'supertokens-auth-react/lib/build/types';
-import { enableDebugLogs } from './logger';
-import { defaultTranslationsTenantDiscovery } from './translations';
+} from "./types";
+import { hidePasswordInput, parseTenantId, populateEmailFromUrl, updateSignInSubmitBtn } from "./util";
 
 const { usePluginContext, setContext } = buildContext<{
   plugins: SuperTokensPublicPlugin[];
@@ -80,16 +80,16 @@ export const init = createPluginInitFunction<
         // tenant selector is enabled, we will redirect to the
         // select tenant page.
         const { shouldShowSelector } = parseTenantId();
-        if (shouldShowSelector && pluginConfig.showTenantSelector && window.location.pathname !== '/select-tenant') {
-          window.location.href = '/select-tenant';
+        if (shouldShowSelector && pluginConfig.showTenantSelector && window.location.pathname !== "/select-tenant") {
+          window.location.href = "/select-tenant";
         }
       },
       routeHandlers: (appConfig: any, plugins: any, sdkVersion: any) => {
         return {
-          status: 'OK',
+          status: "OK",
           routeHandlers: [
             {
-              path: '/select-tenant',
+              path: "/select-tenant",
               handler: () => SelectTenantPage.call(null),
             },
           ],
@@ -116,19 +116,19 @@ export const init = createPluginInitFunction<
                 // determine the tenant from email instead.
 
                 // Extract the email from fromFields
-                const email = input.formFields.find((field) => field.id === 'email')?.value;
+                const email = input.formFields.find((field) => field.id === "email")?.value;
 
                 // Very unlikely that email will be undefined at this stage
                 // but we will throw an error regardless
                 if (!email) {
-                  throw new Error('Email is undefined, should never come here');
+                  throw new Error("Email is undefined, should never come here");
                 }
 
                 const querier = getQuerier(apiBasePath);
                 const response = await querier.post<
-                  { status: 'OK'; tenant: string } | { status: 'ERROR'; message: string }
+                  { status: "OK"; tenant: string } | { status: "ERROR"; message: string }
                 >(
-                  '/from-email',
+                  "/from-email",
                   {
                     email,
                   },
@@ -137,10 +137,10 @@ export const init = createPluginInitFunction<
                   },
                 );
 
-                if (response.status !== 'OK') {
+                if (response.status !== "OK") {
                   // Should never happens since we are passing the email
                   // but handle regardless
-                  throw new Error('Should never come here');
+                  throw new Error("Should never come here");
                 }
 
                 const tenantId = response.tenant;
@@ -149,7 +149,7 @@ export const init = createPluginInitFunction<
                 if (formFields.length < 1) {
                   // Very unlikely since we are setting the field above
                   // but we should still handle.
-                  throw new Error('Should never come here');
+                  throw new Error("Should never come here");
                 }
                 const tenantValueEntered = formFields[0]?.value;
 
@@ -161,9 +161,9 @@ export const init = createPluginInitFunction<
                 // though it should not since we refresh the page right after the tenant
                 // is set.
                 return {
-                  status: 'SIGN_IN_NOT_ALLOWED',
+                  status: "SIGN_IN_NOT_ALLOWED",
                   fetchResponse: new Response(),
-                  reason: 'Tenant discovery plugin overridden method',
+                  reason: "Tenant discovery plugin overridden method",
                 };
               },
             };
@@ -175,6 +175,7 @@ export const init = createPluginInitFunction<
           const { shouldShowSelector } = parseTenantId();
 
           if (shouldShowSelector) {
+            // eslint-disable-next-line react/jsx-no-literals
             return <div>Enter email to continue</div>;
           }
 
@@ -189,19 +190,19 @@ export const init = createPluginInitFunction<
           if (shouldShowSelector) {
             const emailPasswordSignInComponent = EmailPasswordPreBuiltUI.getInstanceOrInitAndGetInstance()
               .getAuthComponents()
-              .find((comp) => comp.type === 'SIGN_IN');
+              .find((comp) => comp.type === "SIGN_IN");
 
             // Unlikely that component will be undefined but still handle
             // the case.
             if (!emailPasswordSignInComponent) {
-              throw new Error('Should never come here');
+              throw new Error("Should never come here");
             }
 
             // Fix type error by ensuring the component matches expected type
             props.authComponents = [emailPasswordSignInComponent.component as React.FC<AuthComponentProps>];
 
             // Set the formField to hide the password field
-            props.factorIds = ['emailpassword'];
+            props.factorIds = ["emailpassword"];
 
             props.userContext = {
               ...props.userContext,
@@ -212,7 +213,7 @@ export const init = createPluginInitFunction<
           useLayoutEffect(() => {
             if (shouldShowSelector) {
               hidePasswordInput();
-              updateSignInSubmitBtn(translations('PL_TD_EMAIL_DISCOVERY_CONTINUE_BUTTON'));
+              updateSignInSubmitBtn(translations("PL_TD_EMAIL_DISCOVERY_CONTINUE_BUTTON"));
             }
 
             // Try to populate the email if it is present
@@ -228,7 +229,6 @@ export const init = createPluginInitFunction<
   },
   (config) => getOverrideableTenantFunctionImplementation(config),
   (pluginConfig) => ({
-    urlToTenantIdMap: pluginConfig.urlToTenantIdMap ?? {},
     showTenantSelector: pluginConfig.showTenantSelector ?? false,
     extractTenantIdFromDomain: pluginConfig.extractTenantIdFromDomain ?? true,
   }),

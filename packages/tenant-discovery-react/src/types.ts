@@ -1,13 +1,11 @@
-import { defaultTranslationsTenantDiscovery } from './translations';
+import { defaultTranslationsTenantDiscovery } from "./translations";
 
 export type SuperTokensPluginTenantDiscoveryPluginConfig = {
-  urlToTenantIdMap?: Record<string, string>;
   showTenantSelector?: boolean;
   extractTenantIdFromDomain?: boolean;
 };
 
 export type SuperTokensPluginTenantDiscoveryPluginNormalisedConfig = {
-  urlToTenantIdMap?: Record<string, string>;
   showTenantSelector?: boolean;
   extractTenantIdFromDomain?: boolean;
 };
@@ -27,4 +25,4 @@ export interface TenantList {
   tenants: TenantDetails[];
 }
 
-export type TranslationKeys = keyof (typeof defaultTranslationsTenantDiscovery)['en'];
+export type TranslationKeys = keyof (typeof defaultTranslationsTenantDiscovery)["en"];

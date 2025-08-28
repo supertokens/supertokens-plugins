@@ -1,9 +1,10 @@
-import { ST_EMAIL_VALUE } from "./constants";
-import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantDiscoveryPluginConfig } from "./types";
 import Session from "supertokens-auth-react/recipe/session";
 
+import { ST_EMAIL_VALUE } from "./constants";
+import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantDiscoveryPluginConfig } from "./types";
+
 export const getOverrideableTenantFunctionImplementation = (
-  config: SuperTokensPluginTenantDiscoveryPluginConfig
+  config: SuperTokensPluginTenantDiscoveryPluginConfig,
 ): OverrideableTenantFunctionImplementation => {
   const implementation = {
     setTenantId: (tenantId: string, email?: string, shouldRefresh?: boolean, shouldOverride?: boolean) => {
@@ -48,21 +49,12 @@ export const getOverrideableTenantFunctionImplementation = (
       }
 
       const url = new URL(window.location.href);
-      if (!config.urlToTenantIdMap) {
-        return undefined;
-      }
 
       // If the url already has a tenantId, return that to avoid
       // an infinite loop.
       const existingTenantId = url.searchParams.get("tenantId");
       if (existingTenantId) {
         return existingTenantId;
-      }
-
-      for (const [urlPattern, tenantId] of Object.entries(config.urlToTenantIdMap)) {
-        if (url.hostname === urlPattern) {
-          return tenantId;
-        }
       }
 
       // Fallback to determining from the url directly if it is a subdomain
