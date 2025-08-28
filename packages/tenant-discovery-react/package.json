@@ -1,24 +1,60 @@
 {
-  "name": "@supertokens-plugin-profile/tenant-discovery-frontend",
-  "version": "0.0.1",
-  "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "name": "@supertokens-plugins/tenant-discovery-react",
+  "version": "0.0.2-beta.2",
+  "description": "Tenant Discovery Plugin for SuperTokens",
+  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/tenant-discovery-react/README.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/supertokens/supertokens-plugins.git",
+    "directory": "packages/tenant-discovery-react"
+  },
+  "scripts": {
+    "build": "vite build && npm run pretty",
+    "pretty": "npx pretty-quick .",
+    "pretty-check": "npx pretty-quick --check ."
+  },
+  "keywords": [
+    "tenant-discovery",
+    "plugin",
+    "supertokens"
+  ],
+  "dependencies": {
+    "supertokens-js-override": "^0.0.4"
+  },
   "peerDependencies": {
-    "react": ">=18.0.0",
-    "react-dom": ">=18.0.0",
-    "supertokens-auth-react": ">=0.48.0",
+    "react": ">=18.3.1",
+    "react-dom": ">=18.3.1",
+    "supertokens-auth-react": ">=0.50.0",
     "supertokens-web-js": ">=0.16.0"
   },
-  "files": [
-    "dist/index.css"
-  ],
+  "devDependencies": {
+    "@shared/eslint": "*",
+    "@shared/tsconfig": "*",
+    "@types/react": "^17.0.20",
+    "prettier": "2.0.5",
+    "pretty-quick": "^3.1.1",
+    "typescript": "^5.8.3",
+    "@shared/js": "*",
+    "@shared/react": "*"
+  },
+  "browser": {
+    "fs": false
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
   "exports": {
-    "./package.json": "./package.json",
     ".": {
-      "types": "./dist/index.d.ts",
-      "require": "./dist/index.js",
-      "default": "./dist/index.js"
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    },
+    "./index": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    },
+    "./index.js": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
     }
   }
 }

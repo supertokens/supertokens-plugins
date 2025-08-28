@@ -24,7 +24,25 @@ export const hidePasswordInput = () => {
       // Set a fake password in the password input
       const passwordInput = formRow.querySelector('[data-supertokens="input input-password"]');
       if (passwordInput) {
-        setInputValue(passwordInput as HTMLInputElement, 'test----not-a-password');
+        setInputValue(passwordInput as HTMLInputElement, 'supertokens----not-a-password');
+      }
+    }
+  });
+};
+
+export const updateSignInSubmitBtn = (btnText: string) => {
+  // @ts-ignore
+  const supertokensRoot = document.querySelector('#supertokens-root')?.shadowRoot;
+
+  // Find all buttons with data-supertokens="button" and find the one with "Sign in" text
+  const submitButtons = supertokensRoot?.querySelectorAll('[data-supertokens="button"]');
+  submitButtons?.forEach((button) => {
+    // Check if it's a button element and has type submit
+    if (button instanceof HTMLButtonElement && button.type === 'submit') {
+      // Check if the button text contains "Sign in"
+      if (button.textContent?.toLowerCase().includes('sign in')) {
+        // @ts-ignore
+        button.textContent = btnText;
       }
     }
   });

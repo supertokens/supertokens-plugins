@@ -1,22 +1,13 @@
 {
-  "files": [],
-  "include": [],
-  "references": [
-    {
-      "path": "../../common/frontend"
-    },
-    {
-      "path": "../../common/shared"
-    },
-    {
-      "path": "./tsconfig.lib.json"
-    },
-    {
-      "path": "./tsconfig.spec.json"
-    },
-    {
-      "path": "./tsconfig.storybook.json"
-    }
-  ],
-  "extends": "../../../tsconfig.base.json"
+  "extends": "@shared/tsconfig/react.json",
+  "compilerOptions": {
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "outDir": "./dist",
+    "declaration": true,
+    "declarationDir": "./dist",
+    "noUnusedLocals": false,
+    "noImplicitAny": false
+  },
+  "include": ["src/**/*"],
+  "exclude": ["src/**/*.test.tsx", "src/**/*.spec.tsx", "src/**/*.test.ts", "src/**/*.spec.ts"]
 }

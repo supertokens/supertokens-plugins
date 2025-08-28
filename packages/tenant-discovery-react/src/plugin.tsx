@@ -1,48 +1,71 @@
-import { SuperTokensPlugin } from 'supertokens-auth-react';
-import { useState, useCallback } from 'react';
+import {
+  SuperTokensPlugin,
+  SuperTokensPublicConfig,
+  SuperTokensPublicPlugin,
+  getTranslationFunction,
+} from 'supertokens-auth-react';
 
-import { PLUGIN_ID, API_PATH } from './config';
-import { createPluginInitFunction } from '@supertokens-plugin-profile/common-shared';
-import { OverrideableTenantFunctionImplementation, PluginConfig, TenantList } from './types';
-import { hidePasswordInput, parseTenantId, populateEmailFromUrl } from './util';
+import { PLUGIN_ID, API_PATH } from './constants';
+import { createPluginInitFunction } from '@shared/js';
+import {
+  OverrideableTenantFunctionImplementation,
+  SuperTokensPluginTenantDiscoveryPluginConfig,
+  SuperTokensPluginTenantDiscoveryPluginNormalisedConfig,
+  TranslationKeys,
+} from './types';
+import { hidePasswordInput, parseTenantId, populateEmailFromUrl, updateSignInSubmitBtn } from './util';
 import { useLayoutEffect } from 'react';
 import { getOverrideableTenantFunctionImplementation } from './recipeImplementation';
-import { updateUsePlugin, usePlugin } from './use-plugin';
-import { useQuerier, getQuerier } from '@supertokens-plugin-profile/common-frontend';
-import { SelectTenantPage } from './select-tenant-page';
+import { getApi } from './api';
+import { buildContext, getQuerier } from '@shared/react';
+import { SelectTenantPage } from './pages';
 import { EmailPasswordPreBuiltUI } from 'supertokens-auth-react/recipe/emailpassword/prebuiltui';
 import { AuthComponentProps } from 'supertokens-auth-react/lib/build/types';
+import { enableDebugLogs } from './logger';
+import { defaultTranslationsTenantDiscovery } from './translations';
 
-export const init = createPluginInitFunction<SuperTokensPlugin, PluginConfig, OverrideableTenantFunctionImplementation>(
+const { usePluginContext, setContext } = buildContext<{
+  plugins: SuperTokensPublicPlugin[];
+  sdkVersion: string;
+  appConfig: SuperTokensPublicConfig;
+  pluginConfig: SuperTokensPluginTenantDiscoveryPluginNormalisedConfig;
+  querier: ReturnType<typeof getQuerier>;
+  api: ReturnType<typeof getApi>;
+  t: (key: TranslationKeys) => string;
+}>();
+export { usePluginContext };
+
+export const init = createPluginInitFunction<
+  SuperTokensPlugin,
+  SuperTokensPluginTenantDiscoveryPluginConfig,
+  OverrideableTenantFunctionImplementation,
+  SuperTokensPluginTenantDiscoveryPluginNormalisedConfig
+>(
   (pluginConfig, implementation) => {
     let apiBasePath: string;
+    let translations: ReturnType<typeof getTranslationFunction<TranslationKeys>>;
     return {
       id: PLUGIN_ID,
       init: async (config, plugins, sdkVersion) => {
+        if (config.enableDebugLogs) {
+          enableDebugLogs();
+        }
+
+        const querier = getQuerier(new URL(API_PATH, config.appInfo.apiDomain.getAsStringDangerous()).toString());
+        const api = getApi(querier);
+
         // Set up the usePlugin hook
         apiBasePath = new URL(API_PATH, config.appInfo.apiDomain.getAsStringDangerous()).toString();
-        updateUsePlugin(() => {
-          const querier = useQuerier(apiBasePath);
-          const [isLoading, setIsLoading] = useState(true);
+        translations = getTranslationFunction<TranslationKeys>(defaultTranslationsTenantDiscovery);
 
-          const fetchTenants = useCallback(async () => {
-            setIsLoading(true);
-            const response = await querier.get<({ status: 'OK' } & TenantList) | { status: 'ERROR'; message: string }>(
-              '/list',
-              {
-                withSession: false,
-              },
-            );
-            setIsLoading(false);
-
-            return response;
-          }, [querier]);
-
-          return {
-            config: pluginConfig ?? {},
-            isLoading,
-            fetchTenants,
-          };
+        setContext({
+          plugins,
+          sdkVersion,
+          appConfig: config,
+          pluginConfig,
+          querier,
+          api,
+          t: translations,
         });
 
         // Check if the url matches any tenantId and accordingly
@@ -181,6 +204,7 @@ export const init = createPluginInitFunction<SuperTokensPlugin, PluginConfig, Ov
           useLayoutEffect(() => {
             if (shouldShowSelector) {
               hidePasswordInput();
+              updateSignInSubmitBtn(translations('PL_TD_EMAIL_DISCOVERY_CONTINUE_BUTTON'));
             }
 
             // Try to populate the email if it is present
@@ -192,10 +216,12 @@ export const init = createPluginInitFunction<SuperTokensPlugin, PluginConfig, Ov
           return <DefaultComponent {...props} />;
         },
       },
-      exports: {
-        usePlugin,
-      },
     };
   },
-  getOverrideableTenantFunctionImplementation,
+  (config) => getOverrideableTenantFunctionImplementation(config),
+  (pluginConfig) => ({
+    urlToTenantIdMap: pluginConfig.urlToTenantIdMap ?? {},
+    showTenantSelector: pluginConfig.showTenantSelector ?? false,
+    extractTenantIdFromDomain: pluginConfig.extractTenantIdFromDomain ?? true,
+  }),
 );

@@ -1,17 +1,20 @@
 import { useState, useEffect } from 'react';
 import { SuperTokensWrapper } from 'supertokens-auth-react';
 import { redirectToAuth } from 'supertokens-auth-react';
-import { usePlugin } from './use-plugin';
-import { TenantDetails } from './types';
+import { TenantDetails } from '../types';
+import { usePluginContext } from '../plugin';
 
 const TenantSelector = () => {
-  const { fetchTenants, isLoading } = usePlugin();
+  const { api } = usePluginContext();
+  const { fetchTenants } = api;
   const [tenants, setTenants] = useState<TenantDetails[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
     const loadTenants = async () => {
+      setIsLoading(true);
       try {
         const response = await fetchTenants();
         if (response.status === 'OK') {
@@ -22,6 +25,7 @@ const TenantSelector = () => {
       } catch (error) {
         console.error('Error fetching tenants:', error);
       }
+      setIsLoading(false);
     };
 
     loadTenants();
@@ -29,12 +33,12 @@ const TenantSelector = () => {
 
   const handleContinue = async () => {
     if (!selectedTenantId) return;
-    
+
     setIsSubmitting(true);
     try {
       redirectToAuth({
         queryParams: { tenantId: selectedTenantId },
-        redirectBack: false
+        redirectBack: false,
       });
     } catch (error) {
       console.error('Failed to redirect:', error);
@@ -44,46 +48,46 @@ const TenantSelector = () => {
 
   if (isLoading) {
     return (
-      <div style={{ 
-        display: 'flex', 
-        justifyContent: 'center', 
-        alignItems: 'center', 
-        height: '100vh',
-        fontFamily: 'system-ui, -apple-system, sans-serif'
-      }}>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          height: '100vh',
+          fontFamily: 'system-ui, -apple-system, sans-serif',
+        }}
+      >
         Loading...
       </div>
     );
   }
 
   return (
-    <div style={{
-      maxWidth: '400px',
-      margin: '100px auto',
-      padding: '32px',
-      backgroundColor: '#fff',
-      borderRadius: '8px',
-      boxShadow: '0 2px 10px rgba(0, 0, 0, 0.1)',
-      fontFamily: 'system-ui, -apple-system, sans-serif'
-    }}>
+    <div
+      style={{
+        maxWidth: '400px',
+        margin: '100px auto',
+        padding: '32px',
+        backgroundColor: '#fff',
+        borderRadius: '8px',
+        boxShadow: '0 2px 10px rgba(0, 0, 0, 0.1)',
+        fontFamily: 'system-ui, -apple-system, sans-serif',
+      }}
+    >
       <div style={{ marginBottom: '24px', textAlign: 'center' }}>
-        <h2 style={{ margin: '0 0 8px 0', fontSize: '24px', color: '#333' }}>
-          Select Tenant
-        </h2>
-        <p style={{ margin: '0', color: '#666', fontSize: '14px' }}>
-          Choose a tenant to continue with authentication
-        </p>
+        <h2 style={{ margin: '0 0 8px 0', fontSize: '24px', color: '#333' }}>Select Tenant</h2>
+        <p style={{ margin: '0', color: '#666', fontSize: '14px' }}>Choose a tenant to continue with authentication</p>
       </div>
 
       <div style={{ marginBottom: '24px' }}>
-        <label 
-          htmlFor="tenant-select" 
-          style={{ 
-            display: 'block', 
-            marginBottom: '8px', 
+        <label
+          htmlFor="tenant-select"
+          style={{
+            display: 'block',
+            marginBottom: '8px',
             fontWeight: '500',
             color: '#333',
-            fontSize: '14px'
+            fontSize: '14px',
           }}
         >
           Available Tenants:
@@ -100,10 +104,10 @@ const TenantSelector = () => {
             fontSize: '14px',
             backgroundColor: '#fff',
             outline: 'none',
-            transition: 'border-color 0.2s'
+            transition: 'border-color 0.2s',
           }}
-          onFocus={(e) => e.target.style.borderColor = '#007bff'}
-          onBlur={(e) => e.target.style.borderColor = '#ddd'}
+          onFocus={(e) => (e.target.style.borderColor = '#007bff')}
+          onBlur={(e) => (e.target.style.borderColor = '#ddd')}
         >
           <option value="">-- Select a tenant --</option>
           {tenants.map((tenant) => (
@@ -127,23 +131,25 @@ const TenantSelector = () => {
           fontSize: '16px',
           fontWeight: '500',
           cursor: selectedTenantId && !isSubmitting ? 'pointer' : 'not-allowed',
-          transition: 'background-color 0.2s'
+          transition: 'background-color 0.2s',
         }}
       >
         {isSubmitting ? 'Continuing...' : 'Continue'}
       </button>
 
       {tenants.length === 0 && !isLoading && (
-        <div style={{
-          marginTop: '16px',
-          padding: '12px',
-          backgroundColor: '#f8f9fa',
-          border: '1px solid #e9ecef',
-          borderRadius: '4px',
-          textAlign: 'center',
-          color: '#666',
-          fontSize: '14px'
-        }}>
+        <div
+          style={{
+            marginTop: '16px',
+            padding: '12px',
+            backgroundColor: '#f8f9fa',
+            border: '1px solid #e9ecef',
+            borderRadius: '4px',
+            textAlign: 'center',
+            color: '#666',
+            fontSize: '14px',
+          }}
+        >
           No tenants available
         </div>
       )}
