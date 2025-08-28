@@ -3,7 +3,7 @@ export const defaultTranslationsProgressiveProfiling = {
     PL_PP_NO_SECTIONS: "No sections found",
     PL_PP_SECTION_PROFILE_START_LABEL: "Profile",
     PL_PP_SECTION_PROFILE_START_DESCRIPTION:
-      "Before advancing any further, you will have to go through a quick x step process for setting up your profile. This is only done once.",
+      "Before advancing any further, you will have to go through a quick {steps} step process for setting up your profile. This is only done once.",
     PL_PP_SECTION_PROFILE_END_LABEL: "Profile",
     PL_PP_SECTION_PROFILE_END_DESCRIPTION:
       "You have completed the profile setup. You can now advance to the next step.",

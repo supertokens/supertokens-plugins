@@ -20,7 +20,7 @@ const { usePluginContext, setContext } = buildContext<{
   componentMap: FormInputComponentMap;
   querier: ReturnType<typeof getQuerier>;
   api: ReturnType<typeof getApi>;
-  t: (key: TranslationKeys) => string;
+  t: (key: TranslationKeys, params?: Record<string, string>) => string;
 }>();
 export { usePluginContext };
 

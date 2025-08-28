@@ -28,7 +28,7 @@ export const ProfilingCard = ({ data, onSubmit, onSuccess, isLoading, ...props }
       {
         id: "profile-start",
         label: t("PL_PP_SECTION_PROFILE_START_LABEL"),
-        description: t("PL_PP_SECTION_PROFILE_START_DESCRIPTION"),
+        description: t("PL_PP_SECTION_PROFILE_START_DESCRIPTION", { steps: (props.sections.length + 2).toString() }),
         completed: true,
         fields: [],
       },
@@ -37,7 +37,7 @@ export const ProfilingCard = ({ data, onSubmit, onSuccess, isLoading, ...props }
         id: "profile-end",
         label: t("PL_PP_SECTION_PROFILE_END_LABEL"),
         description: t("PL_PP_SECTION_PROFILE_END_DESCRIPTION"),
-        completed: true,
+        completed: false,
         fields: [],
       },
     ];
@@ -215,7 +215,7 @@ export const ProfilingCard = ({ data, onSubmit, onSuccess, isLoading, ...props }
             />
           ))}
 
-          <Button onClick={handleSubmit} disabled={!moveToNextSectionEnabled}>
+          <Button variant="brand" onClick={handleSubmit} disabled={!moveToNextSectionEnabled}>
             {moveToNextSectionLabel}
           </Button>
         </form>
