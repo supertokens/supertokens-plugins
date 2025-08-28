@@ -23,6 +23,11 @@ export const ProgressiveProfilingWrapper = () => {
 
     if (response.status === "OK") {
       setSections(response.sections);
+
+      const isComplete = response.sections.every((section) => section.completed);
+      if (isComplete) {
+        await pluginConfig.onSuccess(data);
+      }
     }
 
     return response;

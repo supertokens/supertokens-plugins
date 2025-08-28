@@ -35,7 +35,7 @@ export const ProgressiveProfilingForm = ({
         id: "profile-start",
         label: t("PL_PP_SECTION_PROFILE_START_LABEL"),
         description: t("PL_PP_SECTION_PROFILE_START_DESCRIPTION", { steps: (props.sections.length + 2).toString() }),
-        completed: true,
+        completed: false,
         fields: [],
       },
       ...props.sections,
@@ -55,15 +55,13 @@ export const ProgressiveProfilingForm = ({
   }, [sections]);
 
   const [activeSectionIndex, setActiveSectionIndex] = useState(startingSectionIndex);
-  const [editingProfileDetails, setEditingProfileDetails] = useState<Record<string, FormFieldValue>>({});
+  const [profileDetails, setProfileDetails] = useState<Record<string, FormFieldValue>>({});
 
   const isComplete = useMemo(() => {
     return sections.every((section) => section.completed);
   }, [sections]);
 
-  const isLastSection = useMemo(() => {
-    return activeSectionIndex === sections.length - 1;
-  }, [activeSectionIndex, sections]);
+  const isLastSection = activeSectionIndex === sections.length - 1;
 
   const currentSection = useMemo(() => {
     if (activeSectionIndex === -1) {
@@ -72,18 +70,6 @@ export const ProgressiveProfilingForm = ({
 
     return sections[activeSectionIndex];
   }, [sections, activeSectionIndex]);
-
-  useEffect(() => {
-    setEditingProfileDetails(
-      data.reduce(
-        (acc, item) => {
-          acc[item.fieldId] = item.value;
-          return acc;
-        },
-        {} as Record<string, FormFieldValue>,
-      ),
-    );
-  }, [data]);
 
   const moveToNextSection = useCallback(
     (currentSectionIndex: number) => {
@@ -147,7 +133,7 @@ export const ProgressiveProfilingForm = ({
       return;
     }
 
-    const data: ProfileFormData = Object.entries(editingProfileDetails).map(([key, value]) => {
+    const data: ProfileFormData = Object.entries(profileDetails).map(([key, value]) => {
       return { sectionId: currentSection.id, fieldId: key, value: value };
     });
 
@@ -159,31 +145,26 @@ export const ProgressiveProfilingForm = ({
     } else {
       moveToNextSection(activeSectionIndex);
     }
-  }, [
-    currentSection,
-    isLastSection,
-    onSubmit,
-    onSuccess,
-    moveToNextSection,
-    activeSectionIndex,
-    editingProfileDetails,
-  ]);
+  }, [currentSection, isLastSection, onSubmit, onSuccess, moveToNextSection, activeSectionIndex, profileDetails]);
 
-  const handleInputChange = useCallback(
-    (field: string, value: any) => {
-      setEditingProfileDetails({
-        ...editingProfileDetails,
-        [field]: value,
-      });
-    },
-    [editingProfileDetails],
-  );
+  const handleInputChange = useCallback((field: string, value: any) => {
+    setProfileDetails((prev) => ({
+      ...prev,
+      [field]: value,
+    }));
+  }, []);
 
   useEffect(() => {
-    if (isComplete) {
-      onSuccess(data);
-    }
-  }, []);
+    setProfileDetails(
+      data.reduce(
+        (acc, item) => {
+          acc[item.fieldId] = item.value;
+          return acc;
+        },
+        {} as Record<string, FormFieldValue>,
+      ),
+    );
+  }, [data]);
 
   if (isLoading) {
     return <Card description={t("PL_PP_LOADING")} />;
@@ -214,7 +195,7 @@ export const ProgressiveProfilingForm = ({
           {currentSection.fields.map((field) => (
             <FormInput
               key={field.id}
-              value={editingProfileDetails[field.id]}
+              value={profileDetails[field.id]}
               onChange={(value) => handleInputChange(field.id, value)}
               componentMap={props.componentMap}
               {...field}
