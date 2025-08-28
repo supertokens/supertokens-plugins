@@ -1,7 +1,7 @@
 # SuperTokens Plugin Tenant Discovery
 
 Automatically discover and route users to appropriate tenants based on their email domains.
-This plugin provides endpoints to map email domains to specific tenants and automatically assign users to the correct tenant during authentication.
+This plugin provides endpoints to infer tenant IDs from email domains and automatically assign users to the correct tenant during authentication.
 
 ## Installation
 
@@ -28,11 +28,6 @@ SuperTokens.init({
   ],
   plugins: [
     TenantDiscoveryPlugin.init({
-      emailDomainToTenantIdMap: {
-        "company1.com": "tenant1",
-        "company2.com": "tenant2",
-        "enterprise.org": "enterprise-tenant",
-      },
       restrictedEmailDomains: ["tempmail.com", "10minutemail.com"], // Optional: additional domains to block
     }),
   ],
@@ -56,7 +51,8 @@ The plugin automatically creates these endpoints:
   ```json
   {
     "status": "OK",
-    "tenant": "tenant1",
+    "tenant": "company1", // Final tenant (validated)
+    "inferredTenantId": "company1", // Inferred from email domain
     "email": "user@company1.com"
   }
   ```
@@ -83,30 +79,32 @@ The plugin automatically creates these endpoints:
 
 ## Configuration Options
 
-| Option                     | Type                     | Default | Description                                                   |
-| -------------------------- | ------------------------ | ------- | ------------------------------------------------------------- |
-| `emailDomainToTenantIdMap` | `Record<string, string>` | -       | Maps email domains to tenant IDs                              |
-| `restrictedEmailDomains`   | `string[]`               | `[]`    | Additional email domains to restrict (beyond popular domains) |
+| Option                   | Type      | Default | Description                                                   |
+| ------------------------ | --------- | ------- | ------------------------------------------------------------- |
+| `restrictedEmailDomains` | `string[]` | `[]`    | Additional email domains to restrict (beyond popular domains) |
 
 ## How It Works
 
-### Email Domain Mapping
+### Email Domain to Tenant ID Inference
 
 - The plugin extracts the domain from user email addresses (e.g., `user@company.com` → `company.com`)
-- If the domain matches an entry in `emailDomainToTenantIdMap`, the user is assigned to that tenant
-- If no match is found, the user is assigned to the `public` tenant
+- It then extracts the tenant ID from the domain by taking the second-to-last part (e.g., `company.com` → `company`)
+- For domains with only one part, it uses the entire domain as tenant ID
+- If the inferred tenant doesn't exist in your SuperTokens setup, it falls back to the `public` tenant
 
 ### Domain Restrictions
 
-- Popular email domains (Gmail, Yahoo, Outlook, etc.) are automatically blocked from being used in the mapping
+- Popular email domains (Gmail, Yahoo, Outlook, etc.) are automatically blocked from tenant inference
 - You can specify additional domains to block using `restrictedEmailDomains`
-- This prevents accidental assignment of public email users to specific tenants
+- Restricted domains automatically return `public` as the tenant ID
+- This prevents assignment of public email users to inferred tenant IDs
 
-### Automatic Tenant Assignment
+### Tenant Validation
 
-- During authentication, users are automatically routed to their appropriate tenant based on email domain
-- The plugin integrates seamlessly with SuperTokens' multi-tenancy system
-- No additional session management or user intervention required
+- The plugin validates if the inferred tenant ID actually exists in your SuperTokens configuration
+- If the inferred tenant exists, it's returned as the final tenant
+- If the inferred tenant doesn't exist, `public` is returned as the fallback
+- Both `tenant` (final) and `inferredTenantId` (raw inference) are provided in the API response
 
 ## Ways to Use Tenant Discovery
 
@@ -127,6 +125,8 @@ const discoverTenant = async (email: string) => {
 
   const result = await response.json();
   if (result.status === "OK") {
+    // Use the validated tenant ID
+    console.log(`Final tenant: ${result.tenant}`);
     // Redirect user to tenant-specific sign-in page
     window.location.href = `/auth?tenantId=${result.tenant}`;
   }
@@ -143,9 +143,10 @@ const getTenants = async () => {
 ### Multi-Step Authentication Flow
 
 1. User enters email on landing page
-2. Call `/from-email` endpoint to discover tenant
-3. Redirect user to tenant-specific authentication flow
-4. User completes sign-up/sign-in in correct tenant context
+2. Call `/from-email` endpoint to infer and validate tenant
+3. Use the returned `tenant` field for routing (validated tenant)
+4. Redirect user to tenant-specific authentication flow
+5. User completes sign-up/sign-in in correct tenant context
 
 ### API Integration
 
@@ -164,9 +165,10 @@ const handleEmailSubmit = async (email: string) => {
     const result = await response.json();
 
     if (result.status === "OK") {
-      // Proceed with authentication in discovered tenant
+      // Proceed with authentication in validated tenant
       console.log(`User ${email} belongs to tenant: ${result.tenant}`);
-      // Initialize SuperTokens with discovered tenant
+      console.log(`Inferred tenant ID: ${result.inferredTenantId}`);
+      // Initialize SuperTokens with validated tenant
       initAuthWithTenant(result.tenant);
     }
   } catch (error) {
@@ -188,20 +190,26 @@ The plugin returns standardized error responses:
   "message": "Email is required"
 }
 
-// Invalid email format
+// Restricted domain (returns public)
 {
   "status": "OK",
-  "tenant": "public", // Falls back to public tenant
-  "email": "invalid-email"
+  "tenant": "public", // Restricted domain fallback
+  "inferredTenantId": "public", 
+  "email": "user@gmail.com"
 }
 
-// Restricted domain error (during initialization)
-// Error: Email domain "gmail.com" is not allowed
+// Invalid tenant (inferred tenant doesn't exist)
+{
+  "status": "OK", 
+  "tenant": "public", // Fallback when inferred tenant doesn't exist
+  "inferredTenantId": "nonexistent", // What was inferred from email
+  "email": "user@nonexistent.com"
+}
 ```
 
 ## Domain Restrictions
 
-The plugin automatically blocks these popular email domains from being used in tenant mapping:
+The plugin automatically blocks these popular email domains from tenant inference:
 
 - gmail.com, yahoo.com, hotmail.com, outlook.com
 - icloud.com, aol.com, live.com, msn.com
@@ -211,12 +219,16 @@ You can add custom restrictions:
 
 ```typescript
 TenantDiscoveryPlugin.init({
-  emailDomainToTenantIdMap: {
-    "mycompany.com": "company-tenant",
-  },
   restrictedEmailDomains: ["tempmail.com", "guerrillamail.com"], // Block temporary email services
 });
 ```
+
+**Examples of tenant inference:**
+- `user@company.com` → infers `company` (if company tenant exists)
+- `admin@enterprise.org` → infers `enterprise` (if enterprise tenant exists)
+- `user@sub.company.com` → infers `company` (takes second-to-last part)
+- `user@gmail.com` → returns `public` (restricted domain)
+- `user@nonexistent.com` → infers `nonexistent` but returns `public` (tenant doesn't exist)
 
 ## Requirements
 

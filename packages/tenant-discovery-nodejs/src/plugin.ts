@@ -1,16 +1,16 @@
-import { SuperTokensPlugin } from 'supertokens-node/types';
-import { createPluginInitFunction } from '@shared/js';
+import { SuperTokensPlugin } from "supertokens-node/types";
+import { createPluginInitFunction } from "@shared/js";
 import {
   OverrideableTenantFunctionImplementation,
   SuperTokensPluginTenantDiscoveryPluginConfig,
   SuperTokensPluginTenantDiscoveryPluginNormalisedConfig,
-} from './types';
-import { HANDLE_BASE_PATH, PLUGIN_ID, PLUGIN_SDK_VERSION } from './constants';
-import { POPULAR_EMAIL_DOMAINS } from './constants';
-import { withRequestHandler } from '@shared/nodejs';
-import { enableDebugLogs, logDebugMessage } from './logger';
+} from "./types";
+import { HANDLE_BASE_PATH, PLUGIN_ID, PLUGIN_SDK_VERSION } from "./constants";
+import { POPULAR_EMAIL_DOMAINS } from "./constants";
+import { withRequestHandler } from "@shared/nodejs";
+import { enableDebugLogs, logDebugMessage } from "./logger";
 
-import { getOverrideableTenantFunctionImplementation } from './recipeImplementation';
+import { getOverrideableTenantFunctionImplementation } from "./recipeImplementation";
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
@@ -31,45 +31,45 @@ export const init = createPluginInitFunction<
         // Go through each domain and check if it is a popular one
         const restrictedDomains = [...(pluginConfig.restrictedEmailDomains ?? []), ...POPULAR_EMAIL_DOMAINS];
 
-        logDebugMessage(`Restricted domains: ${restrictedDomains}`);
-        logDebugMessage(`Checking if email domain to tenant ID map contains any of them`);
-        for (const domain of Object.keys(pluginConfig.emailDomainToTenantIdMap)) {
-          if (restrictedDomains.includes(domain)) {
-            throw new Error(`Email domain "${domain}" is not allowed`);
-          }
-        }
+        logDebugMessage(`Updated Restricted domains: ${restrictedDomains}`);
       },
       routeHandlers: () => {
         return {
-          status: 'OK',
+          status: "OK",
           routeHandlers: [
             {
               path: `${HANDLE_BASE_PATH}/list`,
-              method: 'get',
+              method: "get",
               handler: withRequestHandler(async (req, res, session, useContext) => {
                 const tenants = await implementation.getTenants();
                 return {
-                  status: 'OK',
+                  status: "OK",
                   tenants,
                 };
               }),
             },
             {
               path: `${HANDLE_BASE_PATH}/from-email`,
-              method: 'post',
+              method: "post",
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 const payload: { email?: string } | undefined = await req.getJSONBody();
                 if (!payload?.email?.trim()) {
                   return {
-                    status: 'ERROR',
-                    message: 'Email is required',
+                    status: "ERROR",
+                    message: "Email is required",
                   };
                 }
 
                 const tenantId = await implementation.getTenantIdFromEmail(payload.email);
+
+                // Check if the inferred tenantId is valid and otherwise return
+                // `public`.
+                const isInferredTenantIdValid = await implementation.isValidTenant(tenantId);
+
                 return {
-                  status: 'OK',
-                  tenant: tenantId,
+                  status: "OK",
+                  tenant: isInferredTenantIdValid ? tenantId : "public",
+                  inferredTenantId: tenantId,
                   email: payload.email,
                 };
               }),
