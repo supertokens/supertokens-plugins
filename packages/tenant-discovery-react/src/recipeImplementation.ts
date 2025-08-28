@@ -1,9 +1,9 @@
-import { ST_EMAIL_VALUE } from './constants';
-import { OverrideableTenantFunctionImplementation, PluginConfig } from './types';
-import Session from 'supertokens-auth-react/recipe/session';
+import { ST_EMAIL_VALUE } from "./constants";
+import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantDiscoveryPluginConfig } from "./types";
+import Session from "supertokens-auth-react/recipe/session";
 
 export const getOverrideableTenantFunctionImplementation = (
-  config: PluginConfig,
+  config: SuperTokensPluginTenantDiscoveryPluginConfig
 ): OverrideableTenantFunctionImplementation => {
   const implementation = {
     setTenantId: (tenantId: string, email?: string, shouldRefresh?: boolean, shouldOverride?: boolean) => {
@@ -14,13 +14,13 @@ export const getOverrideableTenantFunctionImplementation = (
       //
       // We are using the willOverride flag to determine if the tenantId
       // changed in which case we will override and ignore the shouldOverride flag.
-      const existingTenantId = url.searchParams.get('tenantId');
+      const existingTenantId = url.searchParams.get("tenantId");
       const willOverride = existingTenantId === tenantId;
       if (willOverride && !shouldOverride) {
         return;
       }
 
-      url.searchParams.set('tenantId', tenantId);
+      url.searchParams.set("tenantId", tenantId);
 
       if (email) {
         localStorage.setItem(ST_EMAIL_VALUE, email);
@@ -54,7 +54,7 @@ export const getOverrideableTenantFunctionImplementation = (
 
       // If the url already has a tenantId, return that to avoid
       // an infinite loop.
-      const existingTenantId = url.searchParams.get('tenantId');
+      const existingTenantId = url.searchParams.get("tenantId");
       if (existingTenantId) {
         return existingTenantId;
       }
@@ -84,7 +84,7 @@ export const getOverrideableTenantFunctionImplementation = (
       const hostname = url.hostname;
 
       // Split the hostname by dots
-      const parts = hostname.split('.');
+      const parts = hostname.split(".");
 
       // If we have more than 2 parts, we have a subdomain
       // (e.g., "test.something.com" -> ["test", "something", "com"])

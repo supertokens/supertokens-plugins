@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/tenant-discovery-react",
-  "version": "0.0.2-beta.2",
+  "version": "0.0.1",
   "description": "Tenant Discovery Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/tenant-discovery-react/README.md",
   "repository": {
@@ -35,7 +35,11 @@
     "pretty-quick": "^3.1.1",
     "typescript": "^5.8.3",
     "@shared/js": "*",
-    "@shared/react": "*"
+    "@shared/react": "*",
+    "vite": "^6.3.5",
+    "@vitejs/plugin-react": "^4.5.2",
+    "vite-plugin-dts": "^4.5.4",
+    "rollup-plugin-peer-deps-external": "^2.2.4"
   },
   "browser": {
     "fs": false
