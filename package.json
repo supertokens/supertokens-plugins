@@ -9,8 +9,10 @@
     "clean": "turbo run clean && rm -rf node_modules",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "changeset": "changeset",
-    "version-packages": "changeset version",
-    "release": "turbo run build && changeset publish"
+    "version": "changeset version",
+    "version:private": "changeset version --snapshot beta",
+    "release": "changeset publish",
+    "release:private": "changeset publish --tag beta"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.1",
@@ -41,3 +43,4 @@
     "tsup": "^8.5.0"
   }
 }
+
