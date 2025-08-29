@@ -72,7 +72,7 @@ export const ProgressiveProfilingForm = ({
     }
 
     // the index of the first not completed section (the user hasn't completed all the sections)
-    const nextFormSectionIndex = completedSectionIndexes[0]! + 1;
+    const nextFormSectionIndex = completedSectionIndexes[completedSectionIndexes.length - 1]! + 1;
     return nextFormSectionIndex + 1; // account for the start section
   }, [sections]);
 
@@ -143,9 +143,15 @@ export const ProgressiveProfilingForm = ({
       const isComplete = formSections.every((section) => section.completed);
       if (isComplete) {
         const data: ProfileFormData = Object.entries(profileDetails).map(([key, value]) => {
-          return { sectionId: currentSection.id, fieldId: key, value: value };
+          const sectionId = sections.find((section) => section.fields.some((field) => field.id === key))?.id;
+          if (!sectionId) {
+            throw new Error(`Section not found for field ${key}`);
+          }
+          return { sectionId, fieldId: key, value: value };
         });
+
         await onSuccess(data);
+        return;
       } else {
         throw new Error("All sections must be completed to submit the form");
       }
