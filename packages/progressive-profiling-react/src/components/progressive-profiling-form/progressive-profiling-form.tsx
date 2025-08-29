@@ -36,6 +36,7 @@ export const ProgressiveProfilingForm = ({
 }: ProgressiveProfilingFormProps) => {
   const { t } = usePluginContext();
   const [fieldErrors, setFieldErrors] = useState<Record<string, { id: string; error: string }[]>>({});
+
   const onSubmitAction = usePrettyAction(
     async (data: ProfileFormData) => {
       const result = await onSubmit(data);
@@ -85,15 +86,7 @@ export const ProgressiveProfilingForm = ({
   const [activeSectionIndex, setActiveSectionIndex] = useState(startingSectionIndex);
   const [profileDetails, setProfileDetails] = useState<Record<string, FormFieldValue>>({});
 
-  const isLastSection = activeSectionIndex === sections.length - 1;
-
-  const currentSection = useMemo(() => {
-    if (activeSectionIndex === -1) {
-      return null;
-    }
-
-    return sections[activeSectionIndex];
-  }, [sections, activeSectionIndex]);
+  const currentSection = sections[activeSectionIndex];
 
   const moveToNextSection = useCallback(
     (currentSectionIndex: number) => {
@@ -192,7 +185,7 @@ export const ProgressiveProfilingForm = ({
     } else {
       moveToNextSection(activeSectionIndex);
     }
-  }, [currentSection, isLastSection, onSubmitAction, onSuccess, moveToNextSection, activeSectionIndex, profileDetails]);
+  }, [onSubmitAction, onSuccess, moveToNextSection, activeSectionIndex, profileDetails]);
 
   const handleInputChange = useCallback((field: string, value: any) => {
     setProfileDetails((prev) => ({
