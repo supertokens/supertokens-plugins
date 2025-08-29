@@ -1,3 +1,6 @@
+.progressive-profiling-form {
+}
+
 .progressive-profiling-form-bullets {
   display: flex;
   align-items: center;
@@ -38,7 +41,43 @@
 }
 
 .progressive-profiling-form-form {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+
+.progressive-profiling-form-loading {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(255, 255, 255, 0.8);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+
+.progressive-profiling-form-loading::before {
+  content: "";
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--wa-color-brand-fill-loud);
+  border-top: 3px solid transparent;
+  border-radius: 50%;
+  animation: progressive-profiling-spin 1s linear infinite;
+  margin-bottom: 16px;
+}
+
+@keyframes progressive-profiling-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
 }

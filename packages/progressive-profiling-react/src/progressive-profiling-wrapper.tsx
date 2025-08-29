@@ -73,7 +73,8 @@ export const ProgressiveProfilingWrapper = () => {
         data={data}
         onSubmit={onSubmit}
         isLoading={isLoading}
-        fetchFormData={loadProfile}
+        loadProfile={loadProfile}
+        loadSections={loadSections}
         onSuccess={pluginConfig.onSuccess}
         componentMap={componentMap}
       />

@@ -23,7 +23,8 @@ interface ProgressiveProfilingFormProps {
   >;
   onSuccess: (data: ProfileFormData) => Promise<void>;
   isLoading: boolean;
-  fetchFormData: () => Promise<{ status: "OK"; data: ProfileFormData } | { status: "ERROR"; message: string }>;
+  loadProfile: () => Promise<{ status: "OK"; data: ProfileFormData } | { status: "ERROR"; message: string }>;
+  loadSections: () => Promise<{ status: "OK"; data: FormSection[] } | { status: "ERROR"; message: string }>;
   componentMap: FormInputComponentMap;
 }
 
@@ -33,6 +34,8 @@ export const ProgressiveProfilingForm = ({
   onSuccess,
   isLoading,
   sections: formSections,
+  loadProfile,
+  loadSections,
   ...props
 }: ProgressiveProfilingFormProps) => {
   const { t } = usePluginContext();
@@ -158,6 +161,8 @@ export const ProgressiveProfilingForm = ({
       throw new Error("Some fields are invalid");
     } else if (result.status === "OK") {
       moveToNextSection(activeSectionIndex);
+      // load the sections to get the updated section states (it's fine to be deferred)
+      loadSections();
     } else {
       throw new Error("Could not submit the data");
     }
@@ -182,10 +187,6 @@ export const ProgressiveProfilingForm = ({
     );
   }, [data]);
 
-  if (isLoading) {
-    return <Card description={t("PL_PP_LOADING")} />;
-  }
-
   if (!formSections?.length) {
     return <Card description={t("PL_PP_NO_SECTIONS")} />;
   }
@@ -195,23 +196,29 @@ export const ProgressiveProfilingForm = ({
   }
 
   return (
-    <div>
+    <div className={cx("progressive-profiling-form")}>
       <div className={cx("progressive-profiling-form-bullets")}>
-        {sections.map((section, index) => (
-          <div
-            key={section.id}
-            className={cx("progressive-profiling-form-bullet", {
-              active: index === activeSectionIndex,
-              disabled: !isSectionEnabled(index),
-            })}
-            onClick={() => moveToSection(index)}>
-            {index + 1}
-          </div>
-        ))}
+        {sections.map((section, index) => {
+          const isEnabled = isSectionEnabled(index);
+          return (
+            <div
+              key={section.id}
+              className={cx("progressive-profiling-form-bullet", {
+                active: index === activeSectionIndex,
+                disabled: !isEnabled,
+              })}
+              aria-disabled={!isEnabled}
+              onClick={() => isEnabled && moveToSection(index)}>
+              {index + 1}
+            </div>
+          );
+        })}
       </div>
 
       <Card title={currentSection.label} description={currentSection.description}>
         <form className={cx("progressive-profiling-form-form")}>
+          {isLoading && <div className={cx("progressive-profiling-form-loading")}>{t("PL_PP_LOADING")}</div>}
+
           {currentSection.fields.map((field) => (
             <FormInput
               key={field.id}
