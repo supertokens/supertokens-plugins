@@ -74,7 +74,7 @@ export const ProgressiveProfilingForm = ({
     // the index of the first not completed section (the user hasn't completed all the sections)
     const nextFormSectionIndex = completedSectionIndexes[completedSectionIndexes.length - 1]! + 1;
     return nextFormSectionIndex + 1; // account for the start section
-  }, [sections]);
+  }, [formSections]);
 
   const [activeSectionIndex, setActiveSectionIndex] = useState(startingSectionIndex);
   const [profileDetails, setProfileDetails] = useState<Record<string, FormFieldValue>>({});
@@ -95,13 +95,6 @@ export const ProgressiveProfilingForm = ({
       setActiveSectionIndex(sectionIndex);
     },
     [sections],
-  );
-
-  const moveToNextSection = useCallback(
-    (currentSectionIndex: number) => {
-      moveToSection(currentSectionIndex + 1);
-    },
-    [moveToSection],
   );
 
   const isSectionEnabled = useCallback(
@@ -135,7 +128,7 @@ export const ProgressiveProfilingForm = ({
     }
 
     if (currentSection.id === "profile-start") {
-      moveToNextSection(activeSectionIndex);
+      moveToSection(activeSectionIndex + 1);
       return;
     }
 
@@ -167,13 +160,13 @@ export const ProgressiveProfilingForm = ({
       setFieldErrors(groupBy(result.errors, "id"));
       throw new Error("Some fields are invalid");
     } else if (result.status === "OK") {
-      moveToNextSection(activeSectionIndex);
+      moveToSection(activeSectionIndex + 1);
       // load the sections to get the updated section states (it's fine to be deferred)
       loadSections();
     } else {
-      throw new Error("Could not submit the data");
+      throw new Error("Could not save the details");
     }
-  }, [onSuccess, moveToNextSection, activeSectionIndex, profileDetails, currentSection]);
+  }, [onSuccess, moveToSection, activeSectionIndex, profileDetails, currentSection]);
 
   const handleInputChange = useCallback((field: string, value: any) => {
     setProfileDetails((prev) => ({
