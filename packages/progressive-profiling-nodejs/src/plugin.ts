@@ -9,7 +9,7 @@ import {
   UserMetadataConfig,
   SuperTokensPluginProfileProgressiveProfilingNormalisedConfig,
 } from "./types";
-import { HANDLE_BASE_PATH, PLUGIN_ID, METADATA_KEY, PLUGIN_SDK_VERSION } from "./constants";
+import { HANDLE_BASE_PATH, PLUGIN_ID, METADATA_KEY, PLUGIN_SDK_VERSION, DEFAULT_SECTIONS } from "./constants";
 import { enableDebugLogs } from "./logger";
 import { ProgressiveProfilingService } from "./progressive-profiling-service";
 
@@ -19,8 +19,28 @@ export const init = createPluginInitFunction<
   ProgressiveProfilingService,
   SuperTokensPluginProfileProgressiveProfilingNormalisedConfig
 >(
-  (_, implementation) => {
+  (pluginConfig, implementation) => {
     const metadata = pluginUserMetadata<{ profileConfig?: UserMetadataConfig }>(METADATA_KEY);
+
+    if (pluginConfig.sections.length > 0) {
+      const defaultFields = pluginConfig.sections
+        .map((section) =>
+          section.fields.map((field) => ({
+            id: field.id,
+            defaultValue: field.defaultValue,
+            sectionId: section.id,
+          })),
+        )
+        .flat();
+
+      const defaultRegistrator = implementation.getDefaultRegistrator(defaultFields);
+      implementation.registerSections({
+        registratorId: "default",
+        sections: pluginConfig.sections,
+        set: defaultRegistrator.set,
+        get: defaultRegistrator.get,
+      });
+    }
 
     return {
       id: PLUGIN_ID,
@@ -51,34 +71,7 @@ export const init = createPluginInitFunction<
                   throw new Error("Session not found");
                 }
 
-                const userId = session.getUserId(userContext);
-                if (!userId) {
-                  throw new Error("User not found");
-                }
-
-                const userMetadata = await metadata.get(userId, userContext);
-
-                // map the sections to a json serializable value
-                const sections = implementation.getSections().map((section) => ({
-                  id: section.id,
-                  label: section.label,
-                  description: section.description,
-                  completed: userMetadata?.profileConfig?.sectionCompleted?.[section.id] ?? false,
-                  fields: section.fields.map((field) => {
-                    return {
-                      id: field.id,
-                      label: field.label,
-                      type: field.type,
-                      required: field.required,
-                      defaultValue: field.defaultValue,
-                      placeholder: field.placeholder,
-                      description: field.description,
-                      options: field.options,
-                    };
-                  }),
-                }));
-
-                return { status: "OK", sections };
+                return implementation.getUserSections(session, userContext);
               }),
             },
             {
@@ -95,12 +88,7 @@ export const init = createPluginInitFunction<
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
-                  return { status: "ERROR", message: "Session not found" };
-                }
-
-                const userId = session.getUserId(userContext);
-                if (!userId) {
-                  return { status: "ERROR", message: "User not found" };
+                  throw new Error("Session not found");
                 }
 
                 const payload: { data: ProfileFormData } = await req.getJSONBody();
@@ -125,14 +113,7 @@ export const init = createPluginInitFunction<
                   throw new Error("Session not found");
                 }
 
-                const userId = session.getUserId(userContext);
-                if (!userId) {
-                  throw new Error("User not found");
-                }
-
-                const fieldValues = await implementation.getSectionValues(session, userContext);
-
-                return { status: "OK", data: fieldValues };
+                return implementation.getSectionValues(session, userContext);
               }),
             },
           ],
@@ -178,4 +159,14 @@ export const init = createPluginInitFunction<
   },
 
   (config) => new ProgressiveProfilingService(config),
+  (config) => {
+    return {
+      ...config,
+      sections:
+        config.sections?.map((section) => ({
+          ...section,
+          completed: undefined, // make sure the sections are not marked as completed by default
+        })) ?? DEFAULT_SECTIONS,
+    };
+  },
 );
