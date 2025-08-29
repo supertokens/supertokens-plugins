@@ -35,14 +35,14 @@ export class ProgressiveProfilingService {
 
   registerSection: RegisterSection = function (
     this: ProgressiveProfilingService,
-    { registratorId, sections, set, get },
+    { registratorId, sections, set, get }
   ) {
     const registrableSections = sections
       .filter((section) => {
         const existingSection = this.existingSections.find((s) => s.id === section.id);
         if (existingSection) {
           logDebugMessage(
-            `Profile plugin section with id "${section.id}" already registered by "${existingSection.registratorId}". Skipping...`,
+            `Profile plugin section with id "${section.id}" already registered by "${existingSection.registratorId}". Skipping...`
           );
           return false;
         }
@@ -65,7 +65,7 @@ export class ProgressiveProfilingService {
   setSectionValues = async function (
     this: ProgressiveProfilingService,
     session: SessionContainerInterface,
-    data: ProfileFormData,
+    data: ProfileFormData
   ) {
     const userId = session.getUserId();
     if (!userId) {
@@ -76,8 +76,8 @@ export class ProgressiveProfilingService {
 
     const sectionsById = indexBy(sections, "id");
     const dataBySectionId = groupBy(data, "sectionId");
-    const dataByRegistratorId = groupBy(data, (row) => sectionIdToRegistratorIdMap[row.sectionId]);
     const sectionIdToRegistratorIdMap = mapBy(sections, "id", (section) => section.registratorId);
+    const dataByRegistratorId = groupBy(data, (row) => sectionIdToRegistratorIdMap[row.sectionId]);
 
     const validationErrors: { id: string; error: string }[] = [];
     for (const row of data) {
@@ -126,7 +126,7 @@ export class ProgressiveProfilingService {
     for (const section of sectionsToUpdate) {
       sectionsCompleted[section.id] = await this.isSectionCompleted(
         section,
-        updatedData.filter((d) => d.sectionId === section.id),
+        updatedData.filter((d) => d.sectionId === section.id)
       );
     }
 
@@ -147,7 +147,7 @@ export class ProgressiveProfilingService {
     // but only if all sections are completed
     const allSectionsCompleted = ProgressiveProfilingService.areAllSectionsCompleted(
       this.getSections(),
-      newUserMetadata?.profileConfig,
+      newUserMetadata?.profileConfig
     );
     if (allSectionsCompleted) {
       await session.fetchAndSetClaim(ProgressiveProfilingService.ProgressiveProfilingCompletedClaim);
@@ -183,7 +183,7 @@ export class ProgressiveProfilingService {
   validateField = function (
     this: ProgressiveProfilingService,
     field: FormField,
-    value: FormFieldValue,
+    value: FormFieldValue
   ): string | undefined {
     if (field.required && (value === undefined || (typeof value === "string" && value.trim() === ""))) {
       return `The "${field.label}" field is required`;
