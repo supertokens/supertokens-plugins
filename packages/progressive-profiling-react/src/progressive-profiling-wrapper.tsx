@@ -66,6 +66,11 @@ export const ProgressiveProfilingWrapper = () => {
     loadProfile();
   }, []);
 
+  // make sure we don't render the form if there are no sections
+  if (!sections.length) {
+    return null;
+  }
+
   return (
     <ToastProvider>
       <ProgressiveProfilingForm

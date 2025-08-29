@@ -62,17 +62,18 @@ export const ProgressiveProfilingForm = ({
   }, [formSections]);
 
   const startingSectionIndex = useMemo(() => {
-    const notCompletedSectionIndexes = sections
+    const completedSectionIndexes = formSections
       .map((section, index) => (section.completed ? index : null))
       .filter((index) => index !== null);
 
     // if no sections are completed, or all of them are completed, return the first section
-    if (notCompletedSectionIndexes.length === 2 || notCompletedSectionIndexes.length === sections.length) {
+    if (!completedSectionIndexes.length || completedSectionIndexes.length === formSections.length) {
       return 0;
     }
 
-    // otherwise return the index of the first not completed section - it means the user hasn't completed all thsection
-    return notCompletedSectionIndexes[1] || 0; // return the first section index as a default
+    // the index of the first not completed section (the user hasn't completed all the sections)
+    const nextFormSectionIndex = completedSectionIndexes[0]! + 1;
+    return nextFormSectionIndex + 1; // account for the start section
   }, [sections]);
 
   const [activeSectionIndex, setActiveSectionIndex] = useState(startingSectionIndex);
