@@ -1,4 +1,5 @@
-import { Button, FormInput, FormFieldValue, Card } from "@shared/ui";
+import { groupBy } from "@shared/js";
+import { Button, FormInput, FormFieldValue, Card, usePrettyAction } from "@shared/ui";
 import { FormSection, ProfileFormData } from "@supertokens-plugins/progressive-profiling-shared";
 import classNames from "classnames/bind";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -13,7 +14,13 @@ const cx = classNames.bind(styles);
 interface ProgressiveProfilingFormProps {
   sections: FormSection[];
   data: ProfileFormData;
-  onSubmit: (data: ProfileFormData) => Promise<{ status: "OK" } | { status: "ERROR"; message: string }>;
+  onSubmit: (
+    data: ProfileFormData,
+  ) => Promise<
+    | { status: "OK" }
+    | { status: "ERROR"; message: string }
+    | { status: "INVALID_FIELDS"; errors: { id: string; error: string }[] }
+  >;
   onSuccess: (data: ProfileFormData) => Promise<void>;
   isLoading: boolean;
   fetchFormData: () => Promise<{ status: "OK"; data: ProfileFormData } | { status: "ERROR"; message: string }>;
@@ -28,6 +35,18 @@ export const ProgressiveProfilingForm = ({
   ...props
 }: ProgressiveProfilingFormProps) => {
   const { t } = usePluginContext();
+  const [fieldErrors, setFieldErrors] = useState<Record<string, { id: string; error: string }[]>>({});
+  const onSubmitAction = usePrettyAction(
+    async (data: ProfileFormData) => {
+      const result = await onSubmit(data);
+      if (result.status === "INVALID_FIELDS") {
+        return { ...result, message: "Some fields are invalid" };
+      }
+
+      return result;
+    },
+    [onSubmit],
+  );
 
   const sections = useMemo(() => {
     return [
@@ -128,16 +147,22 @@ export const ProgressiveProfilingForm = ({
         return true;
       }
 
+      if (sectionIndex === activeSectionIndex) {
+        return true;
+      }
+
       if (sectionIndex === sections.length - 1) {
         return sections.slice(1, -1).every((section) => section.completed);
       }
 
       return sections[sectionIndex]?.completed ?? false;
     },
-    [sections],
+    [sections, activeSectionIndex],
   );
 
   const handleSubmit = useCallback(async () => {
+    setFieldErrors({});
+
     if (!currentSection) {
       return;
     }
@@ -151,15 +176,23 @@ export const ProgressiveProfilingForm = ({
       return { sectionId: currentSection.id, fieldId: key, value: value };
     });
 
-    const result = await onSubmit(data);
-    if (result.status === "ERROR") {
-      console.error(result);
-    } else if (isLastSection && result.status === "OK") {
+    if (currentSection.id === "profile-end") {
       await onSuccess(data);
+      return;
+    }
+
+    // only send the current section fields
+    const sectionData = data.filter((row) => {
+      return currentSection.fields.find((field) => field.id === row.fieldId);
+    });
+
+    const result = await onSubmitAction(sectionData);
+    if (result.status === "INVALID_FIELDS") {
+      setFieldErrors(groupBy(result.errors, "id"));
     } else {
       moveToNextSection(activeSectionIndex);
     }
-  }, [currentSection, isLastSection, onSubmit, onSuccess, moveToNextSection, activeSectionIndex, profileDetails]);
+  }, [currentSection, isLastSection, onSubmitAction, onSuccess, moveToNextSection, activeSectionIndex, profileDetails]);
 
   const handleInputChange = useCallback((field: string, value: any) => {
     setProfileDetails((prev) => ({
@@ -212,6 +245,7 @@ export const ProgressiveProfilingForm = ({
               value={profileDetails[field.id]}
               onChange={(value) => handleInputChange(field.id, value)}
               componentMap={props.componentMap}
+              error={fieldErrors[field.id]?.map((error) => error.error).join("\n")}
               {...field}
             />
           ))}
