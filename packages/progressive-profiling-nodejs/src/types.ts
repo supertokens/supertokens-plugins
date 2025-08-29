@@ -14,6 +14,10 @@ export type FormSection = Omit<SharedFormSection, "completed">;
 export type RegisterSections = (payload: {
   registratorId: string;
   sections: FormSection[];
-  set: (data: ProfileFormData, session: SessionContainerInterface | undefined) => Promise<void>;
-  get: (session: SessionContainerInterface | undefined) => Promise<ProfileFormData>;
+  set: (
+    data: ProfileFormData,
+    session: SessionContainerInterface | undefined,
+    userContext?: Record<string, any>,
+  ) => Promise<void>;
+  get: (session: SessionContainerInterface | undefined, userContext?: Record<string, any>) => Promise<ProfileFormData>;
 }) => void;

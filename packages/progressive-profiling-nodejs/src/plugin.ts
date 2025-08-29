@@ -56,7 +56,7 @@ export const init = createPluginInitFunction<
                   throw new Error("User not found");
                 }
 
-                const userMetadata = await metadata.get(userId);
+                const userMetadata = await metadata.get(userId, userContext);
 
                 // map the sections to a json serializable value
                 const sections = implementation.getSections().map((section) => ({
@@ -105,7 +105,7 @@ export const init = createPluginInitFunction<
 
                 const payload: { data: ProfileFormData } = await req.getJSONBody();
 
-                return implementation.setSectionValues(session, payload.data);
+                return implementation.setSectionValues(session, payload.data, userContext);
               }),
             },
             {
@@ -130,7 +130,7 @@ export const init = createPluginInitFunction<
                   throw new Error("User not found");
                 }
 
-                const fieldValues = await implementation.getSectionValues(session);
+                const fieldValues = await implementation.getSectionValues(session, userContext);
 
                 return { status: "OK", data: fieldValues };
               }),
