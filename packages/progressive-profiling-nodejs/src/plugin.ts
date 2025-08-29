@@ -42,7 +42,7 @@ export const init = createPluginInitFunction<
                 overrideGlobalClaimValidators: (globalValidators) => {
                   // we should not check if the profile is completed here, because we want to allow users to access the profile page even if they haven't completed the profile
                   return globalValidators.filter(
-                    (validator) => validator.id !== ProgressiveProfilingService.ProgressiveProfilingCompletedClaim.key
+                    (validator) => validator.id !== ProgressiveProfilingService.ProgressiveProfilingCompletedClaim.key,
                   );
                 },
               },
@@ -89,7 +89,7 @@ export const init = createPluginInitFunction<
                 overrideGlobalClaimValidators: (globalValidators) => {
                   // we should not check if the profile is completed here, because we want to allow users to access the profile page even if they haven't completed the profile
                   return globalValidators.filter(
-                    (validator) => validator.id !== ProgressiveProfilingService.ProgressiveProfilingCompletedClaim.key
+                    (validator) => validator.id !== ProgressiveProfilingService.ProgressiveProfilingCompletedClaim.key,
                   );
                 },
               },
@@ -116,7 +116,7 @@ export const init = createPluginInitFunction<
                 overrideGlobalClaimValidators: (globalValidators) => {
                   // we should not check if the profile is completed here, because we want to allow users to access the profile page even if they haven't completed the profile
                   return globalValidators.filter(
-                    (validator) => validator.id !== ProgressiveProfilingService.ProgressiveProfilingCompletedClaim.key
+                    (validator) => validator.id !== ProgressiveProfilingService.ProgressiveProfilingCompletedClaim.key,
                   );
                 },
               },
@@ -157,7 +157,7 @@ export const init = createPluginInitFunction<
                     input.recipeUserId,
                     input.tenantId,
                     input.accessTokenPayload,
-                    input.userContext
+                    input.userContext,
                   )),
                 };
 
@@ -169,7 +169,7 @@ export const init = createPluginInitFunction<
       },
       exports: {
         metadata,
-        registerSection: implementation.registerSection,
+        registerSections: implementation.registerSections,
         getSections: implementation.getSections,
         setSectionValues: implementation.setSectionValues,
         getSectionValues: implementation.getSectionValues,
@@ -177,5 +177,5 @@ export const init = createPluginInitFunction<
     };
   },
 
-  (config) => new ProgressiveProfilingService(config)
+  (config) => new ProgressiveProfilingService(config),
 );

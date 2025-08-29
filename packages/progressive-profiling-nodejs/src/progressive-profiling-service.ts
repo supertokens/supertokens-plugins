@@ -1,5 +1,5 @@
 import {
-  RegisterSection,
+  RegisterSections,
   FormSection,
   SuperTokensPluginProfileProgressiveProfilingNormalisedConfig,
   UserMetadataConfig,
@@ -14,7 +14,7 @@ import { groupBy, indexBy, mapBy } from "@shared/js";
 
 export class ProgressiveProfilingService {
   protected existingSections: (FormSection & { registratorId: string })[] = [];
-  protected existingRegistratorHandlers: Record<string, Pick<Parameters<RegisterSection>[0], "set" | "get">> = {};
+  protected existingRegistratorHandlers: Record<string, Pick<Parameters<RegisterSections>[0], "set" | "get">> = {};
   protected metadata = pluginUserMetadata<{ profileConfig?: UserMetadataConfig }>(METADATA_KEY);
 
   static ProgressiveProfilingCompletedClaim: BooleanClaim;
@@ -33,7 +33,7 @@ export class ProgressiveProfilingService {
     });
   }
 
-  registerSection: RegisterSection = function (
+  registerSections: RegisterSections = function (
     this: ProgressiveProfilingService,
     { registratorId, sections, set, get }
   ) {
@@ -44,6 +44,11 @@ export class ProgressiveProfilingService {
           logDebugMessage(
             `Profile plugin section with id "${section.id}" already registered by "${existingSection.registratorId}". Skipping...`
           );
+          return false;
+        }
+
+        if (!registratorId) {
+          logDebugMessage(`Profile plugin section with id "${section.id}" has no registrator id. Skipping...`);
           return false;
         }
 
@@ -73,63 +78,68 @@ export class ProgressiveProfilingService {
     }
 
     const sections = this.getSections();
-
     const sectionsById = indexBy(sections, "id");
-    const dataBySectionId = groupBy(data, "sectionId");
     const sectionIdToRegistratorIdMap = mapBy(sections, "id", (section) => section.registratorId);
+    const dataBySectionId = groupBy(data, "sectionId");
     const dataByRegistratorId = groupBy(data, (row) => sectionIdToRegistratorIdMap[row.sectionId]);
 
-    const validationErrors: { id: string; error: string }[] = [];
-    for (const row of data) {
+    // validate the data
+    const validationErrors = data.reduce((acc, row) => {
       const field = sectionsById[row.sectionId]?.fields.find((f) => f.id === row.fieldId);
       if (!field) {
-        validationErrors.push({
-          id: row.fieldId,
-          error: `Field with id "${row.fieldId}" not found`,
-        });
-        continue;
+        return [
+          ...acc,
+          {
+            id: row.fieldId,
+            error: `Field with id "${row.fieldId}" not found`,
+          },
+        ];
       }
 
       const fieldError = this.validateField(field, row.value);
-
       if (fieldError) {
-        validationErrors.push({ id: field.id, error: fieldError });
+        const fieldErrors = Array.isArray(fieldError) ? fieldError : [fieldError];
+        return [...acc, ...fieldErrors.map((error) => ({ id: field.id, error }))];
       }
-    }
+
+      return acc;
+    }, [] as { id: string; error: string }[]);
+
+    logDebugMessage(`Validated data. ${validationErrors.length} errors found.`);
 
     if (validationErrors.length > 0) {
       return { status: "INVALID_FIELDS", errors: validationErrors };
     }
 
+    // store the data by registrator
     const updatedData: ProfileFormData = [];
-    for (const registratorId of Object.keys(dataByRegistratorId)) {
-      const sectionHandlers = this.existingRegistratorHandlers[registratorId];
-      if (!sectionHandlers) {
-        continue;
-      }
-      const sectionData = dataByRegistratorId[registratorId];
-      if (!sectionData) {
+    for (const [registratorId, sectionData] of Object.entries(dataByRegistratorId)) {
+      if (!this.existingRegistratorHandlers[registratorId]) {
+        logDebugMessage(`Registrator with id "${registratorId}" not found. Skipping storing data...`);
         continue;
       }
 
-      await sectionHandlers.set(sectionData, session);
-      // get all the data from the storage, since data could be updated from other places or updated partially
-      const data = await sectionHandlers.get(session);
+      logDebugMessage(`Storing data for registrator "${registratorId}". ${sectionData.length} fields to store.`);
+
+      const registrator = this.existingRegistratorHandlers[registratorId];
+      await registrator.set(sectionData, session);
+      // get fresh data from the storage, since it could be updated from other places or updated partially
+      const data = await registrator.get(session);
       updatedData.push(...data);
     }
 
-    // do it like this to have a unique list of sections to update
+    // check sections that are completed after updating the data
     const sectionsToUpdate = Object.keys(dataBySectionId)
       .map((sectionId) => sections.find((s) => s.id === sectionId))
-      .filter((s) => s !== undefined);
+      .filter((section) => section !== undefined);
     const sectionsCompleted: Record<string, boolean> = {};
     for (const section of sectionsToUpdate) {
-      sectionsCompleted[section.id] = await this.isSectionCompleted(
-        section,
-        updatedData.filter((d) => d.sectionId === section.id)
-      );
+      const sectionData = updatedData.filter((d) => d.sectionId === section.id);
+      sectionsCompleted[section.id] = await this.isSectionCompleted(section, sectionData);
     }
+    logDebugMessage(`Sections completed: ${JSON.stringify(sectionsCompleted)}`);
 
+    // update the user metadata with the new sections completed status
     const userMetadata = await this.metadata.get(userId);
     const newUserMetadata = {
       ...userMetadata,
@@ -168,12 +178,12 @@ export class ProgressiveProfilingService {
 
     const data: ProfileFormData = [];
     for (const registratorId of Object.keys(sectionsByRegistratorId)) {
-      const sectionHandlers = this.existingRegistratorHandlers[registratorId];
-      if (!sectionHandlers) {
+      const registrator = this.existingRegistratorHandlers[registratorId];
+      if (!registrator) {
         continue;
       }
 
-      const sectionData = await sectionHandlers.get(session);
+      const sectionData = await registrator.get(session);
       data.push(...sectionData);
     }
 
@@ -184,7 +194,7 @@ export class ProgressiveProfilingService {
     this: ProgressiveProfilingService,
     field: FormField,
     value: FormFieldValue
-  ): string | undefined {
+  ): string | string[] | undefined {
     if (field.required && (value === undefined || (typeof value === "string" && value.trim() === ""))) {
       return `The "${field.label}" field is required`;
     }

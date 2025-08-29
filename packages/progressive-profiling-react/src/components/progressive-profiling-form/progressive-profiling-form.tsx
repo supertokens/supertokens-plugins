@@ -186,6 +186,10 @@ export const ProgressiveProfilingForm = ({
     return <Card description={t("PL_PP_LOADING")} />;
   }
 
+  if (!formSections?.length) {
+    return <Card description={t("PL_PP_NO_SECTIONS")} />;
+  }
+
   if (!currentSection) {
     return <Card description={t("PL_PP_PROFILE_SETUP_NOT_AVAILABLE")} />;
   }

@@ -66,10 +66,6 @@ export const ProgressiveProfilingWrapper = () => {
     loadProfile();
   }, []);
 
-  if (sections.length === 0) {
-    return <div>{t("PL_PP_NO_SECTIONS")}</div>; // add empty state and/or redirect
-  }
-
   return (
     <ToastProvider>
       <ProgressiveProfilingForm

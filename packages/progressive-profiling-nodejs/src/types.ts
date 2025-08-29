@@ -11,7 +11,7 @@ export type UserMetadataConfig = {
 
 export type FormSection = Omit<SharedFormSection, "completed">;
 
-export type RegisterSection = (section: {
+export type RegisterSections = (payload: {
   registratorId: string;
   sections: FormSection[];
   set: (data: ProfileFormData, session: SessionContainerInterface | undefined) => Promise<void>;
