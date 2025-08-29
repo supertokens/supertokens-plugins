@@ -15,7 +15,8 @@ export type FormField = {
     | "multiselect"
     | "password"
     | "url"
-    | "image-url";
+    | "image-url"
+    | "toggle";
   required: boolean;
   defaultValue?: FormFieldValue;
   placeholder?: string;
