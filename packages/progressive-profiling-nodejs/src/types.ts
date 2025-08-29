@@ -35,13 +35,14 @@ export type FormSection = {
   fields: FormField[];
 };
 export type SuperTokensPluginProfileProgressiveProfilingConfig = undefined;
+export type SuperTokensPluginProfileProgressiveProfilingNormalisedConfig = undefined;
 
 export type UserMetadataConfig = {
   sectionCompleted: Record<string, boolean>;
 };
 
 export type RegisterSection = (section: {
-  registererId: string;
+  registratorId: string;
   sections: FormSection[];
   set: (data: ProfileFormData, session: SessionContainerInterface | undefined) => Promise<void>;
   get: (session: SessionContainerInterface | undefined) => Promise<ProfileFormData>;

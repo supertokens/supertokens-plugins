@@ -50,16 +50,21 @@ export const ProgressiveProfilingForm = ({
   }, [props.sections]);
 
   const startingSectionIndex = useMemo(() => {
-    const index = sections.findIndex((section) => !section.completed);
-    return index === -1 ? 0 : index;
+    const notCompletedSectionIndexes = sections
+      .map((section, index) => (section.completed ? index : null))
+      .filter((index) => index !== null);
+
+    // if no sections are completed, or all of them are completed, return the first section
+    if (notCompletedSectionIndexes.length === 2 || notCompletedSectionIndexes.length === sections.length) {
+      return 0;
+    }
+
+    // otherwise return the index of the first not completed section - it means the user hasn't completed all thsection
+    return notCompletedSectionIndexes[1] || 0; // return the first section index as a default
   }, [sections]);
 
   const [activeSectionIndex, setActiveSectionIndex] = useState(startingSectionIndex);
   const [profileDetails, setProfileDetails] = useState<Record<string, FormFieldValue>>({});
-
-  const isComplete = useMemo(() => {
-    return sections.every((section) => section.completed);
-  }, [sections]);
 
   const isLastSection = activeSectionIndex === sections.length - 1;
 
@@ -103,8 +108,9 @@ export const ProgressiveProfilingForm = ({
   );
 
   const moveToNextSectionEnabled = useMemo(() => {
+    const isComplete = sections.slice(1, -1).every((section) => section.completed);
     return (isComplete && activeSectionIndex === sections.length - 1) || activeSectionIndex < sections.length - 1;
-  }, [isComplete, activeSectionIndex, sections]);
+  }, [activeSectionIndex, sections]);
 
   const moveToNextSectionLabel = useMemo(() => {
     if (activeSectionIndex === 0) {
@@ -118,18 +124,26 @@ export const ProgressiveProfilingForm = ({
 
   const isSectionEnabled = useCallback(
     (sectionIndex: number) => {
-      const section = sections[sectionIndex - 1];
-      if (!section) {
+      if (sectionIndex === 0) {
         return true;
-      } // the first section is always enabled
+      }
 
-      return section.completed;
+      if (sectionIndex === sections.length - 1) {
+        return sections.slice(1, -1).every((section) => section.completed);
+      }
+
+      return sections[sectionIndex]?.completed ?? false;
     },
     [sections],
   );
 
   const handleSubmit = useCallback(async () => {
     if (!currentSection) {
+      return;
+    }
+
+    if (currentSection.id === "profile-start") {
+      moveToNextSection(activeSectionIndex);
       return;
     }
 
