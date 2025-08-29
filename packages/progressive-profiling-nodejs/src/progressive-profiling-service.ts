@@ -12,6 +12,8 @@ import { PLUGIN_ID, METADATA_KEY } from "./constants";
 import { pluginUserMetadata } from "@shared/nodejs";
 import { groupBy, indexBy, mapBy } from "@shared/js";
 
+// todo we disable eslint for unused params until we use interfaces
+
 export class ProgressiveProfilingService {
   protected existingSections: (FormSection & { registratorId: string })[] = [];
   protected existingRegistratorHandlers: Record<string, Pick<Parameters<RegisterSections>[0], "set" | "get">> = {};
@@ -19,16 +21,17 @@ export class ProgressiveProfilingService {
 
   static ProgressiveProfilingCompletedClaim: BooleanClaim;
 
-  static areAllSectionsCompleted = (sections: FormSection[], profileConfig?: UserMetadataConfig) => {
-    return sections.every((section) => profileConfig?.sectionCompleted?.[section.id] ?? false);
-  };
-
   constructor(protected pluginConfig: SuperTokensPluginProfileProgressiveProfilingNormalisedConfig) {
     ProgressiveProfilingService.ProgressiveProfilingCompletedClaim = new BooleanClaim({
       key: `${PLUGIN_ID}-completed`,
-      fetchValue: async (userId) => {
+      fetchValue: async (userId, recipeUserId, tenantId, currentPayload, userContext) => {
         const userMetadata = await this.metadata.get(userId);
-        return ProgressiveProfilingService.areAllSectionsCompleted(this.getSections(), userMetadata?.profileConfig);
+        return this.areAllSectionsCompleted(
+          // can't pass session here because it's not available in the params or a way of getting it
+          undefined as unknown as SessionContainerInterface,
+          userMetadata?.profileConfig,
+          userContext,
+        );
       },
     });
   }
@@ -63,7 +66,13 @@ export class ProgressiveProfilingService {
     this.existingRegistratorHandlers[registratorId] = { set, get };
   };
 
-  getSections = function (this: ProgressiveProfilingService) {
+  getSections = function (
+    this: ProgressiveProfilingService,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    session?: SessionContainerInterface,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    userContext?: Record<string, any>,
+  ) {
     return this.existingSections;
   };
 
@@ -78,7 +87,7 @@ export class ProgressiveProfilingService {
       throw new Error("User not found");
     }
 
-    const sections = this.getSections();
+    const sections = this.getSections(session, userContext);
     const sectionsById = indexBy(sections, "id");
     const sectionIdToRegistratorIdMap = mapBy(sections, "id", (section) => section.registratorId);
     const dataBySectionId = groupBy(data, "sectionId");
@@ -98,7 +107,7 @@ export class ProgressiveProfilingService {
           ];
         }
 
-        const fieldError = this.validateField(field, row.value, userContext);
+        const fieldError = this.validateField(session, field, row.value, userContext);
         if (fieldError) {
           const fieldErrors = Array.isArray(fieldError) ? fieldError : [fieldError];
           return [...acc, ...fieldErrors.map((error) => ({ id: field.id, error }))];
@@ -139,7 +148,7 @@ export class ProgressiveProfilingService {
     const sectionsCompleted: Record<string, boolean> = {};
     for (const section of sectionsToUpdate) {
       const sectionData = updatedData.filter((d) => d.sectionId === section.id);
-      sectionsCompleted[section.id] = await this.isSectionCompleted(section, sectionData, userContext);
+      sectionsCompleted[section.id] = await this.isSectionCompleted(session, section, sectionData, userContext);
     }
     logDebugMessage(`Sections completed: ${JSON.stringify(sectionsCompleted)}`);
 
@@ -159,10 +168,7 @@ export class ProgressiveProfilingService {
 
     // refresh the claim to make sure the frontend has the latest value
     // but only if all sections are completed
-    const allSectionsCompleted = ProgressiveProfilingService.areAllSectionsCompleted(
-      this.getSections(),
-      newUserMetadata?.profileConfig,
-    );
+    const allSectionsCompleted = this.areAllSectionsCompleted(session, newUserMetadata?.profileConfig, userContext);
     if (allSectionsCompleted) {
       await session.fetchAndSetClaim(ProgressiveProfilingService.ProgressiveProfilingCompletedClaim, userContext);
     }
@@ -180,7 +186,7 @@ export class ProgressiveProfilingService {
       throw new Error("User not found");
     }
 
-    const sections = this.getSections();
+    const sections = this.getSections(session, userContext);
 
     const sectionsByRegistratorId = indexBy(sections, "registratorId");
 
@@ -200,10 +206,11 @@ export class ProgressiveProfilingService {
 
   validateField = function (
     this: ProgressiveProfilingService,
+    session: SessionContainerInterface,
     field: FormField,
     value: FormFieldValue,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    userContext?: Record<string, any>, // might be needed for overrides so we have to have the param until we use interfaces
+    userContext?: Record<string, any>,
   ): string | string[] | undefined {
     if (field.required && (value === undefined || (typeof value === "string" && value.trim() === ""))) {
       return `The "${field.label}" field is required`;
@@ -214,13 +221,25 @@ export class ProgressiveProfilingService {
 
   isSectionCompleted = async function (
     this: ProgressiveProfilingService,
+    session: SessionContainerInterface,
     section: FormSection,
     data: ProfileFormData,
     userContext?: Record<string, any>,
   ) {
     const valuesByFieldId = mapBy(data, "fieldId", (row) => row.value);
     return section.fields.every(
-      (field) => this.validateField(field, valuesByFieldId[field.id], userContext) === undefined,
+      (field) => this.validateField(session, field, valuesByFieldId[field.id], userContext) === undefined,
+    );
+  };
+
+  areAllSectionsCompleted = function (
+    this: ProgressiveProfilingService,
+    session: SessionContainerInterface,
+    profileConfig?: UserMetadataConfig,
+    userContext?: Record<string, any>,
+  ) {
+    return this.getSections(session, userContext).every(
+      (section) => profileConfig?.sectionCompleted?.[section.id] ?? false,
     );
   };
 }
