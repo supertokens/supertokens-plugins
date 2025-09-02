@@ -22,7 +22,7 @@ import {
   SuperTokensPluginTenantDiscoveryPluginNormalisedConfig,
   TranslationKeys,
 } from "./types";
-import { parseTenantId, populateEmailFromUrl, updateSignInSubmitBtn } from "./util";
+import { populateEmailFromUrl, updateSignInSubmitBtn } from "./util";
 
 const { usePluginContext, setContext } = buildContext<{
   plugins: SuperTokensPublicPlugin[];
@@ -50,6 +50,10 @@ export const init = createPluginInitFunction<
       init: async (config, plugins, sdkVersion) => {
         if (config.enableDebugLogs) {
           enableDebugLogs();
+        }
+
+        if (!config.usesDynamicLoginMethods) {
+          throw new Error("Cannot continue without `usesDynamicLoginMethods` set to `true`");
         }
 
         const querier = getQuerier(new URL(API_PATH, config.appInfo.apiDomain.getAsStringDangerous()).toString());
@@ -156,9 +160,11 @@ export const init = createPluginInitFunction<
           },
           components: {
             EmailPasswordSignInForm_Override: ({ DefaultComponent, ...props }) => {
-              const { shouldShowSelector } = parseTenantId();
+              const { shouldShowSelector } = implementation.parseTenantId();
+              logDebugMessage(`EmailPasswordSignInForm_Override: shouldShowSelector: ${shouldShowSelector}`);
               const updatedProps = { ...props };
               if (shouldShowSelector) {
+                logDebugMessage("EmailPasswordSignInForm_Override: shouldShowSelector is true");
                 updatedProps.formFields = updatedProps.formFields.filter((field) => field.id === "email");
                 updatedProps.config.signInAndUpFeature.signInForm.formFields =
                   updatedProps.config.signInAndUpFeature.signInForm.formFields.filter((field) => field.id === "email");
@@ -200,7 +206,7 @@ export const init = createPluginInitFunction<
       },
       generalAuthRecipeComponentOverrides: {
         AuthPageHeader_Override: ({ DefaultComponent, ...props }) => {
-          const { shouldShowSelector } = parseTenantId();
+          const { shouldShowSelector } = implementation.parseTenantId();
 
           // If the tenant was not determined from the URL and
           // tenant selector is enabled, we will redirect to the
@@ -218,7 +224,7 @@ export const init = createPluginInitFunction<
           return <DefaultComponent {...props} />;
         },
         AuthPageComponentList_Override: ({ DefaultComponent, ...props }) => {
-          const { shouldShowSelector } = parseTenantId();
+          const { shouldShowSelector } = implementation.parseTenantId();
 
           // Make a copy of the original props and modify them
           const updatedProps: typeof props = { ...props };
@@ -245,6 +251,7 @@ export const init = createPluginInitFunction<
 
           useLayoutEffect(() => {
             if (shouldShowSelector) {
+              logDebugMessage("AuthPageComponentList_Override: Updating continue button text");
               updateSignInSubmitBtn(translations("PL_TD_EMAIL_DISCOVERY_CONTINUE_BUTTON"));
             }
 

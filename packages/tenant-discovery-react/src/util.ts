@@ -14,7 +14,7 @@ export const updateSignInSubmitBtn = (btnText: string) => {
   const supertokensRoot = document.querySelector("#supertokens-root")?.shadowRoot;
 
   // Find all buttons with data-supertokens="button" and find the one with "Sign in" text
-  const submitButtons = supertokensRoot?.querySelectorAll("[data-supertokens=\"button\"]");
+  const submitButtons = supertokensRoot?.querySelectorAll('[data-supertokens="button"]');
   submitButtons?.forEach((button) => {
     // Check if it's a button element and has type submit
     if (button instanceof HTMLButtonElement && button.type === "submit") {
@@ -36,7 +36,7 @@ export const populateEmailFromUrl = () => {
 
   // @ts-ignore
   const supertokensRoot = document.querySelector("#supertokens-root")?.shadowRoot;
-  const emailInput = supertokensRoot?.querySelector("[data-supertokens=\"input input-email\"]");
+  const emailInput = supertokensRoot?.querySelector('[data-supertokens="input input-email"]');
   if (!emailInput) {
     return;
   }
@@ -46,18 +46,4 @@ export const populateEmailFromUrl = () => {
 
   // Remove the email value from sessionStorage after consuming it.
   sessionStorage.removeItem(ST_EMAIL_VALUE_STORAGE_KEY);
-};
-
-type ParseTenantIdResponse =
-  | { tenantId: string; shouldShowSelector: false }
-  | { tenantId: null; shouldShowSelector: true };
-
-export const parseTenantId = (): ParseTenantIdResponse => {
-  // Get the urlParams and check if it has a tenantId
-  const urlParams = new URLSearchParams(window.location.search);
-  const tenantId = urlParams.get("tenantId");
-
-  const shouldShowSelector = !tenantId;
-
-  return shouldShowSelector ? { tenantId: null, shouldShowSelector: true } : { tenantId, shouldShowSelector: false };
 };

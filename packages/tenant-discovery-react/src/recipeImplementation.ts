@@ -2,7 +2,11 @@ import Session from "supertokens-auth-react/recipe/session";
 
 import { ST_EMAIL_VALUE_STORAGE_KEY } from "./constants";
 import { logDebugMessage } from "./logger";
-import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantDiscoveryPluginConfig } from "./types";
+import {
+  OverrideableTenantFunctionImplementation,
+  ParseTenantIdReturnType,
+  SuperTokensPluginTenantDiscoveryPluginConfig,
+} from "./types";
 
 export const getOverrideableTenantFunctionImplementation = (
   config: SuperTokensPluginTenantDiscoveryPluginConfig,
@@ -65,7 +69,7 @@ export const getOverrideableTenantFunctionImplementation = (
       // and `extractTenantIdFromDomain` is enabled.
       return this.determineTenantFromSubdomain();
     },
-    determineTenantFromSubdomain: async function () {
+    determineTenantFromSubdomain: function () {
       /**
        * Try to determine the tenant ID from the subdomain.
        *
@@ -99,6 +103,25 @@ export const getOverrideableTenantFunctionImplementation = (
       // to run.
       logDebugMessage("shouldDetermineTenantFromURL: checking if user is logged in");
       return !(await Session.doesSessionExist());
+    },
+    parseTenantId: function (): ParseTenantIdReturnType {
+      // Get the urlParams and check if it has a tenantId
+      const urlParams = new URLSearchParams(window.location.search);
+      let tenantId = urlParams.get("tenantId") ?? undefined;
+      logDebugMessage(`tenantId inferred with first approach: ${tenantId}`);
+
+      // If `tenantId` is not found in the query param, try to parse it from
+      // URL as a fallback.
+      if (tenantId === undefined) {
+        logDebugMessage("Falling back to inferring tenantId using subdomain");
+        tenantId = this.determineTenantFromSubdomain();
+      }
+
+      logDebugMessage(`final tenant ID: ${tenantId}`);
+
+      return tenantId === undefined
+        ? { tenantId: null, shouldShowSelector: true }
+        : { tenantId, shouldShowSelector: false };
     },
   };
   return implementation;

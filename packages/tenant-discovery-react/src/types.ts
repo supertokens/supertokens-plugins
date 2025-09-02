@@ -10,11 +10,16 @@ export type SuperTokensPluginTenantDiscoveryPluginNormalisedConfig = {
   extractTenantIdFromDomain?: boolean;
 };
 
+export type ParseTenantIdReturnType =
+  | { tenantId: string; shouldShowSelector: false }
+  | { tenantId: null; shouldShowSelector: true };
+
 export type OverrideableTenantFunctionImplementation = {
   setTenantId: (tenantId: string, email?: string, shouldRefresh?: boolean) => void;
   determineTenantFromURL: () => Promise<string | undefined>;
   shouldDetermineTenantFromURL: () => Promise<boolean>;
-  determineTenantFromSubdomain: () => Promise<string | undefined>;
+  determineTenantFromSubdomain: () => string | undefined;
+  parseTenantId: () => ParseTenantIdReturnType;
 };
 
 export interface TenantDetails {
