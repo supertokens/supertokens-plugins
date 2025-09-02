@@ -12,7 +12,7 @@ import { EmailPasswordPreBuiltUI } from "supertokens-auth-react/recipe/emailpass
 
 import { getApi } from "./api";
 import { PLUGIN_ID, API_PATH } from "./constants";
-import { enableDebugLogs } from "./logger";
+import { enableDebugLogs, logDebugMessage } from "./logger";
 import { SelectTenantPage } from "./pages";
 import { getOverrideableTenantFunctionImplementation } from "./recipeImplementation";
 import { defaultTranslationsTenantDiscovery } from "./translations";
@@ -22,7 +22,7 @@ import {
   SuperTokensPluginTenantDiscoveryPluginNormalisedConfig,
   TranslationKeys,
 } from "./types";
-import { hidePasswordInput, parseTenantId, populateEmailFromUrl, updateSignInSubmitBtn } from "./util";
+import { parseTenantId, populateEmailFromUrl, updateSignInSubmitBtn } from "./util";
 
 const { usePluginContext, setContext } = buildContext<{
   plugins: SuperTokensPublicPlugin[];
@@ -90,7 +90,7 @@ export const init = createPluginInitFunction<
               signIn: async (input) => {
                 // If the `tenantId` is set, then we need to
                 // call the original implementation.
-                const { shouldShowSelector } = input.userContext;
+                const { shouldShowSelector } = input as any;
 
                 // If we are showing the selector, we need to parse the tenantId
                 // else return the original response.
@@ -154,6 +154,27 @@ export const init = createPluginInitFunction<
               },
             };
           },
+          components: {
+            EmailPasswordSignInForm_Override: ({ DefaultComponent, ...props }) => {
+              const { shouldShowSelector } = parseTenantId();
+              const updatedProps = { ...props };
+              if (shouldShowSelector) {
+                updatedProps.formFields = updatedProps.formFields.filter((field) => field.id === "email");
+                updatedProps.config.signInAndUpFeature.signInForm.formFields =
+                  updatedProps.config.signInAndUpFeature.signInForm.formFields.filter((field) => field.id === "email");
+
+                const origSignIn = updatedProps.recipeImplementation.signIn;
+                updatedProps.recipeImplementation.signIn = (input) => {
+                  return origSignIn({ ...input, shouldShowSelector } as any);
+                };
+              }
+
+              return (
+                // @ts-ignore
+                <DefaultComponent {...(shouldShowSelector ? updatedProps : props)} />
+              );
+            },
+          },
         },
         multitenancy: {
           recipeInitRequired: true,
@@ -163,16 +184,19 @@ export const init = createPluginInitFunction<
               getTenantId: async (input) => {
                 // Add support for parsing tenantId from subdomain
                 // as well.
+                logDebugMessage("getTenantId Override: Trying to determine tenant from URL");
                 const tenantIdFromSubdomain = await implementation.determineTenantFromURL();
                 if (tenantIdFromSubdomain !== undefined) {
+                  logDebugMessage("getTenantId Override: successfully determined tenant from URL");
                   return tenantIdFromSubdomain;
                 }
 
+                logDebugMessage("getTenantId Override: Failed to determine tenant from URL");
                 return originalImplementation.getTenantId(input);
-              }
+              },
             };
-          }
-        }
+          },
+        },
       },
       generalAuthRecipeComponentOverrides: {
         AuthPageHeader_Override: ({ DefaultComponent, ...props }) => {
@@ -217,16 +241,10 @@ export const init = createPluginInitFunction<
 
             // Set the formField to hide the password field
             updatedProps.factorIds = ["emailpassword"];
-
-            updatedProps.userContext = {
-              ...props.userContext,
-              shouldShowSelector: true,
-            };
           }
 
           useLayoutEffect(() => {
             if (shouldShowSelector) {
-              hidePasswordInput();
               updateSignInSubmitBtn(translations("PL_TD_EMAIL_DISCOVERY_CONTINUE_BUTTON"));
             }
 
