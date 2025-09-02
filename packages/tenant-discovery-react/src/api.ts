@@ -14,7 +14,20 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     return response;
   };
 
+  const tenantIdFromEmail = async (email: string) => {
+    const response = await querier.post<{ status: "OK"; tenant: string; inferredTenantId: string; email: string } | { status: "ERROR"; message: string }>(
+      "/from-email",
+      {
+        email
+      },
+      {
+        withSession: false,
+      },
+    );
+  };
+
   return {
     fetchTenants,
+    tenantIdFromEmail,
   };
 };

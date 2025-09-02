@@ -32,6 +32,7 @@ const { usePluginContext, setContext } = buildContext<{
   querier: ReturnType<typeof getQuerier>;
   api: ReturnType<typeof getApi>;
   t: (key: TranslationKeys) => string;
+  recipe: OverrideableTenantFunctionImplementation;
 }>();
 export { usePluginContext };
 
@@ -66,6 +67,7 @@ export const init = createPluginInitFunction<
           querier,
           api,
           t: translations,
+          recipe: implementation,
         });
 
         // Check if the url matches any tenantId and accordingly
