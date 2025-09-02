@@ -6,9 +6,8 @@ import {
   SuperTokensPluginTenantDiscoveryPluginNormalisedConfig,
 } from "./types";
 import { HANDLE_BASE_PATH, PLUGIN_ID, PLUGIN_SDK_VERSION } from "./constants";
-import { POPULAR_EMAIL_DOMAINS } from "./constants";
 import { withRequestHandler } from "@shared/nodejs";
-import { enableDebugLogs, logDebugMessage } from "./logger";
+import { enableDebugLogs } from "./logger";
 
 import { getOverrideableTenantFunctionImplementation } from "./recipeImplementation";
 
@@ -26,12 +25,6 @@ export const init = createPluginInitFunction<
         if (appConfig.debug) {
           enableDebugLogs();
         }
-
-        // Ensure that the domain is not a generic one
-        // Go through each domain and check if it is a popular one
-        const restrictedDomains = [...(pluginConfig.restrictedEmailDomains ?? []), ...POPULAR_EMAIL_DOMAINS];
-
-        logDebugMessage(`Updated Restricted domains: ${restrictedDomains}`);
       },
       routeHandlers: () => {
         return {
@@ -41,6 +34,13 @@ export const init = createPluginInitFunction<
               path: `${HANDLE_BASE_PATH}/list`,
               method: "get",
               handler: withRequestHandler(async () => {
+                if (!pluginConfig.showTenantSelector) {
+                  return {
+                    status: "TENANT_SELECTOR_NOT_ENABLED",
+                    message: "Tenant Selector is not enabled"
+                  };
+                }
+
                 const tenants = await implementation.getTenants();
                 // Transform tenants to only include JSON-serializable properties
                 const serializableTenants = tenants.map(({ tenantId, ...config }) => ({
@@ -86,17 +86,11 @@ export const init = createPluginInitFunction<
           ],
         };
       },
-      overrideMap: {
-        emailpassword: {
-          apis: (originalImplementation) => {
-            return {
-              ...originalImplementation,
-            };
-          },
-        },
-      },
       exports: {},
     };
   },
-  (config) => getOverrideableTenantFunctionImplementation(config),
+  () => getOverrideableTenantFunctionImplementation(),
+  (config) => ({
+    showTenantSelector: config.showTenantSelector ?? false,
+  })
 );

@@ -1,7 +1,7 @@
 # SuperTokens Plugin Tenant Discovery
 
 Automatically discover and route users to appropriate tenants based on their email domains.
-This plugin provides endpoints to infer tenant IDs from email domains and automatically assign users to the correct tenant during authentication.
+This plugin provides endpoints to infer tenant IDs from email domains.
 
 ## Installation
 
@@ -28,7 +28,7 @@ SuperTokens.init({
   ],
   plugins: [
     TenantDiscoveryPlugin.init({
-      restrictedEmailDomains: ["tempmail.com", "10minutemail.com"], // Optional: additional domains to block
+      showTenantSelector: false,
     }),
   ],
 });
@@ -59,6 +59,9 @@ The plugin automatically creates these endpoints:
 
 ### List All Tenants
 
+> [!IMPORTANT]  
+> This is disabled by default. The `showTenantSelector` field in config has to be set to `true` in order to enable it.
+
 - **GET** `/plugin/supertokens-plugin-tenant-discovery/list`
 - **Response**:
   ```json
@@ -81,21 +84,20 @@ The plugin automatically creates these endpoints:
 
 | Option                   | Type      | Default | Description                                                   |
 | ------------------------ | --------- | ------- | ------------------------------------------------------------- |
-| `restrictedEmailDomains` | `string[]` | `[]`    | Additional email domains to restrict (beyond popular domains) |
+| `showTenantSelector` | `boolean` | `false`    | Whether to show tenant selector (enable API's or not) |
 
 ## How It Works
 
 ### Email Domain to Tenant ID Inference
 
 - The plugin extracts the domain from user email addresses (e.g., `user@company.com` → `company.com`)
-- It then extracts the tenant ID from the domain by taking the second-to-last part (e.g., `company.com` → `company`)
+- It then extracts the tenant ID from the domain by taking the second-to-last part (e.g., `company.com` → `company` or `test.company.com` -> `company`)
 - For domains with only one part, it uses the entire domain as tenant ID
 - If the inferred tenant doesn't exist in your SuperTokens setup, it falls back to the `public` tenant
 
 ### Domain Restrictions
 
 - Popular email domains (Gmail, Yahoo, Outlook, etc.) are automatically blocked from tenant inference
-- You can specify additional domains to block using `restrictedEmailDomains`
 - Restricted domains automatically return `public` as the tenant ID
 - This prevents assignment of public email users to inferred tenant IDs
 
@@ -213,13 +215,13 @@ The plugin automatically blocks these popular email domains from tenant inferenc
 
 - gmail.com, yahoo.com, hotmail.com, outlook.com
 - icloud.com, aol.com, live.com, msn.com
-- And 30+ other popular domains
+- And other popular domains
 
 You can add custom restrictions:
 
 ```typescript
 TenantDiscoveryPlugin.init({
-  restrictedEmailDomains: ["tempmail.com", "guerrillamail.com"], // Block temporary email services
+  showTenantSelector: false,
 });
 ```
 

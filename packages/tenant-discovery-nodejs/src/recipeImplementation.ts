@@ -1,9 +1,8 @@
-import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantDiscoveryPluginConfig } from "./types";
+import { POPULAR_EMAIL_DOMAINS } from "./constants";
+import { OverrideableTenantFunctionImplementation } from "./types";
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
 
-export const getOverrideableTenantFunctionImplementation = (
-  config: SuperTokensPluginTenantDiscoveryPluginConfig,
-): OverrideableTenantFunctionImplementation => {
+export const getOverrideableTenantFunctionImplementation = (): OverrideableTenantFunctionImplementation => {
   const implementation = {
     getTenantIdFromEmail: async (email: string) => {
       const emailSplitted = email.split("@");
@@ -18,7 +17,7 @@ export const getOverrideableTenantFunctionImplementation = (
 
       // If it is one of the restricted domains, we will return
       // public.
-      if (config.restrictedEmailDomains?.includes(emailDomain)) {
+      if (implementation.isRestrictedEmailDomain(emailDomain)) {
         return "public";
       }
 
@@ -45,6 +44,13 @@ export const getOverrideableTenantFunctionImplementation = (
        * see if it is present.
        */
       return (await implementation.getTenants()).map((tenant) => tenant.tenantId).includes(tenantId);
+    },
+    isRestrictedEmailDomain: (emailDomain: string) => {
+      /**
+       * Check if the passed email domain is part of the restricted email
+       * domain list.
+       */
+      return POPULAR_EMAIL_DOMAINS.includes(emailDomain);
     }
   };
 

@@ -1,6 +1,6 @@
 import Session from "supertokens-auth-react/recipe/session";
 
-import { ST_EMAIL_VALUE } from "./constants";
+import { ST_EMAIL_VALUE_STORAGE_KEY } from "./constants";
 import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantDiscoveryPluginConfig } from "./types";
 
 export const getOverrideableTenantFunctionImplementation = (
@@ -24,7 +24,7 @@ export const getOverrideableTenantFunctionImplementation = (
       url.searchParams.set("tenantId", tenantId);
 
       if (email) {
-        localStorage.setItem(ST_EMAIL_VALUE, email);
+        sessionStorage.setItem(ST_EMAIL_VALUE_STORAGE_KEY, email);
       }
 
       // If shouldRefresh is not provided, we will default to true
@@ -68,7 +68,7 @@ export const getOverrideableTenantFunctionImplementation = (
        * Returns undefined if no subdomain exists, otherwise returns the subdomain part.
        * Example: test.something.com returns "test"
        */
-      if (config.extractTenantIdFromDomain === undefined || config.extractTenantIdFromDomain === false) {
+      if (config.extractTenantIdFromDomain !== true) {
         return undefined;
       }
 

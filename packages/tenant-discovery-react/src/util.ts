@@ -1,4 +1,4 @@
-import { ST_EMAIL_VALUE } from "./constants";
+import { ST_EMAIL_VALUE_STORAGE_KEY } from "./constants";
 
 export function setInputValue(input: HTMLInputElement, val: string) {
   // @ts-ignore
@@ -108,7 +108,7 @@ export const showEmailInputOnly = () => {
 
 export const populateEmailFromUrl = () => {
   // Get the urlParams and check if it has a tenantId
-  const email = localStorage.getItem(ST_EMAIL_VALUE);
+  const email = sessionStorage.getItem(ST_EMAIL_VALUE_STORAGE_KEY);
   if (!email) {
     return;
   }
@@ -123,8 +123,8 @@ export const populateEmailFromUrl = () => {
   // @ts-ignore
   setInputValue(emailInput, email);
 
-  // Remove the email value from localStorage after consuming it.
-  localStorage.removeItem(ST_EMAIL_VALUE);
+  // Remove the email value from sessionStorage after consuming it.
+  sessionStorage.removeItem(ST_EMAIL_VALUE_STORAGE_KEY);
 };
 
 type ParseTenantIdResponse =

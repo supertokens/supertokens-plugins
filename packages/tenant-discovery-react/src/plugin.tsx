@@ -156,12 +156,12 @@ export const init = createPluginInitFunction<
                 // Set the tenantId in the current URL and refresh the page
                 implementation.setTenantId(tenantId, tenantValueEntered);
 
-                // return a SIGN_IN_NOT_ALLOWED error
+                // return a TENANT_DETERMINED status
                 // if the code reached this point.
                 // though it should not since we refresh the page right after the tenant
                 // is set.
                 return {
-                  status: "SIGN_IN_NOT_ALLOWED",
+                  status: "TENANT_DETERMINED" as any,
                   fetchResponse: new Response(),
                   reason: "Tenant discovery plugin overridden method",
                 };
@@ -176,7 +176,7 @@ export const init = createPluginInitFunction<
 
           if (shouldShowSelector) {
             // eslint-disable-next-line react/jsx-no-literals
-            return <div>Enter email to continue</div>;
+            return <div>{translations("PL_TD_EMAIL_DISCOVERY_HEADER_TEXT")}</div>;
           }
 
           // @ts-ignore
@@ -184,6 +184,9 @@ export const init = createPluginInitFunction<
         },
         AuthPageComponentList_Override: ({ DefaultComponent, ...props }) => {
           const { shouldShowSelector } = parseTenantId();
+
+          // Make a copy of the original props and modify them
+          const updatedProps: typeof props = { ...props };
 
           // Update the auth component list to only keep email if we are showing
           // the selector.
@@ -199,12 +202,12 @@ export const init = createPluginInitFunction<
             }
 
             // Fix type error by ensuring the component matches expected type
-            props.authComponents = [emailPasswordSignInComponent.component as React.FC<AuthComponentProps>];
+            updatedProps.authComponents = [emailPasswordSignInComponent.component as React.FC<AuthComponentProps>];
 
             // Set the formField to hide the password field
-            props.factorIds = ["emailpassword"];
+            updatedProps.factorIds = ["emailpassword"];
 
-            props.userContext = {
+            updatedProps.userContext = {
               ...props.userContext,
               shouldShowSelector: true,
             };
@@ -222,7 +225,7 @@ export const init = createPluginInitFunction<
           }, [shouldShowSelector]);
 
           // @ts-ignore
-          return <DefaultComponent {...props} />;
+          return <DefaultComponent {...(shouldShowSelector ? updatedProps : props)} />;
         },
       },
     };
