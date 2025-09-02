@@ -77,14 +77,6 @@ export const init = createPluginInitFunction<
           implementation.setTenantId(tenantId);
           return;
         }
-
-        // If the tenant was not determined from the URL and
-        // tenant selector is enabled, we will redirect to the
-        // select tenant page.
-        const { shouldShowSelector } = parseTenantId();
-        if (shouldShowSelector && pluginConfig.showTenantSelector && window.location.pathname !== "/select-tenant") {
-          window.location.href = "/select-tenant";
-        }
       },
       routeHandlers: (appConfig: any, plugins: any, sdkVersion: any) => {
         return {
@@ -175,6 +167,13 @@ export const init = createPluginInitFunction<
       generalAuthRecipeComponentOverrides: {
         AuthPageHeader_Override: ({ DefaultComponent, ...props }) => {
           const { shouldShowSelector } = parseTenantId();
+
+          // If the tenant was not determined from the URL and
+          // tenant selector is enabled, we will redirect to the
+          // select tenant page.
+          if (shouldShowSelector && pluginConfig.showTenantSelector && window.location.pathname !== "/select-tenant") {
+            window.location.href = "/select-tenant";
+          }
 
           if (shouldShowSelector) {
             // eslint-disable-next-line react/jsx-no-literals
