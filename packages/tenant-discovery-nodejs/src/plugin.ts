@@ -40,18 +40,27 @@ export const init = createPluginInitFunction<
             {
               path: `${HANDLE_BASE_PATH}/list`,
               method: "get",
-              handler: withRequestHandler(async (req, res, session, useContext) => {
+              handler: withRequestHandler(async () => {
                 const tenants = await implementation.getTenants();
+                // Transform tenants to only include JSON-serializable properties
+                const serializableTenants = tenants.map(({ tenantId, ...config }) => ({
+                  tenantId,
+                  ...Object.fromEntries(
+                    Object.entries(config).filter(
+                      ([, value]) => typeof value !== "function" && value !== undefined && value !== null,
+                    ),
+                  ),
+                }));
                 return {
                   status: "OK",
-                  tenants,
+                  tenants: serializableTenants,
                 };
               }),
             },
             {
               path: `${HANDLE_BASE_PATH}/from-email`,
               method: "post",
-              handler: withRequestHandler(async (req, res, session, userContext) => {
+              handler: withRequestHandler(async (req) => {
                 const payload: { email?: string } | undefined = await req.getJSONBody();
                 if (!payload?.email?.trim()) {
                   return {
