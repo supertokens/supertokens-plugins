@@ -32,7 +32,7 @@ const { usePluginContext, setContext } = buildContext<{
   querier: ReturnType<typeof getQuerier>;
   api: ReturnType<typeof getApi>;
   t: (key: TranslationKeys) => string;
-  recipe: OverrideableTenantFunctionImplementation;
+  functions: OverrideableTenantFunctionImplementation;
 }>();
 export { usePluginContext };
 
@@ -67,16 +67,8 @@ export const init = createPluginInitFunction<
           querier,
           api,
           t: translations,
-          recipe: implementation,
+          functions: implementation,
         });
-
-        // Check if the url matches any tenantId and accordingly
-        // set the tenantId in the url and refresh the page.
-        const tenantId = await implementation.determineTenantFromURL();
-        if (tenantId) {
-          implementation.setTenantId(tenantId);
-          return;
-        }
       },
       routeHandlers: (appConfig: any, plugins: any, sdkVersion: any) => {
         return {
@@ -163,6 +155,24 @@ export const init = createPluginInitFunction<
             };
           },
         },
+        multitenancy: {
+          recipeInitRequired: true,
+          functions: (originalImplementation, builder) => {
+            return {
+              ...originalImplementation,
+              getTenantId: async (input) => {
+                // Add support for parsing tenantId from subdomain
+                // as well.
+                const tenantIdFromSubdomain = await implementation.determineTenantFromURL();
+                if (tenantIdFromSubdomain !== undefined) {
+                  return tenantIdFromSubdomain;
+                }
+
+                return originalImplementation.getTenantId(input);
+              }
+            };
+          }
+        }
       },
       generalAuthRecipeComponentOverrides: {
         AuthPageHeader_Override: ({ DefaultComponent, ...props }) => {

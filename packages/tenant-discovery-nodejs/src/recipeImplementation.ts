@@ -1,10 +1,11 @@
+import { UserContext } from "supertokens-node/types";
 import { POPULAR_EMAIL_DOMAINS } from "./constants";
 import { OverrideableTenantFunctionImplementation } from "./types";
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
 
 export const getOverrideableTenantFunctionImplementation = (): OverrideableTenantFunctionImplementation => {
   const implementation = {
-    getTenantIdFromEmail: async (email: string) => {
+    getTenantIdFromEmail: async function (email: string) {
       const emailSplitted = email.split("@");
       if (emailSplitted.length !== 2) {
         return "public";
@@ -17,7 +18,7 @@ export const getOverrideableTenantFunctionImplementation = (): OverrideableTenan
 
       // If it is one of the restricted domains, we will return
       // public.
-      if (implementation.isRestrictedEmailDomain(emailDomain)) {
+      if (this.isRestrictedEmailDomain(emailDomain)) {
         return "public";
       }
 
@@ -33,25 +34,25 @@ export const getOverrideableTenantFunctionImplementation = (): OverrideableTenan
       // ['supertokens', 'com']
       return emailDomainSplitted[emailDomainSplitted.length - 2] ?? "public";
     },
-    getTenants: async () => {
-      return (await MultiTenancy.listAllTenants()).tenants;
+    getTenants: async function (userContext?: UserContext) {
+      return (await MultiTenancy.listAllTenants(userContext)).tenants;
     },
-    isValidTenant: async (tenantId: string) => {
+    isValidTenant: async function (tenantId: string, userContext?: UserContext) {
       /**
        * Check whether the passed tenantId is valid or not.
        *
        * We will check by checking in the list of tenants to
        * see if it is present.
        */
-      return (await implementation.getTenants()).map((tenant) => tenant.tenantId).includes(tenantId);
+      return (await this.getTenants(userContext)).map((tenant) => tenant.tenantId).includes(tenantId);
     },
-    isRestrictedEmailDomain: (emailDomain: string) => {
+    isRestrictedEmailDomain: function (emailDomain: string) {
       /**
        * Check if the passed email domain is part of the restricted email
        * domain list.
        */
       return POPULAR_EMAIL_DOMAINS.includes(emailDomain);
-    }
+    },
   };
 
   return implementation;

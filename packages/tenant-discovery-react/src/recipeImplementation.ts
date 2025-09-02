@@ -1,13 +1,14 @@
 import Session from "supertokens-auth-react/recipe/session";
 
 import { ST_EMAIL_VALUE_STORAGE_KEY } from "./constants";
+import { logDebugMessage } from "./logger";
 import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantDiscoveryPluginConfig } from "./types";
 
 export const getOverrideableTenantFunctionImplementation = (
   config: SuperTokensPluginTenantDiscoveryPluginConfig,
 ): OverrideableTenantFunctionImplementation => {
   const implementation = {
-    setTenantId: (tenantId: string, email?: string, shouldRefresh?: boolean, shouldOverride?: boolean) => {
+    setTenantId: function (tenantId: string, email?: string, shouldRefresh?: boolean, shouldOverride?: boolean) {
       const url = new URL(window.location.href);
 
       // If the URL already has the tenantId param, don't override it
@@ -37,16 +38,19 @@ export const getOverrideableTenantFunctionImplementation = (
         window.location.href = url.toString();
       }
     },
-    determineTenantFromURL: async () => {
+    determineTenantFromURL: async function () {
       /**
        * Try to determine the tenantId from the URL.
        *
        * This method will try to check if the url matches any of the tenantIds
        * passed in the config and accordingly return that value.
        */
-      if (!(await implementation.shouldDetermineTenantFromURL())) {
+      logDebugMessage("determineTenantFromURL: checking if tenant should be determined from URL");
+      if (!(await this.shouldDetermineTenantFromURL())) {
+        logDebugMessage("Not determining from URL since `shouldDetermineTenantFromURL` returned false");
         return undefined;
       }
+      logDebugMessage("determineTenantFromURL: continuing since `shouldDetermineTenantFromURL` returned true");
 
       const url = new URL(window.location.href);
 
@@ -59,9 +63,9 @@ export const getOverrideableTenantFunctionImplementation = (
 
       // Fallback to determining from the url directly if it is a subdomain
       // and `extractTenantIdFromDomain` is enabled.
-      return implementation.determineTenantFromSubdomain();
+      return this.determineTenantFromSubdomain();
     },
-    determineTenantFromSubdomain: async () => {
+    determineTenantFromSubdomain: async function () {
       /**
        * Try to determine the tenant ID from the subdomain.
        *
@@ -87,12 +91,13 @@ export const getOverrideableTenantFunctionImplementation = (
       // No subdomain found
       return undefined;
     },
-    shouldDetermineTenantFromURL: async () => {
+    shouldDetermineTenantFromURL: async function () {
       /**
        * Check if the tenant should be determined from the URL or not.
        */
       // If the user is logged in, we don't want the determine trigger
       // to run.
+      logDebugMessage("shouldDetermineTenantFromURL: checking if user is logged in");
       return !(await Session.doesSessionExist());
     },
   };

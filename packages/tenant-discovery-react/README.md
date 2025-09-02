@@ -16,8 +16,8 @@ npm install @supertokens-plugins/tenant-discovery-react
 Initialize the plugin in your SuperTokens frontend configuration:
 
 ```typescript
-import SuperTokens from 'supertokens-auth-react';
-import TenantDiscoveryPlugin from '@supertokens-plugins/tenant-discovery-react';
+import SuperTokens from "supertokens-auth-react";
+import TenantDiscoveryPlugin from "@supertokens-plugins/tenant-discovery-react";
 
 SuperTokens.init({
   appInfo: {
@@ -66,7 +66,7 @@ Access exposed plugin functionality in your custom components:
 import { usePluginContext } from "@supertokens-plugins/tenant-discovery-react";
 
 function MyTenantComponent() {
-  const { api, recipe } = usePluginContext();
+  const { api, functions } = usePluginContext();
 
   const handleFetchTenants = async () => {
     try {
@@ -80,7 +80,7 @@ function MyTenantComponent() {
   };
 
   const handleSetTenant = (tenantId: string, email?: string) => {
-    recipe.setTenantId(tenantId, email, true);
+    functions.setTenantId(tenantId, email, true);
   };
 
   return (
@@ -104,15 +104,15 @@ const { api } = usePluginContext();
 
 // Fetch all tenants
 const result = await api.fetchTenants();
-if (result.status === 'OK') {
-  console.log('Tenants:', result.tenants);
+if (result.status === "OK") {
+  console.log("Tenants:", result.tenants);
   // result.tenants is an array of { tenantId: string }
 } else {
-  console.error('Error:', result.message);
+  console.error("Error:", result.message);
 }
 ```
 
-### Recipe Methods
+### Plugin Methods
 
 Access tenant management functionality:
 
@@ -121,10 +121,10 @@ Access tenant management functionality:
 Set the current tenant ID:
 
 ```typescript
-const { recipe } = usePluginContext();
+const { functions } = usePluginContext();
 
 // Set tenant ID (with optional email and refresh)
-recipe.setTenantId('company-tenant', 'user@company.com', true);
+functions.setTenantId("company-tenant", "user@company.com", true);
 ```
 
 #### determineTenantFromURL
@@ -132,11 +132,11 @@ recipe.setTenantId('company-tenant', 'user@company.com', true);
 Extract tenant from URL parameters:
 
 ```typescript
-const { recipe } = usePluginContext();
+const { functions } = usePluginContext();
 
 // Get tenant from URL
-const tenantFromURL = await recipe.determineTenantFromURL();
-console.log('URL Tenant:', tenantFromURL);
+const tenantFromURL = await functions.determineTenantFromURL();
+console.log("URL Tenant:", tenantFromURL);
 ```
 
 #### determineTenantFromSubdomain
@@ -144,11 +144,11 @@ console.log('URL Tenant:', tenantFromURL);
 Extract tenant from subdomain:
 
 ```typescript
-const { recipe } = usePluginContext();
+const { functions } = usePluginContext();
 
 // Get tenant from subdomain
-const tenantFromSubdomain = await recipe.determineTenantFromSubdomain();
-console.log('Subdomain Tenant:', tenantFromSubdomain);
+const tenantFromSubdomain = await functions.determineTenantFromSubdomain();
+console.log("Subdomain Tenant:", tenantFromSubdomain);
 ```
 
 ## Usage Patterns
@@ -164,14 +164,14 @@ Use the plugin with backend tenant discovery for seamless user routing:
 import { usePluginContext } from "@supertokens-plugins/tenant-discovery-react";
 
 function EmailTenantDiscovery() {
-  const { recipe, api } = usePluginContext();
+  const { functions, api } = usePluginContext();
   const [email, setEmail] = useState("");
 
   const handleEmailSubmit = async () => {
     const result = await api.tenantIdFromEmail(email);
     if (result.status === "OK") {
       // Set discovered tenant
-      recipe.setTenantId(result.tenant, email, true);
+      functions.setTenantId(result.tenant, email, true);
     }
   };
 
@@ -197,7 +197,7 @@ Create your own tenant selection interface:
 import { usePluginContext } from "@supertokens-plugins/tenant-discovery-react";
 
 function CustomTenantSelector() {
-  const { api, recipe } = usePluginContext();
+  const { api, functions } = usePluginContext();
   const [tenants, setTenants] = useState([]);
 
   useEffect(() => {
@@ -211,7 +211,7 @@ function CustomTenantSelector() {
   }, [api]);
 
   const handleTenantSelect = (tenantId: string) => {
-    recipe.setTenantId(tenantId, undefined, true);
+    functions.setTenantId(tenantId, undefined, true);
     // Redirect to auth
     redirectToAuth({ queryParams: { tenantId } });
   };

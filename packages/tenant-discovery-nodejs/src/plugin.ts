@@ -33,7 +33,7 @@ export const init = createPluginInitFunction<
             {
               path: `${HANDLE_BASE_PATH}/list`,
               method: "get",
-              handler: withRequestHandler(async () => {
+              handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!pluginConfig.showTenantSelector) {
                   return {
                     status: "TENANT_SELECTOR_NOT_ENABLED",
@@ -41,7 +41,7 @@ export const init = createPluginInitFunction<
                   };
                 }
 
-                const tenants = await implementation.getTenants();
+                const tenants = await implementation.getTenants(userContext);
                 // Transform tenants to only include JSON-serializable properties
                 const serializableTenants = tenants.map(({ tenantId, ...config }) => ({
                   tenantId,
@@ -60,7 +60,7 @@ export const init = createPluginInitFunction<
             {
               path: `${HANDLE_BASE_PATH}/from-email`,
               method: "post",
-              handler: withRequestHandler(async (req) => {
+              handler: withRequestHandler(async (req, res, session, userContext) => {
                 const payload: { email?: string } | undefined = await req.getJSONBody();
                 if (!payload?.email?.trim()) {
                   return {
@@ -73,7 +73,7 @@ export const init = createPluginInitFunction<
 
                 // Check if the inferred tenantId is valid and otherwise return
                 // `public`.
-                const isInferredTenantIdValid = await implementation.isValidTenant(tenantId);
+                const isInferredTenantIdValid = await implementation.isValidTenant(tenantId, userContext);
 
                 return {
                   status: "OK",
