@@ -1,8 +1,8 @@
 // import { BaseFormSection } from "@supertokens-plugin-profile/common-details-shared";
-import { useCallback } from "react";
+import { useCallback } from 'react';
 
-import { DetailsWrapper } from "./components/details/details-wrapper";
-import { usePluginContext } from "./plugin";
+import { DetailsWrapper } from './components/users/TenantUsers';
+import { usePluginContext } from './plugin';
 
 export const TenantDetailsWrapper = ({ section }: { section: any }) => {
   const { api } = usePluginContext();
@@ -11,7 +11,7 @@ export const TenantDetailsWrapper = ({ section }: { section: any }) => {
     // Use the `tid` from the users access token payload.
 
     const response = await api.getUsers();
-    if (response.status === "ERROR") {
+    if (response.status === 'ERROR') {
       throw new Error(response.message);
     }
     return { users: response.users };
