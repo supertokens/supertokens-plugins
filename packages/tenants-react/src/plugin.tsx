@@ -1,6 +1,6 @@
 import { createPluginInitFunction } from "@shared/js";
 import { buildContext, getQuerier } from "@shared/react";
-import { SuperTokensPlugin, SuperTokensPublicConfig, SuperTokensPublicPlugin } from "supertokens-auth-react";
+import { getTranslationFunction, SuperTokensPlugin, SuperTokensPublicConfig, SuperTokensPublicPlugin } from "supertokens-auth-react";
 import { BooleanClaim } from "supertokens-auth-react/recipe/session";
 
 import { getApi } from "./api";
@@ -9,7 +9,8 @@ import { API_PATH, PLUGIN_ID } from "./constants";
 // import { InvitationAcceptWrapper } from "./invitation-accept-wrapper";
 import { enableDebugLogs } from "./logger";
 // import { SelectTenantPage } from "./select-tenant-page";
-import { SuperTokensPluginTenantsPluginConfig, SuperTokensPluginTenantsPluginNormalisedConfig } from "./types";
+import { defaultTranslationsTenants } from "./translations";
+import { SuperTokensPluginTenantsPluginConfig, SuperTokensPluginTenantsPluginNormalisedConfig, TranslationKeys } from "./types";
 
 const { usePluginContext, setContext } = buildContext<{
   plugins: SuperTokensPublicPlugin[];
@@ -18,7 +19,7 @@ const { usePluginContext, setContext } = buildContext<{
   pluginConfig: SuperTokensPluginTenantsPluginNormalisedConfig;
   querier: ReturnType<typeof getQuerier>;
   api: ReturnType<typeof getApi>;
-  t: (key: any) => string; // TODO: Update with correct translations type
+  t: (key: TranslationKeys) => string;
 }>();
 export { usePluginContext };
 
@@ -75,6 +76,8 @@ export const init = createPluginInitFunction<
       };
     };
 
+    let translations: ReturnType<typeof getTranslationFunction<TranslationKeys>>;
+
     return {
       id: PLUGIN_ID,
       init: (config, plugins, sdkVersion) => {
@@ -118,6 +121,7 @@ export const init = createPluginInitFunction<
 
         const querier = getQuerier(new URL(API_PATH, config.appInfo.apiDomain.getAsStringDangerous()).toString());
         const api = getApi(querier);
+        translations = getTranslationFunction<TranslationKeys>(defaultTranslationsTenants);
 
         setContext({
           plugins,
@@ -126,7 +130,7 @@ export const init = createPluginInitFunction<
           pluginConfig,
           querier,
           api,
-          t: (t: undefined) => "", // TODO: Update this
+          t: translations,
         });
       },
       routeHandlers: (appConfig: any, plugins: any, sdkVersion: any) => {
