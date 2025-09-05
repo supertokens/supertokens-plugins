@@ -1,10 +1,10 @@
-import { BaseFormSection } from "@supertokens-plugin-profile/common-details-shared";
+// import { BaseFormSection } from "@supertokens-plugin-profile/common-details-shared";
 import { useCallback } from "react";
 
 import { DetailsWrapper } from "./components/details/details-wrapper";
 import { usePluginContext } from "./plugin";
 
-export const TenantDetailsWrapper = ({ section }: { section: BaseFormSection }) => {
+export const TenantDetailsWrapper = ({ section }: { section: any }) => {
   const { api } = usePluginContext();
 
   const onFetch = useCallback(async () => {
