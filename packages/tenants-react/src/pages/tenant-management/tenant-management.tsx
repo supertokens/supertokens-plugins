@@ -4,9 +4,10 @@ import { SelectInput, TabGroup, Tab } from "@shared/ui";
 import classNames from "classnames/bind";
 import { useState, useEffect, useCallback } from "react";
 
+import { InvitationsWrapper } from "../../components/invitations/invitations";
+import { TenantTab } from "../../components/tab/TenantTab";
+import { TenantUsers } from "../../components/users/TenantUsers";
 import { usePluginContext } from "../../plugin";
-import { DetailsWrapper } from "../details/details-wrapper";
-import { InvitationsWrapper } from "../invitations/invitations";
 
 import style from "./styles.module.scss";
 
@@ -44,16 +45,13 @@ export const TenantManagement = ({ section }: { section: any }) => {
   }, [getUsers]);
 
   // Invitations tab functions
-  const onFetchInvitations = useCallback(
-    async () => {
-      const response = await getInvitations();
-      if (response.status === "ERROR") {
-        throw new Error(response.message);
-      }
-      return { invitations: response.invitees };
-    },
-    [getInvitations],
-  );
+  const onFetchInvitations = useCallback(async () => {
+    const response = await getInvitations();
+    if (response.status === "ERROR") {
+      throw new Error(response.message);
+    }
+    return { invitations: response.invitees };
+  }, [getInvitations]);
 
   const onRemoveInvite = useCallback(
     async (email: string) => {
@@ -117,15 +115,11 @@ export const TenantManagement = ({ section }: { section: any }) => {
       <div>
         <TabGroup>
           <Tab panel={t("PL_TB_USERS_TAB_LABEL")}>
-            <DetailsWrapper
-              section={{
-                id: "tenant-users",
-                label: "Tenant Users",
-                description: "Users in this tenant",
-                fields: [],
-              }}
-              onFetch={onFetchUsers}
-            />
+            <TenantTab description="List of users that are part of your tenant">
+              <TenantUsers
+                onFetch={onFetchUsers}
+              />
+            </TenantTab>
           </Tab>
           <Tab panel={t("PL_TB_INVITATIONS_TAB_LABEL")}>
             <InvitationsWrapper
