@@ -2,13 +2,19 @@ import classNames from "classnames/bind";
 import { useCallback, useEffect, useState } from "react";
 import { User } from "supertokens-web-js/types";
 
+import { TenantTable } from "../table/TenantTable";
+
 import style from "./details.module.scss";
 
 // import { BaseFormSection } from '@supertokens-plugin-profile/common-details-shared';
 
 const cx = classNames.bind(style);
 
-export const DetailsWrapper = ({ section, onFetch }: { section: any; onFetch: () => Promise<{ users: User[] }> }) => {
+type TenantUsersProps = {
+  onFetch: () => Promise<{ users: User[] }>
+};
+
+export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch }) => {
   const [users, setUsers] = useState<User[]>([]);
 
   const loadDetails = useCallback(async () => {
@@ -22,20 +28,19 @@ export const DetailsWrapper = ({ section, onFetch }: { section: any; onFetch: ()
 
   return (
     <div className={cx("tenantDetailsSection")}>
-      <div className={cx("tenantDetailsHeader")}>
-        <h3>{section.label}</h3>
-        <p>{section.description}</p>
-      </div>
-
       <div className={cx("tenantDetailsContent")}>
         {users.length > 0 ? (
           <div className={cx("tenantDetailsUsers")}>
-            {users.map((user) => (
-              <div key={user.id} className={cx("userRow")}>
-                <div className={cx("userAvatar")}>{user.emails[0]?.charAt(0).toUpperCase() || "U"}</div>
-                <div className={cx("userEmail")}>{user.emails[0]}</div>
-              </div>
-            ))}
+            <TenantTable
+              columns={users.map((user) => ({
+                emailComponent: (
+                  <div className={cx("userRow")}>
+                    <div className={cx("userAvatar")}>{user.emails[0]?.charAt(0).toUpperCase() || "U"}</div>
+                    <div className={cx("userEmail")}>{user.emails[0]}</div>
+                  </div>
+                )
+              }))}
+            />
           </div>
         ) : (
           <div className={cx("tenantDetailsNoUsers")}>

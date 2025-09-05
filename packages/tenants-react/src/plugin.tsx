@@ -4,10 +4,10 @@ import { getTranslationFunction, SuperTokensPlugin, SuperTokensPublicConfig, Sup
 import { BooleanClaim } from "supertokens-auth-react/recipe/session";
 
 import { getApi } from "./api";
-import { TenantManagement } from "./components";
 import { API_PATH, PLUGIN_ID } from "./constants";
 // import { InvitationAcceptWrapper } from "./invitation-accept-wrapper";
 import { enableDebugLogs } from "./logger";
+import { TenantManagement } from "./pages/tenant-management/tenant-management";
 // import { SelectTenantPage } from "./select-tenant-page";
 import { defaultTranslationsTenants } from "./translations";
 import { SuperTokensPluginTenantsPluginConfig, SuperTokensPluginTenantsPluginNormalisedConfig, TranslationKeys } from "./types";
