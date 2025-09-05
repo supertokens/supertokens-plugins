@@ -1,10 +1,6 @@
-import classNames from 'classnames/bind';
-import style from './invitations.module.scss';
-import { BaseFormSection } from '@supertokens-plugin-profile/common-details-shared';
-import { useCallback, useEffect, useState } from 'react';
-import { InviteeDetails } from '@supertokens-plugin-profile/tenants-shared';
-
-const cx = classNames.bind(style);
+import { InviteeDetails } from "@shared/tenants";
+// import { BaseFormSection } from "@supertokens-plugin-profile/common-details-shared";
+import { useCallback, useEffect, useState } from "react";
 
 export const InvitationsWrapper = ({
   section,
@@ -13,7 +9,7 @@ export const InvitationsWrapper = ({
   onCreate,
   selectedTenantId,
 }: {
-  section: BaseFormSection;
+  section: any;
   onFetch: (tenantId?: string) => Promise<{ invitations: InviteeDetails[] }>;
   onRemove: (email: string, tenantId?: string) => Promise<void>;
   onCreate?: (email: string, tenantId: string) => Promise<void>;
@@ -21,7 +17,7 @@ export const InvitationsWrapper = ({
 }) => {
   const [invitations, setInvitations] = useState<InviteeDetails[]>([]);
   const [showInviteForm, setShowInviteForm] = useState(false);
-  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteEmail, setInviteEmail] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showCode, setShowCode] = useState<string | null>(null);
   const loadDetails = useCallback(
@@ -44,17 +40,19 @@ export const InvitationsWrapper = ({
 
   const handleInviteSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!onCreate || !inviteEmail.trim()) return;
+    if (!onCreate || !inviteEmail.trim()) {
+      return;
+    }
 
     setIsSubmitting(true);
     try {
       await onCreate(inviteEmail.trim(), selectedTenantId);
-      setInviteEmail('');
+      setInviteEmail("");
       setShowInviteForm(false);
       // Reload the invitations list
       await loadDetails(selectedTenantId);
     } catch (error) {
-      console.error('Failed to create invitation:', error);
+      console.error("Failed to create invitation:", error);
     } finally {
       setIsSubmitting(false);
     }
@@ -67,53 +65,39 @@ export const InvitationsWrapper = ({
 
   const handleCancelInvite = () => {
     setShowInviteForm(false);
-    setInviteEmail('');
+    setInviteEmail("");
   };
 
   return (
-    <div className={cx('invitationDetailsSection')}>
-      <div className={cx('invitationDetailsHeader')}>
+    <div className="">
+      <div className="">
         <h3>{section.label}</h3>
         <p>{section.description}</p>
         {onCreate && (
-          <button
-            className={cx('inviteButton')}
-            type="button"
-            onClick={() => setShowInviteForm(true)}
-            disabled={showInviteForm}
-          >
+          <button className="" type="button" onClick={() => setShowInviteForm(true)} disabled={showInviteForm}>
             Invite Someone
           </button>
         )}
       </div>
 
       {showInviteForm && onCreate && (
-        <div className={cx('inviteForm')}>
+        <div className="">
           <form onSubmit={handleInviteSubmit}>
-            <div className={cx('inviteFormContent')}>
+            <div className="">
               <input
                 type="email"
                 placeholder="Enter email address"
                 value={inviteEmail}
                 onChange={(e: any) => setInviteEmail(e.currentTarget.value)}
-                className={cx('inviteEmailInput')}
+                className=""
                 required
                 disabled={isSubmitting}
               />
-              <div className={cx('inviteFormActions')}>
-                <button
-                  type="submit"
-                  className={cx('inviteSubmitButton')}
-                  disabled={isSubmitting || !inviteEmail.trim()}
-                >
-                  {isSubmitting ? 'Inviting...' : 'Send Invitation'}
+              <div className="">
+                <button type="submit" className="" disabled={isSubmitting || !inviteEmail.trim()}>
+                  {isSubmitting ? "Inviting..." : "Send Invitation"}
                 </button>
-                <button
-                  type="button"
-                  className={cx('inviteCancelButton')}
-                  onClick={handleCancelInvite}
-                  disabled={isSubmitting}
-                >
+                <button type="button" className="" onClick={handleCancelInvite} disabled={isSubmitting}>
                   Cancel
                 </button>
               </div>
@@ -122,39 +106,37 @@ export const InvitationsWrapper = ({
         </div>
       )}
 
-      <div className={cx('invitationDetailsContent')}>
+      <div className="">
         {invitations.length > 0 ? (
-          <div className={cx('invitationDetailsUsers')}>
-            {invitations.map((invitation) => (
-              <div key={invitation.email} className={cx('userRow')}>
-                <div className={cx('userAvatar')}>{invitation.email.charAt(0).toUpperCase() || 'U'}</div>
-                <div className={cx('userEmail')}>{invitation.email}</div>
-                <button className={cx('showCodeButton')} type="button" onClick={() => handleShowCode(invitation.code)}>
+          <div>
+            {/* {invitations.map((invitation) => (
+              <div key={invitation.email} className="">
+                <div className=""</div>
+                <div className=""</div>
+                <button className="">
                   Code
                 </button>
                 <button
-                  className={cx('removeButton')}
+                  className=""
                   type="button"
                   onClick={() => handleRemoveInvitation(invitation.email, selectedTenantId)}
                 >
                   ×
                 </button>
               </div>
-            ))}
+            ))} */}
           </div>
         ) : (
-          <div className={cx('invitationDetailsNoUsers')}>
+          <div className="">
             <p>No invitations found</p>
           </div>
         )}
       </div>
 
       {showCode && (
-        <div className={cx('invitationDetailsCode')}>
+        <div className="">
           <p>{showCode}</p>
-          <button className={cx('closeButton')} type="button" onClick={() => setShowCode(null)}>
-            Close
-          </button>
+          <button className="">Close</button>
         </div>
       )}
     </div>
