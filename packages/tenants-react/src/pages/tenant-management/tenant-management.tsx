@@ -1,5 +1,5 @@
 import { TenantDetails } from "@shared/tenants";
-import { SelectInput, TabGroup, Tab } from "@shared/ui";
+import { SelectInput, TabGroup, Tab, TabPanel } from "@shared/ui";
 // import { BaseFormSection } from "@supertokens-plugin-profile/common-details-shared";
 import classNames from "classnames/bind";
 import { useState, useEffect, useCallback } from "react";
@@ -114,14 +114,17 @@ export const TenantManagement = ({ section }: { section: any }) => {
       {/* Tab Navigation */}
       <div>
         <TabGroup>
-          <Tab panel={t("PL_TB_USERS_TAB_LABEL")}>
+          <Tab panel="users">{t("PL_TB_USERS_TAB_LABEL")}</Tab>
+          <Tab panel="invitations">{t("PL_TB_INVITATIONS_TAB_LABEL")}</Tab>
+          <Tab panel="requests">{t("PL_TB_REQUESTS_TAB_LABEL")}</Tab>
+
+          {/* Tab Content */}
+          <TabPanel name="users">
             <TenantTab description="List of users that are part of your tenant">
-              <TenantUsers
-                onFetch={onFetchUsers}
-              />
+              <TenantUsers onFetch={onFetchUsers} />
             </TenantTab>
-          </Tab>
-          <Tab panel={t("PL_TB_INVITATIONS_TAB_LABEL")}>
+          </TabPanel>
+          <TabPanel name="invitations">
             <InvitationsWrapper
               section={{
                 id: "tenant-invitations",
@@ -134,8 +137,7 @@ export const TenantManagement = ({ section }: { section: any }) => {
               onCreate={onCreateInvite}
               selectedTenantId={selectedTenantId}
             />
-          </Tab>
-          <Tab panel={t("PL_TB_REQUESTS_TAB_LABEL")}></Tab>
+          </TabPanel>
         </TabGroup>
       </div>
     </div>
