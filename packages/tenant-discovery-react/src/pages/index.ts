@@ -1,1 +1,1 @@
-export * from './SelectTenantPage';
+export * from "./SelectTenantPage";

@@ -14,9 +14,10 @@ import { getApi } from "./api";
 import { PLUGIN_ID, API_PATH } from "./constants";
 import { enableDebugLogs, logDebugMessage } from "./logger";
 import { SelectTenantPage } from "./pages";
-import { getOverrideableTenantFunctionImplementation } from "./recipeImplementation";
+import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
 import { defaultTranslationsTenantDiscovery } from "./translations";
 import {
+  FromEmailReturnType,
   OverrideableTenantFunctionImplementation,
   SuperTokensPluginTenantDiscoveryPluginConfig,
   SuperTokensPluginTenantDiscoveryPluginNormalisedConfig,
@@ -59,30 +60,28 @@ export const init = createPluginInitFunction<
         throw new Error("Email is undefined, should never come here");
       }
 
+      let response: FromEmailReturnType;
       const querier = getQuerier(apiBasePath);
-      const response = await querier.post<
-        | { status: "OK"; tenant: string }
-        | { status: "NOT_ALLOWED"; message: string }
-        | { status: "ERROR"; message: string }
-      >(
-        "/from-email",
-        {
-          email,
-        },
-        {
-          withSession: false,
-        },
-      );
 
-      // If the tenant was not inferred, we need to show an error
-      // in the UI.
-      if (response.status === "NOT_ALLOWED") {
-        logDebugMessage(`Got message from /from-email: ${response.message}`);
-        return {
-          status: "SIGN_IN_NOT_ALLOWED",
-          reason: response.message,
-          fetchResponse: new Response(),
-        };
+      try {
+        response = await querier.post<FromEmailReturnType>(
+          "/from-email",
+          {
+            email,
+          },
+          {
+            withSession: false,
+          },
+        );
+      } catch (e: any) {
+        if (e.payload?.status === "NOT_ALLOWED") {
+          logDebugMessage(`Got message from /from-email: ${e.payload?.message}`);
+          const e_ = Error(e.payload?.message);
+          (e_ as any).isSuperTokensGeneralError = true;
+          throw e_;
+        }
+
+        throw e;
       }
 
       if (response.status !== "OK") {

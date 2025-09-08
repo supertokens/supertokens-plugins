@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import SuperTokens from 'supertokens-auth-react';
 import Session from 'supertokens-auth-react/recipe/session';
-import { getOverrideableTenantFunctionImplementation } from './recipeImplementation';
+import { getOverrideableTenantFunctionImplementation } from './pluginImplementation';
 import { SuperTokensPluginTenantDiscoveryPluginConfig } from './types';
 
 // Mock SuperTokens modules

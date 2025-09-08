@@ -1,6 +1,6 @@
 import { getQuerier } from "@shared/react";
 
-import { TenantList } from "./types";
+import { FromEmailReturnType, TenantList } from "./types";
 
 export const getApi = (querier: ReturnType<typeof getQuerier>) => {
   const fetchTenants = async () => {
@@ -15,11 +15,7 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
   };
 
   const tenantIdFromEmail = async (email: string) => {
-    const response = await querier.post<
-      | { status: "OK"; tenant: string }
-      | { status: "NOT_ALLOWED"; message: string }
-      | { status: "ERROR"; message: string }
-    >(
+    const response = await querier.post<FromEmailReturnType>(
       "/from-email",
       {
         email,
