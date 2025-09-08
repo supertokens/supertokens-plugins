@@ -27,6 +27,7 @@ export type OverrideableTenantFunctionImplementation = {
 
 export interface TenantDetails {
   tenantId: string;
+  displayName: string;
 }
 
 export interface TenantList {

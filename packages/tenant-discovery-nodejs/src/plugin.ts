@@ -42,18 +42,9 @@ export const init = createPluginInitFunction<
                 }
 
                 const tenants = await implementation.getTenants(userContext);
-                // Transform tenants to only include JSON-serializable properties
-                const serializableTenants = tenants.map(({ tenantId, ...config }) => ({
-                  tenantId,
-                  ...Object.fromEntries(
-                    Object.entries(config).filter(
-                      ([, value]) => typeof value !== "function" && value !== undefined && value !== null,
-                    ),
-                  ),
-                }));
                 return {
                   status: "OK",
-                  tenants: serializableTenants,
+                  tenants: tenants,
                 };
               }),
             },

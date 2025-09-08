@@ -1,4 +1,3 @@
-import { TenantConfig } from "supertokens-node/lib/build/recipe/multitenancy/types";
 import { UserContext } from "supertokens-node/types";
 
 export type SuperTokensPluginTenantDiscoveryPluginConfig = {
@@ -11,9 +10,14 @@ export type SuperTokensPluginTenantDiscoveryPluginNormalisedConfig = {
   enableTenantListAPI: boolean;
 };
 
+export type MinimalTenantDetails = {
+  tenantId: string;
+  displayName: string;
+}
+
 export type OverrideableTenantFunctionImplementation = {
   getTenantIdFromEmail: (email: string) => Promise<string>;
-  getTenants: (userContext?: UserContext) => Promise<({ tenantId: string } & TenantConfig)[]>;
+  getTenants: (userContext?: UserContext) => Promise<MinimalTenantDetails[]>;
   isValidTenant: (tenantId: string, userContext?: UserContext) => Promise<boolean>;
   isRestrictedEmailDomain: (emailDomain: string) => boolean;
 };

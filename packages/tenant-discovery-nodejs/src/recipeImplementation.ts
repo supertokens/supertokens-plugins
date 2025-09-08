@@ -35,7 +35,8 @@ export const getOverrideableTenantFunctionImplementation = (): OverrideableTenan
       return emailDomainSplitted[emailDomainSplitted.length - 2] ?? "public";
     },
     getTenants: async function (userContext?: UserContext) {
-      return (await MultiTenancy.listAllTenants(userContext)).tenants;
+      const tenantDetails = (await MultiTenancy.listAllTenants(userContext)).tenants;
+      return tenantDetails.map((tenant) => ({ tenantId: tenant.tenantId, displayName: tenant.tenantId }));
     },
     isValidTenant: async function (tenantId: string, userContext?: UserContext) {
       /**
