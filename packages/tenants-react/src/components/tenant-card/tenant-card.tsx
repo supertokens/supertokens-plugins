@@ -105,7 +105,7 @@ export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => 
           </div>
           {validationError && <div className={cx("validationError")}>{validationError}</div>}
         </Card>
-      </div> */}
+      </div>
     </Card>
   );
 };
