@@ -16,35 +16,26 @@ export const getOverrideableTenantFunctionImplementation = (
       const urlParams = new URLSearchParams(window.location.search);
       return urlParams.get("tenantId") ?? undefined;
     },
-    setTenantId: function (tenantId: string, email?: string, shouldRefresh?: boolean, shouldOverwrite?: boolean) {
+    setTenantId: function (tenantId: string, forceRefresh?: boolean) {
       const url = new URL(window.location.href);
 
       // If the URL already has the tenantId param, don't override it
       // unless that is set to true.
       //
       // We are using the willOverride flag to determine if the tenantId
-      // changed in which case we will override and ignore the shouldOverwrite flag.
+      // changed in which case we will override.
       const existingTenantId = this.getTenantIdFromQuery();
       const willOverride = existingTenantId === tenantId;
-      if (willOverride && !shouldOverwrite) {
+
+      // If the tenantId is the same and the user has not passed
+      // forceRefresh or has set it to `false`, we will return right away.
+      if (willOverride && !forceRefresh) {
         return;
       }
 
+      // Build the new URL and refresh the page.
       url.searchParams.set("tenantId", tenantId);
-
-      if (email) {
-        this.setEmailId(email);
-      }
-
-      // If shouldRefresh is not provided, we will default to true
-      if (shouldRefresh === undefined) {
-        shouldRefresh = true;
-      }
-
-      // If shouldRefresh is true, we will refresh the page
-      if (shouldRefresh) {
-        window.location.href = url.toString();
-      }
+      window.location.href = url.toString();
     },
     determineTenantFromURL: async function () {
       /**

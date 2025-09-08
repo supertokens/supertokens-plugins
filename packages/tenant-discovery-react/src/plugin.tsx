@@ -77,17 +77,13 @@ export const init = createPluginInitFunction<
       }
 
       const tenantId = response.tenant;
-      const formFields = input.formFields;
 
-      if (formFields.length < 1) {
-        // Very unlikely since we are setting the field above
-        // but we should still handle.
-        throw new Error("Should never come here");
-      }
-      const tenantValueEntered = formFields[0]?.value;
+      // Set the emailId so that it can be used to auto populate
+      // the email field after refresh
+      implementation.setEmailId(email);
 
       // Set the tenantId in the current URL and refresh the page
-      implementation.setTenantId(tenantId, tenantValueEntered);
+      implementation.setTenantId(tenantId);
 
       // return a TENANT_DETERMINED status
       // if the code reached this point.
