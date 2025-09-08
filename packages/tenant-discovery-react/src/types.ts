@@ -22,6 +22,7 @@ export type OverrideableTenantFunctionImplementation = {
   setEmailId: (emailId: string) => void;
   getEmailId: () => string | undefined;
   removeEmailId: () => void;
+  getTenantIdFromQuery: () => string | undefined;
 };
 
 export interface TenantDetails {

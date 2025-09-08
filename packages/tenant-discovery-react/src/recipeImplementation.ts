@@ -12,6 +12,10 @@ export const getOverrideableTenantFunctionImplementation = (
   config: SuperTokensPluginTenantDiscoveryPluginConfig,
 ): OverrideableTenantFunctionImplementation => {
   const implementation = {
+    getTenantIdFromQuery: function (): string | undefined {
+      const urlParams = new URLSearchParams(window.location.search);
+      return urlParams.get("tenantId") ?? undefined;
+    },
     setTenantId: function (tenantId: string, email?: string, shouldRefresh?: boolean, shouldOverwrite?: boolean) {
       const url = new URL(window.location.href);
 
@@ -20,7 +24,7 @@ export const getOverrideableTenantFunctionImplementation = (
       //
       // We are using the willOverride flag to determine if the tenantId
       // changed in which case we will override and ignore the shouldOverwrite flag.
-      const existingTenantId = url.searchParams.get("tenantId");
+      const existingTenantId = this.getTenantIdFromQuery();
       const willOverride = existingTenantId === tenantId;
       if (willOverride && !shouldOverwrite) {
         return;
@@ -51,11 +55,9 @@ export const getOverrideableTenantFunctionImplementation = (
        */
       logDebugMessage("determineTenantFromURL: trying to determine tenant from URL");
 
-      const url = new URL(window.location.href);
-
       // If the url already has a tenantId, return that to avoid
       // an infinite loop.
-      const existingTenantId = url.searchParams.get("tenantId");
+      const existingTenantId = this.getTenantIdFromQuery();
       if (existingTenantId) {
         return existingTenantId;
       }
@@ -92,8 +94,7 @@ export const getOverrideableTenantFunctionImplementation = (
     },
     parseTenantId: function (): ParseTenantIdReturnType {
       // Get the urlParams and check if it has a tenantId
-      const urlParams = new URLSearchParams(window.location.search);
-      let tenantId = urlParams.get("tenantId") ?? undefined;
+      let tenantId = this.getTenantIdFromQuery();
       logDebugMessage(`tenantId inferred from query param: ${tenantId}`);
 
       // If `tenantId` is not found in the query param, try to parse it from
@@ -121,12 +122,12 @@ export const getOverrideableTenantFunctionImplementation = (
        */
       return sessionStorage.getItem(ST_EMAIL_VALUE_STORAGE_KEY) ?? undefined;
     },
-    removeEmailId: function() {
+    removeEmailId: function () {
       /**
        * Remove the emailID from session storage.
        */
       sessionStorage.removeItem(ST_EMAIL_VALUE_STORAGE_KEY);
-    }
+    },
   };
   return implementation;
 };
