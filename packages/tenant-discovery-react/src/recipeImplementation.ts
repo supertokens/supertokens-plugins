@@ -29,7 +29,7 @@ export const getOverrideableTenantFunctionImplementation = (
       url.searchParams.set("tenantId", tenantId);
 
       if (email) {
-        sessionStorage.setItem(ST_EMAIL_VALUE_STORAGE_KEY, email);
+        this.setEmailId(email);
       }
 
       // If shouldRefresh is not provided, we will default to true
@@ -123,6 +123,24 @@ export const getOverrideableTenantFunctionImplementation = (
         ? { tenantId: null, shouldShowSelector: true }
         : { tenantId, shouldShowSelector: false };
     },
+    setEmailId: function (emailId: string) {
+      /**
+       * Set the emailId in the sessionStorage for later use.
+       */
+      return sessionStorage.setItem(ST_EMAIL_VALUE_STORAGE_KEY, emailId);
+    },
+    getEmailId: function () {
+      /**
+       * Get the emailId from session storage if available.
+       */
+      return sessionStorage.getItem(ST_EMAIL_VALUE_STORAGE_KEY) ?? undefined;
+    },
+    removeEmailId: function() {
+      /**
+       * Remove the emailID from session storage.
+       */
+      sessionStorage.removeItem(ST_EMAIL_VALUE_STORAGE_KEY);
+    }
   };
   return implementation;
 };

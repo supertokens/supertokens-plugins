@@ -1,4 +1,5 @@
 import { ST_EMAIL_VALUE_STORAGE_KEY } from "./constants";
+import { OverrideableTenantFunctionImplementation } from "./types";
 
 export function setInputValue(input: HTMLInputElement, val: string) {
   // @ts-ignore
@@ -27,9 +28,9 @@ export const updateSignInSubmitBtn = (btnText: string) => {
   });
 };
 
-export const populateEmailFromStorage = () => {
+export const populateEmailFromStorage = (implementation: OverrideableTenantFunctionImplementation) => {
   // Get the urlParams and check if it has a tenantId
-  const email = sessionStorage.getItem(ST_EMAIL_VALUE_STORAGE_KEY);
+  const email = implementation.getEmailId();
   if (!email) {
     return;
   }
@@ -45,5 +46,5 @@ export const populateEmailFromStorage = () => {
   setInputValue(emailInput, email);
 
   // Remove the email value from sessionStorage after consuming it.
-  sessionStorage.removeItem(ST_EMAIL_VALUE_STORAGE_KEY);
+  implementation.removeEmailId();
 };

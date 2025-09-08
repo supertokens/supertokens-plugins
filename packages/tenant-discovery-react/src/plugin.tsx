@@ -257,7 +257,7 @@ export const init = createPluginInitFunction<
 
             // Try to populate the email if it is present
             // in the URL.
-            populateEmailFromStorage();
+            populateEmailFromStorage(implementation);
           }, [shouldShowSelector]);
 
           // @ts-ignore

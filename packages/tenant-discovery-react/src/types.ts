@@ -20,6 +20,9 @@ export type OverrideableTenantFunctionImplementation = {
   shouldDetermineTenantFromURL: () => Promise<boolean>;
   determineTenantFromSubdomain: () => string | undefined;
   parseTenantId: () => ParseTenantIdReturnType;
+  setEmailId: (emailId: string) => void;
+  getEmailId: () => string | undefined;
+  removeEmailId: () => void;
 };
 
 export interface TenantDetails {
