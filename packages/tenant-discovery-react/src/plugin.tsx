@@ -45,6 +45,61 @@ export const init = createPluginInitFunction<
   (pluginConfig, implementation) => {
     let apiBasePath: string;
     let translations: ReturnType<typeof getTranslationFunction<TranslationKeys>>;
+
+    const customSignInOverride = async (input) => {
+      // If the selector is showing up, we will make a call to
+      // determine the tenant from email instead.
+
+      // Extract the email from fromFields
+      const email = input.formFields.find((field) => field.id === "email")?.value;
+
+      // Very unlikely that email will be undefined at this stage
+      // but we will throw an error regardless
+      if (!email) {
+        throw new Error("Email is undefined, should never come here");
+      }
+
+      const querier = getQuerier(apiBasePath);
+      const response = await querier.post<{ status: "OK"; tenant: string } | { status: "ERROR"; message: string }>(
+        "/from-email",
+        {
+          email,
+        },
+        {
+          withSession: false,
+        },
+      );
+
+      if (response.status !== "OK") {
+        // Should never happens since we are passing the email
+        // but handle regardless
+        throw new Error("Should never come here");
+      }
+
+      const tenantId = response.tenant;
+      const formFields = input.formFields;
+
+      if (formFields.length < 1) {
+        // Very unlikely since we are setting the field above
+        // but we should still handle.
+        throw new Error("Should never come here");
+      }
+      const tenantValueEntered = formFields[0]?.value;
+
+      // Set the tenantId in the current URL and refresh the page
+      implementation.setTenantId(tenantId, tenantValueEntered);
+
+      // return a TENANT_DETERMINED status
+      // if the code reached this point.
+      // though it should not since we refresh the page right after the tenant
+      // is set.
+      return {
+        status: "TENANT_DETERMINED" as any,
+        fetchResponse: new Response(),
+        reason: "Tenant discovery plugin overridden method",
+      };
+    };
+
     return {
       id: PLUGIN_ID,
       init: async (config, plugins, sdkVersion) => {
@@ -91,71 +146,6 @@ export const init = createPluginInitFunction<
           functions: (originalImplementation, builder) => {
             return {
               ...originalImplementation,
-              signIn: async (input) => {
-                // If the `tenantId` is set, then we need to
-                // call the original implementation.
-                const { shouldShowSelector } = input as any;
-
-                // If we are showing the selector, we need to parse the tenantId
-                // else return the original response.
-                if (!shouldShowSelector) {
-                  return originalImplementation.signIn(input);
-                }
-
-                // If the selector is showing up, we will make a call to
-                // determine the tenant from email instead.
-
-                // Extract the email from fromFields
-                const email = input.formFields.find((field) => field.id === "email")?.value;
-
-                // Very unlikely that email will be undefined at this stage
-                // but we will throw an error regardless
-                if (!email) {
-                  throw new Error("Email is undefined, should never come here");
-                }
-
-                const querier = getQuerier(apiBasePath);
-                const response = await querier.post<
-                  { status: "OK"; tenant: string } | { status: "ERROR"; message: string }
-                >(
-                  "/from-email",
-                  {
-                    email,
-                  },
-                  {
-                    withSession: false,
-                  },
-                );
-
-                if (response.status !== "OK") {
-                  // Should never happens since we are passing the email
-                  // but handle regardless
-                  throw new Error("Should never come here");
-                }
-
-                const tenantId = response.tenant;
-                const formFields = input.formFields;
-
-                if (formFields.length < 1) {
-                  // Very unlikely since we are setting the field above
-                  // but we should still handle.
-                  throw new Error("Should never come here");
-                }
-                const tenantValueEntered = formFields[0]?.value;
-
-                // Set the tenantId in the current URL and refresh the page
-                implementation.setTenantId(tenantId, tenantValueEntered);
-
-                // return a TENANT_DETERMINED status
-                // if the code reached this point.
-                // though it should not since we refresh the page right after the tenant
-                // is set.
-                return {
-                  status: "TENANT_DETERMINED" as any,
-                  fetchResponse: new Response(),
-                  reason: "Tenant discovery plugin overridden method",
-                };
-              },
             };
           },
           components: {
@@ -169,10 +159,7 @@ export const init = createPluginInitFunction<
                 updatedProps.config.signInAndUpFeature.signInForm.formFields =
                   updatedProps.config.signInAndUpFeature.signInForm.formFields.filter((field) => field.id === "email");
 
-                const origSignIn = updatedProps.recipeImplementation.signIn;
-                updatedProps.recipeImplementation.signIn = (input) => {
-                  return origSignIn({ ...input, shouldShowSelector } as any);
-                };
+                updatedProps.recipeImplementation.signIn = customSignInOverride;
               }
 
               return (
