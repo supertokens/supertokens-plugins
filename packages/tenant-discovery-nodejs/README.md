@@ -26,11 +26,13 @@ SuperTokens.init({
   recipeList: [
     // your other recipes
   ],
-  plugins: [
-    TenantDiscoveryPlugin.init({
-      enableTenantListAPI: false,
-    }),
-  ],
+  experimental: {
+    plugins: [
+      TenantDiscoveryPlugin.init({
+        enableTenantListAPI: false,
+      }),
+    ],
+  }
 });
 ```
 
@@ -51,8 +53,7 @@ The plugin automatically creates these endpoints:
   ```json
   {
     "status": "OK",
-    "tenant": "company1", // Final tenant (validated)
-    "email": "user@company1.com"
+    "tenant": "company1"
   }
   ```
 

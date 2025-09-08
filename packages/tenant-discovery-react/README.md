@@ -16,8 +16,8 @@ npm install @supertokens-plugins/tenant-discovery-react
 Initialize the plugin in your SuperTokens frontend configuration:
 
 ```typescript
-import SuperTokens from "supertokens-auth-react";
-import TenantDiscoveryPlugin from "@supertokens-plugins/tenant-discovery-react";
+import SuperTokens from 'supertokens-auth-react';
+import TenantDiscoveryPlugin from '@supertokens-plugins/tenant-discovery-react';
 
 SuperTokens.init({
   appInfo: {
@@ -26,12 +26,14 @@ SuperTokens.init({
   recipeList: [
     // your recipes
   ],
-  plugins: [
-    TenantDiscoveryPlugin.init({
-      showTenantSelector: true, // Optional: defaults to true
-      extractTenantIdFromDomain: true, // Optional: defaults to true
-    }),
-  ],
+  experimental: {
+    plugins: [
+      TenantDiscoveryPlugin.init({
+        showTenantSelector: true, // Optional: defaults to true
+        extractTenantIdFromDomain: true, // Optional: defaults to true
+      }),
+    ],
+  },
 });
 ```
 
@@ -104,11 +106,11 @@ const { api } = usePluginContext();
 
 // Fetch all tenants
 const result = await api.fetchTenants();
-if (result.status === "OK") {
-  console.log("Tenants:", result.tenants);
+if (result.status === 'OK') {
+  console.log('Tenants:', result.tenants);
   // result.tenants is an array of { tenantId: string }
 } else {
-  console.error("Error:", result.message);
+  console.error('Error:', result.message);
 }
 ```
 
@@ -124,9 +126,9 @@ Set the current tenant ID:
 const { functions } = usePluginContext();
 
 // Save email for prefilling the email input after reload
-functions.setEmailId("user@company.com");
+functions.setEmailId('user@company.com');
 // Set tenant ID and refresh
-functions.setTenantId("company-tenant", true);
+functions.setTenantId('company-tenant', true);
 ```
 
 #### determineTenantFromURL
@@ -138,7 +140,7 @@ const { functions } = usePluginContext();
 
 // Get tenant from URL
 const tenantFromURL = await functions.determineTenantFromURL();
-console.log("URL Tenant:", tenantFromURL);
+console.log('URL Tenant:', tenantFromURL);
 ```
 
 #### determineTenantFromSubdomain
@@ -150,7 +152,7 @@ const { functions } = usePluginContext();
 
 // Get tenant from subdomain
 const tenantFromSubdomain = await functions.determineTenantFromSubdomain();
-console.log("Subdomain Tenant:", tenantFromSubdomain);
+console.log('Subdomain Tenant:', tenantFromSubdomain);
 ```
 
 ## Usage Patterns
