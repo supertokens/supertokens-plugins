@@ -1,0 +1,57 @@
+{
+  "name": "@supertokens-plugins/tenant-discovery-nodejs",
+  "version": "0.0.1",
+  "description": "Tenant Discovery Plugin for SuperTokens",
+  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/tenant-discovery-nodejs/README.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/supertokens/supertokens-plugins.git",
+    "directory": "packages/tenant-discovery-nodejs"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "pretty": "npx pretty-quick .",
+    "pretty-check": "npx pretty-quick --check .",
+    "test": "TEST_MODE=testing vitest run --pool=forks --passWithNoTests"
+  },
+  "keywords": [
+    "tenant-discovery",
+    "plugin",
+    "supertokens"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "supertokens-node": ">=23.0.0"
+  },
+  "devDependencies": {
+    "@shared/eslint": "*",
+    "@shared/tsconfig": "*",
+    "@types/react": "^17.0.20",
+    "express": "^5.1.0",
+    "prettier": "3.6.2",
+    "pretty-quick": "^4.2.2",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4",
+    "@shared/nodejs": "*"
+  },
+  "browser": {
+    "fs": false
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    },
+    "./index": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    },
+    "./index.js": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    }
+  }
+}
