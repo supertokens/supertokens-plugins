@@ -23,8 +23,6 @@ export abstract class BasePluginImplementation<TConfig> {
     const ServiceClass = this as any;
 
     if (ServiceClass.instance) {
-      // Optional: Add logging if available
-      // logDebugMessage(`${ServiceClass.name} instance already initialized. Skipping initialization...`);
       return ServiceClass.instance;
     }
 
