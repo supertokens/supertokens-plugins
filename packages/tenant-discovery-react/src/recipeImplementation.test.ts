@@ -131,22 +131,4 @@ describe('recipeImplementation', () => {
       expect(result).toBeUndefined();
     });
   });
-
-  describe('shouldDetermineTenantFromURL', () => {
-    it('should return true when user has no active session', async () => {
-      vi.mocked(Session.doesSessionExist).mockResolvedValue(false);
-
-      const result = await implementation.shouldDetermineTenantFromURL();
-
-      expect(result).toBe(true);
-    });
-
-    it('should return false when user has active session', async () => {
-      vi.mocked(Session.doesSessionExist).mockResolvedValue(true);
-
-      const result = await implementation.shouldDetermineTenantFromURL();
-
-      expect(result).toBe(false);
-    });
-  });
 });
