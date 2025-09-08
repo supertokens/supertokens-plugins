@@ -1,0 +1,7 @@
+/* Tab related styling */
+
+.st-tab-group::part(base) {
+  border: 1px solid #dddde3;
+  border-radius: 12px;
+  background-color: #f9f9f8;
+}
