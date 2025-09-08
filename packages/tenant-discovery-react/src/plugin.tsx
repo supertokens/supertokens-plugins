@@ -22,7 +22,7 @@ import {
   SuperTokensPluginTenantDiscoveryPluginNormalisedConfig,
   TranslationKeys,
 } from "./types";
-import { populateEmailFromUrl, updateSignInSubmitBtn } from "./util";
+import { populateEmailFromStorage, updateSignInSubmitBtn } from "./util";
 
 const { usePluginContext, setContext } = buildContext<{
   plugins: SuperTokensPublicPlugin[];
@@ -257,7 +257,7 @@ export const init = createPluginInitFunction<
 
             // Try to populate the email if it is present
             // in the URL.
-            populateEmailFromUrl();
+            populateEmailFromStorage();
           }, [shouldShowSelector]);
 
           // @ts-ignore

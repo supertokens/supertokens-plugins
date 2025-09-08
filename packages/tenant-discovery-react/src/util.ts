@@ -14,7 +14,7 @@ export const updateSignInSubmitBtn = (btnText: string) => {
   const supertokensRoot = document.querySelector("#supertokens-root")?.shadowRoot;
 
   // Find all buttons with data-supertokens="button" and find the one with "Sign in" text
-  const submitButtons = supertokensRoot?.querySelectorAll('[data-supertokens="button"]');
+  const submitButtons = supertokensRoot?.querySelectorAll("[data-supertokens=\"button\"]");
   submitButtons?.forEach((button) => {
     // Check if it's a button element and has type submit
     if (button instanceof HTMLButtonElement && button.type === "submit") {
@@ -27,7 +27,7 @@ export const updateSignInSubmitBtn = (btnText: string) => {
   });
 };
 
-export const populateEmailFromUrl = () => {
+export const populateEmailFromStorage = () => {
   // Get the urlParams and check if it has a tenantId
   const email = sessionStorage.getItem(ST_EMAIL_VALUE_STORAGE_KEY);
   if (!email) {
@@ -36,7 +36,7 @@ export const populateEmailFromUrl = () => {
 
   // @ts-ignore
   const supertokensRoot = document.querySelector("#supertokens-root")?.shadowRoot;
-  const emailInput = supertokensRoot?.querySelector('[data-supertokens="input input-email"]');
+  const emailInput = supertokensRoot?.querySelector("[data-supertokens=\"input input-email\"]");
   if (!emailInput) {
     return;
   }
