@@ -9,7 +9,7 @@ import { HANDLE_BASE_PATH, PLUGIN_ID, PLUGIN_SDK_VERSION } from "./constants";
 import { withRequestHandler } from "@shared/nodejs";
 import { enableDebugLogs } from "./logger";
 
-import { getOverrideableTenantFunctionImplementation } from "./recipeImplementation";
+import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,

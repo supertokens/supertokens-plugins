@@ -14,6 +14,10 @@ export type ParseTenantIdReturnType =
   | { tenantId: string; doTenantDiscovery: false }
   | { tenantId: null; doTenantDiscovery: true };
 
+export type FromEmailReturnType = | { status: "OK"; tenant: string }
+| { status: "NOT_ALLOWED"; message: string }
+| { status: "ERROR"; message: string }
+
 export type OverrideableTenantFunctionImplementation = {
   setTenantId: (tenantId: string) => void;
   determineTenantFromURL: () => Promise<string | undefined>;
