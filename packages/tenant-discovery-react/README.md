@@ -123,8 +123,10 @@ Set the current tenant ID:
 ```typescript
 const { functions } = usePluginContext();
 
-// Set tenant ID (with optional email and refresh)
-functions.setTenantId("company-tenant", "user@company.com", true);
+// Save email for prefilling the email input after reload
+functions.setEmailId("user@company.com");
+// Set tenant ID and refresh
+functions.setTenantId("company-tenant", true);
 ```
 
 #### determineTenantFromURL

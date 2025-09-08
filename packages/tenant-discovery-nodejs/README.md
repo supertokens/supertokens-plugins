@@ -52,16 +52,15 @@ The plugin automatically creates these endpoints:
   {
     "status": "OK",
     "tenant": "company1", // Final tenant (validated)
-    "inferredTenantId": "company1", // Inferred from email domain
     "email": "user@company1.com"
   }
   ```
 
 #### Block emails from tenant
 
-The default fallback for getting the tenant ID from the email is "public". If this is not ideal, we provide a function that can be overridden to avoid this.
+The default fallback for getting the tenant ID from the email is "public". If this doesn't work in your use-case, we provide a function that can be overridden to avoid this.
 
-The `isTenantAllowedForEmail` function can be overridden in the following way
+You can avoid redirecting users to the public tenant by overriding the `isTenantAllowedForEmail` function like this:
 
 ```ts
 import SuperTokens from "supertokens-node";
@@ -81,7 +80,7 @@ SuperTokens.init({
         ...originalImplementation,
         isTenantAllowedForEmail: (email: string, tenantId: string) => {
           // Check whether the email can access the tenant
-          return true;
+          return tenantId !== "public;
         },
       }),
     }),
@@ -138,11 +137,18 @@ SuperTokens.init({
 - The plugin validates if the inferred tenant ID actually exists in your SuperTokens configuration
 - If the inferred tenant exists, it's returned as the final tenant
 - If the inferred tenant doesn't exist, `public` is returned as the fallback
-- Both `tenant` (final) and `inferredTenantId` (raw inference) are provided in the API response
 
 ## Ways to Use Tenant Discovery
 
+### Frontend plugin
+
+You can use the @supertokens-plugins/tenant-discovery-react plugin on the frontend to automatically integrate with this plugin
+
 ### Frontend Integration
+
+If you are using a custom UI or want to avoid using the above mentioned plugin:
+
+#### Plugin APIs
 
 Use the plugin's API endpoints from your frontend to determine which tenant a user belongs to:
 
@@ -174,7 +180,7 @@ const getTenants = async () => {
 };
 ```
 
-### Multi-Step Authentication Flow
+#### Multi-Step Authentication Flow
 
 1. User enters email on landing page
 2. Call `/from-email` endpoint to infer and validate tenant
@@ -201,7 +207,6 @@ const handleEmailSubmit = async (email: string) => {
     if (result.status === "OK") {
       // Proceed with authentication in validated tenant
       console.log(`User ${email} belongs to tenant: ${result.tenant}`);
-      console.log(`Inferred tenant ID: ${result.inferredTenantId}`);
       // Initialize SuperTokens with validated tenant
       initAuthWithTenant(result.tenant);
     }
@@ -228,7 +233,6 @@ The plugin returns standardized error responses:
 {
   "status": "OK",
   "tenant": "public", // Restricted domain fallback
-  "inferredTenantId": "public",
   "email": "user@gmail.com"
 }
 
@@ -236,7 +240,6 @@ The plugin returns standardized error responses:
 {
   "status": "OK",
   "tenant": "public", // Fallback when inferred tenant doesn't exist
-  "inferredTenantId": "nonexistent", // What was inferred from email
   "email": "user@nonexistent.com"
 }
 ```
@@ -253,7 +256,12 @@ You can add custom restrictions:
 
 ```typescript
 TenantDiscoveryPlugin.init({
-  enableTenantListAPI: false,
+  override: (originalImplementation) => ({
+        ...originalImplementation,
+        isRestrictedEmailDomain: (emailDomain: string) => {
+          return originalImplementation.isRestrictedEmailDomain(emailDomain) || emailDomain === "example.com"
+        },
+      }),
 });
 ```
 
