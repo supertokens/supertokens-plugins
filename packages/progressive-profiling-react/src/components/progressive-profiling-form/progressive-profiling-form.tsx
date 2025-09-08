@@ -1,5 +1,5 @@
 import { groupBy } from "@shared/js";
-import { Button, FormInput, FormFieldValue, Card, usePrettyAction, useToast } from "@shared/ui";
+import { Button, FormInput, FormFieldValue, Card, usePrettyAction } from "@shared/ui";
 import { FormSection, ProfileFormData } from "@supertokens-plugins/progressive-profiling-shared";
 import classNames from "classnames/bind";
 import { useCallback, useEffect, useMemo, useState } from "react";
