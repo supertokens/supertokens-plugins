@@ -101,12 +101,12 @@ SuperTokens.init({
     "status": "OK",
     "tenants": [
       {
-        "tenantId": "public"
-        // ... tenant configuration
+        "tenantId": "public",
+        "displayName": "public"
       },
       {
-        "tenantId": "tenant1"
-        // ... tenant configuration
+        "tenantId": "tenant1",
+        "displayName": "tenant1"
       }
     ]
   }
