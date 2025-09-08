@@ -3,12 +3,12 @@ import { UserContext } from "supertokens-node/types";
 
 export type SuperTokensPluginTenantDiscoveryPluginConfig = {
   // Option to opt-in for the tenant selector dropdown
-  showTenantSelector?: boolean;
+  enableTenantListAPI?: boolean;
 };
 
 export type SuperTokensPluginTenantDiscoveryPluginNormalisedConfig = {
   // Option to opt-in for the tenant selector dropdown
-  showTenantSelector: boolean;
+  enableTenantListAPI: boolean;
 };
 
 export type OverrideableTenantFunctionImplementation = {

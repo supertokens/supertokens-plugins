@@ -34,7 +34,7 @@ export const init = createPluginInitFunction<
               path: `${HANDLE_BASE_PATH}/list`,
               method: "get",
               handler: withRequestHandler(async (req, res, session, userContext) => {
-                if (!pluginConfig.showTenantSelector) {
+                if (!pluginConfig.enableTenantListAPI) {
                   return {
                     status: "TENANT_SELECTOR_NOT_ENABLED",
                     message: "Tenant Selector is not enabled"
@@ -91,6 +91,6 @@ export const init = createPluginInitFunction<
   },
   () => getOverrideableTenantFunctionImplementation(),
   (config) => ({
-    showTenantSelector: config.showTenantSelector ?? false,
+    enableTenantListAPI: config.enableTenantListAPI ?? false,
   })
 );

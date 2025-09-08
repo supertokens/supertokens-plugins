@@ -28,7 +28,7 @@ SuperTokens.init({
   ],
   plugins: [
     TenantDiscoveryPlugin.init({
-      showTenantSelector: false,
+      enableTenantListAPI: false,
     }),
   ],
 });
@@ -60,7 +60,7 @@ The plugin automatically creates these endpoints:
 ### List All Tenants
 
 > [!IMPORTANT]  
-> This is disabled by default. The `showTenantSelector` field in config has to be set to `true` in order to enable it.
+> This is disabled by default. The `enableTenantListAPI` field in config has to be set to `true` in order to enable it.
 
 - **GET** `/plugin/supertokens-plugin-tenant-discovery/list`
 - **Response**:
@@ -84,7 +84,7 @@ The plugin automatically creates these endpoints:
 
 | Option                   | Type      | Default | Description                                                   |
 | ------------------------ | --------- | ------- | ------------------------------------------------------------- |
-| `showTenantSelector` | `boolean` | `false`    | Whether to show tenant selector (enable API's or not) |
+| `enableTenantListAPI` | `boolean` | `false`    | Whether to show tenant selector (enable API's or not) |
 
 ## How It Works
 
@@ -221,7 +221,7 @@ You can add custom restrictions:
 
 ```typescript
 TenantDiscoveryPlugin.init({
-  showTenantSelector: false,
+  enableTenantListAPI: false,
 });
 ```
 
