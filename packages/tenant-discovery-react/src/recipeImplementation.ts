@@ -108,7 +108,7 @@ export const getOverrideableTenantFunctionImplementation = (
       // Get the urlParams and check if it has a tenantId
       const urlParams = new URLSearchParams(window.location.search);
       let tenantId = urlParams.get("tenantId") ?? undefined;
-      logDebugMessage(`tenantId inferred with first approach: ${tenantId}`);
+      logDebugMessage(`tenantId inferred from query param: ${tenantId}`);
 
       // If `tenantId` is not found in the query param, try to parse it from
       // URL as a fallback.
