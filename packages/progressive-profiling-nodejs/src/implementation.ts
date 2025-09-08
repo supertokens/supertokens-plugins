@@ -10,27 +10,27 @@ import { SessionContainerInterface } from "supertokens-node/recipe/session/types
 import { BooleanClaim } from "supertokens-node/recipe/session/claims";
 import { PLUGIN_ID, METADATA_KEY, METADATA_PROFILE_KEY } from "./constants";
 import { pluginUserMetadata } from "@shared/nodejs";
-import { groupBy, indexBy, mapBy } from "@shared/js";
+import { BasePluginImplementation, groupBy, indexBy, mapBy } from "@shared/js";
 
-// todo we disable eslint for unused params until we use interfaces
-
-export class ProgressiveProfilingService {
+export class Implementation extends BasePluginImplementation<SuperTokensPluginProfileProgressiveProfilingNormalisedConfig> {
   protected existingSections: (FormSection & { registratorId: string })[] = [];
   protected existingRegistratorHandlers: Record<string, Pick<Parameters<RegisterSections>[0], "set" | "get">> = {};
   protected metadata = pluginUserMetadata<{ profileConfig?: UserMetadataConfig }>(METADATA_KEY);
 
   static ProgressiveProfilingCompletedClaim: BooleanClaim;
 
-  constructor(protected pluginConfig: SuperTokensPluginProfileProgressiveProfilingNormalisedConfig) {
-    ProgressiveProfilingService.ProgressiveProfilingCompletedClaim = new BooleanClaim({
+  constructor(pluginConfig: SuperTokensPluginProfileProgressiveProfilingNormalisedConfig) {
+    super(pluginConfig);
+
+    Implementation.ProgressiveProfilingCompletedClaim = new BooleanClaim({
       key: `${PLUGIN_ID}-completed`,
       fetchValue: async (userId, recipeUserId, tenantId, currentPayload, userContext) => {
         const userMetadata = await this.metadata.get(userId);
         return this.areAllSectionsCompleted(
           // can't pass session here because it's not available in the params or a way of getting it
-          (undefined as unknown) as SessionContainerInterface,
+          undefined as unknown as SessionContainerInterface,
           userMetadata?.profileConfig,
-          userContext
+          userContext,
         );
       },
     });
@@ -38,8 +38,8 @@ export class ProgressiveProfilingService {
 
   // todo make sure the implementation is the same as in the profile plugin (when it will be implement in the new repo - maybe part of a shared library or exported from the plugin itself ?)
   getDefaultRegistrator = function (
-    this: ProgressiveProfilingService,
-    pluginFormFields: (Pick<FormField, "id" | "defaultValue"> & { sectionId: string })[]
+    this: Implementation,
+    pluginFormFields: (Pick<FormField, "id" | "defaultValue"> & { sectionId: string })[],
   ) {
     const metadata = pluginUserMetadata<{ profile: Record<string, FormFieldValue> }>(METADATA_PROFILE_KEY);
 
@@ -70,7 +70,7 @@ export class ProgressiveProfilingService {
               [field.id]: newValue ?? existingValue ?? field.defaultValue,
             };
           },
-          { ...existingProfile }
+          { ...existingProfile },
         );
 
         await metadata.set(
@@ -81,22 +81,19 @@ export class ProgressiveProfilingService {
               ...profile,
             },
           },
-          userContext
+          userContext,
         );
       },
     };
   };
 
-  registerSections: RegisterSections = function (
-    this: ProgressiveProfilingService,
-    { registratorId, sections, set, get }
-  ) {
+  registerSections: RegisterSections = function (this: Implementation, { registratorId, sections, set, get }) {
     const registrableSections = sections
       .filter((section) => {
         const existingSection = this.existingSections.find((s) => s.id === section.id);
         if (existingSection) {
           logDebugMessage(
-            `Profile plugin section with id "${section.id}" already registered by "${existingSection.registratorId}". Skipping...`
+            `Profile plugin section with id "${section.id}" already registered by "${existingSection.registratorId}". Skipping...`,
           );
           return false;
         }
@@ -118,19 +115,19 @@ export class ProgressiveProfilingService {
   };
 
   getSections = function (
-    this: ProgressiveProfilingService,
+    this: Implementation,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     session?: SessionContainerInterface,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    userContext?: Record<string, any>
+    userContext?: Record<string, any>,
   ) {
     return this.existingSections;
   };
 
   getUserSections = async function (
-    this: ProgressiveProfilingService,
+    this: Implementation,
     session: SessionContainerInterface,
-    userContext?: Record<string, any>
+    userContext?: Record<string, any>,
   ) {
     const userMetadata = await this.metadata.get(session.getUserId(userContext), userContext);
 
@@ -158,10 +155,10 @@ export class ProgressiveProfilingService {
   };
 
   setSectionValues = async function (
-    this: ProgressiveProfilingService,
+    this: Implementation,
     session: SessionContainerInterface,
     data: ProfileFormData,
-    userContext?: Record<string, any>
+    userContext?: Record<string, any>,
   ) {
     const userId = session.getUserId(userContext);
 
@@ -172,26 +169,29 @@ export class ProgressiveProfilingService {
     const dataByRegistratorId = groupBy(data, (row) => sectionIdToRegistratorIdMap[row.sectionId]);
 
     // validate the data
-    const validationErrors = data.reduce((acc, row) => {
-      const field = sectionsById[row.sectionId]?.fields.find((f) => f.id === row.fieldId);
-      if (!field) {
-        return [
-          ...acc,
-          {
-            id: row.fieldId,
-            error: `Field with id "${row.fieldId}" not found`,
-          },
-        ];
-      }
+    const validationErrors = data.reduce(
+      (acc, row) => {
+        const field = sectionsById[row.sectionId]?.fields.find((f) => f.id === row.fieldId);
+        if (!field) {
+          return [
+            ...acc,
+            {
+              id: row.fieldId,
+              error: `Field with id "${row.fieldId}" not found`,
+            },
+          ];
+        }
 
-      const fieldError = this.validateField(session, field, row.value, userContext);
-      if (fieldError) {
-        const fieldErrors = Array.isArray(fieldError) ? fieldError : [fieldError];
-        return [...acc, ...fieldErrors.map((error) => ({ id: field.id, error }))];
-      }
+        const fieldError = this.validateField(session, field, row.value, userContext);
+        if (fieldError) {
+          const fieldErrors = Array.isArray(fieldError) ? fieldError : [fieldError];
+          return [...acc, ...fieldErrors.map((error) => ({ id: field.id, error }))];
+        }
 
-      return acc;
-    }, [] as { id: string; error: string }[]);
+        return acc;
+      },
+      [] as { id: string; error: string }[],
+    );
 
     logDebugMessage(`Validated data. ${validationErrors.length} errors found.`);
 
@@ -245,16 +245,16 @@ export class ProgressiveProfilingService {
     // but only if all sections are completed
     const allSectionsCompleted = this.areAllSectionsCompleted(session, newUserMetadata?.profileConfig, userContext);
     if (allSectionsCompleted) {
-      await session.fetchAndSetClaim(ProgressiveProfilingService.ProgressiveProfilingCompletedClaim, userContext);
+      await session.fetchAndSetClaim(Implementation.ProgressiveProfilingCompletedClaim, userContext);
     }
 
     return { status: "OK" };
   };
 
   getSectionValues = async function (
-    this: ProgressiveProfilingService,
+    this: Implementation,
     session: SessionContainerInterface,
-    userContext?: Record<string, any>
+    userContext?: Record<string, any>,
   ) {
     const sections = this.getSections(session, userContext);
     const sectionsByRegistratorId = indexBy(sections, "registratorId");
@@ -274,12 +274,12 @@ export class ProgressiveProfilingService {
   };
 
   validateField = function (
-    this: ProgressiveProfilingService,
+    this: Implementation,
     session: SessionContainerInterface,
     field: FormField,
     value: FormFieldValue,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    userContext?: Record<string, any>
+    userContext?: Record<string, any>,
   ): string | string[] | undefined {
     if (field.required && (value === undefined || (typeof value === "string" && value.trim() === ""))) {
       return `The "${field.label}" field is required`;
@@ -289,26 +289,26 @@ export class ProgressiveProfilingService {
   };
 
   isSectionCompleted = async function (
-    this: ProgressiveProfilingService,
+    this: Implementation,
     session: SessionContainerInterface,
     section: FormSection,
     data: ProfileFormData,
-    userContext?: Record<string, any>
+    userContext?: Record<string, any>,
   ) {
     const valuesByFieldId = mapBy(data, "fieldId", (row) => row.value);
     return section.fields.every(
-      (field) => this.validateField(session, field, valuesByFieldId[field.id], userContext) === undefined
+      (field) => this.validateField(session, field, valuesByFieldId[field.id], userContext) === undefined,
     );
   };
 
   areAllSectionsCompleted = function (
-    this: ProgressiveProfilingService,
+    this: Implementation,
     session: SessionContainerInterface,
     profileConfig?: UserMetadataConfig,
-    userContext?: Record<string, any>
+    userContext?: Record<string, any>,
   ) {
     return this.getSections(session, userContext).every(
-      (section) => profileConfig?.sectionCompleted?.[section.id] ?? false
+      (section) => profileConfig?.sectionCompleted?.[section.id] ?? false,
     );
   };
 }
