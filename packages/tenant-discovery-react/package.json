@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/tenant-discovery-react",
-  "version": "0.0.1-beta.0",
+  "version": "0.1.0",
   "description": "Tenant Discovery Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/tenant-discovery-react/README.md",
   "repository": {
@@ -50,20 +50,5 @@
     "fs": false
   },
   "main": "./dist/index.js",
-  "module": "./dist/index.mjs",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "dist/index.d.ts",
-      "default": "dist/index.js"
-    },
-    "./index": {
-      "types": "dist/index.d.ts",
-      "default": "dist/index.js"
-    },
-    "./index.js": {
-      "types": "dist/index.d.ts",
-      "default": "dist/index.js"
-    }
-  }
+  "types": "./dist/index.d.ts"
 }

@@ -213,8 +213,14 @@ export const init = createPluginInitFunction<
           }
 
           if (doTenantDiscovery) {
-            // eslint-disable-next-line react/jsx-no-literals
-            return <div>{translations("PL_TD_EMAIL_DISCOVERY_HEADER_TEXT")}</div>;
+            // @ts-ignore
+            return (
+              <DefaultComponent
+                {...props}
+                headerLabel={translations("PL_TD_EMAIL_DISCOVERY_HEADER_TEXT")}
+                hideSignInSwitcher={true}
+              />
+            );
           }
 
           // @ts-ignore

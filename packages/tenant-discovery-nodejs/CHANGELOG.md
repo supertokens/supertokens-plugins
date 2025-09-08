@@ -1,7 +1,5 @@
 # @supertokens-plugins/tenant-discovery-nodejs
 
-## 0.0.1
-
-### Minor Changes
+## 0.1.0
 
 - Add the initial node tenant discovery plugin
