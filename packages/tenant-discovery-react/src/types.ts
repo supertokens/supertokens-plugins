@@ -11,8 +11,8 @@ export type SuperTokensPluginTenantDiscoveryPluginNormalisedConfig = {
 };
 
 export type ParseTenantIdReturnType =
-  | { tenantId: string; shouldShowSelector: false }
-  | { tenantId: null; shouldShowSelector: true };
+  | { tenantId: string; doTenantDiscovery: false }
+  | { tenantId: null; doTenantDiscovery: true };
 
 export type OverrideableTenantFunctionImplementation = {
   setTenantId: (tenantId: string, email?: string, shouldRefresh?: boolean) => void;

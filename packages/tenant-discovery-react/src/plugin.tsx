@@ -150,10 +150,10 @@ export const init = createPluginInitFunction<
           },
           components: {
             EmailPasswordSignInForm_Override: ({ DefaultComponent, ...props }) => {
-              const { shouldShowSelector } = implementation.parseTenantId();
-              logDebugMessage(`EmailPasswordSignInForm_Override: shouldShowSelector: ${shouldShowSelector}`);
+              const { doTenantDiscovery } = implementation.parseTenantId();
+              logDebugMessage(`EmailPasswordSignInForm_Override: shouldShowSelector: ${doTenantDiscovery}`);
               const updatedProps = { ...props };
-              if (shouldShowSelector) {
+              if (doTenantDiscovery) {
                 logDebugMessage("EmailPasswordSignInForm_Override: shouldShowSelector is true");
                 updatedProps.formFields = updatedProps.formFields.filter((field) => field.id === "email");
                 updatedProps.config.signInAndUpFeature.signInForm.formFields =
@@ -193,16 +193,16 @@ export const init = createPluginInitFunction<
       },
       generalAuthRecipeComponentOverrides: {
         AuthPageHeader_Override: ({ DefaultComponent, ...props }) => {
-          const { shouldShowSelector } = implementation.parseTenantId();
+          const { doTenantDiscovery } = implementation.parseTenantId();
 
           // If the tenant was not determined from the URL and
           // tenant selector is enabled, we will redirect to the
           // select tenant page.
-          if (shouldShowSelector && pluginConfig.showTenantSelector && window.location.pathname !== "/select-tenant") {
+          if (doTenantDiscovery && pluginConfig.showTenantSelector && window.location.pathname !== "/select-tenant") {
             window.location.href = "/select-tenant";
           }
 
-          if (shouldShowSelector) {
+          if (doTenantDiscovery) {
             // eslint-disable-next-line react/jsx-no-literals
             return <div>{translations("PL_TD_EMAIL_DISCOVERY_HEADER_TEXT")}</div>;
           }
@@ -211,14 +211,14 @@ export const init = createPluginInitFunction<
           return <DefaultComponent {...props} />;
         },
         AuthPageComponentList_Override: ({ DefaultComponent, ...props }) => {
-          const { shouldShowSelector } = implementation.parseTenantId();
+          const { doTenantDiscovery } = implementation.parseTenantId();
 
           // Make a copy of the original props and modify them
           const updatedProps: typeof props = { ...props };
 
           // Update the auth component list to only keep email if we are showing
           // the selector.
-          if (shouldShowSelector) {
+          if (doTenantDiscovery) {
             const emailPasswordSignInComponent = EmailPasswordPreBuiltUI.getInstanceOrInitAndGetInstance()
               .getAuthComponents()
               .find((comp) => comp.type === "SIGN_IN");
@@ -237,7 +237,7 @@ export const init = createPluginInitFunction<
           }
 
           useLayoutEffect(() => {
-            if (shouldShowSelector) {
+            if (doTenantDiscovery) {
               logDebugMessage("AuthPageComponentList_Override: Updating continue button text");
               updateSignInSubmitBtn(translations("PL_TD_EMAIL_DISCOVERY_CONTINUE_BUTTON"));
             }
@@ -245,7 +245,7 @@ export const init = createPluginInitFunction<
             // Try to populate the email if it is present
             // in the URL.
             populateEmailFromStorage(implementation);
-          }, [shouldShowSelector]);
+          }, [doTenantDiscovery]);
 
           // @ts-ignore
           return <DefaultComponent {...(shouldShowSelector ? updatedProps : props)} />;

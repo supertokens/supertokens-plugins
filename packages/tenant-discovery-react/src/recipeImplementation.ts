@@ -107,8 +107,8 @@ export const getOverrideableTenantFunctionImplementation = (
       logDebugMessage(`final tenant ID: ${tenantId}`);
 
       return tenantId === undefined
-        ? { tenantId: null, shouldShowSelector: true }
-        : { tenantId, shouldShowSelector: false };
+        ? { tenantId: null, doTenantDiscovery: true }
+        : { tenantId, doTenantDiscovery: false };
     },
     setEmailId: function (emailId: string) {
       /**
