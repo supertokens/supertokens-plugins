@@ -37,7 +37,7 @@ export const init = createPluginInitFunction<
                 if (!pluginConfig.enableTenantListAPI) {
                   return {
                     status: "TENANT_SELECTOR_NOT_ENABLED",
-                    message: "Tenant Selector is not enabled"
+                    message: "Tenant Selector is not enabled",
                   };
                 }
 
@@ -65,12 +65,20 @@ export const init = createPluginInitFunction<
                 // Check if the inferred tenantId is valid and otherwise return
                 // `public`.
                 const isInferredTenantIdValid = await implementation.isValidTenant(tenantId, userContext);
+                const tenantIdToReturn = isInferredTenantIdValid ? tenantId : "public";
+
+                // Check if the tenant is allowed for the email.
+                if (!implementation.isTenantAllowedForEmail(payload.email, tenantIdToReturn)) {
+                  // Return an error indicating the user is not allowed.
+                  return {
+                    status: "NOT_ALLOWED",
+                    message: "No tenant found for the passed email Id",
+                  };
+                }
 
                 return {
                   status: "OK",
-                  tenant: isInferredTenantIdValid ? tenantId : "public",
-                  inferredTenantId: tenantId,
-                  email: payload.email,
+                  tenant: tenantIdToReturn,
                 };
               }),
             },
@@ -83,5 +91,5 @@ export const init = createPluginInitFunction<
   () => getOverrideableTenantFunctionImplementation(),
   (config) => ({
     enableTenantListAPI: config.enableTenantListAPI ?? false,
-  })
+  }),
 );

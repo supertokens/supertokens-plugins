@@ -54,6 +54,13 @@ export const getOverrideableTenantFunctionImplementation = (): OverrideableTenan
        */
       return POPULAR_EMAIL_DOMAINS.includes(emailDomain);
     },
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    isTenantAllowedForEmail: function (email: string, tenantId: string) {
+      /**
+       * Check if the passed tenant is allowed for the email ID.
+       */
+      return true;
+    },
   };
 
   return implementation;

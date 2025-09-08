@@ -15,15 +15,21 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
   };
 
   const tenantIdFromEmail = async (email: string) => {
-    const response = await querier.post<{ status: "OK"; tenant: string; inferredTenantId: string; email: string } | { status: "ERROR"; message: string }>(
+    const response = await querier.post<
+      | { status: "OK"; tenant: string }
+      | { status: "NOT_ALLOWED"; message: string }
+      | { status: "ERROR"; message: string }
+    >(
       "/from-email",
       {
-        email
+        email,
       },
       {
         withSession: false,
       },
     );
+
+    return response;
   };
 
   return {

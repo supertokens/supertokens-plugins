@@ -57,6 +57,38 @@ The plugin automatically creates these endpoints:
   }
   ```
 
+#### Block emails from tenant
+
+The default fallback for getting the tenant ID from the email is "public". If this is not ideal, we provide a function that can be overridden to avoid this.
+
+The `isTenantAllowedForEmail` function can be overridden in the following way
+
+```ts
+import SuperTokens from "supertokens-node";
+import TenantDiscoveryPlugin from "@supertokens-plugins/tenant-discovery-nodejs";
+
+SuperTokens.init({
+  appInfo: {
+    // your app info
+  },
+  recipeList: [
+    // your other recipes
+  ],
+  plugins: [
+    TenantDiscoveryPlugin.init({
+      enableTenantListAPI: false,
+      override: (originalImplementation) => ({
+        ...originalImplementation,
+        isTenantAllowedForEmail: (email: string, tenantId: string) => {
+          // Check whether the email can access the tenant
+          return true;
+        },
+      }),
+    }),
+  ],
+});
+```
+
 ### List All Tenants
 
 > [!IMPORTANT]  
@@ -82,9 +114,9 @@ The plugin automatically creates these endpoints:
 
 ## Configuration Options
 
-| Option                   | Type      | Default | Description                                                   |
-| ------------------------ | --------- | ------- | ------------------------------------------------------------- |
-| `enableTenantListAPI` | `boolean` | `false`    | Whether to show tenant selector (enable API's or not) |
+| Option                | Type      | Default | Description                                           |
+| --------------------- | --------- | ------- | ----------------------------------------------------- |
+| `enableTenantListAPI` | `boolean` | `false` | Whether to show tenant selector (enable API's or not) |
 
 ## How It Works
 
@@ -196,13 +228,13 @@ The plugin returns standardized error responses:
 {
   "status": "OK",
   "tenant": "public", // Restricted domain fallback
-  "inferredTenantId": "public", 
+  "inferredTenantId": "public",
   "email": "user@gmail.com"
 }
 
 // Invalid tenant (inferred tenant doesn't exist)
 {
-  "status": "OK", 
+  "status": "OK",
   "tenant": "public", // Fallback when inferred tenant doesn't exist
   "inferredTenantId": "nonexistent", // What was inferred from email
   "email": "user@nonexistent.com"
@@ -226,6 +258,7 @@ TenantDiscoveryPlugin.init({
 ```
 
 **Examples of tenant inference:**
+
 - `user@company.com` → infers `company` (if company tenant exists)
 - `admin@enterprise.org` → infers `enterprise` (if enterprise tenant exists)
 - `user@sub.company.com` → infers `company` (takes second-to-last part)

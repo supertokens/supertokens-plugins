@@ -60,7 +60,11 @@ export const init = createPluginInitFunction<
       }
 
       const querier = getQuerier(apiBasePath);
-      const response = await querier.post<{ status: "OK"; tenant: string } | { status: "ERROR"; message: string }>(
+      const response = await querier.post<
+        | { status: "OK"; tenant: string }
+        | { status: "NOT_ALLOWED"; message: string }
+        | { status: "ERROR"; message: string }
+      >(
         "/from-email",
         {
           email,
@@ -69,6 +73,17 @@ export const init = createPluginInitFunction<
           withSession: false,
         },
       );
+
+      // If the tenant was not inferred, we need to show an error
+      // in the UI.
+      if (response.status === "NOT_ALLOWED") {
+        logDebugMessage(`Got message from /from-email: ${response.message}`);
+        return {
+          status: "SIGN_IN_NOT_ALLOWED",
+          reason: response.message,
+          fetchResponse: new Response(),
+        };
+      }
 
       if (response.status !== "OK") {
         // Should never happens since we are passing the email
@@ -147,10 +162,10 @@ export const init = createPluginInitFunction<
           components: {
             EmailPasswordSignInForm_Override: ({ DefaultComponent, ...props }) => {
               const { doTenantDiscovery } = implementation.parseTenantId();
-              logDebugMessage(`EmailPasswordSignInForm_Override: shouldShowSelector: ${doTenantDiscovery}`);
+              logDebugMessage(`EmailPasswordSignInForm_Override: doTenantDiscovery: ${doTenantDiscovery}`);
               const updatedProps = { ...props };
               if (doTenantDiscovery) {
-                logDebugMessage("EmailPasswordSignInForm_Override: shouldShowSelector is true");
+                logDebugMessage("EmailPasswordSignInForm_Override: doTenantDiscovery is true");
                 updatedProps.formFields = updatedProps.formFields.filter((field) => field.id === "email");
                 updatedProps.config.signInAndUpFeature.signInForm.formFields =
                   updatedProps.config.signInAndUpFeature.signInForm.formFields.filter((field) => field.id === "email");
@@ -160,7 +175,7 @@ export const init = createPluginInitFunction<
 
               return (
                 // @ts-ignore
-                <DefaultComponent {...(shouldShowSelector ? updatedProps : props)} />
+                <DefaultComponent {...(doTenantDiscovery ? updatedProps : props)} />
               );
             },
           },
@@ -244,7 +259,7 @@ export const init = createPluginInitFunction<
           }, [doTenantDiscovery]);
 
           // @ts-ignore
-          return <DefaultComponent {...(shouldShowSelector ? updatedProps : props)} />;
+          return <DefaultComponent {...(doTenantDiscovery ? updatedProps : props)} />;
         },
       },
     };
