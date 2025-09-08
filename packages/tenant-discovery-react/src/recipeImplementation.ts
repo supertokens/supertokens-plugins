@@ -12,17 +12,17 @@ export const getOverrideableTenantFunctionImplementation = (
   config: SuperTokensPluginTenantDiscoveryPluginConfig,
 ): OverrideableTenantFunctionImplementation => {
   const implementation = {
-    setTenantId: function (tenantId: string, email?: string, shouldRefresh?: boolean, shouldOverride?: boolean) {
+    setTenantId: function (tenantId: string, email?: string, shouldRefresh?: boolean, shouldOverwrite?: boolean) {
       const url = new URL(window.location.href);
 
       // If the URL already has the tenantId param, don't override it
       // unless that is set to true.
       //
       // We are using the willOverride flag to determine if the tenantId
-      // changed in which case we will override and ignore the shouldOverride flag.
+      // changed in which case we will override and ignore the shouldOverwrite flag.
       const existingTenantId = url.searchParams.get("tenantId");
       const willOverride = existingTenantId === tenantId;
-      if (willOverride && !shouldOverride) {
+      if (willOverride && !shouldOverwrite) {
         return;
       }
 
@@ -49,12 +49,7 @@ export const getOverrideableTenantFunctionImplementation = (
        * This method will try to check if the url matches any of the tenantIds
        * passed in the config and accordingly return that value.
        */
-      logDebugMessage("determineTenantFromURL: checking if tenant should be determined from URL");
-      if (!(await this.shouldDetermineTenantFromURL())) {
-        logDebugMessage("Not determining from URL since `shouldDetermineTenantFromURL` returned false");
-        return undefined;
-      }
-      logDebugMessage("determineTenantFromURL: continuing since `shouldDetermineTenantFromURL` returned true");
+      logDebugMessage("determineTenantFromURL: trying to determine tenant from URL");
 
       const url = new URL(window.location.href);
 
@@ -94,15 +89,6 @@ export const getOverrideableTenantFunctionImplementation = (
 
       // No subdomain found
       return undefined;
-    },
-    shouldDetermineTenantFromURL: async function () {
-      /**
-       * Check if the tenant should be determined from the URL or not.
-       */
-      // If the user is logged in, we don't want the determine trigger
-      // to run.
-      logDebugMessage("shouldDetermineTenantFromURL: checking if user is logged in");
-      return !(await Session.doesSessionExist());
     },
     parseTenantId: function (): ParseTenantIdReturnType {
       // Get the urlParams and check if it has a tenantId

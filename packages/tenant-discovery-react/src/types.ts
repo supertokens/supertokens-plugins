@@ -17,7 +17,6 @@ export type ParseTenantIdReturnType =
 export type OverrideableTenantFunctionImplementation = {
   setTenantId: (tenantId: string, email?: string, shouldRefresh?: boolean) => void;
   determineTenantFromURL: () => Promise<string | undefined>;
-  shouldDetermineTenantFromURL: () => Promise<boolean>;
   determineTenantFromSubdomain: () => string | undefined;
   parseTenantId: () => ParseTenantIdReturnType;
   setEmailId: (emailId: string) => void;

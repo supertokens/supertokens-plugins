@@ -53,7 +53,7 @@ export const init = createPluginInitFunction<
         }
 
         if (!config.usesDynamicLoginMethods) {
-          throw new Error("Cannot continue without `usesDynamicLoginMethods` set to `true`");
+          console.error("Cannot continue without `usesDynamicLoginMethods` set to `true`");
         }
 
         const querier = getQuerier(new URL(API_PATH, config.appInfo.apiDomain.getAsStringDangerous()).toString());
