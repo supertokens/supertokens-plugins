@@ -26,12 +26,14 @@ SuperTokens.init({
   recipeList: [
     // your recipes
   ],
-  plugins: [
-    TenantDiscoveryPlugin.init({
-      showTenantSelector: true, // Optional: defaults to true
-      extractTenantIdFromDomain: true, // Optional: defaults to true
-    }),
-  ],
+  experimental: {
+    plugins: [
+      TenantDiscoveryPlugin.init({
+        showTenantSelector: true, // Optional: defaults to true
+        extractTenantIdFromDomain: true, // Optional: defaults to true
+      }),
+    ],
+  }
 });
 ```
 
