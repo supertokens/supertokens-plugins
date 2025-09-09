@@ -1,0 +1,44 @@
+.tableContainer {
+  border: 1px solid #b9bbc6;
+  border-radius: 8px;
+
+  .tableHead {
+    padding: 12px;
+    display: flex;
+    align-items: center;
+    background-color: #f9f9f8;
+    border-radius: 8px;
+
+    font-weight: 500;
+    font-style: Medium;
+    font-size: 14px;
+    line-height: 20px;
+    letter-spacing: 0px;
+    color: #60646c;
+
+    .emailHeader {
+      width: 65%;
+    }
+
+    .extraHeader {
+      width: 35%;
+    }
+  }
+
+  .tableColumns {
+    .tableColumn {
+      border-top: 1px solid #b9bbc6;
+      padding: 16px 8px;
+      display: flex;
+      align-items: center;
+
+      .emailComponentWrapper {
+        width: 65%;
+      }
+
+      .extraComponentWrapper {
+        width: 35%;
+      }
+    }
+  }
+}

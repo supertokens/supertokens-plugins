@@ -1,4 +1,4 @@
-export const PLUGIN_ID = "supertokens-plugin-tenant-discovery";
+export const PLUGIN_ID = "supertokens-plugin-tenants";
 export const PLUGIN_VERSION = "0.0.1";
 
 export const PLUGIN_SDK_VERSION = ["23.0.0", "23.0.1", ">=23.0.1"];

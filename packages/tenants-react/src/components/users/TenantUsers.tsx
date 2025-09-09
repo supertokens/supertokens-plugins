@@ -2,6 +2,7 @@ import classNames from "classnames/bind";
 import { useCallback, useEffect, useState } from "react";
 import { User } from "supertokens-web-js/types";
 
+import { usePluginContext } from "../../plugin";
 import { TenantTable } from "../table/TenantTable";
 
 import style from "./details.module.scss";
@@ -11,10 +12,11 @@ import style from "./details.module.scss";
 const cx = classNames.bind(style);
 
 type TenantUsersProps = {
-  onFetch: () => Promise<{ users: User[] }>
+  onFetch: () => Promise<{ users: User[] }>;
 };
 
 export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch }) => {
+  const { t } = usePluginContext();
   const [users, setUsers] = useState<User[]>([]);
 
   const loadDetails = useCallback(async () => {
@@ -38,13 +40,14 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch }) => {
                     <div className={cx("userAvatar")}>{user.emails[0]?.charAt(0).toUpperCase() || "U"}</div>
                     <div className={cx("userEmail")}>{user.emails[0]}</div>
                   </div>
-                )
+                ),
               }))}
             />
           </div>
         ) : (
           <div className={cx("tenantDetailsNoUsers")}>
-            <p>No users found</p>
+            <div className="icon"></div>
+            <div className="text">{t("PL_TB_NO_USERS_FOUND_TEXT")}</div>
           </div>
         )}
       </div>
