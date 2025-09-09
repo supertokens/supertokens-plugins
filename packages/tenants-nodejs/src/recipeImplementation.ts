@@ -39,7 +39,8 @@ export const getOverrideableTenantFunctionImplementation = (
 
       // Return the tenants that the user is not a member of
       return {
-        ...tenantDetails,
+        status: "OK",
+        tenants: tenantDetails.tenants.map((tenant) => ({ tenantId: tenant.tenantId, displayName: tenant.tenantId })),
         joinedTenantIds: userDetails.tenantIds,
       };
     },

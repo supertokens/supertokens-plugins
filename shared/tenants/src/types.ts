@@ -1,4 +1,4 @@
-import { TenantConfig } from 'supertokens-node/lib/build/recipe/multitenancy/types';
+import { TenantConfig } from "supertokens-node/lib/build/recipe/multitenancy/types";
 
 export type TenantJoinData = {
   tenantId: string;
@@ -10,7 +10,8 @@ export type TenantCreateData = {
 
 export type TenantDetails = {
   tenantId: string;
-} & TenantConfig;
+  displayName: string;
+};
 
 export type TenantList = {
   tenants: TenantDetails[];

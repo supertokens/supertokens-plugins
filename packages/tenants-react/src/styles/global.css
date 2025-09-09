@@ -3,5 +3,28 @@
 .st-tab-group::part(base) {
   border: 1px solid #dddde3;
   border-radius: 12px;
-  background-color: #f9f9f8;
+  background-color: #ffffff;
+
+  --indicator-color: #3e63dd;
+}
+
+.st-tab-group::part(tabs) {
+  gap: 30px;
+}
+
+.st-tab::part(base) {
+  padding: 12px 16px;
+  font-weight: 500;
+  font-style: Medium;
+  font-size: 14px;
+  line-height: 20px;
+  letter-spacing: 0px;
+}
+
+.st-tab:not([active])::part(base) {
+  color: #1c2024;
+}
+
+.st-tab-panel::part(base) {
+  padding: 0;
 }

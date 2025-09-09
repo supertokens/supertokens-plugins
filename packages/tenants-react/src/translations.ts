@@ -3,5 +3,6 @@ export const defaultTranslationsTenants = {
     PL_TB_USERS_TAB_LABEL: "Users",
     PL_TB_INVITATIONS_TAB_LABEL: "Invitations",
     PL_TB_REQUESTS_TAB_LABEL: "Requests",
+    PL_TB_NO_USERS_FOUND_TEXT: "No users have been found linked to this tenant.",
   },
 } as const;
