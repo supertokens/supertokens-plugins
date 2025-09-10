@@ -1,5 +1,5 @@
 import { TenantDetails } from "@shared/tenants";
-import { SelectInput, TabGroup, Tab, TabPanel } from "@shared/ui";
+import { SelectInput, TabGroup, Tab, TabPanel, ToastProvider, ToastContainer } from "@shared/ui";
 // import { BaseFormSection } from "@supertokens-plugin-profile/common-details-shared";
 import classNames from "classnames/bind";
 import { useState, useEffect, useCallback } from "react";
@@ -7,15 +7,16 @@ import { useState, useEffect, useCallback } from "react";
 import { InvitationsWrapper } from "../../components/invitations/invitations";
 import { TenantTab } from "../../components/tab/TenantTab";
 import { TenantUsers } from "../../components/users/TenantUsers";
+import { logDebugMessage } from "../../logger";
 import { usePluginContext } from "../../plugin";
 
 import style from "./styles.module.scss";
 
 const cx = classNames.bind(style);
 
-export const TenantManagement = ({ section }: { section: any }) => {
+export const TenantManagementWithoutToastWrapper = ({ section }: { section: any }) => {
   const { api, t } = usePluginContext();
-  const { getUsers, getInvitations, removeInvitation, addInvitation, fetchTenants, switchTenant } = api;
+  const { getUsers, getInvitations, removeInvitation, addInvitation, fetchTenants, switchTenant, changeRole } = api;
   const [tenants, setTenants] = useState<TenantDetails[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState<string>("public");
 
@@ -43,6 +44,18 @@ export const TenantManagement = ({ section }: { section: any }) => {
     }
     return { users: response.users };
   }, [getUsers]);
+
+  const onRoleChange = useCallback(
+    async (userId: string, role: string) => {
+      const response = await changeRole(userId, role);
+      if (response.status === "ERROR") {
+        logDebugMessage(`Got error while changing role: ${response.message}`);
+        return false;
+      }
+      return true;
+    },
+    [changeRole],
+  );
 
   // Invitations tab functions
   const onFetchInvitations = useCallback(async () => {
@@ -121,7 +134,7 @@ export const TenantManagement = ({ section }: { section: any }) => {
           {/* Tab Content */}
           <TabPanel name="users">
             <TenantTab description="List of users that are part of your tenant">
-              <TenantUsers onFetch={onFetchUsers} />
+              <TenantUsers onFetch={onFetchUsers} onRoleChange={onRoleChange} />
             </TenantTab>
           </TabPanel>
           <TabPanel name="invitations">
@@ -141,5 +154,14 @@ export const TenantManagement = ({ section }: { section: any }) => {
         </TabGroup>
       </div>
     </div>
+  );
+};
+
+export const TenantManagement = (props) => {
+  return (
+    <ToastProvider>
+      <TenantManagementWithoutToastWrapper {...props} />
+      <ToastContainer />
+    </ToastProvider>
   );
 };

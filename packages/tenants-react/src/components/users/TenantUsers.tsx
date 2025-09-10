@@ -5,6 +5,7 @@ import { User } from "supertokens-web-js/types";
 
 import { ROLES } from "../../../../../shared/tenants/src/roles";
 import { SelectInput } from "../../../../../shared/ui/src/components";
+import { usePrettyAction } from "../../../../../shared/ui/src/hooks";
 import { logDebugMessage } from "../../logger";
 import { usePluginContext } from "../../plugin";
 import { TenantTable } from "../table/TenantTable";
@@ -19,14 +20,16 @@ type UserWithRole = { roles: string[] } & User;
 
 type TenantUsersProps = {
   onFetch: () => Promise<{ users: UserWithRole[] }>;
+  onRoleChange: (userId: string, role: string) => Promise<boolean>;
 };
 
-export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch }) => {
+export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch, onRoleChange }) => {
   const { t } = usePluginContext();
   const [users, setUsers] = useState<UserWithRole[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
   const [currentUserDetails, setCurrentUserDetails] = useState<UserWithRole | null>(null);
   const isCurrentUserAdmin = useMemo(() => currentUserDetails?.roles.includes(ROLES.ADMIN), [currentUserDetails]);
+  const [isRoleChanging, setRoleChanging] = useState(false);
 
   const loadDetails = useCallback(async () => {
     const details = await onFetch();
@@ -56,13 +59,30 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch }) => {
     },
   ];
 
+  const handleRoleChange = usePrettyAction(
+    async (userId: string, newValue: string) => {
+      logDebugMessage(`Changing role for user to: ${newValue}`);
+      setRoleChanging(true);
+
+      const wasChanged = await onRoleChange(userId, newValue);
+      setRoleChanging(false);
+      if (!wasChanged) {
+        throw new Error("Failed to change role");
+      }
+    },
+    [onRoleChange],
+    { errorMessage: "Failed to change role" },
+  );
+
   const getExtraComponent = useCallback(
     (user: { roles: string[] } & User) => {
       // It's safe to assume that they would have one role
       const currentRole = user.roles[0] ?? ROLES.MEMBER;
 
-      const handleRoleChange = (newValue) => {
-        logDebugMessage(`Changing role for user to: ${newValue}`);
+      const getRoleChangeWrapper = (userId: string) => {
+        return async (newValue: string) => {
+          return await handleRoleChange(userId, newValue);
+        };
       };
 
       return (
@@ -71,15 +91,15 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch }) => {
             <SelectInput
               id="role-select"
               value={currentRole}
-              onChange={(e: any) => handleRoleChange(e.target.value)}
+              onChange={(e: any) => getRoleChangeWrapper(user.id)(e)}
               options={availableRoles}
-              disabled={!isCurrentUserAdmin}
+              disabled={!isCurrentUserAdmin || isRoleChanging}
             />
           </div>
         </div>
       );
     },
-    [isCurrentUserAdmin],
+    [isCurrentUserAdmin, isRoleChanging, handleRoleChange],
   );
 
   if (!userId) {
