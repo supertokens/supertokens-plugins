@@ -28,12 +28,14 @@ SuperTokens.init({
     UserRoles.init(), // Required: UserRoles recipe must be initialized
     // your other recipes
   ],
-  plugins: [
-    UserBanningPlugin.init({
-      userBanningPermission: "ban-user", // Optional: defaults to "ban-user"
-      bannedUserRole: "banned", // Optional: defaults to "banned"
-    }),
-  ],
+  experimental: {
+    plugins: [
+      UserBanningPlugin.init({
+        userBanningPermission: "ban-user", // Optional: defaults to "ban-user"
+        bannedUserRole: "banned", // Optional: defaults to "banned"
+      }),
+    ],
+  },
 });
 ```
 
@@ -160,7 +162,7 @@ const statusResponse = await fetch(
     headers: {
       // Include session tokens in headers
     },
-  },
+  }
 );
 const status = await statusResponse.json();
 console.log(status.banned); // true/false
