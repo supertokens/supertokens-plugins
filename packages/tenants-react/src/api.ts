@@ -15,42 +15,40 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     return response;
   };
 
-  const joinTenant =
-    async (data: TenantJoinData) => {
-      const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
-        "/join",
-        {
-          ...data,
-        },
-        { withSession: true },
-      );
+  const joinTenant = async (data: TenantJoinData) => {
+    const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
+      "/join",
+      {
+        ...data,
+      },
+      { withSession: true },
+    );
 
-      // Refresh the session if the status was OK
-      let wasSessionRefreshed = false;
-      if (response.status === "OK") {
-        wasSessionRefreshed = await Session.attemptRefreshingSession();
-      }
+    // Refresh the session if the status was OK
+    let wasSessionRefreshed = false;
+    if (response.status === "OK") {
+      wasSessionRefreshed = await Session.attemptRefreshingSession();
+    }
 
-      return {
-        ...response,
-        wasSessionRefreshed,
-      };
+    return {
+      ...response,
+      wasSessionRefreshed,
     };
+  };
 
-  const createTenant =
-    async (data: TenantCreateData) => {
-      const response = await querier.post<
-        { status: "OK"; pendingApproval: boolean; requestId: string } | { status: "ERROR"; message: string }
-      >(
-        "/create",
-        {
-          ...data,
-        },
-        { withSession: true },
-      );
+  const createTenant = async (data: TenantCreateData) => {
+    const response = await querier.post<
+      { status: "OK"; pendingApproval: boolean; requestId: string } | { status: "ERROR"; message: string }
+    >(
+      "/create",
+      {
+        ...data,
+      },
+      { withSession: true },
+    );
 
-      return response;
-    };
+    return response;
+  };
 
   const getUsers = async () => {
     const response = await querier.post<{ status: "OK"; users: User[] } | { status: "ERROR"; message: string }>(
@@ -70,49 +68,55 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     return response;
   };
 
-  const removeInvitation =
-    async (email: string) => {
-      const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
-        "/invite/remove",
-        { email },
-        { withSession: true },
-      );
+  const removeInvitation = async (email: string) => {
+    const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
+      "/invite/remove",
+      { email },
+      { withSession: true },
+    );
 
-      return response;
-    };
+    return response;
+  };
 
-  const addInvitation =
-    async (email: string) => {
-      const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
-        "/invite/add",
-        { email },
-        { withSession: true },
-      );
+  const addInvitation = async (email: string) => {
+    const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
+      "/invite/add",
+      { email },
+      { withSession: true },
+    );
 
-      return response;
-    };
+    return response;
+  };
 
-  const acceptInvitation =
-    async (code: string, tenantId: string) => {
-      const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
-        "/invite/accept",
-        { code, tenantId },
-        { withSession: true },
-      );
+  const acceptInvitation = async (code: string, tenantId: string) => {
+    const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
+      "/invite/accept",
+      { code, tenantId },
+      { withSession: true },
+    );
 
-      return response;
-    };
+    return response;
+  };
 
-  const switchTenant =
-    async (tenantId: string) => {
-      const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
-        "/switch-tenant",
-        { tenantId },
-        { withSession: true },
-      );
+  const switchTenant = async (tenantId: string) => {
+    const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
+      "/switch-tenant",
+      { tenantId },
+      { withSession: true },
+    );
 
-      return response;
-    };
+    return response;
+  };
+
+  const changeRole = async (userId: string, role: string) => {
+    const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
+      "/role/change",
+      { userId, role },
+      { withSession: true },
+    );
+
+    return response;
+  };
 
   return {
     fetchTenants,
@@ -124,5 +128,6 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     addInvitation,
     acceptInvitation,
     switchTenant,
+    changeRole,
   };
 };

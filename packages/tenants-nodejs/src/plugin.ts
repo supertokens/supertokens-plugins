@@ -13,7 +13,7 @@ import {
   SuperTokensPluginTenantPluginConfig,
   PluginEmailDeliveryInput,
   SendPluginEmail,
-  SuperTokensPluginTenantPluginNormalisedConfig
+  SuperTokensPluginTenantPluginNormalisedConfig,
 } from "./types";
 import { HANDLE_BASE_PATH, METADATA_KEY, PLUGIN_ID, PLUGIN_SDK_VERSION } from "./constants";
 import { BooleanClaim } from "supertokens-node/lib/build/recipe/session/claims";
@@ -761,6 +761,51 @@ export const init = createPluginInitFunction<
                 };
               }),
             },
+            {
+              path: `${HANDLE_BASE_PATH}/role/change`,
+              method: "post",
+              verifySessionOptions: {
+                sessionRequired: true,
+                overrideGlobalClaimValidators: (globalValidators) => {
+                  return [...globalValidators, UserRoles.UserRoleClaim.validators.includesAny([ROLES.ADMIN])];
+                },
+              },
+              handler: withRequestHandler(async (req, res, session) => {
+                if (!session) {
+                  throw new Error("Session not found");
+                }
+
+                // Parse the tenantId from the body
+                const tenantIdToUse = session.getTenantId();
+                const payload: { userId: string; role: string } | undefined = await req.getJSONBody();
+
+                if (!payload?.userId || !payload?.role) {
+                  return {
+                    status: "ERROR",
+                    message: "User ID and role is required",
+                  };
+                }
+
+                // We need to remove any existing role from the tenant for the user
+                // and assign the new one to them.
+
+                // We need to check that the user doesn't have an existing role, in which
+                // case we cannot "accept" the request.
+                const roleDetails = await UserRoles.getRolesForUser(tenantIdToUse, payload.userId);
+                for (const role of roleDetails.roles) {
+                  UserRoles.removeUserRole(tenantIdToUse, payload.userId, role);
+                }
+
+                // NOTE: We are assuming that the role passed in the payload
+                // is a valid one.
+                await assignRoleToUserInTenant(tenantIdToUse, payload.userId, payload.role);
+
+                return {
+                  status: "OK",
+                  message: "Role changed",
+                };
+              }),
+            },
           ],
         };
       },
@@ -808,12 +853,12 @@ export const init = createPluginInitFunction<
                   ...input.accessTokenPayload,
                   ...(pluginConfig.requireNonPublicTenantAssociation
                     ? await MultipleTenantsPresentClaim.build(
-                      input.userId,
-                      input.recipeUserId,
-                      tenantId,
-                      input.accessTokenPayload,
-                      input.userContext,
-                    )
+                        input.userId,
+                        input.recipeUserId,
+                        tenantId,
+                        input.accessTokenPayload,
+                        input.userContext,
+                      )
                     : {}),
                 };
 
@@ -939,5 +984,5 @@ export const init = createPluginInitFunction<
   (config) => ({
     requireNonPublicTenantAssociation: config.requireNonPublicTenantAssociation ?? false,
     requireTenantCreationRequestApproval: config.requireTenantCreationRequestApproval ?? true,
-  })
+  }),
 );
