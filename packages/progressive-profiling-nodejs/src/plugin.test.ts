@@ -1,60 +1,63 @@
-import { init } from "./plugin";
-import SuperTokens from "supertokens-node";
+import express from "express";
+import crypto from "node:crypto";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
+
+import { FormSection, SuperTokensPluginProfileProgressiveProfilingConfig } from "./types";
+import { registerSections, init, getSectionValues, setSectionValues } from "./index";
+import { HANDLE_BASE_PATH } from "./constants";
+
+import SuperTokens from "supertokens-node/lib/build/index";
+import Session from "supertokens-node/lib/build/recipe/session/index";
+import EmailPassword from "supertokens-node/lib/build/recipe/emailpassword/index";
+
+import { middleware, errorHandler } from "supertokens-node/framework/express";
+import { verifySession } from "supertokens-node/lib/build/recipe/session/framework/express";
+
+import { ProcessState } from "supertokens-node/lib/build/processState";
 import SuperTokensRaw from "supertokens-node/lib/build/supertokens";
-import Session from "supertokens-node/recipe/session";
-import UserRoles from "supertokens-node/recipe/userroles";
 import SessionRaw from "supertokens-node/lib/build/recipe/session/recipe";
 import UserRolesRaw from "supertokens-node/lib/build/recipe/userroles/recipe";
-import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
-import express from "express";
-import { middleware, errorHandler } from "supertokens-node/framework/express";
-import { verifySession } from "supertokens-node/recipe/session/framework/express";
-import EmailPassword from "supertokens-node/recipe/emailpassword";
 import EmailPasswordRaw from "supertokens-node/lib/build/recipe/emailpassword/recipe";
-import { FormSection, SuperTokensPluginProfileProgressiveProfilingConfig } from "./types";
 import AccountLinkingRaw from "supertokens-node/lib/build/recipe/accountlinking/recipe";
 import MultitenancyRaw from "supertokens-node/lib/build/recipe/multitenancy/recipe";
 import UserMetadataRaw from "supertokens-node/lib/build/recipe/usermetadata/recipe";
-import Multitenancy from "supertokens-node/recipe/multitenancy";
-import { registerSections } from "./index";
-import crypto from "node:crypto";
-import { HANDLE_BASE_PATH } from "./constants";
-import { DEFAULT_BANNED_USER_ROLE } from "../../user-banning-nodejs/src/constants";
+import { Implementation } from "./implementation";
 
 const testPORT = process.env.PORT || 3000;
 const testEmail = "user@test.com";
 const testPW = "test";
+const testSections = [
+  {
+    id: "test",
+    label: "Test",
+    fields: [
+      {
+        id: "test",
+        label: "Test",
+        type: "text",
+        required: false,
+        defaultValue: "test",
+        description: "Test",
+        placeholder: "Test",
+      },
+    ],
+  },
+] as FormSection[];
 
 describe("progressive-profiling-nodejs", () => {
   describe("[API]", () => {
     afterEach(() => {
       resetST();
+      Implementation.reset();
     });
-
     beforeEach(() => {
       resetST();
+      Implementation.reset();
     });
 
     it("should get the default configured sections", async () => {
-      const sections = [
-        {
-          id: "test",
-          label: "Test",
-          fields: [
-            {
-              id: "test",
-              label: "Test",
-              type: "text",
-              required: false,
-              defaultValue: "test",
-              description: "Test",
-              placeholder: "Test",
-            },
-          ],
-        },
-      ];
       const { user } = await setup({
-        sections: sections as FormSection[],
+        sections: testSections,
       });
 
       const session = await Session.createNewSessionWithoutRequestResponse(
@@ -74,35 +77,17 @@ describe("progressive-profiling-nodejs", () => {
       const result = await response.json();
 
       expect(result.status).toBe("OK");
-      expect(result.sections).toEqual(sections.map((section) => ({ ...section, completed: false })));
+      expect(result.sections).toEqual(testSections.map((section) => ({ ...section, completed: false })));
     });
 
     it("should get the registered sections", async () => {
       const { user } = await setup();
 
-      const sections = [
-        {
-          id: "test",
-          label: "Test",
-          fields: [
-            {
-              id: "test",
-              label: "Test",
-              type: "text",
-              required: false,
-              defaultValue: "test",
-              description: "Test",
-              placeholder: "Test",
-            },
-          ],
-        },
-      ];
-
       registerSections({
         get: async () => [],
         set: async () => {},
         registratorId: "test",
-        sections: sections as FormSection[],
+        sections: testSections,
       });
 
       const session = await Session.createNewSessionWithoutRequestResponse(
@@ -122,33 +107,474 @@ describe("progressive-profiling-nodejs", () => {
       const result = await response.json();
 
       expect(result.status).toBe("OK");
-      expect(result.sections).toEqual(sections.map((section) => ({ ...section, completed: false })));
+      expect(result.sections).toEqual(testSections.map((section) => ({ ...section, completed: false })));
     });
 
-    it("should fail claim validation if the profile is not completed", async () => {});
-    it("should allow api calls even if the claim is not valid", async () => {});
-    it("should not allow api calls to get profile if session is not valid", async () => {});
-    it("should not allow api calls to set profile if session is not valid", async () => {});
-    it("should return the profile details for every sections and fields", async () => {});
-    it("should set the profile details using the default registrator", async () => {});
-    it("should set the profile details using a custom registrator", async () => {});
-    it("should set the profile details partially", async () => {});
-    it("should validate the profile details", async () => {});
-    it("should check if the profile is completed", async () => {});
+    it("should fail claim validation if the profile is not completed", async () => {
+      const { user } = await setup({
+        sections: testSections,
+      });
+
+      const session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        SuperTokens.convertToRecipeUserId(user.id)
+      );
+
+      const claims = await Session.validateClaimsForSessionHandle(session.getHandle());
+      expect(claims.status).toBe("OK");
+
+      // @ts-ignore
+      expect(claims.invalidClaims).toContainEqual({
+        id: "supertokens-plugin-progressive-profiling-completed",
+        reason: {
+          actualValue: false,
+          expectedValue: true,
+          message: "wrong value",
+        },
+      });
+    });
+
+    it("should pass claim validation if the profile is completed", async () => {
+      const { user } = await setup({
+        sections: testSections,
+      });
+
+      const session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        SuperTokens.convertToRecipeUserId(user.id)
+      );
+
+      const claims = await Session.validateClaimsForSessionHandle(session.getHandle());
+      expect(claims.status).toBe("OK");
+
+      // @ts-expect-error we'd need to do an if check on the status because of the discriminated union type
+      expect(claims.invalidClaims).toContainEqual({
+        id: "supertokens-plugin-progressive-profiling-completed",
+        reason: {
+          actualValue: false,
+          expectedValue: true,
+          message: "wrong value",
+        },
+      });
+
+      const response = await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.getAccessToken()}`,
+        },
+        body: JSON.stringify({
+          data: testSections
+            .map((section) =>
+              section.fields.map((field) => ({
+                sectionId: section.id,
+                fieldId: field.id,
+                value: "value",
+              }))
+            )
+            .flat(),
+        }),
+      });
+      expect(response.status).toBe(200);
+
+      const validatedClaims = await Session.validateClaimsForSessionHandle(session.getHandle());
+      expect(claims.status).toBe("OK");
+      // @ts-expect-error we'd need to do an if check on the status because of the discriminated union type
+      expect(validatedClaims.invalidClaims).toHaveLength(0);
+    });
+
+    it("should not allow api calls if the claim is not valid", async () => {
+      const { user } = await setup({
+        sections: testSections,
+      });
+
+      const session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        SuperTokens.convertToRecipeUserId(user.id)
+      );
+
+      const response = await fetch(`http://localhost:${testPORT}/check-session`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${session.getAccessToken()}`,
+        },
+      });
+      expect(response.status).toBe(403);
+
+      const result = await response.json();
+      expect(result.message).toBe("invalid claim");
+    });
+
+    it("should allow api calls if the claim is valid", async () => {
+      const { user } = await setup({
+        sections: testSections,
+      });
+
+      let session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        SuperTokens.convertToRecipeUserId(user.id)
+      );
+
+      await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.getAccessToken()}`,
+        },
+        body: JSON.stringify({
+          data: testSections
+            .map((section) =>
+              section.fields.map((field) => ({
+                sectionId: section.id,
+                fieldId: field.id,
+                value: "value",
+              }))
+            )
+            .flat(),
+        }),
+      });
+
+      session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        SuperTokens.convertToRecipeUserId(user.id)
+      );
+
+      const response = await fetch(`http://localhost:${testPORT}/check-session`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${session.getAccessToken()}`,
+        },
+      });
+      expect(response.status).toBe(200);
+    });
+
+    it("should set the profile details using the default registrator", async () => {
+      const { user } = await setup({
+        sections: testSections,
+      });
+
+      let session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        SuperTokens.convertToRecipeUserId(user.id)
+      );
+
+      await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.getAccessToken()}`,
+        },
+        body: JSON.stringify({
+          data: testSections
+            .map((section) =>
+              section.fields.map((field) => ({
+                sectionId: section.id,
+                fieldId: field.id,
+                value: "value",
+              }))
+            )
+            .flat(),
+        }),
+      });
+
+      const sectionValues = await getSectionValues(session);
+      expect(sectionValues.status).toBe("OK");
+      expect(sectionValues.data).toEqual(
+        testSections
+          .map((section) =>
+            section.fields.map((field) => ({ fieldId: field.id, sectionId: section.id, value: "value" }))
+          )
+          .flat()
+      );
+    });
+
+    it("should set the profile details using a custom registrator", async () => {
+      const { user } = await setup({
+        sections: testSections,
+        override: (oI) => ({
+          ...oI,
+          getDefaultRegistrator: (...props) => ({
+            ...oI.getDefaultRegistrator.apply(oI, props),
+            set: async () => {},
+          }),
+        }),
+      });
+
+      let session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        SuperTokens.convertToRecipeUserId(user.id)
+      );
+
+      await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.getAccessToken()}`,
+        },
+        body: JSON.stringify({
+          data: testSections
+            .map((section) =>
+              section.fields.map((field) => ({
+                sectionId: section.id,
+                fieldId: field.id,
+                value: "value",
+              }))
+            )
+            .flat(),
+        }),
+      });
+
+      const sectionValues = await getSectionValues(session);
+      expect(sectionValues.status).toBe("OK");
+      expect(sectionValues.data).toEqual(
+        testSections
+          .map((section) =>
+            section.fields.map((field) => ({ fieldId: field.id, sectionId: section.id, value: field.defaultValue }))
+          )
+          .flat()
+      );
+    });
+
+    it("should set the profile details partially", async () => {
+      const { user } = await setup({
+        sections: [
+          {
+            ...testSections[0],
+            fields: [
+              ...testSections[0].fields,
+              {
+                id: "test2",
+                label: "Test2",
+                type: "text",
+                required: false,
+                description: "Test2",
+                placeholder: "Test2",
+              },
+            ],
+          },
+        ],
+      });
+
+      const session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        SuperTokens.convertToRecipeUserId(user.id)
+      );
+
+      await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.getAccessToken()}`,
+        },
+        body: JSON.stringify({
+          data: testSections
+            .map((section) =>
+              section.fields.map((field) => ({
+                sectionId: section.id,
+                fieldId: field.id,
+                value: "value",
+              }))
+            )
+            .flat(),
+        }),
+      });
+
+      const sectionValues = await getSectionValues(session);
+      expect(sectionValues.status).toBe("OK");
+      expect(sectionValues.data).toEqual([
+        ...testSections
+          .map((section) =>
+            section.fields.map((field) => ({ fieldId: field.id, sectionId: section.id, value: "value" }))
+          )
+          .flat(),
+        { fieldId: "test2", sectionId: "test" },
+      ]);
+    });
+
+    it("should return the profile details using the default registrator", async () => {
+      const { user } = await setup({
+        sections: testSections,
+      });
+
+      const session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        SuperTokens.convertToRecipeUserId(user.id)
+      );
+
+      await setSectionValues(
+        session,
+        testSections
+          .map((section) =>
+            section.fields.map((field) => ({
+              sectionId: section.id,
+              fieldId: field.id,
+              value: "value",
+            }))
+          )
+          .flat()
+      );
+
+      const response = await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${session.getAccessToken()}`,
+        },
+      });
+      expect(response.status).toBe(200);
+
+      const result = await response.json();
+      expect(result.status).toBe("OK");
+      expect(result.data).toEqual(
+        testSections
+          .map((section) =>
+            section.fields.map((field) => ({ fieldId: field.id, sectionId: section.id, value: "value" }))
+          )
+          .flat()
+      );
+    });
+
+    it("should return the profile details using a custom registrator", async () => {
+      const { user } = await setup({
+        sections: testSections,
+        override: (oI) => ({
+          ...oI,
+          getDefaultRegistrator: (...props) => ({
+            ...oI.getDefaultRegistrator.apply(oI, props),
+            get: async () => [],
+          }),
+        }),
+      });
+
+      const session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        SuperTokens.convertToRecipeUserId(user.id)
+      );
+
+      await setSectionValues(
+        session,
+        testSections
+          .map((section) =>
+            section.fields.map((field) => ({
+              sectionId: section.id,
+              fieldId: field.id,
+              value: "value",
+            }))
+          )
+          .flat()
+      );
+
+      const response = await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${session.getAccessToken()}`,
+        },
+      });
+      expect(response.status).toBe(200);
+
+      const result = await response.json();
+      expect(result.status).toBe("OK");
+      expect(result.data).toEqual([]);
+    });
+
+    it("should validate the profile details using the default validator", async () => {
+      const { user } = await setup({
+        sections: testSections.map((section) => ({
+          ...section,
+          fields: section.fields.map((field) => ({ ...field, required: true, defaultValue: undefined })),
+        })),
+      });
+
+      const session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        SuperTokens.convertToRecipeUserId(user.id)
+      );
+
+      const response = await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.getAccessToken()}`,
+        },
+        body: JSON.stringify({
+          data: testSections
+            .map((section) =>
+              section.fields.map((field) => ({
+                sectionId: section.id,
+                fieldId: field.id,
+                value: undefined,
+              }))
+            )
+            .flat(),
+        }),
+      });
+
+      expect(response.status).toBe(400);
+
+      const result = await response.json();
+      expect(result).toEqual({
+        status: "INVALID_FIELDS",
+        errors: testSections
+          .map((section) =>
+            section.fields.map((field) => ({ id: field.id, error: `The "${field.label}" field is required` }))
+          )
+          .flat(),
+      });
+    });
+
+    it("should validate the profile details using a custom validator", async () => {
+      const { user } = await setup({
+        sections: testSections,
+        override: (oI) => ({
+          ...oI,
+          validateField: (session, field, value, userContext) => {
+            return "TestInvalid";
+          },
+        }),
+      });
+
+      const session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        SuperTokens.convertToRecipeUserId(user.id)
+      );
+
+      const response = await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.getAccessToken()}`,
+        },
+        body: JSON.stringify({
+          data: testSections
+            .map((section) =>
+              section.fields.map((field) => ({
+                sectionId: section.id,
+                fieldId: field.id,
+                value: "value",
+              }))
+            )
+            .flat(),
+        }),
+      });
+
+      expect(response.status).toBe(400);
+
+      const result = await response.json();
+      expect(result).toEqual({
+        status: "INVALID_FIELDS",
+        errors: testSections
+          .map((section) => section.fields.map((field) => ({ id: field.id, error: "TestInvalid" })))
+          .flat(),
+      });
+    });
   });
 });
 
 function resetST() {
-  SuperTokensRaw.reset();
+  ProcessState.getInstance().reset();
   SessionRaw.reset();
   UserRolesRaw.reset();
   EmailPasswordRaw.reset();
   AccountLinkingRaw.reset();
   MultitenancyRaw.reset();
   UserMetadataRaw.reset();
+  SuperTokensRaw.reset();
 }
 
-async function setup(pluginConfig?: SuperTokensPluginProfileProgressiveProfilingConfig, appId?: string) {
+async function setup(pluginConfig?: Parameters<typeof init>[0]) {
+  let appId;
   let isNewApp = false;
   const coreBaseURL = process.env.CORE_BASE_URL || `http://localhost:3567`;
   if (appId === undefined) {
@@ -160,11 +586,11 @@ async function setup(pluginConfig?: SuperTokensPluginProfileProgressiveProfiling
     if (process.env.CORE_API_KEY) {
       headers["api-key"] = process.env.CORE_API_KEY;
     }
-    const createAppResp = await fetch(`${coreBaseURL}/recipe/multitenancy/app/v2`, {
+    await fetch(`${coreBaseURL}/recipe/multitenancy/app/v2`, {
       method: "PUT",
       headers,
       body: JSON.stringify({
-        appId,
+        appId: appId,
         coreConfig: {},
       }),
     });
@@ -201,7 +627,6 @@ async function setup(pluginConfig?: SuperTokensPluginProfileProgressiveProfiling
   if (isNewApp) {
     const signupResponse = await EmailPassword.signUp("public", testEmail, testPW);
     if (signupResponse.status !== "OK") {
-      console.log(signupResponse);
       throw new Error("Failed to set up test user");
     }
     user = signupResponse.user;
@@ -214,6 +639,6 @@ async function setup(pluginConfig?: SuperTokensPluginProfileProgressiveProfiling
 
   return {
     user,
-    appId,
+    appId: appId,
   };
 }
