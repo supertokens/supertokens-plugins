@@ -1,4 +1,5 @@
 import { InviteeDetails } from "@shared/tenants";
+import { usePrettyAction } from "@shared/ui";
 import { useCallback, useEffect, useState } from "react";
 
 import { usePluginContext } from "../../plugin";
@@ -14,7 +15,7 @@ type InvitationsProps = {
 
 export const Invitations: React.FC<InvitationsProps> = ({ selectedTenantId, onFetch }) => {
   const { api } = usePluginContext();
-  const { addInvitation } = api;
+  const { addInvitation, removeInvitation } = api;
 
   const [invitations, setInvitations] = useState<InviteeDetails[]>([]);
 
@@ -52,11 +53,26 @@ export const Invitations: React.FC<InvitationsProps> = ({ selectedTenantId, onFe
     [addInvitation],
   );
 
+  const onRemoveInvite = usePrettyAction(
+    async (email: string) => {
+      const response = await removeInvitation(email);
+      if (response.status === "ERROR") {
+        throw new Error(response.message);
+      }
+
+      // If it was successful, remove the invitation from the
+      // list.
+      setInvitations((currentInvitations) => currentInvitations.filter((invitation) => invitation.email !== email));
+    },
+    [removeInvitation],
+    { errorMessage: "Failed to remove invitation, please try again" }
+  );
+
   return (
     <TenantTab
       description="Invitations sent to join your tenant"
       descriptionComponent={<AddInvitation onCreate={onCreateInvite} selectedTenantId={selectedTenantId} />}>
-      <InvitedUsers invitations={invitations} selectedTenantId={selectedTenantId} />
+      <InvitedUsers invitations={invitations} onRemove={onRemoveInvite} />
     </TenantTab>
   );
 };

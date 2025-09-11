@@ -8,3 +8,4 @@ export * from "./tag";
 export * from "./theme-provider";
 export * from "./callout";
 export * from "./tab";
+export * from "./icon";
