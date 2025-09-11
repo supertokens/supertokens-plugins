@@ -1,0 +1,64 @@
+name: Release Private Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Release branch"
+        required: false
+        default: "main"
+        type: string
+      skip_tests:
+        description: "Skip tests"
+        required: false
+        default: false
+        type: boolean
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: private-npm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Create beta branch
+        id: create-branch
+        run: |
+          DATETIME=$(date +%Y%m%d%H%M%S)
+          BRANCH_NAME="beta-$DATETIME"
+          git checkout -b $BRANCH_NAME
+          git push origin $BRANCH_NAME
+          echo "branch-name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create beta version
+        run: npm run version:private
+
+      - name: Run tests
+        if: ${{ inputs.skip_tests == false }}
+        run: npm test
+
+      - name: build
+        run: npm run build
+
+      - name: Publish
+        uses: changesets/action@v1
+        with:
+          version: npm run version:private
+          publish: npm run release:private
+          createGithubReleases: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
