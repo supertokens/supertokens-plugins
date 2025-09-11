@@ -79,7 +79,7 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
   };
 
   const addInvitation = async (email: string) => {
-    const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
+    const response = await querier.post<{ status: "OK"; code: string } | { status: "ERROR"; message: string }>(
       "/invite/add",
       { email },
       { withSession: true },

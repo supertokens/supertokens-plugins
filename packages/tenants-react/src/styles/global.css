@@ -28,3 +28,10 @@
 .st-tab-panel::part(base) {
   padding: 0;
 }
+
+/* Style the button */
+
+wa-button::part(base) {
+  background-color: var(--wa-color-brand-80);
+  color: var(--wa-color-neutral-00);
+}
