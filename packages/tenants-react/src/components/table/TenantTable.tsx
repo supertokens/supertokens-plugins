@@ -13,16 +13,16 @@ type TableProps = {
   }[];
 };
 
-export const TenantTable: React.FC<TableProps> = ({
+export const TenantUsersTable: React.FC<TableProps> = ({
   emailComponentTitle = "Email",
-  extraComponentTitle = "Role",
+  extraComponentTitle = undefined,
   columns,
 }) => {
   return (
     <div className={cx("tableContainer")}>
       <div data-supertokens="table-head" className={cx("tableHead")}>
         <div className={cx("emailHeader")}>{emailComponentTitle}</div>
-        <div className={cx("extraHeader")}>{extraComponentTitle}</div>
+        {extraComponentTitle && <div className={cx("extraHeader")}>{extraComponentTitle}</div>}
       </div>
       <div data-supertokens="table-columns" className={cx("tableColumns")}>
         {columns.map((column) => (

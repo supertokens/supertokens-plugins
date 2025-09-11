@@ -7,13 +7,17 @@ const cx = classNames.bind(style);
 
 type TenantTabProps = {
   description: string;
+  descriptionComponent?: React.ReactNode;
   children: React.ReactNode;
 };
 
-export const TenantTab: React.FC<TenantTabProps> = ({ description, children }) => {
+export const TenantTab: React.FC<TenantTabProps> = ({ description, descriptionComponent, children }) => {
   return (
     <div>
-      <div className={cx("tabDescription")}>{description}</div>
+      <div className={cx("tabDescription")}>
+        <div className={cx("tabDescriptionText")}>{description}</div>
+        {descriptionComponent && <div>{descriptionComponent}</div>}
+      </div>
       <div className={cx("tabChildrenWrapper")}>{children}</div>
     </div>
   );

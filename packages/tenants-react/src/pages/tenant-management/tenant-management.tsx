@@ -4,7 +4,7 @@ import { SelectInput, TabGroup, Tab, TabPanel, ToastProvider, ToastContainer } f
 import classNames from "classnames/bind";
 import { useState, useEffect, useCallback } from "react";
 
-import { InvitationsWrapper } from "../../components/invitations/invitations";
+import { Invitations } from "../../components/invitations/invitations";
 import { TenantTab } from "../../components/tab/TenantTab";
 import { TenantUsers } from "../../components/users/TenantUsers";
 import { logDebugMessage } from "../../logger";
@@ -16,7 +16,7 @@ const cx = classNames.bind(style);
 
 export const TenantManagementWithoutToastWrapper = ({ section }: { section: any }) => {
   const { api, t } = usePluginContext();
-  const { getUsers, getInvitations, removeInvitation, addInvitation, fetchTenants, switchTenant, changeRole } = api;
+  const { getUsers, getInvitations, removeInvitation, fetchTenants, switchTenant, changeRole } = api;
   const [tenants, setTenants] = useState<TenantDetails[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState<string>("public");
 
@@ -76,16 +76,6 @@ export const TenantManagementWithoutToastWrapper = ({ section }: { section: any 
     [removeInvitation],
   );
 
-  const onCreateInvite = useCallback(
-    async (email: string) => {
-      const response = await addInvitation(email);
-      if (response.status === "ERROR") {
-        throw new Error(response.message);
-      }
-    },
-    [addInvitation],
-  );
-
   const handleTenantSwitch = useCallback(
     async (tenantId: string) => {
       const response = await switchTenant(tenantId);
@@ -138,18 +128,7 @@ export const TenantManagementWithoutToastWrapper = ({ section }: { section: any 
             </TenantTab>
           </TabPanel>
           <TabPanel name="invitations">
-            <InvitationsWrapper
-              section={{
-                id: "tenant-invitations",
-                label: "Tenant Invitations",
-                description: "Invitations for this tenant",
-                fields: [],
-              }}
-              onFetch={onFetchInvitations}
-              onRemove={onRemoveInvite}
-              onCreate={onCreateInvite}
-              selectedTenantId={selectedTenantId}
-            />
+            <Invitations onFetch={onFetchInvitations} selectedTenantId={selectedTenantId} />
           </TabPanel>
         </TabGroup>
       </div>
