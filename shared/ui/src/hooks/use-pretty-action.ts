@@ -1,6 +1,18 @@
 import { useCallback } from "react";
 import { useToast } from "../components/toast";
 
+const getErrorMessage = (e: any) => {
+  if (e.message) {
+    return e.message;
+  }
+
+  if (e.name) {
+    return e.name;
+  }
+
+  return "An error occurred";
+};
+
 export const usePrettyAction = <T extends (...args: any[]) => any | Promise<any>>(
   action: T,
   deps: any[] = [],
@@ -34,10 +46,14 @@ export const usePrettyAction = <T extends (...args: any[]) => any | Promise<any>
 
   const handleError = useCallback(
     (e: any, ...args: Parameters<T>) => {
-      const message =
-        typeof options.errorMessage === "function"
-          ? options.errorMessage(e, ...args)
-          : (options.errorMessage ?? "An error occurred");
+      let message: string;
+      if (typeof options.errorMessage === "function") {
+        message = options.errorMessage(e, ...args);
+      } else if (typeof options.errorMessage === "string") {
+        message = options.errorMessage;
+      } else {
+        message = getErrorMessage(e);
+      }
 
       addToast({
         message,
@@ -66,6 +82,14 @@ export const usePrettyAction = <T extends (...args: any[]) => any | Promise<any>
 
         if (options.onSuccess) {
           await options.onSuccess();
+        }
+
+        if (res?.status && res.status !== "OK") {
+          handleError(res, ...args);
+
+          if (options.onError) {
+            await options.onError(res);
+          }
         }
 
         return res as ReturnType<T> extends Promise<any> ? Awaited<ReturnType<T>> : ReturnType<T>;

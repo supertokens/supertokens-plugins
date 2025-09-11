@@ -1,3 +1,12 @@
+export class QuerierError extends Error {
+  constructor(
+    message: string,
+    public payload: any,
+  ) {
+    super(message);
+  }
+}
+
 const post =
   (basePath: string) =>
   async <T>(
@@ -14,38 +23,24 @@ const post =
       credentials.credentials = "include";
     }
 
-    let response;
-    try {
-      response = await fetch(url, {
-        ...credentials,
-        method: "POST",
-        headers: {
-          "Content-type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify(body),
-      });
-    } catch (error) {
-      const newError = new Error(`Fetch failed: ${error}`);
-      let payload = error;
-      try {
-        payload = JSON.parse(error as string);
-      } catch (e) {}
-      // @ts-ignore
-      newError.payload = payload;
-      throw newError;
-    }
+    const response = await fetch(url, {
+      ...credentials,
+      method: "POST",
+      headers: {
+        "Content-type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(body),
+    });
 
     if (!response.ok) {
       const error = await response.text();
-      const newError = new Error(`Fetch failed: ${error}`);
       let payload = error;
       try {
         payload = JSON.parse(error);
       } catch (e) {}
-      // @ts-ignore
-      newError.payload = payload;
-      throw newError;
+
+      throw new QuerierError(`Fetch failed: ${error}`, payload);
     }
 
     return response.json() as Promise<T>;
