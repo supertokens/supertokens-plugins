@@ -5,13 +5,23 @@ import { TenantUsersTable } from "../table/TenantTable";
 import { NoUsers } from "../users/NoUsers";
 import { UserDetails } from "../users/UserDetails";
 
+import { RemoveInvitation } from "./RemoveInvitation";
+
 export type InvitedUsersProps = {
-  selectedTenantId: string;
+  onRemove: (email: string) => Promise<void>;
   invitations: InviteeDetails[];
 };
 
-export const InvitedUsers: React.FC<InvitedUsersProps> = ({ selectedTenantId, invitations }) => {
+export const InvitedUsers: React.FC<InvitedUsersProps> = ({ onRemove, invitations }) => {
   const { t } = usePluginContext();
+
+  const getExtraComponent = (invitation: InviteeDetails) => {
+    return (
+      <div>
+        <RemoveInvitation onRemove={() => onRemove(invitation.email)} />
+      </div>
+    );
+  };
 
   return (
     <div>
@@ -20,7 +30,7 @@ export const InvitedUsers: React.FC<InvitedUsersProps> = ({ selectedTenantId, in
           <TenantUsersTable
             columns={invitations.map((user) => ({
               emailComponent: <UserDetails email={user.email} />,
-              //   extraComponent: getExtraComponent(user),
+              extraComponent: getExtraComponent(user),
             }))}
           />
         </div>

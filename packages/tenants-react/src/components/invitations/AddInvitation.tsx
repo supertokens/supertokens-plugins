@@ -41,7 +41,11 @@ export const AddInvitation: React.FC<AddInvitationProps> = ({ onCreate, selected
         required
         disabled={isSubmitting}
       />
-      <Button appearance="filled" disabled={isSubmitting || inviteEmail.trim().length === 0} onClick={handleAddInvite}>
+      <Button
+        appearance="filled"
+        variant="brand"
+        disabled={isSubmitting || inviteEmail.trim().length === 0}
+        onClick={handleAddInvite}>
         {t("PL_TB_ADD_INVITE_BUTTON_TEXT")}
       </Button>
     </div>

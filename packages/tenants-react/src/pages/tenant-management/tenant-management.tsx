@@ -66,16 +66,6 @@ export const TenantManagementWithoutToastWrapper = ({ section }: { section: any 
     return { invitations: response.invitees };
   }, [getInvitations]);
 
-  const onRemoveInvite = useCallback(
-    async (email: string) => {
-      const response = await removeInvitation(email);
-      if (response.status === "ERROR") {
-        throw new Error(response.message);
-      }
-    },
-    [removeInvitation],
-  );
-
   const handleTenantSwitch = useCallback(
     async (tenantId: string) => {
       const response = await switchTenant(tenantId);
