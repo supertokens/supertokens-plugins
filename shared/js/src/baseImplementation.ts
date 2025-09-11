@@ -45,6 +45,10 @@ export abstract class BasePluginImplementation<TConfig> {
     return ServiceClass.instance;
   }
 
+  public static reset() {
+    this.instance = undefined;
+  }
+
   /**
    * Constructor that takes the plugin configuration.
    * @param config - The plugin configuration
