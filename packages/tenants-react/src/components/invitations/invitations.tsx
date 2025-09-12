@@ -65,14 +65,14 @@ export const Invitations: React.FC<InvitationsProps> = ({ selectedTenantId, onFe
       setInvitations((currentInvitations) => currentInvitations.filter((invitation) => invitation.email !== email));
     },
     [removeInvitation],
-    { errorMessage: "Failed to remove invitation, please try again" }
+    { errorMessage: "Failed to remove invitation, please try again" },
   );
 
   return (
     <TenantTab
       description="Invitations sent to join your tenant"
       descriptionComponent={<AddInvitation onCreate={onCreateInvite} selectedTenantId={selectedTenantId} />}>
-      <InvitedUsers invitations={invitations} onRemove={onRemoveInvite} />
+      <InvitedUsers invitations={invitations} onRemove={onRemoveInvite} tenantId={selectedTenantId} />
     </TenantTab>
   );
 };
