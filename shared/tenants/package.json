@@ -1,0 +1,19 @@
+{
+  "name": "@shared/tenants",
+  "version": "0.0.1",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "peerDependencies": {
+    "supertokens-node": "^23.0.1"
+  },
+  "devDependencies": {
+    "@shared/eslint": "*",
+    "@shared/tsconfig": "*",
+    "@types/debug": "^4.1.12"
+  },
+  "dependencies": {
+    "debug": "^4.4.1"
+  }
+}
