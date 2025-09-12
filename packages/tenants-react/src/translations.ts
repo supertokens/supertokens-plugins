@@ -6,5 +6,6 @@ export const defaultTranslationsTenants = {
     PL_TB_NO_USERS_FOUND_TEXT: "No users have been found linked to this tenant.",
     PL_TB_NO_INVITATIONS_FOUND_TEXT: "There are currently no pending invites.",
     PL_TB_ADD_INVITE_BUTTON_TEXT: "+ Invite",
+    PL_TB_VIEW_CODE_TEXT: "Code",
   },
 } as const;
