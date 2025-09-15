@@ -238,9 +238,9 @@ export const getOverrideableTenantFunctionImplementation = (
       // By default, only owners can approve tenant creation requests.
       return role === ROLES.ADMIN;
     },
-    canRemoveUserFromTenant: async (user: User, role: string, session: SessionContainerInterface) => {
+    canRemoveUserFromTenant: async (user: User, roles: string[], session: SessionContainerInterface) => {
       // By default, only owners can remove users from a tenant.
-      return role === ROLES.ADMIN;
+      return roles.includes(ROLES.ADMIN);
     },
     associateAllLoginMethodsOfUserWithTenant: async (
       tenantId: string,
