@@ -90,7 +90,7 @@ export type OverrideableTenantFunctionImplementation = {
   canCreateInvitation: (user: User, role: string, session: SessionContainerInterface) => Promise<boolean>;
   canApproveJoinRequest: (user: User, role: string, session: SessionContainerInterface) => Promise<boolean>;
   canApproveTenantCreationRequest: (user: User, role: string, session: SessionContainerInterface) => Promise<boolean>;
-  canRemoveUserFromTenant: (user: User, role: string, session: SessionContainerInterface) => Promise<boolean>;
+  canRemoveUserFromTenant: (user: User, roles: string[], session: SessionContainerInterface) => Promise<boolean>;
   createTenantAndAssignAdmin: (
     tenantDetails: {
       name: string;

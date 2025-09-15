@@ -118,6 +118,16 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     return response;
   };
 
+  const removeUserFromTenant = async (userId: string) => {
+    const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
+      "/remove",
+      { userId },
+      { withSession: true }
+    );
+
+    return response;
+  };
+
   return {
     fetchTenants,
     joinTenant,
@@ -129,5 +139,6 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     acceptInvitation,
     switchTenant,
     changeRole,
+    removeUserFromTenant,
   };
 };

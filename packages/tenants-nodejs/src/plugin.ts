@@ -2,7 +2,7 @@ import { NormalisedAppinfo, SuperTokensPlugin, UserContext } from "supertokens-n
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
 import Session from "supertokens-node/recipe/session";
 import { logDebugMessage } from "supertokens-node/lib/build/logger";
-import supertokens from "supertokens-node";
+import supertokens, { RecipeUserId } from "supertokens-node";
 import UserRoles from "supertokens-node/recipe/userroles";
 
 import { createPluginInitFunction } from "@shared/js";
@@ -419,6 +419,70 @@ export const init = createPluginInitFunction<
 
                 return getUsersResponse;
               }),
+            },
+            {
+              path: `${HANDLE_BASE_PATH}/remove`,
+              method: "post",
+              verifySessionOptions: {
+                sessionRequired: true,
+                overrideGlobalClaimValidators: (globalValidators) => {
+                  return [
+                    ...globalValidators,
+                    UserRoles.UserRoleClaim.validators.includesAny([ROLES.ADMIN]),
+                  ];
+                },
+              },
+              handler: withRequestHandler(async (req, res, session, userContext) => {
+                if (!session) {
+                  throw new Error("Session not found");
+                }
+
+                const tenantIdToUse = session.getTenantId();
+
+                const userDetails = await supertokens.getUser(session.getUserId());
+                const userRoleInTenant = await UserRoles.getRolesForUser(tenantIdToUse, session.getUserId(), userContext);
+
+                // Check if the current logged in user can remove the user
+                // from tenant.
+                if (!implementation.canRemoveUserFromTenant(userDetails!, userRoleInTenant.roles, session)) {
+                  return {
+                    status: "ERROR",
+                    message: "Logged in user not allowed to remove user from tenant"
+                  };
+                }
+
+                const payload: { userId: string } | undefined = await req.getJSONBody();
+
+                if (!payload?.userId) {
+                  return {
+                    status: "ERROR",
+                    message: "userId is required to remove from tenant"
+                  };
+                }
+
+                // Get details of the user being removed
+                const userToRemove = await supertokens.getUser(payload.userId, userContext);
+                if (!userToRemove) {
+                  // Cannot remove invalid user from tenant.
+                  return {
+                    status: "ERROR",
+                    message: "Cannot remove non-existent user from tenant"
+                  };
+                }
+
+                // Remove all roles of the user from the tenant
+                const allUserRolesInTenant = await UserRoles.getRolesForUser(tenantIdToUse, userToRemove.id);
+                for (const role of allUserRolesInTenant.roles) {
+                  await UserRoles.removeUserRole(tenantIdToUse, userToRemove.id, role, userContext);
+                }
+
+                // Remove the user from the tenant
+                await MultiTenancy.disassociateUserFromTenant(tenantIdToUse, new RecipeUserId(userToRemove.id), userContext);
+
+                return {
+                  status: "OK"
+                };
+              })
             },
             // Invite related routes
             {
@@ -853,12 +917,12 @@ export const init = createPluginInitFunction<
                   ...input.accessTokenPayload,
                   ...(pluginConfig.requireNonPublicTenantAssociation
                     ? await MultipleTenantsPresentClaim.build(
-                        input.userId,
-                        input.recipeUserId,
-                        tenantId,
-                        input.accessTokenPayload,
-                        input.userContext,
-                      )
+                      input.userId,
+                      input.recipeUserId,
+                      tenantId,
+                      input.accessTokenPayload,
+                      input.userContext,
+                    )
                     : {}),
                 };
 
