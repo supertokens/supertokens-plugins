@@ -7,10 +7,7 @@ import packageJson from "./package.json";
 export default defineConfig(() => {
   return {
     root: __dirname,
-    plugins: [
-      dts({ entryRoot: "src", tsconfigPath: path.join(__dirname, "tsconfig.json") }),
-      peerDepsExternal(),
-    ],
+    plugins: [dts({ entryRoot: "src", tsconfigPath: path.join(__dirname, "tsconfig.json") }), peerDepsExternal()],
 
     build: {
       outDir: "dist",

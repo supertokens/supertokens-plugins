@@ -27,10 +27,8 @@ SuperTokens.init({
     // your recipes
   ],
   experimental: {
-    plugins: [
-      OpenTelemetryPlugin.init(),
-    ],
-  }
+    plugins: [OpenTelemetryPlugin.init()],
+  },
 });
 ```
 
@@ -47,7 +45,6 @@ This plugin manually adds traces to all overrideable functions and APIs. By init
 
 By default the plugin removes the following fields from traces: "password", "email", "phoneNumber", "email", "emails", "phoneNumbers", "accessToken", "refreshToken"
 You can add (or remove) items from this list by overriding the `getSensitiveFields` function:
-
 
 ```typescript
 import SuperTokens from "supertokens-node";
@@ -71,12 +68,13 @@ SuperTokens.init({
         }),
       }),
     ],
-  }
+  },
 });
 ```
 
 ### Other ways of protecting sensitive data
 
 You can achieve this in two ways:
+
 1. You can explicitly control how things are transformed into attributes by overriding `transformInputToAttributes` and `transformResultToAttributes`.
 2. Opt-out of the built-in data removal by overriding `getSensitiveFields` to return an empty array and configure data protection as as described here: https://opentelemetry.io/docs/security/handling-sensitive-data/

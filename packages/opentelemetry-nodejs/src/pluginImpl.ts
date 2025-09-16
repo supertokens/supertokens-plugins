@@ -7,7 +7,12 @@ import { HttpRequest, UserContext } from "supertokens-node/types";
 export class PluginImpl {
   constructor(private readonly config: OpenTelemetryLoggerPluginConfig) {}
 
-  startSpan = function (this: PluginImpl, tracer: Tracer, spanName: string, attributes: Record<string, any>): {
+  startSpan = function (
+    this: PluginImpl,
+    tracer: Tracer,
+    spanName: string,
+    attributes: Record<string, any>,
+  ): {
     end: () => void;
     addEvent: (eventName: string, attributes: Record<string, AttributeValue>) => void;
     setAttributes: (attributes: Record<string, AttributeValue>) => void;
@@ -16,7 +21,13 @@ export class PluginImpl {
     return tracer.startSpan(spanName, { attributes });
   };
 
-  startActiveSpan = function<T>(this: PluginImpl, tracer: Tracer, spanName: string, attributes: Record<string, any>, fn: (span: Span) => T): T {
+  startActiveSpan = function <T> (
+    this: PluginImpl,
+    tracer: Tracer,
+    spanName: string,
+    attributes: Record<string, any>,
+    fn: (span: Span) => T,
+  ): T {
     return tracer.startActiveSpan(spanName, { attributes }, fn);
   };
 
@@ -25,16 +36,22 @@ export class PluginImpl {
   };
 
   transformInputToAttributes = function (this: PluginImpl, input: unknown): Record<string, AttributeValue> {
-    return Object.fromEntries(transformObjectToEntryList(input, "input", this.getSensitiveFields(defaultSensitiveFields)));
+    return Object.fromEntries(
+      transformObjectToEntryList(input, "input", this.getSensitiveFields(defaultSensitiveFields)),
+    );
   };
 
   transformResultToAttributes = function (this: PluginImpl, input: unknown): Record<string, AttributeValue> {
-    return Object.fromEntries(transformObjectToEntryList(input, "input", this.getSensitiveFields(defaultSensitiveFields)));
+    return Object.fromEntries(
+      transformObjectToEntryList(input, "input", this.getSensitiveFields(defaultSensitiveFields)),
+    );
   };
 
   transformErrorToAttributes = function (this: PluginImpl, error: unknown): Record<string, AttributeValue> {
     return {
-        error: (typeof error === "object" && error !== null && "message" in error ? error?.message : "Unknown error") as string,
+      error: (typeof error === "object" && error !== null && "message" in error
+        ? error?.message
+        : "Unknown error") as string,
     };
   };
 
@@ -42,25 +59,40 @@ export class PluginImpl {
     return defaultSensitiveFields;
   };
 
-  getTracingHeadersForCoreCall = function (this: PluginImpl, req: HttpRequest, userContext: UserContext): Record<string, string> {
+  getTracingHeadersForCoreCall = function (
+    this: PluginImpl,
+    req: HttpRequest,
+    userContext: UserContext,
+  ): Record<string, string> {
     return {
       "x-parent-trace-id": getRequestFromUserContext(userContext)?.getHeaderValue("x-trace-id") ?? "",
     };
   };
-};
+}
 
+const defaultSensitiveFields = [
+  "password",
+  "email",
+  "phoneNumber",
+  "email",
+  "emails",
+  "phoneNumbers",
+  "accessToken",
+  "refreshToken",
+  "phonenumber",
+];
 
-const defaultSensitiveFields = ["password", "email", "phoneNumber", "email", "emails", "phoneNumbers", "accessToken", "refreshToken", "phonenumber"];
-
-function transformObjectToEntryList(obj: any | undefined, prefix: string, sensitiveFields: string[]): [string, AttributeValue][] {
+function transformObjectToEntryList(
+  obj: any | undefined,
+  prefix: string,
+  sensitiveFields: string[],
+): [string, AttributeValue][] {
   if (Array.isArray(obj)) {
     return obj.flatMap((item, index) => transformObjectToEntryList(item, prefix + ".[" + index + "]", sensitiveFields));
   }
 
   if (obj === null || typeof obj !== "object") {
-    if (
-      sensitiveFields.some(field => prefix.includes(field))
-    ) {
+    if (sensitiveFields.some((field) => prefix.includes(field))) {
       return [[prefix, "REDACTED"]];
     }
     return [[prefix, obj]];
@@ -131,7 +163,7 @@ function transformObjectToEntryList(obj: any | undefined, prefix: string, sensit
     if (typeof value === "function") {
       return [];
     }
-    if (sensitiveFields.some(field => key === field)) {
+    if (sensitiveFields.some((field) => key === field)) {
       return [[prefix + "." + key, "REDACTED"]];
     }
     return [[prefix + "." + key, value]];
