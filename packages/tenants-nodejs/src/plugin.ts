@@ -426,10 +426,7 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [
-                    ...globalValidators,
-                    UserRoles.UserRoleClaim.validators.includesAny([ROLES.ADMIN]),
-                  ];
+                  return [...globalValidators, UserRoles.UserRoleClaim.validators.includesAny([ROLES.ADMIN])];
                 },
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
@@ -440,14 +437,18 @@ export const init = createPluginInitFunction<
                 const tenantIdToUse = session.getTenantId();
 
                 const userDetails = await supertokens.getUser(session.getUserId());
-                const userRoleInTenant = await UserRoles.getRolesForUser(tenantIdToUse, session.getUserId(), userContext);
+                const userRoleInTenant = await UserRoles.getRolesForUser(
+                  tenantIdToUse,
+                  session.getUserId(),
+                  userContext,
+                );
 
                 // Check if the current logged in user can remove the user
                 // from tenant.
                 if (!implementation.canRemoveUserFromTenant(userDetails!, userRoleInTenant.roles, session)) {
                   return {
                     status: "ERROR",
-                    message: "Logged in user not allowed to remove user from tenant"
+                    message: "Logged in user not allowed to remove user from tenant",
                   };
                 }
 
@@ -456,7 +457,7 @@ export const init = createPluginInitFunction<
                 if (!payload?.userId) {
                   return {
                     status: "ERROR",
-                    message: "userId is required to remove from tenant"
+                    message: "userId is required to remove from tenant",
                   };
                 }
 
@@ -466,7 +467,7 @@ export const init = createPluginInitFunction<
                   // Cannot remove invalid user from tenant.
                   return {
                     status: "ERROR",
-                    message: "Cannot remove non-existent user from tenant"
+                    message: "Cannot remove non-existent user from tenant",
                   };
                 }
 
@@ -477,12 +478,16 @@ export const init = createPluginInitFunction<
                 }
 
                 // Remove the user from the tenant
-                await MultiTenancy.disassociateUserFromTenant(tenantIdToUse, new RecipeUserId(userToRemove.id), userContext);
+                await MultiTenancy.disassociateUserFromTenant(
+                  tenantIdToUse,
+                  new RecipeUserId(userToRemove.id),
+                  userContext,
+                );
 
                 return {
-                  status: "OK"
+                  status: "OK",
                 };
-              })
+              }),
             },
             // Invite related routes
             {
@@ -607,6 +612,9 @@ export const init = createPluginInitFunction<
                     message: "Tenant ID is required",
                   };
                 }
+
+                // Associate the user with the tenant
+                await MultiTenancy.associateUserToTenant(tenantId, session.getRecipeUserId());
 
                 await assignAdminToUserInTenant(tenantId, session.getUserId());
                 logDebugMessage(`Admin role assigned to user: ${session.getUserId()}`);
@@ -917,12 +925,12 @@ export const init = createPluginInitFunction<
                   ...input.accessTokenPayload,
                   ...(pluginConfig.requireNonPublicTenantAssociation
                     ? await MultipleTenantsPresentClaim.build(
-                      input.userId,
-                      input.recipeUserId,
-                      tenantId,
-                      input.accessTokenPayload,
-                      input.userContext,
-                    )
+                        input.userId,
+                        input.recipeUserId,
+                        tenantId,
+                        input.accessTokenPayload,
+                        input.userContext,
+                      )
                     : {}),
                 };
 

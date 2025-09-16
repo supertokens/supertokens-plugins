@@ -16,7 +16,8 @@ const cx = classNames.bind(style);
 
 export const TenantManagementWithoutToastWrapper = ({ section }: { section: any }) => {
   const { api, t } = usePluginContext();
-  const { getUsers, getInvitations, removeInvitation, fetchTenants, switchTenant, changeRole } = api;
+  const { getUsers, getInvitations, removeInvitation, removeUserFromTenant, fetchTenants, switchTenant, changeRole } =
+    api;
   const [tenants, setTenants] = useState<TenantDetails[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState<string>("public");
 
@@ -55,6 +56,18 @@ export const TenantManagementWithoutToastWrapper = ({ section }: { section: any 
       return true;
     },
     [changeRole],
+  );
+
+  const onUserRemove = useCallback(
+    async (userId: string): boolean => {
+      const response = await removeUserFromTenant(userId);
+      if (response.status === "ERROR") {
+        logDebugMessage(`Got error while removing user: ${response.message}`);
+        return false;
+      }
+      return true;
+    },
+    [removeUserFromTenant],
   );
 
   // Invitations tab functions
@@ -114,7 +127,7 @@ export const TenantManagementWithoutToastWrapper = ({ section }: { section: any 
           {/* Tab Content */}
           <TabPanel name="users">
             <TenantTab description="List of users that are part of your tenant">
-              <TenantUsers onFetch={onFetchUsers} onRoleChange={onRoleChange} />
+              <TenantUsers onFetch={onFetchUsers} onRoleChange={onRoleChange} onUserRemove={onUserRemove} />
             </TenantTab>
           </TabPanel>
           <TabPanel name="invitations">
