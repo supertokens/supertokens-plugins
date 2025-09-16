@@ -26,9 +26,11 @@ SuperTokens.init({
   recipeList: [
     // your recipes
   ],
-  plugins: [
-    OpenTelemetryPlugin.init(),
-  ],
+  experimental: {
+    plugins: [
+      OpenTelemetryPlugin.init(),
+    ],
+  }
 });
 ```
 
@@ -61,13 +63,15 @@ SuperTokens.init({
   recipeList: [
     // your recipes
   ],
-  plugins: [
-    OpenTelemetryPlugin.init({
-      override: () => ({
-        getSensitiveFields: (defaultSensitiveFields: string[]) => [...defaultSensitiveFields, "randomField"],
+  experimental: {
+    plugins: [
+      OpenTelemetryPlugin.init({
+        override: () => ({
+          getSensitiveFields: (defaultSensitiveFields: string[]) => [...defaultSensitiveFields, "randomField"],
+        }),
       }),
-    }),
-  ],
+    ],
+  }
 });
 ```
 

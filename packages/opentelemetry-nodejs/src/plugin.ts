@@ -13,7 +13,6 @@ import { PluginImpl } from "./pluginImpl";
 export const init = createPluginInitFunction<SuperTokensPlugin, OpenTelemetryLoggerPluginConfig, PluginImpl, OpenTelemetryLoggerPluginConfig>(
   (config, implementation): SuperTokensPlugin => {
   const tracer = implementation.getTracer();
-  tracer.startSpan("test");
 
   validatePluginConfig(config);
   return {
