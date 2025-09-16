@@ -5,7 +5,10 @@
   border-radius: 12px;
   background-color: #ffffff;
 
-  --indicator-color: #3e63dd;
+  --indicator-color: var(--accent-color-accent-9);
+
+  /* Make the track color same as background color to hide it */
+  --track-color: var(--neutral-color-neutral-8);
 }
 
 .st-tab-group::part(tabs) {
@@ -22,9 +25,20 @@
 }
 
 .st-tab:not([active])::part(base) {
-  color: #1c2024;
+  color: var(--neutral-color-neutral-12);
 }
 
 .st-tab-panel::part(base) {
   padding: 0;
+}
+
+.tenantRequestsWrapper .st-tab-group::part(base) {
+  background-color: #f9f9f8;
+  border: none;
+  border-radius: 0;
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
+  box-shadow: none;
+
+  --track-color: var(--neutral-color-neutral-6);
 }

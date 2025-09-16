@@ -4,7 +4,8 @@ import { SelectInput, TabGroup, Tab, TabPanel, ToastProvider, ToastContainer } f
 import classNames from "classnames/bind";
 import { useState, useEffect, useCallback } from "react";
 
-import { Invitations } from "../../components/invitations/invitations";
+import { Invitations } from "../../components/invitations/Invitations";
+import { TenantRequests } from "../../components/requests/TenantRequests";
 import { TenantTab } from "../../components/tab/TenantTab";
 import { TenantUsers } from "../../components/users/TenantUsers";
 import { logDebugMessage } from "../../logger";
@@ -59,7 +60,7 @@ export const TenantManagementWithoutToastWrapper = ({ section }: { section: any 
   );
 
   const onUserRemove = useCallback(
-    async (userId: string): boolean => {
+    async (userId: string): Promise<boolean> => {
       const response = await removeUserFromTenant(userId);
       if (response.status === "ERROR") {
         logDebugMessage(`Got error while removing user: ${response.message}`);
@@ -132,6 +133,9 @@ export const TenantManagementWithoutToastWrapper = ({ section }: { section: any 
           </TabPanel>
           <TabPanel name="invitations">
             <Invitations onFetch={onFetchInvitations} selectedTenantId={selectedTenantId} />
+          </TabPanel>
+          <TabPanel name="requests">
+            <TenantRequests />
           </TabPanel>
         </TabGroup>
       </div>
