@@ -1,3 +1,4 @@
+import classNames from "classnames/bind";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Session from "supertokens-auth-react/recipe/session";
 import { User } from "supertokens-web-js/types";
@@ -7,10 +8,14 @@ import { SelectInput } from "../../../../../shared/ui/src/components";
 import { usePrettyAction } from "../../../../../shared/ui/src/hooks";
 import { logDebugMessage } from "../../logger";
 import { usePluginContext } from "../../plugin";
+import { RemoveInvitation } from "../invitations/RemoveInvitation";
 import { TenantUsersTable } from "../table/TenantTable";
 
 import { NoUsers } from "./NoUsers";
 import { UserDetails } from "./UserDetails";
+import style from "./users.module.scss";
+
+const cx = classNames.bind(style);
 
 // import { BaseFormSection } from '@supertokens-plugin-profile/common-details-shared';
 
@@ -19,9 +24,10 @@ type UserWithRole = { roles: string[] } & User;
 type TenantUsersProps = {
   onFetch: () => Promise<{ users: UserWithRole[] }>;
   onRoleChange: (userId: string, role: string) => Promise<boolean>;
+  onUserRemove: (userId: string) => Promise<boolean>;
 };
 
-export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch, onRoleChange }) => {
+export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch, onRoleChange, onUserRemove }) => {
   const { t } = usePluginContext();
   const [users, setUsers] = useState<UserWithRole[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
@@ -72,6 +78,20 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch, onRoleChange 
     { errorMessage: "Failed to change role" },
   );
 
+  const handleUserRemove = usePrettyAction(
+    async (userId: string) => {
+      logDebugMessage(`Removing user from tenant: ${userId}`);
+      const wasRemoved = await onUserRemove(userId);
+
+      // Update the list of users if it was successful.
+      if (wasRemoved) {
+        setUsers((currenUsers) => currenUsers.filter((user) => user.id !== userId));
+      }
+    },
+    [onUserRemove],
+    { errorMessage: "Failed to remove user" },
+  );
+
   const getExtraComponent = useCallback(
     (user: { roles: string[] } & User) => {
       // It's safe to assume that they would have one role
@@ -84,7 +104,7 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch, onRoleChange 
       };
 
       return (
-        <div>
+        <div className={cx("userExtraComponent")}>
           <div className="role--input">
             <SelectInput
               id="role-select"
@@ -94,10 +114,16 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch, onRoleChange 
               disabled={!isCurrentUserAdmin || isRoleChanging}
             />
           </div>
+          <div>
+            <RemoveInvitation
+              onRemove={() => handleUserRemove(user.id)}
+              disabled={currentUserDetails!.id === user.id}
+            />
+          </div>
         </div>
       );
     },
-    [isCurrentUserAdmin, isRoleChanging, handleRoleChange],
+    [isCurrentUserAdmin, isRoleChanging, handleRoleChange, handleUserRemove, currentUserDetails],
   );
 
   if (!userId) {
