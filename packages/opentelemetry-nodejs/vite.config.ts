@@ -1,5 +1,4 @@
 import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
 import dts from "vite-plugin-dts";
 import peerDepsExternal from "rollup-plugin-peer-deps-external";
 import * as path from "path";
@@ -9,7 +8,6 @@ export default defineConfig(() => {
   return {
     root: __dirname,
     plugins: [
-      react(),
       dts({ entryRoot: "src", tsconfigPath: path.join(__dirname, "tsconfig.json") }),
       peerDepsExternal(),
     ],
