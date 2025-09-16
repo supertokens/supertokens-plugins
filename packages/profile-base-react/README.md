@@ -1,4 +1,4 @@
-# SuperTokens Plugin Base Profile
+# SuperTokens Plugin Profile Base
 
 Create a comprehensive user profile interface for your SuperTokens React application.
 This plugin provides a foundational profile page with a sectioned layout that other profile-related plugins can extend and customize.
@@ -6,7 +6,7 @@ This plugin provides a foundational profile page with a sectioned layout that ot
 ## Installation
 
 ```bash
-npm install @supertokens-plugins/base-profile-react
+npm install @supertokens-plugins/profile-base-react
 ```
 
 ## Quick Start
@@ -17,7 +17,7 @@ Initialize the plugin in your SuperTokens frontend configuration:
 
 ```typescript
 import SuperTokens from "supertokens-auth-react";
-import BaseProfilePlugin from "@supertokens-plugins/base-profile-react";
+import ProfileBasePlugin from "@supertokens-plugins/profile-base-react";
 
 SuperTokens.init({
   appInfo: {
@@ -28,7 +28,7 @@ SuperTokens.init({
   ],
   experimental: {
     plugins: [
-      BaseProfilePlugin.init({
+      ProfileBasePlugin.init({
         profilePagePath: "/user/profile", // Optional: defaults to "/user/profile"
         sections: [
           // Optional: initial sections
@@ -55,10 +55,10 @@ The plugin provides a complete user profile interface accessible at `/user/profi
 
 ## Configuration Options
 
-| Option            | Type                                | Default             | Description                           |
-| ----------------- | ----------------------------------- | ------------------- | ------------------------------------- |
-| `profilePagePath` | string                              | `"/user/profile"`   | Path where the profile page is served |
-| `sections`        | `SuperTokensPluginProfileSection[]` | `[]`                | Initial profile sections to display   |
+| Option            | Type                                | Default           | Description                           |
+| ----------------- | ----------------------------------- | ----------------- | ------------------------------------- |
+| `profilePagePath` | string                              | `"/user/profile"` | Path where the profile page is served |
+| `sections`        | `SuperTokensPluginProfileSection[]` | `[]`              | Initial profile sections to display   |
 
 ## Section Structure
 
@@ -81,13 +81,13 @@ type SuperTokensPluginProfileSection = {
 Access plugin functionality and register new sections:
 
 ```typescript
-import { usePluginContext } from "@supertokens-plugins/base-profile-react";
+import { usePluginContext } from "@supertokens-plugins/profile-base-react";
 
 function MyProfileComponent() {
   const { getSections, registerSection, pluginConfig, t } = usePluginContext();
 
   const currentSections = getSections();
-  
+
   // Register a new section dynamically
   const addCustomSection = async () => {
     await registerSection(async () => ({
@@ -115,7 +115,7 @@ function MyProfileComponent() {
 Use the profile wrapper in your own components:
 
 ```typescript
-import { UserProfileWrapper } from "@supertokens-plugins/base-profile-react";
+import { UserProfileWrapper } from "@supertokens-plugins/profile-base-react";
 import { ThemeProvider } from "@shared/ui";
 
 function CustomProfilePage() {
@@ -130,29 +130,4 @@ function CustomProfilePage() {
     </ThemeProvider>
   );
 }
-```
-
-## Integration with Other Plugins
-
-This plugin serves as a foundation for other profile-related plugins:
-
-```typescript
-// Example: Security plugin registering its section
-import BaseProfilePlugin from "@supertokens-plugins/base-profile-react";
-import SecurityPlugin from "@supertokens-plugins/security-react";
-
-SuperTokens.init({
-  // ... other config
-  experimental: {
-    plugins: [
-      BaseProfilePlugin.init({
-        profilePagePath: "/dashboard/profile",
-      }),
-      SecurityPlugin.init({
-        // Security plugin will automatically register its sections
-        // with the base profile plugin
-      }),
-    ],
-  },
-});
 ```

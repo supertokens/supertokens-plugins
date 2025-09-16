@@ -1,12 +1,12 @@
 {
-  "name": "@supertokens-plugins/base-profile-react",
+  "name": "@supertokens-plugins/profile-base-react",
   "version": "0.0.1-beta.1",
-  "description": "Base Profile Plugin for SuperTokens",
-  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/base-profile-react/README.md",
+  "description": "Profile Base Plugin for SuperTokens",
+  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/profile-base-react/README.md",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/supertokens/supertokens-plugins.git",
-    "directory": "packages/base-profile-react"
+    "directory": "packages/profile-base-react"
   },
   "scripts": {
     "build": "vite build && npm run pretty",

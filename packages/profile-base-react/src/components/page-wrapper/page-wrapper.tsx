@@ -1,7 +1,7 @@
+import classNames from "classnames/bind";
 import { ReactNode } from "react";
 
 import style from "./page-wrapper.module.css";
-import classNames from "classnames/bind";
 
 const cx = classNames.bind(style);
 

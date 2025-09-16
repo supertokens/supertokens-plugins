@@ -1,8 +1,8 @@
-import React, { useCallback, useMemo, useState } from "react";
+import { Card, useHashParam } from "@shared/ui";
 import classNames from "classnames/bind";
+import React, { useCallback, useMemo, useState } from "react";
 
 import style from "./profile-sections.module.css";
-import { Card, useHashParam } from "@shared/ui";
 
 const cx = classNames.bind(style);
 
@@ -21,7 +21,9 @@ export const ProfileSections = ({
   const [activeIndex, setActiveIndex] = useState(() => {
     const sectionId = hashParam.get();
 
-    if (!sectionId) return 0;
+    if (!sectionId) {
+      return 0;
+    }
 
     const sectionIndex = sections.findIndex((section) => section.id === sectionId);
     return sectionIndex >= 0 ? sectionIndex : 0;
@@ -29,8 +31,12 @@ export const ProfileSections = ({
 
   const changeSection = useCallback(
     (index: number) => {
-      if (!sections?.[index]?.id) return;
-      if (activeIndex === index) return;
+      if (!sections?.[index]?.id) {
+        return;
+      }
+      if (activeIndex === index) {
+        return;
+      }
 
       setActiveIndex(index);
 

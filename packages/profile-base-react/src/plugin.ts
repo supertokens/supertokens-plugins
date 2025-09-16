@@ -1,4 +1,9 @@
+import { createPluginInitFunction } from "@shared/js";
+import { buildContext } from "@shared/react";
+import { SuperTokensPlugin, getTranslationFunction } from "supertokens-auth-react";
+
 import { DEFAULT_PROFILE_PAGE_PATH, PLUGIN_ID } from "./constants";
+import { enableDebugLogs, logDebugMessage } from "./logger";
 import {
   RegisterSection,
   Section,
@@ -7,10 +12,6 @@ import {
   SuperTokensPluginProfileSection,
 } from "./types";
 import { UserProfilePage } from "./user-profile-page";
-import { SuperTokensPlugin, getTranslationFunction } from "supertokens-auth-react";
-import { createPluginInitFunction } from "@shared/js";
-import { buildContext } from "@shared/react";
-import { enableDebugLogs, logDebugMessage } from "./logger";
 
 const { usePluginContext, setContext } = buildContext<{
   pluginConfig: SuperTokensPluginProfileConfig;

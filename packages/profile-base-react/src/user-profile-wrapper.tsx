@@ -1,5 +1,6 @@
-import { ProfileSections } from "./components";
 import { ToastProvider, ToastContainer } from "@shared/ui";
+
+import { ProfileSections } from "./components";
 import { usePluginContext } from "./plugin";
 
 export const UserProfileWrapper = () => {
