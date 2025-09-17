@@ -2,9 +2,10 @@ import { TabGroup, Tab, TabPanel } from "@shared/ui";
 import classNames from "classnames/bind";
 
 import { usePluginContext } from "../../plugin";
-
-import style from "./requests.module.scss";
 import { TenantTab } from "../tab/TenantTab";
+
+import { OnboardingRequests } from "./OnboardingRequests";
+import style from "./requests.module.scss";
 
 const cx = classNames.bind(style);
 
@@ -20,7 +21,7 @@ export const TenantRequests = () => {
         {/* Tab Content */}
         <TabPanel name="onboarding">
           <TenantTab description={t("PL_TB_TENANT_REQUESTS_ONBOARDING_DESCRIPTION")}>
-            <div></div>
+            <OnboardingRequests />
           </TenantTab>
         </TabPanel>
         <TabPanel name="creation">

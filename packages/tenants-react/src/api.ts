@@ -122,10 +122,35 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
       "/remove",
       { userId },
-      { withSession: true }
+      { withSession: true },
     );
 
     return response;
+  };
+
+  const getOnboardingRequests = async () => {
+    const response = await querier.post<{ status: "OK"; users: User[] } | { status: "ERROR"; message: string }>(
+      "/request/list",
+      {},
+      { withSession: true },
+    );
+    return response;
+  };
+
+  const acceptOnboardingAccept = async (userId: string) => {
+    return querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
+      "/request/accept",
+      { userId },
+      { withSession: true },
+    );
+  };
+
+  const declineOnboardingAccept = async (userId: string) => {
+    return querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
+      "/request/reject",
+      { userId },
+      { withSession: true },
+    );
   };
 
   return {
@@ -140,5 +165,8 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     switchTenant,
     changeRole,
     removeUserFromTenant,
+    getOnboardingRequests,
+    acceptOnboardingAccept,
+    declineOnboardingAccept,
   };
 };
