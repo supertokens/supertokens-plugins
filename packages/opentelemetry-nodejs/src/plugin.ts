@@ -15,30 +15,13 @@ export const init = createPluginInitFunction<
   OpenTelemetryLoggerPluginConfig
 >(
   (config, implementation): SuperTokensPlugin => {
+    console.log("init", { config, implementation });
     const tracer = implementation.getTracer();
 
     validatePluginConfig(config);
     return {
       id: PLUGIN_ID,
       compatibleSDKVersions: [PLUGIN_SDK_VERSION, "23.0.0", "23.0.1"],
-      config: (config) => ({
-        ...config,
-        supertokens: {
-          ...config.supertokens,
-          networkInterceptor: (req: HttpRequest, userContext: UserContext) => {
-            const newReq = {
-              ...req,
-              headers: {
-                ...req.headers,
-                ...implementation.getTracingHeadersForCoreCall(req, userContext),
-              },
-            };
-            return config.supertokens?.networkInterceptor
-              ? config.supertokens.networkInterceptor(newReq, userContext)
-              : newReq;
-          },
-        } as any,
-      }),
       overrideMap: {
         emailpassword: {
           apis: overrideWithLogger({
