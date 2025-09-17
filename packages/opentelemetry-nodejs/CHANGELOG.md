@@ -1,5 +1,12 @@
 # @supertokens-plugins/opentelemetry-nodejs
 
+## 0.1.2
+
+### Patch Changes
+
+- 96b77b1: - Fix error in readme
+  - Remove debug log
+
 ## 0.1.1
 
 ### Patch Changes
