@@ -13,6 +13,8 @@ import { usePluginContext } from "../../plugin";
 import { FormInputComponentMap } from "../../types";
 
 import style from "./details-section.module.css";
+import { SectionEdit } from "./section-edit";
+import { SectionView } from "./section-view";
 
 const cx = classNames.bind(style);
 
@@ -83,7 +85,6 @@ export const DetailsSectionContent = ({
   onSubmit,
   onFetch,
   section,
-  componentMap,
 }: {
   section: BaseFormSection;
   onSubmit: (data: BaseFormFieldPayload[]) => Promise<any>;
@@ -104,7 +105,6 @@ export const DetailsSectionContent = ({
       {} as Record<string, any>,
     );
   });
-  const [editingProfileDetails, setEditingProfileDetails] = useState<Record<string, any>>(profileDetails);
 
   const loadDetails = usePrettyAction(
     async () => {
@@ -122,40 +122,32 @@ export const DetailsSectionContent = ({
     { errorMessage: t("PL_CD_SECTION_DETAILS_ERROR_FETCHING_DETAILS") },
   );
 
-  const handleInputChange = useCallback(
-    (field: string, value: any) => {
-      setEditingProfileDetails({
-        ...editingProfileDetails,
-        [field]: value,
-      });
-    },
-    [editingProfileDetails],
-  );
-
   const toggleEditing = useCallback(() => {
     setIsEditing(!isEditing);
-    setEditingProfileDetails(profileDetails);
-  }, [isEditing, profileDetails]);
+  }, [isEditing]);
 
-  const handleFormSubmit = useCallback(async () => {
-    const data: BaseFormFieldPayload[] = [];
-    Object.entries(editingProfileDetails).map(([key, value]) => {
-      data.push({
-        sectionId: section.id,
-        fieldId: key,
-        value: value.toString(),
-      });
-    });
+  const handleFormSubmit = useCallback(
+    async (data: BaseFormFieldPayload[]) => {
+      try {
+        await onSubmit(data);
 
-    setProfileDetails(editingProfileDetails);
+        setProfileDetails(
+          data.reduce(
+            (acc, item) => {
+              acc[item.fieldId] = item.value;
+              return acc;
+            },
+            {} as Record<string, any>,
+          ),
+        );
 
-    try {
-      await onSubmit(data);
-      setIsEditing(false);
-    } catch (error) {
-      console.error(error);
-    }
-  }, [editingProfileDetails, onSubmit]);
+        setIsEditing(false);
+      } catch (error) {
+        console.error(error);
+      }
+    },
+    [onSubmit],
+  );
 
   useEffect(() => {
     loadDetails();
@@ -166,50 +158,18 @@ export const DetailsSectionContent = ({
       <div className={cx("supertokens-plugin-profile-details-header")}>
         <h3>{section.label}</h3>
         {section.description ? <p>{section.description}</p> : null}
-        <Button
-          onClick={toggleEditing}
-          variant="neutral"
-          className={cx("supertokens-plugin-profile-details-edit-button")}>
-          {isEditing ? t("PL_CD_SECTION_DETAILS_CANCEL_BUTTON") : t("PL_CD_SECTION_DETAILS_EDIT_BUTTON")}
-        </Button>
       </div>
 
       {isEditing ? (
-        <form className={cx("supertokens-plugin-profile-details-edit-form")}>
-          {section.fields
-            .sort((a, b) => (a.order || 0) - (b.order || 0))
-            .map((field) => (
-              <FormInput
-                key={field.id}
-                value={editingProfileDetails[field.id]}
-                onChange={(value) => handleInputChange(field.id, value)}
-                componentMap={componentMap}
-                {...field}
-              />
-            ))}
-
-          <div className={cx("supertokens-plugin-profile-details-form-actions")}>
-            <Button onClick={handleFormSubmit}>{t("PL_CD_SECTION_DETAILS_SAVE_BUTTON")}</Button>
-          </div>
-        </form>
+        <SectionEdit
+          id={section.id}
+          fields={section.fields}
+          values={profileDetails}
+          onSubmit={handleFormSubmit}
+          onCancel={toggleEditing}
+        />
       ) : (
-        <div>
-          <section className={cx("supertokens-plugin-profile-details-group")}>
-            {section.fields
-              .sort((a, b) => (a.order || 0) - (b.order || 0))
-              .map((field) => {
-                const value = profileDetails[field.id];
-                return (
-                  <div key={field.id} className={cx("supertokens-plugin-profile-details-item")}>
-                    <span className={cx("supertokens-plugin-profile-details-label")}>{field.label}</span>
-                    <span className={cx("supertokens-plugin-profile-details-value")}>
-                      <FieldValue field={field} value={value} />
-                    </span>
-                  </div>
-                );
-              })}
-          </section>
-        </div>
+        <SectionView fields={section.fields} values={profileDetails} onEdit={toggleEditing} />
       )}
     </div>
   );

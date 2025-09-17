@@ -14,7 +14,7 @@ export const defaultTranslationsCommonDetails = {
     PL_CD_SECTION_DETAILS_ERROR_FETCHING_DETAILS: "Error getting the profile",
     PL_CD_SECTION_DETAILS_CANCEL_BUTTON: "Cancel",
     PL_CD_SECTION_DETAILS_EDIT_BUTTON: "Edit",
-    PL_CD_SECTION_DETAILS_SAVE_BUTTON: "Save Changes",
+    PL_CD_SECTION_DETAILS_SAVE_BUTTON: "Save",
 
     PL_CD_SECTION_ACCOUNT_LABEL: "Account",
     PL_CD_SECTION_ACCOUNT_DESCRIPTION: "Here you can find all your account details that can be used for login.",
