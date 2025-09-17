@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/opentelemetry-nodejs",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "SuperTokens plugin for adding OpenTelemetry logging in your Node.js application.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
