@@ -7,6 +7,7 @@ import UserRoles from "supertokens-node/recipe/userroles";
 
 import { createPluginInitFunction } from "@shared/js";
 import { pluginUserMetadata, withRequestHandler } from "@shared/nodejs";
+import { SessionClaimValidator } from "supertokens-node/recipe/session";
 
 import {
   OverrideableTenantFunctionImplementation,

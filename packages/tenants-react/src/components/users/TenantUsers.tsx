@@ -127,7 +127,7 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch, onRoleChange,
   );
 
   if (!userId) {
-    return <div>Loading....</div>;
+    return <div>{t("PL_TB_TENANTS_LOADING_MESSAGE")}</div>;
   }
 
   return (

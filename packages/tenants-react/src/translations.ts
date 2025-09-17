@@ -11,5 +11,8 @@ export const defaultTranslationsTenants = {
     PL_TB_TENANT_REQUESTS_CREATION_TAB_LABEL: "Tenant Creation",
     PL_TB_TENANT_REQUESTS_ONBOARDING_DESCRIPTION: "A list of user requests to join your tenant.",
     PL_TB_TENANT_REQUESTS_CREATION_DESCRIPTION: "List of requests to create new tenant in your app.",
+    PL_TB_TENANTS_LOADING_MESSAGE: "Loading...",
+    PL_TB_TENANTS_REQUESTS_ACCEPT_BUTTON_TEXT: "Accept",
+    PL_TB_TENANTS_REQUESTS_DECLINE_BUTTON_TEXT: "Decline",
   },
 } as const;
