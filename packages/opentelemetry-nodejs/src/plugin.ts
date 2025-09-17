@@ -15,7 +15,6 @@ export const init = createPluginInitFunction<
   OpenTelemetryLoggerPluginConfig
 >(
   (config, implementation): SuperTokensPlugin => {
-    console.log("init", { config, implementation });
     const tracer = implementation.getTracer();
 
     validatePluginConfig(config);

@@ -63,7 +63,8 @@ SuperTokens.init({
   experimental: {
     plugins: [
       OpenTelemetryPlugin.init({
-        override: () => ({
+        override: (oI) => ({
+          ...oI,
           getSensitiveFields: (defaultSensitiveFields: string[]) => [...defaultSensitiveFields, "randomField"],
         }),
       }),
