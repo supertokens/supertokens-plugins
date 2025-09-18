@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 
 import { FormSection, SuperTokensPluginProfileProgressiveProfilingConfig } from "./types";
-import { registerSections, init, getSectionValues, setSectionValues } from "./index";
+import { registerSections, init, getSectionValues, setSectionValues, getAllSections } from "./index";
 import { HANDLE_BASE_PATH } from "./constants";
 
 import SuperTokens from "supertokens-node/lib/build/index";
@@ -45,11 +45,12 @@ const testSections = [
 ] as FormSection[];
 
 describe("progressive-profiling-nodejs", () => {
-  describe("[API]", () => {
+  describe("API", () => {
     afterEach(() => {
       resetST();
       Implementation.reset();
     });
+
     beforeEach(() => {
       resetST();
       Implementation.reset();
@@ -86,7 +87,7 @@ describe("progressive-profiling-nodejs", () => {
       registerSections({
         get: async () => [],
         set: async () => {},
-        registratorId: "test",
+        storageHandlerId: "test",
         sections: testSections,
       });
 
@@ -246,7 +247,7 @@ describe("progressive-profiling-nodejs", () => {
       expect(response.status).toBe(200);
     });
 
-    it("should set the profile details using the default registrator", async () => {
+    it("should set the profile details using the default storage handler", async () => {
       const { user } = await setup({
         sections: testSections,
       });
@@ -285,15 +286,12 @@ describe("progressive-profiling-nodejs", () => {
       );
     });
 
-    it("should set the profile details using a custom registrator", async () => {
+    it("should set the profile details using a custom storage handler", async () => {
       const { user } = await setup({
         sections: testSections,
         override: (oI) => ({
           ...oI,
-          getDefaultRegistrator: (...props) => ({
-            ...oI.getDefaultRegistrator.apply(oI, props),
-            set: async () => {},
-          }),
+          defaultStorageHandlerSetFields: () => Promise.resolve(),
         }),
       });
 
@@ -386,7 +384,7 @@ describe("progressive-profiling-nodejs", () => {
       ]);
     });
 
-    it("should return the profile details using the default registrator", async () => {
+    it("should return the profile details using the default storage handler", async () => {
       const { user } = await setup({
         sections: testSections,
       });
@@ -428,15 +426,12 @@ describe("progressive-profiling-nodejs", () => {
       );
     });
 
-    it("should return the profile details using a custom registrator", async () => {
+    it("should return the profile details using a custom storage handler", async () => {
       const { user } = await setup({
         sections: testSections,
         override: (oI) => ({
           ...oI,
-          getDefaultRegistrator: (...props) => ({
-            ...oI.getDefaultRegistrator.apply(oI, props),
-            get: async () => [],
-          }),
+          defaultStorageHandlerGetFields: (...props) => Promise.resolve([]),
         }),
       });
 
@@ -557,6 +552,59 @@ describe("progressive-profiling-nodejs", () => {
         errors: testSections
           .map((section) => section.fields.map((field) => ({ id: field.id, error: "TestInvalid" })))
           .flat(),
+      });
+    });
+  });
+
+  describe("exports", () => {
+    afterEach(() => {
+      resetST();
+      Implementation.reset();
+    });
+
+    beforeEach(() => {
+      resetST();
+      Implementation.reset();
+    });
+
+    describe("registerSections", () => {
+      it("should export the function", () => {
+        expect(getAllSections).toBeDefined();
+      });
+
+      it("should return the sections", async () => {
+        const { user } = await setup({
+          sections: testSections,
+        });
+
+        const sections = await getAllSections();
+        console.log(sections);
+        console.log(testSections);
+        expect(sections).toEqual(
+          testSections.map((section) => ({ ...section, completed: undefined, storageHandlerId: "default" }))
+        );
+      });
+
+      it("should return the correct sections when the getAllSections method is overridden", async () => {
+        const { user } = await setup({
+          sections: testSections,
+          override: (oI) => ({
+            ...oI,
+            getAllSections: () =>
+              Promise.resolve(
+                testSections.map((section) => ({
+                  ...section,
+                  completed: undefined,
+                  storageHandlerId: "defaultOverride",
+                }))
+              ),
+          }),
+        });
+
+        const sections = await getAllSections();
+        expect(sections).toEqual(
+          testSections.map((section) => ({ ...section, completed: undefined, storageHandlerId: "defaultOverride" }))
+        );
       });
     });
   });

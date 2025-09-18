@@ -20,6 +20,9 @@ export const init = createPluginInitFunction<
   SuperTokensPluginProfileProgressiveProfilingNormalisedConfig
 >(
   (pluginConfig, implementation) => {
+    // make sure the overrides are available to the cached
+    Implementation.instance = implementation;
+
     const metadata = pluginUserMetadata<{ profileConfig?: UserMetadataConfig }>(METADATA_KEY);
 
     if (pluginConfig.sections.length > 0) {
@@ -29,16 +32,17 @@ export const init = createPluginInitFunction<
             id: field.id,
             defaultValue: field.defaultValue,
             sectionId: section.id,
-          })),
+          }))
         )
         .flat();
 
-      const defaultRegistrator = implementation.getDefaultRegistrator(defaultFields);
       implementation.registerSections({
-        registratorId: "default",
+        storageHandlerId: "default",
         sections: pluginConfig.sections,
-        set: defaultRegistrator.set,
-        get: defaultRegistrator.get,
+        set: (data, session, userContext) =>
+          implementation.defaultStorageHandlerSetFields(defaultFields, data, session, userContext),
+        get: (session, userContext) =>
+          implementation.defaultStorageHandlerGetFields(defaultFields, session, userContext),
       });
     }
 
@@ -62,7 +66,7 @@ export const init = createPluginInitFunction<
                 overrideGlobalClaimValidators: (globalValidators) => {
                   // we should not check if the profile is completed here, because we want to allow users to access the profile page even if they haven't completed the profile
                   return globalValidators.filter(
-                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key,
+                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key
                   );
                 },
               },
@@ -71,7 +75,7 @@ export const init = createPluginInitFunction<
                   throw new Error("Session not found");
                 }
 
-                return implementation.getUserSections(session, userContext);
+                return implementation.getSessionUserSections(session, userContext);
               }),
             },
             {
@@ -82,7 +86,7 @@ export const init = createPluginInitFunction<
                 overrideGlobalClaimValidators: (globalValidators) => {
                   // we should not check if the profile is completed here, because we want to allow users to access the profile page even if they haven't completed the profile
                   return globalValidators.filter(
-                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key,
+                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key
                   );
                 },
               },
@@ -104,7 +108,7 @@ export const init = createPluginInitFunction<
                 overrideGlobalClaimValidators: (globalValidators) => {
                   // we should not check if the profile is completed here, because we want to allow users to access the profile page even if they haven't completed the profile
                   return globalValidators.filter(
-                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key,
+                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key
                   );
                 },
               },
@@ -138,7 +142,7 @@ export const init = createPluginInitFunction<
                     input.recipeUserId,
                     input.tenantId,
                     input.accessTokenPayload,
-                    input.userContext,
+                    input.userContext
                   )),
                 };
 
@@ -151,14 +155,14 @@ export const init = createPluginInitFunction<
       exports: {
         metadata,
         registerSections: implementation.registerSections,
-        getSections: implementation.getSections,
+        getSections: implementation.getAllSections,
         setSectionValues: implementation.setSectionValues,
         getSectionValues: implementation.getSectionValues,
       },
     };
   },
 
-  (config) => Implementation.init(config),
+  () => Implementation.init(),
   (config) => {
     return {
       ...config,
@@ -168,5 +172,5 @@ export const init = createPluginInitFunction<
           completed: undefined, // make sure the sections are not marked as completed by default
         })) ?? DEFAULT_SECTIONS,
     };
-  },
+  }
 );

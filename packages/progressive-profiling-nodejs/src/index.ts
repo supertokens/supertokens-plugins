@@ -14,7 +14,7 @@ const getSectionValues = (session: SessionContainerInterface, userContext?: Reco
 const setSectionValues = (
   session: SessionContainerInterface,
   profile: ProfileFormData,
-  userContext?: Record<string, any>,
+  userContext?: Record<string, any>
 ) => {
   return Implementation.getInstanceOrThrow().setSectionValues(session, profile, userContext);
 };
@@ -23,11 +23,11 @@ const registerSections = (payload: Parameters<RegisterSections>[0]) => {
   return Implementation.getInstanceOrThrow().registerSections(payload);
 };
 
-const getSections = () => {
-  return Implementation.getInstanceOrThrow().getSections();
+const getAllSections = () => {
+  return Implementation.getInstanceOrThrow().getAllSections();
 };
 
-export { init, PLUGIN_ID, PLUGIN_VERSION, getSectionValues, setSectionValues, registerSections, getSections };
+export { init, PLUGIN_ID, PLUGIN_VERSION, getSectionValues, setSectionValues, registerSections, getAllSections };
 export default {
   init,
   PLUGIN_ID,
@@ -35,5 +35,5 @@ export default {
   getSectionValues,
   setSectionValues,
   registerSections,
-  getSections,
+  getAllSections,
 };

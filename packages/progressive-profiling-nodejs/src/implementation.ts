@@ -1,105 +1,125 @@
-import {
-  RegisterSections,
-  FormSection,
-  SuperTokensPluginProfileProgressiveProfilingNormalisedConfig,
-  UserMetadataConfig,
-} from "./types";
+import { RegisterSections, FormSection, UserMetadataConfig } from "./types";
 import { logDebugMessage } from "./logger";
 import { FormField, FormFieldValue, ProfileFormData } from "@supertokens-plugins/progressive-profiling-shared";
 import { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import { BooleanClaim } from "supertokens-node/recipe/session/claims";
 import { PLUGIN_ID, METADATA_KEY, METADATA_PROFILE_KEY } from "./constants";
 import { pluginUserMetadata } from "@shared/nodejs";
-import { BasePluginImplementation, groupBy, indexBy, mapBy } from "@shared/js";
+import { groupBy, indexBy, mapBy } from "@shared/js";
 
-export class Implementation extends BasePluginImplementation<SuperTokensPluginProfileProgressiveProfilingNormalisedConfig> {
-  protected existingSections: (FormSection & { registratorId: string })[] = [];
-  protected existingRegistratorHandlers: Record<string, Pick<Parameters<RegisterSections>[0], "set" | "get">> = {};
+export class Implementation {
+  static instance: Implementation | undefined;
+
+  protected existingSections: (FormSection & { storageHandlerId: string })[] = [];
+  protected existingStorageHandlers: Record<string, Pick<Parameters<RegisterSections>[0], "set" | "get">> = {};
   protected metadata = pluginUserMetadata<{ profileConfig?: UserMetadataConfig }>(METADATA_KEY);
 
   static ProgressiveProfilingCompletedClaim: BooleanClaim;
 
-  constructor(pluginConfig: SuperTokensPluginProfileProgressiveProfilingNormalisedConfig) {
-    super(pluginConfig);
+  static init(): Implementation {
+    if (Implementation.instance) {
+      return Implementation.instance;
+    }
+    Implementation.instance = new Implementation();
 
+    return Implementation.instance;
+  }
+
+  static getInstanceOrThrow(): Implementation {
+    if (!Implementation.instance) {
+      throw new Error("Implementation instance not found. Make sure you have initialized the plugin.");
+    }
+
+    return Implementation.instance;
+  }
+
+  static reset(): void {
+    Implementation.instance = undefined;
+  }
+
+  constructor() {
     Implementation.ProgressiveProfilingCompletedClaim = new BooleanClaim({
       key: `${PLUGIN_ID}-completed`,
-      fetchValue: async (userId, recipeUserId, tenantId, currentPayload, userContext) => {
-        const userMetadata = await this.metadata.get(userId);
-        return this.areAllSectionsCompleted(
-          // can't pass session here because it's not available in the params or a way of getting it
-          undefined as unknown as SessionContainerInterface,
-          userMetadata?.profileConfig,
-          userContext,
+      fetchValue: async (userId) => {
+        const implementation = Implementation.getInstanceOrThrow();
+        const userMetadata = await implementation.metadata.get(userId);
+        return implementation.existingSections.every(
+          (section) => userMetadata?.profileConfig?.sectionsCompleted?.[section.id] ?? false,
         );
       },
     });
   }
 
-  // todo make sure the implementation is the same as in the profile plugin (when it will be implement in the new repo - maybe part of a shared library or exported from the plugin itself ?)
-  getDefaultRegistrator = function (
+  defaultStorageHandlerGetFields = async function (
     this: Implementation,
     pluginFormFields: (Pick<FormField, "id" | "defaultValue"> & { sectionId: string })[],
-  ) {
+    session: SessionContainerInterface,
+    userContext?: Record<string, any>,
+  ): Promise<ProfileFormData> {
     const metadata = pluginUserMetadata<{ profile: Record<string, FormFieldValue> }>(METADATA_PROFILE_KEY);
 
-    return {
-      get: async (session: SessionContainerInterface, userContext?: Record<string, any>) => {
-        const userMetadata = await metadata.get(session.getUserId(userContext), userContext);
-        const existingProfile = userMetadata?.profile || {};
+    const userMetadata = await metadata.get(session.getUserId(userContext), userContext);
+    const existingProfile = userMetadata?.profile || {};
 
-        const data = pluginFormFields.map((field) => ({
-          sectionId: field.sectionId,
-          fieldId: field.id,
-          value: existingProfile[field.id] ?? field.defaultValue,
-        }));
+    const data = pluginFormFields.map((field) => ({
+      sectionId: field.sectionId,
+      fieldId: field.id,
+      value: existingProfile[field.id] ?? field.defaultValue,
+    }));
 
-        return data;
-      },
-      set: async (formData: ProfileFormData, session: SessionContainerInterface, userContext?: Record<string, any>) => {
-        const userId = session.getUserId(userContext);
-        const userMetadata = await metadata.get(userId, userContext);
-        const existingProfile = userMetadata?.profile || {};
-
-        const profile = pluginFormFields.reduce(
-          (acc, field) => {
-            const newValue = formData.find((d) => d.fieldId === field.id)?.value;
-            const existingValue = existingProfile?.[field.id];
-            return {
-              ...acc,
-              [field.id]: newValue ?? existingValue ?? field.defaultValue,
-            };
-          },
-          { ...existingProfile },
-        );
-
-        await metadata.set(
-          userId,
-          {
-            profile: {
-              ...(userMetadata?.profile || {}),
-              ...profile,
-            },
-          },
-          userContext,
-        );
-      },
-    };
+    return data;
   };
 
-  registerSections: RegisterSections = function (this: Implementation, { registratorId, sections, set, get }) {
+  defaultStorageHandlerSetFields = async function (
+    this: Implementation,
+    pluginFormFields: (Pick<FormField, "id" | "defaultValue"> & { sectionId: string })[],
+    formData: ProfileFormData,
+    session: SessionContainerInterface,
+    userContext?: Record<string, any>,
+  ): Promise<void> {
+    const metadata = pluginUserMetadata<{ profile: Record<string, FormFieldValue> }>(METADATA_PROFILE_KEY);
+
+    const userId = session.getUserId(userContext);
+    const userMetadata = await metadata.get(userId, userContext);
+    const existingProfile = userMetadata?.profile || {};
+
+    const profile = pluginFormFields.reduce(
+      (acc, field) => {
+        const newValue = formData.find((d) => d.fieldId === field.id)?.value;
+        const existingValue = existingProfile?.[field.id];
+        return {
+          ...acc,
+          [field.id]: newValue ?? existingValue ?? field.defaultValue,
+        };
+      },
+      { ...existingProfile },
+    );
+
+    await metadata.set(
+      userId,
+      {
+        profile: {
+          ...(userMetadata?.profile || {}),
+          ...profile,
+        },
+      },
+      userContext,
+    );
+  };
+
+  registerSections: RegisterSections = function (this: Implementation, { storageHandlerId, sections, set, get }) {
     const registrableSections = sections
       .filter((section) => {
         const existingSection = this.existingSections.find((s) => s.id === section.id);
         if (existingSection) {
           logDebugMessage(
-            `Profile plugin section with id "${section.id}" already registered by "${existingSection.registratorId}". Skipping...`,
+            `Profile plugin section with id "${section.id}" already registered by "${existingSection.storageHandlerId}". Skipping...`,
           );
           return false;
         }
 
-        if (!registratorId) {
-          logDebugMessage(`Profile plugin section with id "${section.id}" has no registrator id. Skipping...`);
+        if (!storageHandlerId) {
+          logDebugMessage(`Profile plugin section with id "${section.id}" has no storage handler id. Skipping...`);
           return false;
         }
 
@@ -107,14 +127,14 @@ export class Implementation extends BasePluginImplementation<SuperTokensPluginPr
       })
       .map((section) => ({
         ...section,
-        registratorId,
+        storageHandlerId,
       }));
 
     this.existingSections.push(...registrableSections);
-    this.existingRegistratorHandlers[registratorId] = { set, get };
+    this.existingStorageHandlers[storageHandlerId] = { set, get };
   };
 
-  getSections = function (
+  getAllSections = function (
     this: Implementation,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     session?: SessionContainerInterface,
@@ -124,7 +144,7 @@ export class Implementation extends BasePluginImplementation<SuperTokensPluginPr
     return this.existingSections;
   };
 
-  getUserSections = async function (
+  getSessionUserSections = async function (
     this: Implementation,
     session: SessionContainerInterface,
     userContext?: Record<string, any>,
@@ -132,11 +152,11 @@ export class Implementation extends BasePluginImplementation<SuperTokensPluginPr
     const userMetadata = await this.metadata.get(session.getUserId(userContext), userContext);
 
     // map the sections to a json serializable value
-    const sections = this.getSections(session, userContext).map((section) => ({
+    const sections = this.getAllSections(session, userContext).map((section) => ({
       id: section.id,
       label: section.label,
       description: section.description,
-      completed: userMetadata?.profileConfig?.sectionCompleted?.[section.id] ?? false,
+      completed: userMetadata?.profileConfig?.sectionsCompleted?.[section.id] ?? false,
       fields: section.fields.map((field) => {
         return {
           id: field.id,
@@ -162,11 +182,11 @@ export class Implementation extends BasePluginImplementation<SuperTokensPluginPr
   ) {
     const userId = session.getUserId(userContext);
 
-    const sections = this.getSections(session, userContext);
+    const sections = this.getAllSections(session, userContext);
     const sectionsById = indexBy(sections, "id");
-    const sectionIdToRegistratorIdMap = mapBy(sections, "id", (section) => section.registratorId);
+    const sectionIdToStorageHandlerIdMap = mapBy(sections, "id", (section) => section.storageHandlerId);
     const dataBySectionId = groupBy(data, "sectionId");
-    const dataByRegistratorId = groupBy(data, (row) => sectionIdToRegistratorIdMap[row.sectionId]);
+    const dataByStorageHandlerId = groupBy(data, (row) => sectionIdToStorageHandlerIdMap[row.sectionId]);
 
     // validate the data
     const validationErrors = data.reduce(
@@ -199,20 +219,20 @@ export class Implementation extends BasePluginImplementation<SuperTokensPluginPr
       return { status: "INVALID_FIELDS", errors: validationErrors };
     }
 
-    // store the data by registrator
+    // store the data by storage handler
     const updatedData: ProfileFormData = [];
-    for (const [registratorId, sectionData] of Object.entries(dataByRegistratorId)) {
-      if (!this.existingRegistratorHandlers[registratorId]) {
-        logDebugMessage(`Registrator with id "${registratorId}" not found. Skipping storing data...`);
+    for (const [storageHandlerId, sectionData] of Object.entries(dataByStorageHandlerId)) {
+      if (!this.existingStorageHandlers[storageHandlerId]) {
+        logDebugMessage(`Storage handler with id "${storageHandlerId}" not found. Skipping storing data...`);
         continue;
       }
 
-      logDebugMessage(`Storing data for registrator "${registratorId}". ${sectionData.length} fields to store.`);
+      logDebugMessage(`Storing data for storage handler "${storageHandlerId}". ${sectionData.length} fields to store.`);
 
-      const registrator = this.existingRegistratorHandlers[registratorId];
-      await registrator.set(sectionData, session, userContext);
+      const storageHandler = this.existingStorageHandlers[storageHandlerId];
+      await storageHandler.set(sectionData, session, userContext);
       // get fresh data from the storage, since it could be updated from other places or updated partially
-      const data = await registrator.get(session, userContext);
+      const data = await storageHandler.get(session, userContext);
       updatedData.push(...data);
     }
 
@@ -233,8 +253,8 @@ export class Implementation extends BasePluginImplementation<SuperTokensPluginPr
       ...userMetadata,
       profileConfig: {
         ...userMetadata?.profileConfig,
-        sectionCompleted: {
-          ...(userMetadata?.profileConfig?.sectionCompleted ?? {}),
+        sectionsCompleted: {
+          ...(userMetadata?.profileConfig?.sectionsCompleted ?? {}),
           ...sectionsCompleted,
         },
       },
@@ -243,7 +263,9 @@ export class Implementation extends BasePluginImplementation<SuperTokensPluginPr
 
     // refresh the claim to make sure the frontend has the latest value
     // but only if all sections are completed
-    const allSectionsCompleted = this.areAllSectionsCompleted(session, newUserMetadata?.profileConfig, userContext);
+    const allSectionsCompleted = this.getAllSections(session, userContext).every(
+      (section) => newUserMetadata?.profileConfig?.sectionsCompleted?.[section.id] ?? false,
+    );
     if (allSectionsCompleted) {
       await session.fetchAndSetClaim(Implementation.ProgressiveProfilingCompletedClaim, userContext);
     }
@@ -256,17 +278,17 @@ export class Implementation extends BasePluginImplementation<SuperTokensPluginPr
     session: SessionContainerInterface,
     userContext?: Record<string, any>,
   ) {
-    const sections = this.getSections(session, userContext);
-    const sectionsByRegistratorId = indexBy(sections, "registratorId");
+    const sections = this.getAllSections(session, userContext);
+    const sectionsByStorageHandlerId = indexBy(sections, "storageHandlerId");
 
     const data: ProfileFormData = [];
-    for (const registratorId of Object.keys(sectionsByRegistratorId)) {
-      const registrator = this.existingRegistratorHandlers[registratorId];
-      if (!registrator) {
+    for (const storageHandlerId of Object.keys(sectionsByStorageHandlerId)) {
+      const storageHandler = this.existingStorageHandlers[storageHandlerId];
+      if (!storageHandler) {
         continue;
       }
 
-      const sectionData = await registrator.get(session, userContext);
+      const sectionData = await storageHandler.get(session, userContext);
       data.push(...sectionData);
     }
 
@@ -298,17 +320,6 @@ export class Implementation extends BasePluginImplementation<SuperTokensPluginPr
     const valuesByFieldId = mapBy(data, "fieldId", (row) => row.value);
     return section.fields.every(
       (field) => this.validateField(session, field, valuesByFieldId[field.id], userContext) === undefined,
-    );
-  };
-
-  areAllSectionsCompleted = function (
-    this: Implementation,
-    session: SessionContainerInterface,
-    profileConfig?: UserMetadataConfig,
-    userContext?: Record<string, any>,
-  ) {
-    return this.getSections(session, userContext).every(
-      (section) => profileConfig?.sectionCompleted?.[section.id] ?? false,
     );
   };
 }
