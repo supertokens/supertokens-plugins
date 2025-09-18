@@ -1,4 +1,4 @@
-import { TenantConfig } from "supertokens-node/lib/build/recipe/multitenancy/types";
+import { User } from "supertokens-node";
 
 export type TenantJoinData = {
   tenantId: string;
@@ -28,6 +28,8 @@ export type TenantCreationRequest = {
   firstFactors?: string[] | null;
   requestId: string;
 };
+
+export type TenantCreationRequestWithUser = TenantCreationRequest & { user: User };
 
 export type TenantMetadata = {
   invitees: InviteeDetails[];

@@ -4,6 +4,7 @@ import classNames from "classnames/bind";
 import { usePluginContext } from "../../plugin";
 import { TenantTab } from "../tab/TenantTab";
 
+import { CreationRequests } from "./CreationRequests";
 import { OnboardingRequests } from "./OnboardingRequests";
 import style from "./requests.module.scss";
 
@@ -26,7 +27,7 @@ export const TenantRequests = () => {
         </TabPanel>
         <TabPanel name="creation">
           <TenantTab description={t("PL_TB_TENANT_REQUESTS_CREATION_DESCRIPTION")}>
-            <div></div>
+            <CreationRequests />
           </TenantTab>
         </TabPanel>
       </TabGroup>

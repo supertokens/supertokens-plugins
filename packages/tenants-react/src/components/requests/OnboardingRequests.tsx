@@ -1,7 +1,7 @@
+import { usePrettyAction } from "@shared/ui";
 import { useEffect, useState } from "react";
 import { User } from "supertokens-web-js/types";
 
-import { usePrettyAction } from "../../../../../shared/ui/src/hooks";
 import { usePluginContext } from "../../plugin";
 import { TenantUsersTable } from "../table/TenantTable";
 import { NoUsers } from "../users/NoUsers";

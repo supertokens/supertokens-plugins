@@ -1,5 +1,11 @@
 import { getQuerier } from "@shared/react";
-import { InviteeDetails, TenantCreateData, TenantJoinData, TenantList } from "@shared/tenants";
+import {
+  InviteeDetails,
+  TenantCreateData,
+  TenantCreationRequestWithUser,
+  TenantJoinData,
+  TenantList,
+} from "@shared/tenants";
 import Session from "supertokens-auth-react/recipe/session";
 import { User } from "supertokens-web-js/types";
 
@@ -153,6 +159,30 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     );
   };
 
+  /* Tenant Creation related endpoints */
+
+  const getCreationRequests = async () => {
+    return querier.post<
+      { status: "OK"; requests: TenantCreationRequestWithUser[] } | { status: "ERROR"; message: string }
+    >("/tenant-requests/list", {}, { withSession: true });
+  };
+
+  const acceptCreationRequest = async (requestId: string) => {
+    return querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
+      "/tenant-requests/accept",
+      { requestId },
+      { withSession: true },
+    );
+  };
+
+  const declineCreationRequest = async (requestId: string) => {
+    return querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
+      "/tenant-requests/reject",
+      { requestId },
+      { withSession: true },
+    );
+  };
+
   return {
     fetchTenants,
     joinTenant,
@@ -168,5 +198,8 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     getOnboardingRequests,
     acceptOnboardingAccept,
     declineOnboardingAccept,
+    getCreationRequests,
+    acceptCreationRequest,
+    declineCreationRequest,
   };
 };
