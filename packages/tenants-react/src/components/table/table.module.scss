@@ -17,11 +17,11 @@
     color: #60646c;
 
     .emailHeader {
-      width: 65%;
+      width: var(--email-col-width, 65%);
     }
 
     .extraHeader {
-      width: 35%;
+      width: var(--extra-col-width, 35%);
     }
   }
 
@@ -33,11 +33,11 @@
       align-items: center;
 
       .emailComponentWrapper {
-        width: 65%;
+        width: var(--email-col-width, 65%);
       }
 
       .extraComponentWrapper {
-        width: 35%;
+        width: var(--extra-col-width, 35%);
       }
     }
   }

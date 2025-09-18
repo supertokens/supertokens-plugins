@@ -7,7 +7,6 @@ import UserRoles from "supertokens-node/recipe/userroles";
 
 import { createPluginInitFunction } from "@shared/js";
 import { pluginUserMetadata, withRequestHandler } from "@shared/nodejs";
-import { SessionClaimValidator } from "supertokens-node/recipe/session";
 
 import {
   OverrideableTenantFunctionImplementation,
@@ -201,12 +200,12 @@ export const init = createPluginInitFunction<
                   return [...globalValidators, UserRoles.UserRoleClaim.validators.includesAny([ROLES.APP_ADMIN])];
                 },
               },
-              handler: withRequestHandler(async (req, res, session) => {
+              handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
                   throw new Error("Session not found");
                 }
 
-                return implementation.getTenantCreationRequests(tenantCreationRequestMetadata);
+                return implementation.getTenantCreationRequests(tenantCreationRequestMetadata, userContext);
               }),
             },
             {
@@ -619,6 +618,9 @@ export const init = createPluginInitFunction<
 
                 await assignAdminToUserInTenant(tenantId, session.getUserId());
                 logDebugMessage(`Admin role assigned to user: ${session.getUserId()}`);
+
+                await assignRoleToUserInTenant(tenantId, session.getUserId(), ROLES.APP_ADMIN);
+                logDebugMessage(`App Admin role assigned to user: ${session.getUserId()}`);
 
                 const roles = await UserRoles.getUsersThatHaveRole(tenantId, ROLES.ADMIN);
                 logDebugMessage(`roles: ${JSON.stringify(roles)}`);

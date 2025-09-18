@@ -2,8 +2,8 @@ import { SessionContainerInterface } from "supertokens-node/recipe/session/types
 import { pluginUserMetadata } from "@shared/nodejs";
 import {
   InviteeDetails,
-  TenantCreationRequest,
   TenantCreationRequestMetadata,
+  TenantCreationRequestWithUser,
   TenantList,
   TenantMetadata,
 } from "@shared/tenants";
@@ -64,7 +64,7 @@ export type SuperTokensPluginTenantPluginNormalisedConfig = {
       originalImplementation: EmailDeliveryInterface<PluginEmailDeliveryInput>,
     ) => EmailDeliveryInterface<PluginEmailDeliveryInput>;
   };
-}
+};
 
 export type SendPluginEmail = (input: PluginEmailDeliveryInput, userContext: UserContext) => Promise<void>;
 
@@ -135,9 +135,8 @@ export type OverrideableTenantFunctionImplementation = {
   ) => Promise<{ status: "OK" } | NonOkResponse | ErrorResponse>;
   getTenantCreationRequests: (
     metadata: TenantCreationRequestMetadataType,
-  ) => Promise<
-    ({ status: "OK" } & { requests: (TenantCreationRequest & { userId: string })[] }) | NonOkResponse | ErrorResponse
-  >;
+    userContext: UserContext,
+  ) => Promise<({ status: "OK" } & { requests: TenantCreationRequestWithUser[] }) | NonOkResponse | ErrorResponse>;
   acceptTenantCreationRequest: (
     requestId: string,
     session: SessionContainerInterface,

@@ -2,8 +2,8 @@
 import supertokens from "supertokens-node";
 import { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
-import { InviteeDetails, ROLES, TenantList } from "@shared/tenants";
-import { User } from "supertokens-node/types";
+import { InviteeDetails, ROLES, TenantCreationRequestWithUser, TenantList } from "@shared/tenants";
+import { User, UserContext } from "supertokens-node/types";
 import {
   ErrorResponse,
   MetadataType,
@@ -307,11 +307,28 @@ export const getOverrideableTenantFunctionImplementation = (
         requestId,
       };
     },
-    getTenantCreationRequests: async (metadata: TenantCreationRequestMetadataType) => {
+    getTenantCreationRequests: async (metadata: TenantCreationRequestMetadataType, userContext: UserContext) => {
       const tenantCreateRequestMetadata = await metadata.get(TENANT_CREATE_METADATA_REQUESTS_KEY);
+
+      // Fetch the user details for each user
+      const requestsWithUserId = tenantCreateRequestMetadata.requests;
+      const requestsWithUser: TenantCreationRequestWithUser[] = [];
+
+      for (const request of tenantCreateRequestMetadata.requests) {
+        const userDetails = await supertokens.getUser(request.userId, userContext);
+        if (!userDetails) {
+          logDebugMessage(
+            `Couldn't find user details for tenant request ${request.requestId} and user: ${request.userId}`,
+          );
+          continue;
+        }
+
+        requestsWithUser.push({ ...request, user: userDetails });
+      }
+
       return {
         status: "OK",
-        requests: tenantCreateRequestMetadata?.requests ?? [],
+        requests: requestsWithUser,
       };
     },
     acceptTenantCreationRequest: async (requestId, session, metadata) => {
