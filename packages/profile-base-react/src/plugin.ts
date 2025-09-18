@@ -2,7 +2,7 @@ import { createPluginInitFunction } from "@shared/js";
 import { buildContext } from "@shared/react";
 import { SuperTokensPlugin, getTranslationFunction } from "supertokens-auth-react";
 
-import { DEFAULT_PROFILE_PAGE_PATH, PLUGIN_ID } from "./constants";
+import { DEFAULT_PROFILE_PAGE_PATH, PLUGIN_ID, SECTION_ORDER_INCREMENT } from "./constants";
 import { enableDebugLogs, logDebugMessage } from "./logger";
 import {
   RegisterSection,
@@ -56,9 +56,15 @@ export const init = createPluginInitFunction<
           continue;
         }
 
+        let order = newSection.order;
+        if (!order) {
+          sectionOrder += SECTION_ORDER_INCREMENT;
+          order = sectionOrder;
+        }
+
         sections.push({
           ...newSection,
-          order: newSection.order ?? sectionOrder++,
+          order,
         });
       }
     };
@@ -84,7 +90,7 @@ export const init = createPluginInitFunction<
           status: "OK",
           routeHandlers: [
             {
-              path: "/user/profile",
+              path: pluginConfig.profilePagePath,
               handler: () => UserProfilePage.call(null),
             },
           ],

@@ -10,7 +10,7 @@ export const UserProfilePage = () => {
     <ThemeProvider>
       <SuperTokensWrapper>
         <SessionAuth>
-          <ProfilePageWrapper style={{ width: "700px", margin: "100px auto" }}>
+          <ProfilePageWrapper>
             <UserProfileWrapper />
           </ProfilePageWrapper>
         </SessionAuth>
