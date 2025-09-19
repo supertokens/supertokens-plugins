@@ -3,6 +3,10 @@ import { Button, Card, TextInput, usePrettyAction } from "@shared/ui";
 import classNames from "classnames/bind";
 import { useState } from "react";
 
+import style from "./tenant-card.module.scss";
+
+const cx = classNames.bind(style);
+
 interface TenantCardProps {
   data: TenantList;
   onJoin: (data: TenantJoinData) => Promise<{ status: "OK" } | { status: "ERROR"; message: string }>;
@@ -13,10 +17,6 @@ interface TenantCardProps {
 }
 
 export const TenantCard = ({ data, onJoin, onCreate, isLoading }: TenantCardProps) => {
-  if (isLoading) {
-    return <Card description="Loading..." />;
-  }
-
   const [newTenantName, setNewTenantName] = useState<string>("");
 
   const onSuccess = () => {
@@ -54,9 +54,13 @@ export const TenantCard = ({ data, onJoin, onCreate, isLoading }: TenantCardProp
     },
   );
 
+  if (isLoading) {
+    return <Card description="Loading..." />;
+  }
+
   return (
     <Card>
-      {/* <div slot="header" className={cx("createTenantHeader")}>
+      <div slot="header" className={cx("createTenantHeader")}>
         Create Tenant
       </div>
       <div slot="footer" className={cx("createTenantFooter")}>
@@ -64,8 +68,7 @@ export const TenantCard = ({ data, onJoin, onCreate, isLoading }: TenantCardProp
           onClick={() => handleCreateAndJoin()}
           disabled={newTenantName.trim() === ""}
           variant="brand"
-          appearance="accent"
-        >
+          appearance="accent">
           Create and Join
         </Button>
       </div>
@@ -88,7 +91,7 @@ export const TenantCard = ({ data, onJoin, onCreate, isLoading }: TenantCardProp
             />
           </div>
         </Card>
-      </div> */}
+      </div>
     </Card>
   );
 };

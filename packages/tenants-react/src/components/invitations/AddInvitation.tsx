@@ -21,8 +21,11 @@ export const AddInvitation: React.FC<AddInvitationProps> = ({ onCreate, selected
   const handleAddInvite = usePrettyAction(
     async () => {
       setIsSubmitting(true);
-      await onCreate(inviteEmail, selectedTenantId);
-      setIsSubmitting(false);
+      try {
+        await onCreate(inviteEmail, selectedTenantId);
+      } finally {
+        setIsSubmitting(false);
+      }
       setInviteEmail("");
     },
     [onCreate, inviteEmail, selectedTenantId],
