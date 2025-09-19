@@ -3,7 +3,6 @@
   "version": "0.2.0",
   "description": "SuperTokens plugin that adds CAPTCHA support in your React application.",
   "main": "./dist/index.js",
-  "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "scripts": {
     "test": "vitest run",
@@ -13,20 +12,6 @@
     "clean": "rm -rf .turbo && rm -rf node_modules && rm -rf dist"
   },
   "keywords": [],
-  "exports": {
-    ".": {
-      "types": "dist/index.d.ts",
-      "default": "dist/index.js"
-    },
-    "./index": {
-      "types": "dist/index.d.ts",
-      "default": "dist/index.js"
-    },
-    "./index.js": {
-      "types": "dist/index.d.ts",
-      "default": "dist/index.js"
-    }
-  },
   "license": "Apache-2.0",
   "dependencies": {
     "supertokens-auth-react": "^0.50.0"
