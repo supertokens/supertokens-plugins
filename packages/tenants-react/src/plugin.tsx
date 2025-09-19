@@ -11,10 +11,10 @@ import { BooleanClaim } from "supertokens-auth-react/recipe/session";
 import { getApi } from "./api";
 import { API_PATH, PLUGIN_ID } from "./constants";
 import "./styles/global.css";
-// import { InvitationAcceptWrapper } from "./invitation-accept-wrapper";
+import { InvitationAcceptWrapper } from "./invitation-accept-wrapper";
 import { enableDebugLogs } from "./logger";
 import { TenantManagement } from "./pages/tenant-management/tenant-management";
-// import { SelectTenantPage } from "./select-tenant-page";
+import { SelectTenantPage } from "./select-tenant-page";
 import { defaultTranslationsTenants } from "./translations";
 import {
   SuperTokensPluginTenantsPluginConfig,
@@ -147,14 +147,14 @@ export const init = createPluginInitFunction<
         return {
           status: "OK",
           routeHandlers: [
-            // {
-            //   path: "/user/tenants/select",
-            //   handler: () => SelectTenantPage.call(null),
-            // },
-            // {
-            //   path: "/user/invite/accept",
-            //   handler: () => InvitationAcceptWrapper.call(null),
-            // },
+            {
+              path: "/user/tenants/select",
+              handler: () => SelectTenantPage.call(null),
+            },
+            {
+              path: "/user/invite/accept",
+              handler: () => InvitationAcceptWrapper.call(null),
+            },
           ],
         };
       },

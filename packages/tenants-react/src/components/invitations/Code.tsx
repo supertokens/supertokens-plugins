@@ -22,7 +22,7 @@ export const Code: React.FC<CodeProps> = ({ code, tenantId }) => {
   const handleCodeCopyClick = usePrettyAction(
     async () => {
       const origin = window.location.origin;
-      const urlToCopy = `${origin}/user/invite/accept?tenantid=${encodeURIComponent(tenantId)}&code=${encodeURIComponent(
+      const urlToCopy = `${origin}/user/invite/accept?tenantId=${encodeURIComponent(tenantId)}&code=${encodeURIComponent(
         code,
       )}`;
       try {
