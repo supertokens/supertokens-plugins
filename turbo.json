@@ -1,23 +1,62 @@
 {
   "$schema": "https://turborepo.com/schema.json",
   "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true,
+      "outputs": [
+        "dist/**",
+        ".next/**",
+        "!.next/cache/**",
+        "storybook-static/**"
+      ],
+      "dependsOn": [
+        "^dev"
+      ]
+    },
     "build": {
-      "inputs": ["$TURBO_DEFAULT$", ".env*"],
-      "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
-      "dependsOn": ["^build"]
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        ".env*",
+        "!**/*.stories.{tsx,jsx,mdx}"
+      ],
+      "outputs": [
+        "dist/**",
+        ".next/**",
+        "!.next/cache/**",
+        "storybook-static/**"
+      ],
+      "dependsOn": [
+        "^build"
+      ]
+    },
+    "build:storybook": {
+      "dependsOn": [
+        "^build:storybook"
+      ],
+      "outputs": [
+        "storybook-static/**"
+      ]
     },
     "test": {
-      "dependsOn": ["transit"]
+      "dependsOn": [
+        "transit"
+      ]
     },
     "transit": {
-      "dependsOn": ["^transit"]
+      "dependsOn": [
+        "^transit"
+      ]
     },
     "test:watch": {
       "cache": false,
       "persistent": true
     },
     "lint": {
-      "dependsOn": ["^build", "^lint"]
+      "dependsOn": [
+        "^build",
+        "^lint"
+      ]
     },
     "clean": {
       "cache": false
