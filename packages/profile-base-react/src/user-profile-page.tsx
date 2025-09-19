@@ -1,4 +1,4 @@
-import { ThemeProvider } from "@shared/ui";
+import { Card, ThemeProvider } from "@shared/ui";
 import { SuperTokensWrapper } from "supertokens-auth-react";
 import { SessionAuth } from "supertokens-auth-react/recipe/session";
 
@@ -11,7 +11,9 @@ export const UserProfilePage = () => {
       <SuperTokensWrapper>
         <SessionAuth>
           <ProfilePageWrapper>
-            <UserProfileWrapper />
+            <Card title="User Profile">
+              <UserProfileWrapper />
+            </Card>
           </ProfilePageWrapper>
         </SessionAuth>
       </SuperTokensWrapper>

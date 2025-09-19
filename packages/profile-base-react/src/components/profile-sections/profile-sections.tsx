@@ -1,4 +1,4 @@
-import { Card, useHashParam } from "@shared/ui";
+import { Button, useHashParam } from "@shared/ui";
 import classNames from "classnames/bind";
 import React, { useCallback, useMemo, useState } from "react";
 
@@ -11,8 +11,7 @@ export const ProfileSections = ({
 }: {
   sections: {
     id: string;
-    title: string;
-    icon?: () => React.JSX.Element;
+    title: string | React.JSX.Element;
     component: () => React.JSX.Element;
   }[];
 }) => {
@@ -51,32 +50,25 @@ export const ProfileSections = ({
   );
 
   return (
-    <Card>
-      <div className={cx("profile-sections")}>
-        <div className={cx("profile-sidebar")}>
-          <ul>
-            {sections.map((section, idx) => (
-              <li
-                key={section.title}
-                className={cx("profile-sidebar-item", {
-                  active: activeIndex === idx,
-                })}
-                onClick={() => changeSection(idx)}>
-                {section.icon && (
-                  <span className={cx("profile-sidebar-icon")}>
-                    <section.icon />
-                  </span>
-                )}
-                <span>{section.title}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-
-        <div className={cx("profile-content")}>
-          <ActiveSectionComponent />
-        </div>
+    <div className={cx("profile-sections")}>
+      <div className={cx("profile-sidebar")}>
+        {sections.map((section, idx) => (
+          <Button
+            key={section.id}
+            className={cx("profile-sidebar-item")}
+            variant={activeIndex === idx ? "brand" : "neutral"}
+            appearance={activeIndex === idx ? "filled" : "plain"}
+            onClick={() => changeSection(idx)}>
+            {section.title}
+          </Button>
+        ))}
       </div>
-    </Card>
+
+      <div className={cx("profile-divider")} />
+
+      <div className={cx("profile-content")}>
+        <ActiveSectionComponent />
+      </div>
+    </div>
   );
 };

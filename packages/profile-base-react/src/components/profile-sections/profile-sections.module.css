@@ -8,8 +8,21 @@
   border-radius: var(--border-radius);
   display: flex;
   width: 100%;
-  min-width: 600px;
-  min-height: 400px;
+  min-width: 1100px;
+  min-height: 584px;
+  position: relative;
+}
+
+.profile-sections::after {
+  border-radius: var(--border-radius);
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -0.5px;
+  right: -0.5px;
+  box-shadow: 0 1.5px 2px 0 rgba(0, 0, 0, 0.13) inset;
+  pointer-events: none;
 }
 
 .profile-divider {
