@@ -1,0 +1,74 @@
+.profile-sections {
+  --border-color: var(--wa-color-neutral-40);
+  --sidebar-color: var(--wa-color-surface-default);
+  --container-color: var(--colors-sand-2);
+  --border-radius: var(--wa-border-radius-l);
+
+  border: var(--wa-border-width-s) var(--wa-border-style) var(--border-color);
+  border-radius: var(--border-radius);
+  display: flex;
+  width: 100%;
+  min-width: 1100px;
+  min-height: 584px;
+  position: relative;
+}
+
+.profile-sections::after {
+  border-radius: var(--border-radius);
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -0.5px;
+  right: -0.5px;
+  box-shadow: 0 1.5px 2px 0 rgba(0, 0, 0, 0.13) inset;
+  pointer-events: none;
+}
+
+.profile-divider {
+  border-right: var(--wa-border-width-s) var(--wa-border-style) var(--border-color);
+  width: 0px;
+}
+
+.profile-sidebar {
+  border-top-left-radius: var(--border-radius);
+  border-bottom-left-radius: var(--border-radius);
+  background: var(--sidebar-color);
+  padding: var(--wa-space-xs);
+  min-width: 200px;
+}
+
+.profile-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wa-space-xs);
+}
+
+wa-button.profile-sidebar-item::part(base) {
+  justify-content: left;
+}
+
+.profile-content {
+  border-top-right-radius: var(--border-radius);
+  border-bottom-right-radius: var(--border-radius);
+  background: var(--container-color);
+  padding: var(--wa-space-m);
+  flex: 1;
+}
+
+.profile-content h3 {
+  margin-top: 0;
+}
+
+.profile-content h2 {
+  margin-top: 0;
+  margin-bottom: 24px;
+}
+
+.profile-sidebar-icon {
+  height: 20px;
+}
+
+.profile-sidebar-icon > * {
+  height: 100%;
+}
