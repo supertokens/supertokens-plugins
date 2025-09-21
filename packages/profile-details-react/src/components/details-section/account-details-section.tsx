@@ -1,4 +1,4 @@
-import { usePrettyAction } from "@shared/ui";
+import { usePrettyAction, Button } from "@shared/ui";
 import classNames from "classnames/bind";
 import { useEffect, useState } from "react";
 import { User } from "supertokens-web-js/types";
@@ -21,6 +21,7 @@ export const AccountDetailsSection = ({
     emails: [],
     phoneNumbers: [],
     connectedAccounts: [],
+    timeJoined: 0,
   });
 
   const loadDetails = usePrettyAction(
@@ -36,6 +37,7 @@ export const AccountDetailsSection = ({
             provider: method.thirdParty!.id,
             email: method.email!,
           })),
+        timeJoined: details.user.timeJoined,
       });
     },
     [onFetch],
@@ -53,35 +55,56 @@ export const AccountDetailsSection = ({
         {t("PL_CD_SECTION_ACCOUNT_DESCRIPTION")}
       </div>
 
-      <div>
-        <section className={cx("supertokens-plugin-profile-details-group")}>
-          <h3>{t("PL_CD_SECTION_ACCOUNT_EMAILS")}</h3>
-          {accountDetails.emails.length === 0 && (
-            <span className={cx("supertokens-plugin-profile-details-value")}>
-              {t("PL_CD_SECTION_ACCOUNT_EMAIL_NO_EMAILS")}
-            </span>
-          )}
-          {accountDetails.emails.map((email, index) => (
-            <span key={email} className={cx("supertokens-plugin-profile-details-value")}>
-              {email}
-            </span>
-          ))}
-        </section>
+      <section className={cx("supertokens-plugin-profile-details-group")}>
+        <div className={cx("supertokens-plugin-profile-details-item")}>
+          <span className={cx("supertokens-plugin-profile-details-label")}>{t("PL_CD_SECTION_ACCOUNT_EMAILS")}</span>
+          <span className={cx("supertokens-plugin-profile-details-value")}>
+            {accountDetails.emails.length === 0 && (
+              <span className={cx("supertokens-plugin-profile-details-empty")}>
+                {t("PL_CD_SECTION_ACCOUNT_EMAIL_NO_EMAILS")}
+              </span>
+            )}
+            {accountDetails.emails.map((email, index) => (
+              <>
+                {email}
+                {index < accountDetails.emails.length - 1 && <br />}
+              </>
+            ))}
+          </span>
+        </div>
+        <div className={cx("supertokens-plugin-profile-details-item")}>
+          <span className={cx("supertokens-plugin-profile-details-label")}>
+            {t("PL_CD_SECTION_ACCOUNT_PHONE_NUMBERS")}
+          </span>
+          <span className={cx("supertokens-plugin-profile-details-value")}>
+            {accountDetails.phoneNumbers.length === 0 && (
+              <span className={cx("supertokens-plugin-profile-details-empty")}>
+                {t("PL_CD_SECTION_ACCOUNT_PHONE_NUMBERS_NO_PHONE_NUMBERS")}
+              </span>
+            )}
+            {accountDetails.phoneNumbers.map((phoneNumber, index) => (
+              <>
+                {phoneNumber}
+                {index < accountDetails.phoneNumbers.length - 1 && <br />}
+              </>
+            ))}
+          </span>
+        </div>
 
-        <section className={cx("supertokens-plugin-profile-details-group")}>
-          <h3>{t("PL_CD_SECTION_ACCOUNT_PHONE_NUMBERS")}</h3>
-          {accountDetails.phoneNumbers.length === 0 && (
-            <span className={cx("supertokens-plugin-profile-details-value")}>
-              {t("PL_CD_SECTION_ACCOUNT_PHONE_NUMBERS_NO_PHONE_NUMBERS")}
-            </span>
-          )}
-          {accountDetails.phoneNumbers.map((phoneNumber, index) => (
-            <span key={phoneNumber} className={cx("supertokens-plugin-profile-details-value")}>
-              {phoneNumber}
-            </span>
-          ))}
-        </section>
-      </div>
+        <div className={cx("supertokens-plugin-profile-details-item")}>
+          <span className={cx("supertokens-plugin-profile-details-label")}>
+            {t("PL_CD_SECTION_ACCOUNT_TIME_JOINED")}
+          </span>
+          <span className={cx("supertokens-plugin-profile-details-value")}>
+            {!accountDetails.timeJoined && (
+              <span className={cx("supertokens-plugin-profile-details-empty")}>
+                {t("PL_CD_SECTION_ACCOUNT_TIME_JOINED_NO_TIME_JOINED")}
+              </span>
+            )}
+            {Boolean(accountDetails.timeJoined) && new Date(accountDetails.timeJoined).toLocaleDateString()}
+          </span>
+        </div>
+      </section>
     </div>
   );
 };

@@ -18,6 +18,8 @@ const FieldValue = ({ field, value }: { field: BaseFormField; value: any }) => {
   switch (field.type) {
     case "boolean":
       return value ? t("PL_CD_YES") : t("PL_CD_NO");
+    case "toggle":
+      return value ? t("PL_CD_ENABLED") : t("PL_CD_DISABLED");
     case "multiselect":
       if (Array.isArray(value)) {
         return value.length > 0 ? value.join(", ") : t("PL_CD_NONE_SELECTED");
@@ -82,7 +84,10 @@ export const SectionView = ({ fields, values, onEdit }) => {
           const value = values[field.id];
           return (
             <div key={field.id} className={cx("supertokens-plugin-profile-details-item")}>
-              <span className={cx("supertokens-plugin-profile-details-label")}>{field.label}</span>
+              <span className={cx("supertokens-plugin-profile-details-label")}>
+                {field.label}
+                {field.required ? <span className={cx("supertokens-plugin-profile-details-required")}>*</span> : null}
+              </span>
               <span className={cx("supertokens-plugin-profile-details-value")}>
                 <FieldValue field={field} value={value} />
               </span>

@@ -16,6 +16,7 @@ export type AccountDetails = {
   emails: string[];
   phoneNumbers: string[];
   connectedAccounts: ConnectedAccount[];
+  timeJoined: number;
 };
 
 export type ConnectedAccount = {

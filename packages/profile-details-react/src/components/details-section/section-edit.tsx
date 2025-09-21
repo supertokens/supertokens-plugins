@@ -44,7 +44,10 @@ export const SectionEdit = ({ id, fields, values, onSubmit, onCancel }) => {
           .sort((a, b) => (a.order || 0) - (b.order || 0))
           .map((field) => (
             <div key={field.id} className={cx("supertokens-plugin-profile-details-item")}>
-              <span className={cx("supertokens-plugin-profile-details-label")}>{field.label}</span>
+              <span className={cx("supertokens-plugin-profile-details-label")}>
+                {field.label}
+                {field.required ? <span className={cx("supertokens-plugin-profile-details-required")}>*</span> : null}
+              </span>
               <span className={cx("supertokens-plugin-profile-details-value")}>
                 <FormInput
                   key={field.id}
