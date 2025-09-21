@@ -4,12 +4,14 @@ import { SuperTokensPlugin, getTranslationFunction } from "supertokens-auth-reac
 
 import { DEFAULT_PROFILE_PAGE_PATH, PLUGIN_ID, SECTION_ORDER_INCREMENT } from "./constants";
 import { enableDebugLogs, logDebugMessage } from "./logger";
+import { defaultTranslations } from "./translations";
 import {
   RegisterSection,
   Section,
   SuperTokensPluginProfileConfig,
   SuperTokensPluginProfileNormalisedConfig,
   SuperTokensPluginProfileSection,
+  TranslationKeys,
 } from "./types";
 import { UserProfilePage } from "./user-profile-page";
 
@@ -17,7 +19,7 @@ const { usePluginContext, setContext } = buildContext<{
   pluginConfig: SuperTokensPluginProfileConfig;
   getSections: () => SuperTokensPluginProfileSection[];
   registerSection: RegisterSection;
-  t: (key: string, replacements?: Record<string, string>) => string;
+  t: (key: TranslationKeys, replacements?: Record<string, string>) => string;
 }>();
 export { usePluginContext };
 
@@ -76,7 +78,7 @@ export const init = createPluginInitFunction<
           enableDebugLogs();
         }
 
-        const t = getTranslationFunction();
+        const t = getTranslationFunction<TranslationKeys>(defaultTranslations);
 
         setContext({
           pluginConfig,
