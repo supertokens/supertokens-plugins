@@ -72,6 +72,7 @@ export const AccountDetailsSection = ({
             ))}
           </span>
         </div>
+
         <div className={cx("supertokens-plugin-profile-details-item")}>
           <span className={cx("supertokens-plugin-profile-details-label")}>
             {t("PL_CD_SECTION_ACCOUNT_PHONE_NUMBERS")}

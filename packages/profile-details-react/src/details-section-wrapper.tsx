@@ -6,7 +6,7 @@ import { DetailsSectionContent } from "./components";
 import { usePluginContext } from "./plugin";
 
 export const DetailsSectionWrapper = ({ section }: { section: BaseFormSection }) => {
-  const { componentMap, api } = usePluginContext();
+  const { api } = usePluginContext();
 
   const saveDetails = useCallback(async (data: BaseFormFieldPayload[]) => {
     const response = await api.updateProfile({ data });
@@ -30,12 +30,7 @@ export const DetailsSectionWrapper = ({ section }: { section: BaseFormSection })
 
   return (
     <ToastProvider>
-      <DetailsSectionContent
-        section={section}
-        onSubmit={saveDetails}
-        onFetch={getDetails}
-        componentMap={componentMap}
-      />
+      <DetailsSectionContent section={section} onSubmit={saveDetails} onFetch={getDetails} />
       <ToastContainer />
     </ToastProvider>
   );

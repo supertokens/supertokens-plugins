@@ -9,7 +9,7 @@ import {
 
 import { AccountSectionWrapper } from "./account-section-wrapper";
 import { getApi } from "./api";
-import { API_PATH, FIELD_TYPE_COMPONENT_MAP, PLUGIN_ID } from "./constants";
+import { API_PATH, FIELD_INPUT_COMPONENT_MAP, FIELD_VIEW_COMPONENT_MAP, PLUGIN_ID } from "./constants";
 import { DetailsSectionWrapper } from "./details-section-wrapper";
 import { enableDebugLogs, logDebugMessage } from "./logger";
 import { defaultTranslationsCommonDetails } from "./translations";
@@ -18,6 +18,7 @@ import {
   SuperTokensPluginProfileDetailsImplementation,
   FormInputComponentMap,
   TranslationKeys,
+  FormViewComponentMap,
 } from "./types";
 
 const { usePluginContext, setContext } = buildContext<{
@@ -25,7 +26,8 @@ const { usePluginContext, setContext } = buildContext<{
   sdkVersion: string;
   appConfig: SuperTokensPublicConfig;
   pluginConfig: SuperTokensPluginProfileDetailsConfig;
-  componentMap: FormInputComponentMap;
+  fieldInputComponentMap: FormInputComponentMap;
+  fieldViewComponentMap: FormViewComponentMap;
   querier: ReturnType<typeof getQuerier>;
   api: ReturnType<typeof getApi>;
   t: (key: TranslationKeys) => string;
@@ -38,7 +40,8 @@ export const init = createPluginInitFunction<
   SuperTokensPluginProfileDetailsImplementation
 >(
   (pluginConfig, implementation) => {
-    const componentMap = implementation.componentMap(FIELD_TYPE_COMPONENT_MAP);
+    const fieldInputComponentMap = implementation.fieldInputComponentMap(FIELD_INPUT_COMPONENT_MAP);
+    const fieldViewComponentMap = implementation.fieldViewComponentMap(FIELD_VIEW_COMPONENT_MAP);
 
     return {
       id: PLUGIN_ID,
@@ -79,7 +82,8 @@ export const init = createPluginInitFunction<
           sdkVersion,
           appConfig,
           pluginConfig,
-          componentMap,
+          fieldInputComponentMap,
+          fieldViewComponentMap,
           querier,
           api,
           t,
@@ -90,15 +94,7 @@ export const init = createPluginInitFunction<
           id: "account",
           title: t("PL_CD_SECTION_ACCOUNT_LABEL"),
           order: sectionOrder++,
-          component: () =>
-            AccountSectionWrapper.call(null, {
-              section: {
-                id: "account",
-                label: t("PL_CD_SECTION_ACCOUNT_LABEL"),
-                description: t("PL_CD_SECTION_ACCOUNT_DESCRIPTION"),
-                fields: [],
-              },
-            }),
+          component: () => AccountSectionWrapper.call(null),
         }));
 
         await registerSection(async () => {
@@ -121,6 +117,7 @@ export const init = createPluginInitFunction<
     };
   },
   {
-    componentMap: (originalImplementation) => originalImplementation,
+    fieldInputComponentMap: (originalImplementation) => originalImplementation,
+    fieldViewComponentMap: (originalImplementation) => originalImplementation,
   },
 );

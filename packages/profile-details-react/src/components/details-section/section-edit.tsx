@@ -10,7 +10,7 @@ import style from "./details-section.module.css";
 const cx = classNames.bind(style);
 
 export const SectionEdit = ({ id, fields, values, onSubmit, onCancel }) => {
-  const { t, componentMap } = usePluginContext();
+  const { t, fieldInputComponentMap } = usePluginContext();
 
   const [editingProfileDetails, setEditingProfileDetails] = useState<Record<string, any>>(values);
 
@@ -53,7 +53,7 @@ export const SectionEdit = ({ id, fields, values, onSubmit, onCancel }) => {
                   key={field.id}
                   value={values[field.id]}
                   onChange={(value) => handleInputChange(field.id, value)}
-                  componentMap={componentMap}
+                  componentMap={fieldInputComponentMap}
                   {...field}
                   label={undefined}
                 />

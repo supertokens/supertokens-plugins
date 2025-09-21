@@ -5,7 +5,7 @@ import { useCallback } from "react";
 import { AccountDetailsSection } from "./components";
 import { usePluginContext } from "./plugin";
 
-export const AccountSectionWrapper = ({ section }: { section: BaseFormSection }) => {
+export const AccountSectionWrapper = () => {
   const { api } = usePluginContext();
 
   const getDetails = useCallback(async () => {
