@@ -5,6 +5,5 @@ type TrashProps = {
 };
 
 export const Trash: React.FC<TrashProps> = ({ label }) => {
-  // TODO: Update with the actual icon
-  return <Icon name="xmark" label={label} />;
+  return <Icon name="trash" library="bundled" />;
 };
