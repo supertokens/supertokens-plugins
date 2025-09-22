@@ -41,7 +41,6 @@
     "@shared/js": "*",
     "@shared/nodejs": "*",
     "@shared/react": "*",
-    "@supertokens-plugins/progressive-profiling-shared": "*",
     "tsup": "^8.5.0"
   }
 }
