@@ -1,105 +1,100 @@
+/* eslint-disable indent */ // buggy linting for the originalImplementation conditional signInUpPOST
 import { SuperTokensPlugin } from "supertokens-node/types";
 import { SessionContainerInterface } from "supertokens-node/recipe/session/types";
-import { PLUGIN_ID, PLUGIN_SDK_VERSION, HANDLE_BASE_PATH, METADATA_KEY } from "./constants";
-import { getUser } from "supertokens-node";
-import { pluginUserMetadata, withRequestHandler } from "@shared/nodejs";
-import { createPluginInitFunction } from "@shared/js";
 import {
-  SuperTokensPluginProfileDetailsConfig,
-  SuperTokensPluginProfileDetailsImplementation,
-  SuperTokensPluginProfileDetailsNormalisedConfig,
-} from "./types";
-import { buildFormData, buildProfile } from "./utils";
-import type { BaseFormField, BaseFormFieldPayload, BaseProfile } from "@supertokens-plugins/profile-details-shared";
+  PLUGIN_ID,
+  PLUGIN_SDK_VERSION,
+  HANDLE_BASE_PATH,
+  SUPERTOKENS_PLUGIN_PROGRESSIVE_PROFILING_ID,
+} from "./constants";
+import { getUser } from "supertokens-node";
+import { withRequestHandler } from "@shared/nodejs";
+import { createPluginInitFunction } from "@shared/js";
+import { SuperTokensPluginProfileDetailsConfig, SuperTokensPluginProfileDetailsNormalisedConfig } from "./types";
+import type { BaseFormFieldPayload } from "@supertokens-plugins/profile-details-shared";
 import { BASE_FORM_SECTIONS } from "@supertokens-plugins/profile-details-shared";
-import { defaultThirdPartyFieldMap } from "./utils";
 import { enableDebugLogs, logDebugMessage } from "./logger";
+import { Implementation } from "./implementation";
 
-// todo: feedback: have more exposed apis from the sdk - can't list users, cant get a user by email (or other fields), etc.
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
   SuperTokensPluginProfileDetailsConfig,
-  SuperTokensPluginProfileDetailsImplementation,
+  Implementation,
   SuperTokensPluginProfileDetailsNormalisedConfig
 >(
   (pluginConfig, implementation) => {
-    const thirdPartyFieldMap = implementation.thirdPartyFieldMap(defaultThirdPartyFieldMap);
-
-    const metadata = pluginUserMetadata<{ profile: BaseProfile }>(METADATA_KEY);
-
-    const pluginFormFields = pluginConfig.sections.flatMap((section) =>
-      section.fields.map((f: BaseFormField) => ({ ...f, sectionId: section.id })),
-    );
-
-    const updateProfile = async (userId: string, payload: BaseFormFieldPayload[]) => {
-      const userMetadata = await metadata.get(userId);
-
-      const profile = buildProfile(pluginFormFields, payload, userMetadata?.profile || {});
-
-      await metadata.set(userId, {
-        profile: {
-          ...(userMetadata?.profile || {}),
-          ...profile,
-        },
-      });
-    };
-
     return {
       id: PLUGIN_ID,
       compatibleSDKVersions: PLUGIN_SDK_VERSION,
       overrideMap: {
         thirdparty: {
-          functions(originalImplementation) {
+          apis(originalImplementation) {
             return {
               ...originalImplementation,
-              signInUp: async (input) => {
-                const signUpResult = await originalImplementation.signInUp(input);
-                if (!thirdPartyFieldMap) {
-                  return signUpResult;
-                }
+              signInUpPOST: originalImplementation?.signInUpPOST
+                ? async (input) => {
+                    const signUpResult = await originalImplementation!.signInUpPOST!(input);
 
-                if (signUpResult.status !== "OK") {
-                  return signUpResult;
-                }
+                    if (signUpResult.status !== "OK") {
+                      return signUpResult;
+                    }
 
-                const providerId = signUpResult.user.loginMethods.find(
-                  (method) => method.recipeUserId.getAsString() === signUpResult.recipeUserId.getAsString(),
-                )?.thirdParty?.id;
+                    const providerId = signUpResult.user.loginMethods.find(
+                      (method) =>
+                        method.recipeUserId.getAsString() === signUpResult.session.getRecipeUserId().getAsString()
+                    )?.thirdParty?.id;
 
-                if (!providerId) {
-                  throw new Error("Provider ID not found. This should not have happened.");
-                }
+                    if (!providerId) {
+                      throw new Error("Provider ID not found. This should not have happened.");
+                    }
 
-                const userMetadata = await metadata.get(signUpResult.user.id);
-                const profile = userMetadata?.profile ?? ({} as BaseProfile);
+                    const profile = await implementation.getProfile(
+                      signUpResult.user.id,
+                      signUpResult.session,
+                      input.userContext
+                    );
 
-                const updatedFields = pluginFormFields.reduce((acc, field) => {
-                  if (profile[field.id]) return acc;
+                    const userInfo = await input.provider.getUserInfo({
+                      oAuthTokens: signUpResult.oAuthTokens,
+                      userContext: input.userContext,
+                    });
+                    const providerUserInfo = userInfo?.rawUserInfoFromProvider?.fromUserInfoAPI;
 
-                  const value = thirdPartyFieldMap(
-                    providerId,
-                    field,
-                    input.rawUserInfoFromProvider?.fromUserInfoAPI,
-                    profile,
-                  );
-                  if (typeof value === "undefined") return acc;
+                    const updatedFields = implementation
+                      .getPluginFormFields(signUpResult.session, input.userContext)
+                      .reduce((acc, field) => {
+                        if (profile[field.id]) return acc;
 
-                  return [
-                    ...acc,
-                    {
-                      sectionId: field.sectionId,
-                      fieldId: field.id,
-                      value,
-                    },
-                  ];
-                }, [] as BaseFormFieldPayload[]);
+                        const value = implementation.getThirdPartyFieldValue(
+                          providerId,
+                          field,
+                          providerUserInfo,
+                          profile
+                        );
+                        if (typeof value === "undefined") return acc;
 
-                if (updatedFields.length > 0) {
-                  await updateProfile(signUpResult.user.id, updatedFields);
-                }
+                        return [
+                          ...acc,
+                          {
+                            sectionId: field.sectionId,
+                            fieldId: field.id,
+                            value,
+                          },
+                        ];
+                      }, [] as BaseFormFieldPayload[]);
 
-                return signUpResult;
-              },
+                    if (updatedFields.length > 0) {
+                      await implementation.updateProfile(
+                        signUpResult.user.id,
+                        updatedFields,
+                        signUpResult.session,
+                        input.userContext
+                      );
+                    }
+
+                    return signUpResult;
+                  }
+                : undefined,
             };
           },
         },
@@ -110,7 +105,7 @@ export const init = createPluginInitFunction<
         }
 
         const progressiveProfilingPlugin = plugins.find(
-          (plugin: any) => plugin.id === "supertokens-plugin-progressive-profiling",
+          (plugin: any) => plugin.id === SUPERTOKENS_PLUGIN_PROGRESSIVE_PROFILING_ID
         );
         if (progressiveProfilingPlugin?.exports?.registerSections) {
           logDebugMessage("Progressive profiling plugin found. Adding common details profile plugin.");
@@ -126,23 +121,25 @@ export const init = createPluginInitFunction<
                 required: field.required ?? false,
               })),
             })),
-            get: async (session: SessionContainerInterface) => {
+            get: async (session: SessionContainerInterface, userContext?: Record<string, any>) => {
               if (!session) {
                 throw new Error("Session not found");
               }
 
-              const userMetadata = await metadata.get(session.getUserId());
-              const formData = buildFormData(pluginFormFields, userMetadata?.profile ?? {});
-
-              return formData;
+              const profile = await implementation.getProfile(session.getUserId(), session, userContext);
+              return implementation.buildFormData(profile, session, userContext);
             },
-            set: async (formData: BaseFormFieldPayload[], session: SessionContainerInterface) => {
+            set: async (
+              formData: BaseFormFieldPayload[],
+              session: SessionContainerInterface,
+              userContext?: Record<string, any>
+            ) => {
               if (!session) {
                 throw new Error("Session not found");
               }
 
               const userId = session.getUserId();
-              await updateProfile(userId, formData);
+              await implementation.updateProfile(userId, formData, session, userContext);
             },
           });
         }
@@ -155,17 +152,21 @@ export const init = createPluginInitFunction<
               path: HANDLE_BASE_PATH + "/sections",
               method: "get",
               verifySessionOptions: {
-                // not needed, since it doesn't use user data
-                // also, this has to always return, as registering a section happens only at init and there is no session there
-                sessionRequired: false,
+                sessionRequired: true,
               },
-              handler: withRequestHandler(async () => {
+              handler: withRequestHandler(async (req, res, session, userContext) => {
+                if (!session) {
+                  throw new Error("Session not found");
+                }
+
+                const userId = session!.getUserId();
+                if (!userId) {
+                  return { status: "ERROR", message: "User not found" };
+                }
+
                 return {
                   status: "OK",
-                  sections: pluginConfig.sections.map((section) => ({
-                    ...section,
-                    fields: section.fields.map(({ ...field }) => field),
-                  })),
+                  sections: implementation.getSections(session!, userContext),
                 };
               }),
             },
@@ -175,7 +176,11 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
               },
-              handler: withRequestHandler(async (req, res, session) => {
+              handler: withRequestHandler(async (req, res, session, userContext) => {
+                if (!session) {
+                  throw new Error("Session not found");
+                }
+
                 const userId = session!.getUserId();
                 if (!userId) {
                   return { status: "ERROR", message: "User not found" };
@@ -183,7 +188,7 @@ export const init = createPluginInitFunction<
 
                 const payload = await req.getJSONBody();
 
-                await updateProfile(userId, payload.data || []);
+                await implementation.updateProfile(userId, payload.data || [], session!, userContext);
 
                 return { status: "OK", profile: payload };
               }),
@@ -195,6 +200,10 @@ export const init = createPluginInitFunction<
                 sessionRequired: true,
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
+                if (!session) {
+                  throw new Error("Session not found");
+                }
+
                 const userId = session!.getUserId();
                 if (!userId) {
                   return { status: "ERROR", message: "User not found" };
@@ -205,12 +214,7 @@ export const init = createPluginInitFunction<
                   return { status: "ERROR", message: "User not found" };
                 }
 
-                const userMetadata = await metadata.get(userId);
-                let profile = userMetadata?.profile as BaseProfile;
-                if (!userMetadata) {
-                  profile = buildProfile(pluginFormFields, [], {});
-                  await metadata.set(userId, { profile });
-                }
+                const profile = await implementation.getProfile(userId, session!, userContext);
 
                 return {
                   status: "OK",
@@ -224,10 +228,8 @@ export const init = createPluginInitFunction<
       },
     };
   },
-  {
-    thirdPartyFieldMap: (originalImplementation) => originalImplementation,
-  },
+  (config) => Implementation.init(config),
   (config) => ({
     sections: config?.sections ?? BASE_FORM_SECTIONS,
-  }),
+  })
 );
