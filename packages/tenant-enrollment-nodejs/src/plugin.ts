@@ -1,22 +1,22 @@
-import { SuperTokensPlugin } from 'supertokens-node';
-import { createPluginInitFunction } from '@shared/js';
-import { PLUGIN_ID, PLUGIN_SDK_VERSION } from './constants';
+import { SuperTokensPlugin } from "supertokens-node";
+import { createPluginInitFunction } from "@shared/js";
+import { PLUGIN_ID, PLUGIN_SDK_VERSION } from "./constants";
 import {
   OverrideableTenantFunctionImplementation,
   SuperTokensPluginTenantEnrollmentPluginConfig,
   SuperTokensPluginTenantEnrollmentPluginNormalisedConfig,
-} from './types';
-import { getOverrideableTenantFunctionImplementation } from './recipeImplementation';
-import { logDebugMessage } from 'supertokens-node/lib/build/logger';
+} from "./types";
+import { getOverrideableTenantFunctionImplementation } from "./recipeImplementation";
+import { logDebugMessage } from "supertokens-node/lib/build/logger";
 import {
   AssociateAllLoginMethodsOfUserWithTenant,
   PLUGIN_ID as TENANTS_PLUGIN_ID,
   SendPluginEmail,
   GetAppUrl,
-} from '@supertokens-plugins/tenants-nodejs';
-import { listUsersByAccountInfo } from 'supertokens-node';
-import { NormalisedAppinfo } from 'supertokens-node/types';
-import { enableDebugLogs } from './logger';
+} from "@supertokens-plugins/tenants-nodejs";
+import { listUsersByAccountInfo } from "supertokens-node";
+import { NormalisedAppinfo } from "supertokens-node/types";
+import { enableDebugLogs } from "./logger";
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
@@ -39,27 +39,27 @@ export const init = createPluginInitFunction<
 
         const tenantsPlugin = plugins.find((plugin: any) => plugin.id === TENANTS_PLUGIN_ID);
         if (!tenantsPlugin) {
-          throw new Error('Base Tenants plugin not initialized, cannot continue.');
+          throw new Error("Base Tenants plugin not initialized, cannot continue.");
         }
 
         if (!tenantsPlugin.exports) {
-          throw new Error('Base Tenants plugin does not export, cannot continue.');
+          throw new Error("Base Tenants plugin does not export, cannot continue.");
         }
 
         const associateAllLoginMethodsOfUserWithTenant =
           tenantsPlugin.exports?.associateAllLoginMethodsOfUserWithTenant;
         if (!associateAllLoginMethodsOfUserWithTenant) {
-          throw new Error('Tenants plugin does not export associateAllLoginMethodsOfUserWithTenant, cannot continue.');
+          throw new Error("Tenants plugin does not export associateAllLoginMethodsOfUserWithTenant, cannot continue.");
         }
 
         const sendPluginEmail = tenantsPlugin.exports?.sendEmail;
         if (!sendPluginEmail) {
-          throw new Error('Tenants plugin does not export sendEmail, cannot continue.');
+          throw new Error("Tenants plugin does not export sendEmail, cannot continue.");
         }
 
         const getUserIdsInTenantWithRole = tenantsPlugin.exports?.getUserIdsInTenantWithRole;
         if (!getUserIdsInTenantWithRole) {
-          throw new Error('Tenants plugin does not export getUserIdsInTenantWithRole, cannot continue.');
+          throw new Error("Tenants plugin does not export getUserIdsInTenantWithRole, cannot continue.");
         }
 
         associateLoginMethodDef = associateAllLoginMethodsOfUserWithTenant;
@@ -68,7 +68,7 @@ export const init = createPluginInitFunction<
 
         const getAppUrl = tenantsPlugin.exports?.getAppUrl;
         if (!getAppUrl) {
-          throw new Error('Tenants plugin does not export getAppUrl, cannot continue');
+          throw new Error("Tenants plugin does not export getAppUrl, cannot continue");
         }
 
         getAppUrlDef = getAppUrl;
@@ -76,7 +76,7 @@ export const init = createPluginInitFunction<
       },
       routeHandlers: () => {
         return {
-          status: 'OK',
+          status: "OK",
           routeHandlers: [],
         };
       },
@@ -87,19 +87,19 @@ export const init = createPluginInitFunction<
               ...originalImplementation,
               signUp: async (input) => {
                 const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, {
-                  type: 'email',
+                  type: "email",
                   email: input.email,
                 });
-                logDebugMessage('Reason: ' + reason);
+                logDebugMessage("Reason: " + reason);
                 if (!canJoin) {
                   return {
-                    status: 'LINKING_TO_SESSION_USER_FAILED',
-                    reason: 'EMAIL_VERIFICATION_REQUIRED',
+                    status: "LINKING_TO_SESSION_USER_FAILED",
+                    reason: "EMAIL_VERIFICATION_REQUIRED",
                   };
                 }
 
                 const response = await originalImplementation.signUp(input);
-                if (response.status !== 'OK') {
+                if (response.status !== "OK") {
                   return response;
                 }
 
@@ -125,7 +125,7 @@ export const init = createPluginInitFunction<
               ...originalImplementation,
               signUpPOST: async (input) => {
                 const response = await originalImplementation.signUpPOST!(input);
-                if (response.status === 'SIGN_UP_NOT_ALLOWED' && response.reason.includes('ERR_CODE_013')) {
+                if (response.status === "SIGN_UP_NOT_ALLOWED" && response.reason.includes("ERR_CODE_013")) {
                   // There is a possibility that the user is not allowed
                   // to signup to the tenant so we will have to update the message
                   // accordingly.
@@ -146,7 +146,7 @@ export const init = createPluginInitFunction<
               ...originalImplementation,
               signInUpPOST: async (input) => {
                 const response = await originalImplementation.signInUpPOST!(input);
-                if (response.status === 'SIGN_IN_UP_NOT_ALLOWED' && response.reason.includes('ERR_CODE_020')) {
+                if (response.status === "SIGN_IN_UP_NOT_ALLOWED" && response.reason.includes("ERR_CODE_020")) {
                   return {
                     ...response,
                     reason: "Cannot sign in / sign up due to security reasons or tenant doesn't allow signup",
@@ -176,19 +176,19 @@ export const init = createPluginInitFunction<
                 }
 
                 const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, {
-                  type: 'thirdParty',
+                  type: "thirdParty",
                   thirdPartyId: input.thirdPartyId,
                 });
-                logDebugMessage('Reason: ' + reason);
+                logDebugMessage("Reason: " + reason);
                 if (!canJoin) {
                   return {
-                    status: 'LINKING_TO_SESSION_USER_FAILED',
-                    reason: 'EMAIL_VERIFICATION_REQUIRED',
+                    status: "LINKING_TO_SESSION_USER_FAILED",
+                    reason: "EMAIL_VERIFICATION_REQUIRED",
                   };
                 }
 
                 const response = await originalImplementation.signInUp(input);
-                if (response.status !== 'OK') {
+                if (response.status !== "OK") {
                   return response;
                 }
 
@@ -216,7 +216,7 @@ export const init = createPluginInitFunction<
               ...originalImplementation,
               createCodePOST: async (input) => {
                 const response = await originalImplementation.createCodePOST!(input);
-                if (response.status === 'SIGN_IN_UP_NOT_ALLOWED' && response.reason.includes('ERR_CODE_002')) {
+                if (response.status === "SIGN_IN_UP_NOT_ALLOWED" && response.reason.includes("ERR_CODE_002")) {
                   return {
                     ...response,
                     reason: "Cannot sign in / sign up due to security reasons or tenant doesn't allow signup",
@@ -227,7 +227,7 @@ export const init = createPluginInitFunction<
               },
               consumeCodePOST: async (input) => {
                 const response = await originalImplementation.consumeCodePOST!(input);
-                if (response.status === 'SIGN_IN_UP_NOT_ALLOWED' && response.reason.includes('ERR_CODE_002')) {
+                if (response.status === "SIGN_IN_UP_NOT_ALLOWED" && response.reason.includes("ERR_CODE_002")) {
                   return {
                     ...response,
                     reason: "Cannot sign in / sign up due to security reasons or tenant doesn't allow signup",
@@ -245,8 +245,8 @@ export const init = createPluginInitFunction<
                 // If this is a signup, we need to check if the user
                 // can signup to the tenant.
                 const accountInfoResponse = await listUsersByAccountInfo(input.tenantId, {
-                  email: 'email' in input ? input.email : undefined,
-                  phoneNumber: 'phoneNumber' in input ? input.phoneNumber : undefined,
+                  email: "email" in input ? input.email : undefined,
+                  phoneNumber: "phoneNumber" in input ? input.phoneNumber : undefined,
                 });
                 const isSignUp = accountInfoResponse.length === 0;
 
@@ -256,19 +256,19 @@ export const init = createPluginInitFunction<
 
                 // If this is a signup but its through phone number, we cannot
                 // restrict it so we will let it go through.
-                if ('phoneNumber' in input) {
+                if ("phoneNumber" in input) {
                   return originalImplementation.createCode(input);
                 }
 
                 const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, {
-                  type: 'email',
+                  type: "email",
                   email: input.email,
                 });
-                logDebugMessage('Reason: ' + reason);
+                logDebugMessage("Reason: " + reason);
 
                 if (!canJoin) {
                   return {
-                    status: 'SIGN_IN_UP_NOT_ALLOWED',
+                    status: "SIGN_IN_UP_NOT_ALLOWED",
                   } as any;
                 }
 
@@ -289,7 +289,7 @@ export const init = createPluginInitFunction<
                   // This is handled in the consumeCode but we can handle
                   // it here as well
                   return {
-                    status: 'RESTART_FLOW_ERROR',
+                    status: "RESTART_FLOW_ERROR",
                   };
                 }
 
@@ -297,11 +297,11 @@ export const init = createPluginInitFunction<
                   input.tenantId,
                   deviceInfo.phoneNumber !== undefined
                     ? {
-                        phoneNumber: deviceInfo.phoneNumber!,
-                      }
+                      phoneNumber: deviceInfo.phoneNumber!,
+                    }
                     : {
-                        email: deviceInfo.email!,
-                      },
+                      email: deviceInfo.email!,
+                    },
                 );
                 const isSignUp = accountInfoResponse.length === 0;
 
@@ -314,14 +314,14 @@ export const init = createPluginInitFunction<
                 // Since this is a signup, we need to check if the user
                 // can signup to the tenant.
                 const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, {
-                  type: 'email',
+                  type: "email",
                   email: deviceInfo.email!,
                 });
-                logDebugMessage('Reason: ' + reason);
+                logDebugMessage("Reason: " + reason);
 
                 if (!canJoin) {
                   return {
-                    status: 'SIGN_IN_UP_NOT_ALLOWED',
+                    status: "SIGN_IN_UP_NOT_ALLOWED",
                   } as any;
                 }
 
