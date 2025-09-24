@@ -14,5 +14,12 @@ export const defaultTranslationsTenants = {
     PL_TB_TENANTS_LOADING_MESSAGE: "Loading...",
     PL_TB_TENANTS_REQUESTS_ACCEPT_BUTTON_TEXT: "Accept",
     PL_TB_TENANTS_REQUESTS_DECLINE_BUTTON_TEXT: "Decline",
+    PL_TB_CREATE_TENANT_LABEL: "Create Tenant",
+    PL_TB_CREATE_TENANT_BUTTON_TEXT: "Create and Join",
+    PL_TB_CREATE_TENANT_ENTER_NAME_LABEL: "Enter name of your tenant",
+    PL_TB_CREATE_TENANT_AWAITING_APPROVAL_HEADER: "Awaiting app admin approval",
+    PL_TB_CREATE_TENANT_AWAITING_APPROVAL_MESSAGE:
+      "It is essential to await the app administrator's approval before proceeding with the",
+    PL_TB_CREATE_TENANT_AWAITING_APPROVAL_MESSAGE_HIGHLIGHT: "creation of the new tenant",
   },
 } as const;

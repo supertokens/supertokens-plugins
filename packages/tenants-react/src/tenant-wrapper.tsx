@@ -3,6 +3,7 @@ import { ToastProvider, ToastContainer } from "@shared/ui";
 import { useEffect, useState } from "react";
 
 import { TenantCard } from "./components";
+import { AwaitingApprovalMessage } from "./components/tenant-card/awaiting-approval";
 import { logDebugMessage } from "./logger";
 import { usePluginContext } from "./plugin";
 
@@ -14,6 +15,7 @@ const TenantCardWrapper = () => {
     joinedTenantIds: [],
   });
   const [isLoading, setIsLoading] = useState(true);
+  const [isPendingApproval, setIsPendingApproval] = useState(false);
 
   useEffect(() => {
     setIsLoading(true);
@@ -59,8 +61,12 @@ const TenantCardWrapper = () => {
 
       // If there was an error, show that
       if (result.status === "ERROR") {
-        console.error(result.message);
-        return result;
+        throw new Error(result.message);
+      }
+
+      // If it's pending approval, we need to change the view
+      if (result.pendingApproval) {
+        setIsPendingApproval(true);
       }
 
       return result;
@@ -69,7 +75,11 @@ const TenantCardWrapper = () => {
     }
   };
 
-  return <TenantCard data={data} onJoin={handleOnJoin} onCreate={handleOnCreate} isLoading={isLoading} />;
+  return isPendingApproval ? (
+    <AwaitingApprovalMessage />
+  ) : (
+    <TenantCard data={data} onJoin={handleOnJoin} onCreate={handleOnCreate} isLoading={isLoading} />
+  );
 };
 
 const TenantCardWrapperWithToast = () => {

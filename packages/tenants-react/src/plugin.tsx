@@ -148,7 +148,7 @@ export const init = createPluginInitFunction<
           status: "OK",
           routeHandlers: [
             {
-              path: "/user/tenants/select",
+              path: "/user/tenants/create",
               handler: () => SelectTenantPage.call(null),
             },
             {

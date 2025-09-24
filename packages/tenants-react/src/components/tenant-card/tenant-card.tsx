@@ -3,6 +3,8 @@ import { Button, Card, TextInput, usePrettyAction } from "@shared/ui";
 import classNames from "classnames/bind";
 import { useState } from "react";
 
+import { usePluginContext } from "../../plugin";
+
 import style from "./tenant-card.module.scss";
 
 const cx = classNames.bind(style);
@@ -18,6 +20,7 @@ interface TenantCardProps {
 
 export const TenantCard = ({ data, onJoin, onCreate, isLoading }: TenantCardProps) => {
   const [newTenantName, setNewTenantName] = useState<string>("");
+  const { t } = usePluginContext();
 
   const onSuccess = () => {
     // Redirect the user to the app.
@@ -36,9 +39,10 @@ export const TenantCard = ({ data, onJoin, onCreate, isLoading }: TenantCardProp
         throw new Error(createResponse.message);
       }
 
-      // If creation is pending approval, show a message to the user
+      // NOTE: We don't need to handle the pendingApproval
+      // flow since that's handled in the parent component
       if (createResponse.pendingApproval) {
-        throw new Error("Tenant creation request is pending approval");
+        return;
       }
 
       // If creation is successful, join the tenant
@@ -61,7 +65,7 @@ export const TenantCard = ({ data, onJoin, onCreate, isLoading }: TenantCardProp
   return (
     <Card>
       <div slot="header" className={cx("createTenantHeader")}>
-        Create Tenant
+        {t("PL_TB_CREATE_TENANT_LABEL")}
       </div>
       <div slot="footer" className={cx("createTenantFooter")}>
         <Button
@@ -69,13 +73,13 @@ export const TenantCard = ({ data, onJoin, onCreate, isLoading }: TenantCardProp
           disabled={newTenantName.trim() === ""}
           variant="brand"
           appearance="accent">
-          Create and Join
+          {t("PL_TB_CREATE_TENANT_BUTTON_TEXT")}
         </Button>
       </div>
       <div>
         <Card className={cx("createTenantInputContainer")}>
           <div className={cx("createTenantInputCardText")} slot="header">
-            Enter name of your tenant
+            {t("PL_TB_CREATE_TENANT_ENTER_NAME_LABEL")}
           </div>
           <div className={cx("createTenantInputWrapper")}>
             <TextInput
