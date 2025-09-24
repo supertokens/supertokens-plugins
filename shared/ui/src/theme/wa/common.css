@@ -8,6 +8,20 @@
      * For larger font sizes, each size is twice 1.125x larger to maximize impact.
      * Each value uses `rem` units and is rounded to the nearest whole pixel when rendered. */
 
+    --wa-font-family-body: inherit;
+
+    --wa-font-size-scale: 1;
+
+    --wa-font-size-2xs: round(calc(0.6875rem * var(--wa-font-size-scale)), 1px);
+    --wa-font-size-xs: round(calc(0.75rem * var(--wa-font-size-scale)), 1px);
+    --wa-font-size-s: round(calc(0.875rem * var(--wa-font-size-scale)), 1px);
+    --wa-font-size-m: calc(1rem * var(--wa-font-size-scale));
+    --wa-font-size-l: round(calc(1.125rem * var(--wa-font-size-scale)), 1px);
+    --wa-font-size-xl: round(calc(1.5625rem * var(--wa-font-size-scale)), 1px);
+    --wa-font-size-2xl: round(calc(2rem * var(--wa-font-size-scale)), 1px);
+    --wa-font-size-3xl: round(calc(var(--wa-font-size-2xl) * 1.125 * 1.125), 1px);
+    --wa-font-size-4xl: round(calc(var(--wa-font-size-3xl) * 1.125 * 1.125), 1px);
+
     --wa-font-size-smaller: round(calc(1em / 1.125), 1px);
     --wa-font-size-larger: round(calc(1em * 1.125 * 1.125), 1px);
 
@@ -26,8 +40,7 @@
     --wa-line-height-normal: 1.6;
     --wa-line-height-expanded: 2;
 
-    --wa-link-decoration-default: underline
-      color-mix(in oklab, currentColor 70%, transparent) dotted;
+    --wa-link-decoration-default: underline color-mix(in oklab, currentColor 70%, transparent) dotted;
     --wa-link-decoration-hover: underline;
     /* #endregion */
 
@@ -70,8 +83,7 @@
     /* #region Focus ~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
     --wa-focus-ring-style: solid;
     --wa-focus-ring-width: 0.1875rem; /* 3px */
-    --wa-focus-ring: var(--wa-focus-ring-style) var(--wa-focus-ring-width)
-      var(--wa-color-focus);
+    --wa-focus-ring: var(--wa-focus-ring-style) var(--wa-focus-ring-width) var(--wa-color-focus);
     --wa-focus-ring-offset: 0.0625rem; /* 1px */
     /* #endregion */
 
@@ -92,12 +104,11 @@
     --wa-shadow-spread-m: calc(var(--wa-shadow-spread-scale) * 0.25rem);
     --wa-shadow-spread-l: calc(var(--wa-shadow-spread-scale) * 0.5rem);
 
-    --wa-shadow-s: 0 1px 4px 0 rgba(0, 0, 61, 0.05),
-      0 2px 1px -1px rgba(0, 0, 61, 0.05), 0 1px 3px 0 rgba(0, 0, 0, 0.05); /* done */
-    --wa-shadow-m: var(--wa-shadow-offset-x-m) var(--wa-shadow-offset-y-m)
-      var(--wa-shadow-blur-m) var(--wa-shadow-spread-m) var(--wa-color-shadow);
-    --wa-shadow-l: 0 12px 32px -16px rgba(0, 0, 0, 0.05),
-      0 8px 40px 0 rgba(0, 0, 61, 0.05); /* done */
+    --wa-shadow-s:
+      0 1px 4px 0 rgba(0, 0, 61, 0.05), 0 2px 1px -1px rgba(0, 0, 61, 0.05), 0 1px 3px 0 rgba(0, 0, 0, 0.05); /* done */
+    --wa-shadow-m: var(--wa-shadow-offset-x-m) var(--wa-shadow-offset-y-m) var(--wa-shadow-blur-m)
+      var(--wa-shadow-spread-m) var(--wa-color-shadow);
+    --wa-shadow-l: 0 12px 32px -16px rgba(0, 0, 0, 0.05), 0 8px 40px 0 rgba(0, 0, 61, 0.05); /* done */
     /* #endregion */
 
     /* #region Transitions ~~~~~~~~~~~~~~~~~~~~~~ */
@@ -112,12 +123,8 @@
     --wa-form-control-background-color: var(--wa-color-surface-default);
 
     --wa-form-control-border-color: var(--wa-color-neutral-border-loud);
-    --wa-form-control-border-color-hover: var(
-      --st-color-neutral-border-loud-hover
-    ); /* done */
-    --wa-form-control-border-color-focus: var(
-      --st-color-neutral-border-loud-focus
-    ); /* done */
+    --wa-form-control-border-color-hover: var(--st-color-neutral-border-loud-hover); /* done */
+    --wa-form-control-border-color-focus: var(--st-color-neutral-border-loud-focus); /* done */
     --wa-form-control-border-style: var(--wa-border-style);
     --wa-form-control-border-width: var(--wa-border-width-s);
     --wa-form-control-border-radius: var(--wa-border-radius-m);
@@ -136,9 +143,7 @@
     --wa-form-control-hint-font-weight: var(--wa-font-weight-body);
     --wa-form-control-hint-line-height: var(--wa-line-height-normal);
 
-    --wa-form-control-placeholder-color: var(
-      --wa-color-neutral-alpha-80
-    ); /* done */
+    --wa-form-control-placeholder-color: var(--wa-color-neutral-alpha-80); /* done */
 
     --wa-form-control-required-content: "*";
     --wa-form-control-required-content-color: var(--wa-color-danger-90);
@@ -147,10 +152,7 @@
     --wa-form-control-padding-block: 0.75em;
     --wa-form-control-padding-inline: 1em;
     --wa-form-control-height: round(
-      calc(
-        2 * var(--wa-form-control-padding-block) + 1em *
-          var(--wa-form-control-value-line-height)
-      ),
+      calc(2 * var(--wa-form-control-padding-block) + 1em * var(--wa-form-control-value-line-height)),
       1px
     );
     --wa-form-control-toggle-size: round(1.25em, 1px);
