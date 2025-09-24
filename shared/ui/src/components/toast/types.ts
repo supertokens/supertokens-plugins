@@ -7,7 +7,7 @@ export enum FlashToastKey {
 
 export interface Toast {
   id: string;
-  variant: BaseWaVariant;
+  variant?: "success" | "warning" | "danger";
   message: string;
   duration?: number;
   onClose?: () => void;

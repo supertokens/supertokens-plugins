@@ -10,7 +10,7 @@ export interface ThemeProviderProps {
 
 export const ThemeProvider = ({ children, className }: ThemeProviderProps) => {
   return (
-    <div data-fa-kit-code="38c11e3f20" className={cx("plugin-profile", "wa-theme-defaul", className)}>
+    <div data-fa-kit-code="38c11e3f20" className={cx("plugin-profile", "wa-theme-default", className)}>
       {children}
     </div>
   );
