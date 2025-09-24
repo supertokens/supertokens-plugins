@@ -8,7 +8,15 @@ export type SuperTokensPluginProfileProgressiveProfilingConfig = {
   requireSetup?: boolean;
   showStartSection?: boolean;
   showEndSection?: boolean;
-  onSuccess: (data: ProfileFormData) => Promise<void>;
+  onSuccess?: (data: ProfileFormData) => Promise<void> | undefined;
+};
+
+export type SuperTokensPluginProfileProgressiveProfilingNormalisedConfig = {
+  setupPagePath: string;
+  requireSetup: boolean;
+  showStartSection: boolean;
+  showEndSection: boolean;
+  onSuccess?: (data: ProfileFormData) => Promise<void> | undefined;
 };
 
 export type SuperTokensPluginProfileProgressiveProfilingImplementation = {

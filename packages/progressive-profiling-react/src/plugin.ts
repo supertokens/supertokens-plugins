@@ -7,9 +7,10 @@ import { getApi } from "./api";
 import {
   API_PATH,
   DEFAULT_FIELD_TYPE_COMPONENT_MAP,
-  DEFAULT_ON_SUCCESS,
   DEFAULT_REQUIRE_SETUP,
   DEFAULT_SETUP_PAGE_PATH,
+  DEFAULT_SHOW_END_SECTION,
+  DEFAULT_SHOW_START_SECTION,
   PLUGIN_ID,
 } from "./constants";
 import { enableDebugLogs } from "./logger";
@@ -17,6 +18,7 @@ import { ProgressiveProfilingSetupPage } from "./progressive-profiling-setup-pag
 import { defaultTranslationsProgressiveProfiling } from "./translations";
 import {
   SuperTokensPluginProfileProgressiveProfilingConfig,
+  SuperTokensPluginProfileProgressiveProfilingNormalisedConfig,
   SuperTokensPluginProfileProgressiveProfilingImplementation,
   FormInputComponentMap,
   TranslationKeys,
@@ -28,6 +30,7 @@ const { usePluginContext, setContext } = buildContext<{
   querier: ReturnType<typeof getQuerier>;
   api: ReturnType<typeof getApi>;
   t: (key: TranslationKeys, replacements?: Record<string, string>) => string;
+  ProgressiveProfilingCompletedClaim: BooleanClaim;
 }>();
 export { usePluginContext };
 
@@ -35,7 +38,7 @@ export const init = createPluginInitFunction<
   SuperTokensPlugin,
   SuperTokensPluginProfileProgressiveProfilingConfig,
   SuperTokensPluginProfileProgressiveProfilingImplementation,
-  Required<SuperTokensPluginProfileProgressiveProfilingConfig>
+  SuperTokensPluginProfileProgressiveProfilingNormalisedConfig
 >(
   (pluginConfig, implementation) => {
     const componentMap = implementation.componentMap();
@@ -65,6 +68,7 @@ export const init = createPluginInitFunction<
           querier,
           api,
           t,
+          ProgressiveProfilingCompletedClaim,
         });
       },
       routeHandlers: () => {
@@ -101,8 +105,10 @@ export const init = createPluginInitFunction<
     componentMap: () => DEFAULT_FIELD_TYPE_COMPONENT_MAP,
   },
   (config) => ({
-    onSuccess: config.onSuccess ?? DEFAULT_ON_SUCCESS,
     requireSetup: config.requireSetup ?? DEFAULT_REQUIRE_SETUP,
     setupPagePath: config.setupPagePath ?? DEFAULT_SETUP_PAGE_PATH,
+    showStartSection: config.showStartSection ?? DEFAULT_SHOW_START_SECTION,
+    showEndSection: config.showEndSection ?? DEFAULT_SHOW_END_SECTION,
+    onSuccess: config.onSuccess,
   }),
 );

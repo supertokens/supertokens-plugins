@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { usePluginContext } from "../../plugin";
 import { FormInputComponentMap } from "../../types";
+import Session from "supertokens-auth-react/recipe/session";
 
 import styles from "./progressive-profiling-form.module.css";
 
@@ -21,7 +22,7 @@ interface ProgressiveProfilingFormProps {
     | { status: "ERROR"; message: string }
     | { status: "INVALID_FIELDS"; errors: { id: string; error: string }[] }
   >;
-  onSuccess: (data: ProfileFormData) => Promise<void>;
+  onSuccess: (data: ProfileFormData) => Promise<void> | void;
   isLoading: boolean;
   loadProfile: () => Promise<{ status: "OK"; data: ProfileFormData } | { status: "ERROR"; message: string }>;
   loadSections: () => Promise<{ status: "OK"; data: FormSection[] } | { status: "ERROR"; message: string }>;
@@ -38,7 +39,7 @@ export const ProgressiveProfilingForm = ({
   loadSections,
   ...props
 }: ProgressiveProfilingFormProps) => {
-  const { t, pluginConfig } = usePluginContext();
+  const { t, pluginConfig, ProgressiveProfilingCompletedClaim } = usePluginContext();
   const [fieldErrors, setFieldErrors] = useState<Record<string, { id: string; error: string }[]>>({});
 
   const sections = useMemo(() => {
@@ -137,7 +138,12 @@ export const ProgressiveProfilingForm = ({
       return;
     }
 
-    if (currentSection.id !== "profile-end" && currentSection.id !== "profile-start") {
+    if (currentSection.id === "profile-start") {
+      moveToSection(activeSectionIndex + 1);
+      return;
+    }
+
+    if (currentSection.id !== "profile-end") {
       // only send the current section fields
       const sectionData = currentSection.fields.map((field) => {
         return { sectionId: currentSection.id, fieldId: field.id, value: profileDetails[field.id] };
@@ -147,21 +153,22 @@ export const ProgressiveProfilingForm = ({
         setFieldErrors(groupBy(result.errors, "id"));
         throw new Error("Some fields are invalid");
       } else if (result.status === "OK") {
-        moveToSection(activeSectionIndex + 1);
-        // load the sections to get the updated section states (it's fine to be deferred)
-        loadSections();
+        if (!isLastSection) {
+          moveToSection(activeSectionIndex + 1);
+          // load the sections to get the updated section states (it's fine to be deferred)
+          void loadSections();
+          return;
+        }
       } else {
         throw new Error("Could not save the details");
       }
     }
 
-    if (currentSection.id === "profile-start") {
-      moveToSection(activeSectionIndex + 1);
-      return;
-    }
-
     if (currentSection.id === "profile-end" || isLastSection) {
-      const isComplete = formSections.every((section) => section.completed);
+      const claimValidationErrors = await Session.validateClaims({
+        overrideGlobalClaimValidators: () => [ProgressiveProfilingCompletedClaim.validators.isTrue()],
+      });
+      const isComplete = claimValidationErrors.length === 0;
       if (isComplete) {
         const data: ProfileFormData = Object.entries(profileDetails).map(([key, value]) => {
           const sectionId = sections.find((section) => section.fields.some((field) => field.id === key))?.id;

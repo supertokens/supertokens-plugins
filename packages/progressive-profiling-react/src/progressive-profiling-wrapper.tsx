@@ -4,11 +4,14 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ProgressiveProfilingForm } from "./components";
 import { usePluginContext } from "./plugin";
+import { AuthPage } from "supertokens-auth-react/ui";
 
 export const ProgressiveProfilingWrapper = () => {
   const { api, componentMap, t, pluginConfig } = usePluginContext();
 
   const [isLoading, setIsLoading] = useState(true);
+  const [isSuccess, setIsSuccess] = useState(false);
+
   const [sections, setSections] = useState<FormSection[]>([]);
   const [data, setData] = useState<ProfileFormData>([]);
 
@@ -56,6 +59,11 @@ export const ProgressiveProfilingWrapper = () => {
     return response;
   }, []);
 
+  const onSuccess = useCallback(async () => {
+    await pluginConfig.onSuccess?.(data);
+    setIsSuccess(true);
+  }, []);
+
   useEffect(() => {
     loadSections();
     loadProfile();
@@ -66,8 +74,16 @@ export const ProgressiveProfilingWrapper = () => {
     return null;
   }
 
+  // The loading string below should never actually appear on screen, but we need to provide a component to prevent the AuthPage from loading unnecessary components.
   return (
     <ToastProvider>
+      {isSuccess && (
+        <div style={{ display: "none" }}>
+          <AuthPage preBuiltUIList={[]}>
+            <>Loading...</>
+          </AuthPage>
+        </div>
+      )}
       <ProgressiveProfilingForm
         sections={sections}
         data={data}
@@ -75,7 +91,7 @@ export const ProgressiveProfilingWrapper = () => {
         isLoading={isLoading}
         loadProfile={loadProfile}
         loadSections={loadSections}
-        onSuccess={pluginConfig.onSuccess}
+        onSuccess={onSuccess}
         componentMap={componentMap}
       />
       <ToastContainer />
