@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/progressive-profiling-react",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Progressive Profiling Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/progressive-profiling-react/README.md",
   "repository": {
@@ -19,9 +19,6 @@
     "supertokens"
   ],
   "dependencies": {
-    "@shared/js": "*",
-    "@shared/react": "*",
-    "@shared/ui": "*",
     "supertokens-js-override": "^0.0.4"
   },
   "peerDependencies": {
@@ -35,6 +32,9 @@
     "@types/react": "^17.0.20",
     "prettier": "3.5.3",
     "pretty-quick": "^4.2.2",
+    "@shared/js": "*",
+    "@shared/react": "*",
+    "@shared/ui": "*",
     "@supertokens-plugins/progressive-profiling-shared": "*",
     "typescript": "^5.8.3"
   },

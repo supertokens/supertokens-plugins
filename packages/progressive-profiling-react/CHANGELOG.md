@@ -1,5 +1,11 @@
 # @supertokens-plugins/progressive-profiling-react
 
+## 0.0.4
+
+### Patch Changes
+
+- Moved internal dependencies into devdependencies to bundle them
+
 ## 0.0.3
 
 ### Patch Changes
