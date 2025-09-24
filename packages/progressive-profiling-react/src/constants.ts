@@ -42,3 +42,5 @@ export const DEFAULT_SETUP_PAGE_PATH = "/user/setup";
 export const DEFAULT_ON_SUCCESS = async () => {
   window.location.href = "/";
 };
+export const DEFAULT_SHOW_START_SECTION = true;
+export const DEFAULT_SHOW_END_SECTION = true;

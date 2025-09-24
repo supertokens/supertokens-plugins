@@ -6,6 +6,8 @@ import { defaultTranslationsProgressiveProfiling } from "./translations";
 export type SuperTokensPluginProfileProgressiveProfilingConfig = {
   setupPagePath?: string;
   requireSetup?: boolean;
+  showStartSection?: boolean;
+  showEndSection?: boolean;
   onSuccess: (data: ProfileFormData) => Promise<void>;
 };
 

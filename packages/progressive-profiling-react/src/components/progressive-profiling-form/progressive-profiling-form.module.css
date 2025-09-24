@@ -7,7 +7,7 @@
   justify-content: space-evenly;
   flex-direction: row;
   width: 100%;
-  margin-bottom: var(--plugin-spacing-2xl);
+  margin-bottom: var(--wa-space-l);
 }
 
 .progressive-profiling-form-bullets .progressive-profiling-form-bullet {

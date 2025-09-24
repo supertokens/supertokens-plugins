@@ -38,28 +38,38 @@ export const ProgressiveProfilingForm = ({
   loadSections,
   ...props
 }: ProgressiveProfilingFormProps) => {
-  const { t } = usePluginContext();
+  const { t, pluginConfig } = usePluginContext();
   const [fieldErrors, setFieldErrors] = useState<Record<string, { id: string; error: string }[]>>({});
 
   const sections = useMemo(() => {
     return [
-      {
-        id: "profile-start",
-        label: t("PL_PP_SECTION_PROFILE_START_LABEL"),
-        description: t("PL_PP_SECTION_PROFILE_START_DESCRIPTION", { steps: (formSections.length + 2).toString() }),
-        completed: false,
-        fields: [],
-      },
+      ...(pluginConfig.showStartSection
+        ? [
+            {
+              id: "profile-start",
+              label: t("PL_PP_SECTION_PROFILE_START_LABEL"),
+              description: t("PL_PP_SECTION_PROFILE_START_DESCRIPTION", {
+                steps: (formSections.length + 2).toString(),
+              }),
+              completed: false,
+              fields: [],
+            },
+          ]
+        : []),
       ...formSections,
-      {
-        id: "profile-end",
-        label: t("PL_PP_SECTION_PROFILE_END_LABEL"),
-        description: t("PL_PP_SECTION_PROFILE_END_DESCRIPTION"),
-        completed: false,
-        fields: [],
-      },
+      ...(pluginConfig.showEndSection
+        ? [
+            {
+              id: "profile-end",
+              label: t("PL_PP_SECTION_PROFILE_END_LABEL"),
+              description: t("PL_PP_SECTION_PROFILE_END_DESCRIPTION"),
+              completed: false,
+              fields: [],
+            },
+          ]
+        : []),
     ];
-  }, [formSections]);
+  }, [formSections, pluginConfig.showStartSection, pluginConfig.showEndSection]);
 
   const startingSectionIndex = useMemo(() => {
     const completedSectionIndexes = formSections
@@ -73,8 +83,8 @@ export const ProgressiveProfilingForm = ({
 
     // the index of the first not completed section (the user hasn't completed all the sections)
     const nextFormSectionIndex = completedSectionIndexes[completedSectionIndexes.length - 1]! + 1;
-    return nextFormSectionIndex + 1; // account for the start section
-  }, [formSections]);
+    return nextFormSectionIndex + (pluginConfig.showStartSection ? 1 : 0); // account for the start section
+  }, [formSections, pluginConfig.showStartSection]);
 
   const [activeSectionIndex, setActiveSectionIndex] = useState(startingSectionIndex);
   const [profileDetails, setProfileDetails] = useState<Record<string, FormFieldValue>>({});
@@ -100,7 +110,7 @@ export const ProgressiveProfilingForm = ({
   const isSectionEnabled = useCallback(
     (sectionIndex: number) => {
       // first section is always enabled
-      if (sectionIndex === 0) {
+      if (sectionIndex === 0 && pluginConfig.showStartSection) {
         return true;
       }
 
@@ -110,14 +120,14 @@ export const ProgressiveProfilingForm = ({
       }
 
       // last section is enabled if all form sections are completed
-      if (sectionIndex === sections.length - 1) {
+      if (sectionIndex === sections.length - 1 && pluginConfig.showEndSection) {
         return formSections.every((section) => section.completed);
       }
 
       // other sections are enabled if they are completed
       return sections[sectionIndex]?.completed ?? false;
     },
-    [sections, activeSectionIndex, formSections],
+    [sections, activeSectionIndex, formSections, pluginConfig],
   );
 
   const handleSubmit = usePrettyAction(async () => {
@@ -127,12 +137,30 @@ export const ProgressiveProfilingForm = ({
       return;
     }
 
+    if (currentSection.id !== "profile-end" && currentSection.id !== "profile-start") {
+      // only send the current section fields
+      const sectionData = currentSection.fields.map((field) => {
+        return { sectionId: currentSection.id, fieldId: field.id, value: profileDetails[field.id] };
+      });
+      const result = await onSubmit(sectionData);
+      if (result.status === "INVALID_FIELDS") {
+        setFieldErrors(groupBy(result.errors, "id"));
+        throw new Error("Some fields are invalid");
+      } else if (result.status === "OK") {
+        moveToSection(activeSectionIndex + 1);
+        // load the sections to get the updated section states (it's fine to be deferred)
+        loadSections();
+      } else {
+        throw new Error("Could not save the details");
+      }
+    }
+
     if (currentSection.id === "profile-start") {
       moveToSection(activeSectionIndex + 1);
       return;
     }
 
-    if (currentSection.id === "profile-end") {
+    if (currentSection.id === "profile-end" || isLastSection) {
       const isComplete = formSections.every((section) => section.completed);
       if (isComplete) {
         const data: ProfileFormData = Object.entries(profileDetails).map(([key, value]) => {
@@ -149,24 +177,16 @@ export const ProgressiveProfilingForm = ({
         throw new Error("All sections must be completed to submit the form");
       }
     }
-
-    // only send the current section fields
-    const sectionData = currentSection.fields.map((field) => {
-      return { sectionId: currentSection.id, fieldId: field.id, value: profileDetails[field.id] };
-    });
-
-    const result = await onSubmit(sectionData);
-    if (result.status === "INVALID_FIELDS") {
-      setFieldErrors(groupBy(result.errors, "id"));
-      throw new Error("Some fields are invalid");
-    } else if (result.status === "OK") {
-      moveToSection(activeSectionIndex + 1);
-      // load the sections to get the updated section states (it's fine to be deferred)
-      loadSections();
-    } else {
-      throw new Error("Could not save the details");
-    }
-  }, [onSuccess, moveToSection, activeSectionIndex, profileDetails, currentSection]);
+  }, [
+    onSuccess,
+    onSubmit,
+    loadSections,
+    moveToSection,
+    activeSectionIndex,
+    profileDetails,
+    currentSection,
+    isLastSection,
+  ]);
 
   const handleInputChange = useCallback((field: string, value: any) => {
     setProfileDetails((prev) => ({
