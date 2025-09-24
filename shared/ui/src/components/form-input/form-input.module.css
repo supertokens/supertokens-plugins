@@ -22,22 +22,4 @@
     display: block;
     margin: 0 auto;
   }
-
-  .st-image-url-input-preview {
-    margin-top: 8px;
-    border: 1px solid #ddd;
-    border-radius: 4px;
-    padding: 8px;
-    background-color: #f9f9f9;
-  }
-
-  .st-image-url-input-preview-img {
-    max-width: 200px;
-    max-height: 200px;
-    width: auto;
-    height: auto;
-    border-radius: 4px;
-    display: block;
-    margin: 0 auto;
-  }
 }
