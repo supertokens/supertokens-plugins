@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/progressive-profiling-nodejs",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Progressive Profiling Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/progressive-profiling-nodejs/README.md",
   "repository": {
@@ -19,13 +19,12 @@
     "plugin",
     "supertokens"
   ],
-  "dependencies": {
-    "@supertokens-plugins/progressive-profiling-shared": "*"
-  },
+  "dependencies": {},
   "peerDependencies": {
     "supertokens-node": ">=23.0.0"
   },
   "devDependencies": {
+    "@supertokens-plugins/progressive-profiling-shared": "*",
     "@shared/eslint": "*",
     "@shared/tsconfig": "*",
     "@shared/nodejs": "*",
