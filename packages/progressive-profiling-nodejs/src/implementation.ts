@@ -40,12 +40,18 @@ export class Implementation {
   constructor() {
     Implementation.ProgressiveProfilingCompletedClaim = new BooleanClaim({
       key: `${PLUGIN_ID}-completed`,
-      fetchValue: async (userId) => {
-        const implementation = Implementation.getInstanceOrThrow();
-        const userMetadata = await implementation.metadata.get(userId);
-        return implementation.existingSections.every(
-          (section) => userMetadata?.profileConfig?.sectionsCompleted?.[section.id] ?? false
-        );
+      fetchValue: async (userId, recipeUserId, tenantId, payload, userContext) => {
+        // the plugin caches the completion status of each section
+        // this is done because of multiple reasons:
+        // - performace: avoid calling the storage handlers every time we need to check the claim - they can be anything - a databse, another service, a file, etc
+        // - data scoping: the completion of a section is data specific to the plugin so it makes sense to be handled in the plugin. checking the section completion directly in the claim would make the plugin dependent on the storage handlers.
+        // - user management: it allows the maintainers/developers to use the dashboard to manage and view the completion status of each section
+        return Implementation.getInstanceOrThrow().areSectionsCompleted({
+          userId,
+          recipeUserId: recipeUserId.getAsString(),
+          tenantId,
+          userContext,
+        });
       },
     });
   }
@@ -257,7 +263,7 @@ export class Implementation {
     const sectionsCompleted: Record<string, boolean> = {};
     for (const section of sectionsToUpdate) {
       const sectionData = updatedData.filter((d) => d.sectionId === section.id);
-      sectionsCompleted[section.id] = await this.isSectionCompleted({
+      sectionsCompleted[section.id] = await this.isSectionValid({
         section,
         data: sectionData,
         session,
@@ -266,25 +272,16 @@ export class Implementation {
     }
     logDebugMessage(`Sections completed: ${JSON.stringify(sectionsCompleted)}`);
 
-    // update the user metadata with the new sections completed status
-    const userMetadata = await this.metadata.get(userId, userContext);
-    const newUserMetadata = {
-      ...userMetadata,
-      profileConfig: {
-        ...userMetadata?.profileConfig,
-        sectionsCompleted: {
-          ...(userMetadata?.profileConfig?.sectionsCompleted ?? {}),
-          ...sectionsCompleted,
-        },
-      },
-    };
-    await this.metadata.set(userId, newUserMetadata, userContext);
+    await this.storeCompletedSections({ sectionsCompleted, userId, session, userContext });
 
     // refresh the claim to make sure the frontend has the latest value
     // but only if all sections are completed
-    const allSectionsCompleted = this.getAllSections({ session, userContext }).every(
-      (section) => newUserMetadata?.profileConfig?.sectionsCompleted?.[section.id] ?? false
-    );
+    const allSectionsCompleted = await this.areSectionsCompleted({
+      userId,
+      userContext,
+      recipeUserId: session.getRecipeUserId().getAsString(),
+      tenantId: session.getTenantId(),
+    });
     if (allSectionsCompleted) {
       await session.fetchAndSetClaim(Implementation.ProgressiveProfilingCompletedClaim, userContext);
     }
@@ -332,7 +329,7 @@ export class Implementation {
     return undefined;
   };
 
-  isSectionCompleted = async function (
+  isSectionValid = async function (
     this: Implementation,
     {
       data,
@@ -354,5 +351,42 @@ export class Implementation {
           ...rest,
         }) === undefined
     );
+  };
+
+  areSectionsCompleted = async function (
+    this: Implementation,
+    { userId, userContext }: { userId: string; recipeUserId: string; tenantId: string; userContext: any }
+  ) {
+    const userMetadata = await this.metadata.get(userId, userContext);
+    return this.existingSections.every(
+      (section) => userMetadata?.profileConfig?.sectionsCompleted?.[section.id] ?? false
+    );
+  };
+
+  storeCompletedSections = async function (
+    this: Implementation,
+    {
+      sectionsCompleted,
+      userId,
+      userContext,
+    }: {
+      sectionsCompleted: Record<string, boolean>;
+      userId: string;
+      session: SessionContainerInterface;
+      userContext: any;
+    }
+  ) {
+    const userMetadata = await this.metadata.get(userId, userContext);
+    const newUserMetadata = {
+      ...userMetadata,
+      profileConfig: {
+        ...userMetadata?.profileConfig,
+        sectionsCompleted: {
+          ...(userMetadata?.profileConfig?.sectionsCompleted ?? {}),
+          ...sectionsCompleted,
+        },
+      },
+    };
+    await this.metadata.set(userId, newUserMetadata, userContext);
   };
 }
