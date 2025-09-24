@@ -1,8 +1,26 @@
 :global(.plugin-profile) {
   .st-input .st-input-error {
-    color: var(--plugin-color-error-text);
-    font-size: 12px;
-    margin-top: 4px;
+    color: var(--wa-color-danger-on-normal);
+    font-size: var(--wa-font-size-xs);
+    margin-top: var(--wa-space-2xs);
+  }
+
+  .st-image-url-input-preview {
+    margin-top: var(--wa-space-xs);
+    border-radius: var(--wa-border-radius-m);
+    padding: var(--wa-space-xs);
+    background-color: var(--wa-form-control-background-color);
+    border: 1px solid var(--wa-form-control-border-color);
+  }
+
+  .st-image-url-input-preview-img {
+    max-width: 200px;
+    max-height: 200px;
+    width: auto;
+    height: auto;
+    border-radius: var(--wa-border-radius-m);
+    display: block;
+    margin: 0 auto;
   }
 
   .st-image-url-input-preview {

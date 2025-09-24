@@ -9,7 +9,6 @@ import { DateInput } from "./date-input";
 import { ImageUrlInput } from "./image-url-input";
 import { BaseInput } from "./types";
 import { PasswordInput } from "./password-input";
-
 // String field component
 export const StringFieldComponent = ({ value, onChange, error, className, ...field }: BaseInput<string>) => (
   <TextInput
