@@ -2,7 +2,7 @@ import express from "express";
 import crypto from "node:crypto";
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 
-import { FormSection, SuperTokensPluginProfileProgressiveProfilingConfig } from "./types";
+import { FormSection } from "./types";
 import { registerSections, init, getSectionValues, setSectionValues, getAllSections } from "./index";
 import { HANDLE_BASE_PATH } from "./constants";
 
@@ -275,7 +275,7 @@ describe("progressive-profiling-nodejs", () => {
         }),
       });
 
-      const sectionValues = await getSectionValues(session);
+      const sectionValues = await getSectionValues({ session });
       expect(sectionValues.status).toBe("OK");
       expect(sectionValues.data).toEqual(
         testSections
@@ -318,7 +318,7 @@ describe("progressive-profiling-nodejs", () => {
         }),
       });
 
-      const sectionValues = await getSectionValues(session);
+      const sectionValues = await getSectionValues({ session });
       expect(sectionValues.status).toBe("OK");
       expect(sectionValues.data).toEqual(
         testSections
@@ -372,7 +372,7 @@ describe("progressive-profiling-nodejs", () => {
         }),
       });
 
-      const sectionValues = await getSectionValues(session);
+      const sectionValues = await getSectionValues({ session });
       expect(sectionValues.status).toBe("OK");
       expect(sectionValues.data).toEqual([
         ...testSections
@@ -394,9 +394,9 @@ describe("progressive-profiling-nodejs", () => {
         SuperTokens.convertToRecipeUserId(user.id)
       );
 
-      await setSectionValues(
+      await setSectionValues({
         session,
-        testSections
+        data: testSections
           .map((section) =>
             section.fields.map((field) => ({
               sectionId: section.id,
@@ -404,8 +404,8 @@ describe("progressive-profiling-nodejs", () => {
               value: "value",
             }))
           )
-          .flat()
-      );
+          .flat(),
+      });
 
       const response = await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
         method: "GET",
@@ -440,9 +440,9 @@ describe("progressive-profiling-nodejs", () => {
         SuperTokens.convertToRecipeUserId(user.id)
       );
 
-      await setSectionValues(
+      await setSectionValues({
         session,
-        testSections
+        data: testSections
           .map((section) =>
             section.fields.map((field) => ({
               sectionId: section.id,
@@ -450,8 +450,8 @@ describe("progressive-profiling-nodejs", () => {
               value: "value",
             }))
           )
-          .flat()
-      );
+          .flat(),
+      });
 
       const response = await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
         method: "GET",
@@ -515,7 +515,7 @@ describe("progressive-profiling-nodejs", () => {
         sections: testSections,
         override: (oI) => ({
           ...oI,
-          validateField: (session, field, value, userContext) => {
+          validateField: () => {
             return "TestInvalid";
           },
         }),
@@ -576,10 +576,11 @@ describe("progressive-profiling-nodejs", () => {
         const { user } = await setup({
           sections: testSections,
         });
-
-        const sections = await getAllSections();
-        console.log(sections);
-        console.log(testSections);
+        const session = await Session.createNewSessionWithoutRequestResponse(
+          "public",
+          SuperTokens.convertToRecipeUserId(user.id)
+        );
+        const sections = await getAllSections({ session });
         expect(sections).toEqual(
           testSections.map((section) => ({ ...section, completed: undefined, storageHandlerId: "default" }))
         );
@@ -591,17 +592,20 @@ describe("progressive-profiling-nodejs", () => {
           override: (oI) => ({
             ...oI,
             getAllSections: () =>
-              Promise.resolve(
-                testSections.map((section) => ({
-                  ...section,
-                  completed: undefined,
-                  storageHandlerId: "defaultOverride",
-                }))
-              ),
+              testSections.map((section) => ({
+                ...section,
+                completed: undefined,
+                storageHandlerId: "defaultOverride",
+              })),
           }),
         });
 
-        const sections = await getAllSections();
+        const session = await Session.createNewSessionWithoutRequestResponse(
+          "public",
+          SuperTokens.convertToRecipeUserId(user.id)
+        );
+
+        const sections = getAllSections({ session });
         expect(sections).toEqual(
           testSections.map((section) => ({ ...section, completed: undefined, storageHandlerId: "defaultOverride" }))
         );

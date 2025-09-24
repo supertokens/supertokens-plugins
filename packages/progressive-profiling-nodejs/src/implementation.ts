@@ -44,7 +44,7 @@ export class Implementation {
         const implementation = Implementation.getInstanceOrThrow();
         const userMetadata = await implementation.metadata.get(userId);
         return implementation.existingSections.every(
-          (section) => userMetadata?.profileConfig?.sectionsCompleted?.[section.id] ?? false,
+          (section) => userMetadata?.profileConfig?.sectionsCompleted?.[section.id] ?? false
         );
       },
     });
@@ -52,9 +52,15 @@ export class Implementation {
 
   defaultStorageHandlerGetFields = async function (
     this: Implementation,
-    pluginFormFields: (Pick<FormField, "id" | "defaultValue"> & { sectionId: string })[],
-    session: SessionContainerInterface,
-    userContext?: Record<string, any>,
+    {
+      pluginFormFields,
+      session,
+      userContext,
+    }: {
+      pluginFormFields: (Pick<FormField, "id" | "defaultValue"> & { sectionId: string })[];
+      session: SessionContainerInterface;
+      userContext?: Record<string, any>;
+    }
   ): Promise<ProfileFormData> {
     const metadata = pluginUserMetadata<{ profile: Record<string, FormFieldValue> }>(METADATA_PROFILE_KEY);
 
@@ -72,10 +78,17 @@ export class Implementation {
 
   defaultStorageHandlerSetFields = async function (
     this: Implementation,
-    pluginFormFields: (Pick<FormField, "id" | "defaultValue"> & { sectionId: string })[],
-    formData: ProfileFormData,
-    session: SessionContainerInterface,
-    userContext?: Record<string, any>,
+    {
+      pluginFormFields,
+      data,
+      session,
+      userContext,
+    }: {
+      pluginFormFields: (Pick<FormField, "id" | "defaultValue"> & { sectionId: string })[];
+      data: ProfileFormData;
+      session: SessionContainerInterface;
+      userContext?: Record<string, any>;
+    }
   ): Promise<void> {
     const metadata = pluginUserMetadata<{ profile: Record<string, FormFieldValue> }>(METADATA_PROFILE_KEY);
 
@@ -85,14 +98,14 @@ export class Implementation {
 
     const profile = pluginFormFields.reduce(
       (acc, field) => {
-        const newValue = formData.find((d) => d.fieldId === field.id)?.value;
+        const newValue = data.find((d) => d.fieldId === field.id)?.value;
         const existingValue = existingProfile?.[field.id];
         return {
           ...acc,
           [field.id]: newValue ?? existingValue ?? field.defaultValue,
         };
       },
-      { ...existingProfile },
+      { ...existingProfile }
     );
 
     await metadata.set(
@@ -103,7 +116,7 @@ export class Implementation {
           ...profile,
         },
       },
-      userContext,
+      userContext
     );
   };
 
@@ -113,7 +126,7 @@ export class Implementation {
         const existingSection = this.existingSections.find((s) => s.id === section.id);
         if (existingSection) {
           logDebugMessage(
-            `Profile plugin section with id "${section.id}" already registered by "${existingSection.storageHandlerId}". Skipping...`,
+            `Profile plugin section with id "${section.id}" already registered by "${existingSection.storageHandlerId}". Skipping...`
           );
           return false;
         }
@@ -137,22 +150,19 @@ export class Implementation {
   getAllSections = function (
     this: Implementation,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    session?: SessionContainerInterface,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    userContext?: Record<string, any>,
+    input: { session: SessionContainerInterface; userContext?: Record<string, any> }
   ) {
     return this.existingSections;
   };
 
   getSessionUserSections = async function (
     this: Implementation,
-    session: SessionContainerInterface,
-    userContext?: Record<string, any>,
+    { session, userContext }: { session: SessionContainerInterface; userContext?: Record<string, any> }
   ) {
     const userMetadata = await this.metadata.get(session.getUserId(userContext), userContext);
 
     // map the sections to a json serializable value
-    const sections = this.getAllSections(session, userContext).map((section) => ({
+    const sections = this.getAllSections({ session, userContext }).map((section) => ({
       id: section.id,
       label: section.label,
       description: section.description,
@@ -176,42 +186,46 @@ export class Implementation {
 
   setSectionValues = async function (
     this: Implementation,
-    session: SessionContainerInterface,
-    data: ProfileFormData,
-    userContext?: Record<string, any>,
+    {
+      data,
+      session,
+      userContext,
+    }: { session: SessionContainerInterface; data: ProfileFormData; userContext?: Record<string, any> }
   ) {
     const userId = session.getUserId(userContext);
 
-    const sections = this.getAllSections(session, userContext);
+    const sections = this.getAllSections({ session, userContext });
     const sectionsById = indexBy(sections, "id");
     const sectionIdToStorageHandlerIdMap = mapBy(sections, "id", (section) => section.storageHandlerId);
     const dataBySectionId = groupBy(data, "sectionId");
     const dataByStorageHandlerId = groupBy(data, (row) => sectionIdToStorageHandlerIdMap[row.sectionId]);
 
     // validate the data
-    const validationErrors = data.reduce(
-      (acc, row) => {
-        const field = sectionsById[row.sectionId]?.fields.find((f) => f.id === row.fieldId);
-        if (!field) {
-          return [
-            ...acc,
-            {
-              id: row.fieldId,
-              error: `Field with id "${row.fieldId}" not found`,
-            },
-          ];
-        }
+    const validationErrors = data.reduce((acc, row) => {
+      const field = sectionsById[row.sectionId]?.fields.find((f) => f.id === row.fieldId);
+      if (!field) {
+        return [
+          ...acc,
+          {
+            id: row.fieldId,
+            error: `Field with id "${row.fieldId}" not found`,
+          },
+        ];
+      }
 
-        const fieldError = this.validateField(session, field, row.value, userContext);
-        if (fieldError) {
-          const fieldErrors = Array.isArray(fieldError) ? fieldError : [fieldError];
-          return [...acc, ...fieldErrors.map((error) => ({ id: field.id, error }))];
-        }
+      const fieldError = this.validateField({
+        field,
+        value: row.value,
+        session,
+        userContext,
+      });
+      if (fieldError) {
+        const fieldErrors = Array.isArray(fieldError) ? fieldError : [fieldError];
+        return [...acc, ...fieldErrors.map((error) => ({ id: field.id, error }))];
+      }
 
-        return acc;
-      },
-      [] as { id: string; error: string }[],
-    );
+      return acc;
+    }, [] as { id: string; error: string }[]);
 
     logDebugMessage(`Validated data. ${validationErrors.length} errors found.`);
 
@@ -243,7 +257,12 @@ export class Implementation {
     const sectionsCompleted: Record<string, boolean> = {};
     for (const section of sectionsToUpdate) {
       const sectionData = updatedData.filter((d) => d.sectionId === section.id);
-      sectionsCompleted[section.id] = await this.isSectionCompleted(session, section, sectionData, userContext);
+      sectionsCompleted[section.id] = await this.isSectionCompleted({
+        section,
+        data: sectionData,
+        session,
+        userContext,
+      });
     }
     logDebugMessage(`Sections completed: ${JSON.stringify(sectionsCompleted)}`);
 
@@ -263,8 +282,8 @@ export class Implementation {
 
     // refresh the claim to make sure the frontend has the latest value
     // but only if all sections are completed
-    const allSectionsCompleted = this.getAllSections(session, userContext).every(
-      (section) => newUserMetadata?.profileConfig?.sectionsCompleted?.[section.id] ?? false,
+    const allSectionsCompleted = this.getAllSections({ session, userContext }).every(
+      (section) => newUserMetadata?.profileConfig?.sectionsCompleted?.[section.id] ?? false
     );
     if (allSectionsCompleted) {
       await session.fetchAndSetClaim(Implementation.ProgressiveProfilingCompletedClaim, userContext);
@@ -275,10 +294,9 @@ export class Implementation {
 
   getSectionValues = async function (
     this: Implementation,
-    session: SessionContainerInterface,
-    userContext?: Record<string, any>,
+    { session, userContext }: { session: SessionContainerInterface; userContext?: Record<string, any> }
   ) {
-    const sections = this.getAllSections(session, userContext);
+    const sections = this.getAllSections({ session, userContext });
     const sectionsByStorageHandlerId = indexBy(sections, "storageHandlerId");
 
     const data: ProfileFormData = [];
@@ -297,11 +315,15 @@ export class Implementation {
 
   validateField = function (
     this: Implementation,
-    session: SessionContainerInterface,
-    field: FormField,
-    value: FormFieldValue,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    userContext?: Record<string, any>,
+    {
+      field,
+      value,
+    }: {
+      field: FormField;
+      value: FormFieldValue;
+      session: SessionContainerInterface;
+      userContext?: Record<string, any>;
+    }
   ): string | string[] | undefined {
     if (field.required && (value === undefined || (typeof value === "string" && value.trim() === ""))) {
       return `The "${field.label}" field is required`;
@@ -312,14 +334,25 @@ export class Implementation {
 
   isSectionCompleted = async function (
     this: Implementation,
-    session: SessionContainerInterface,
-    section: FormSection,
-    data: ProfileFormData,
-    userContext?: Record<string, any>,
+    {
+      data,
+      section,
+      ...rest
+    }: {
+      section: FormSection;
+      data: ProfileFormData;
+      session: SessionContainerInterface;
+      userContext?: Record<string, any>;
+    }
   ) {
     const valuesByFieldId = mapBy(data, "fieldId", (row) => row.value);
     return section.fields.every(
-      (field) => this.validateField(session, field, valuesByFieldId[field.id], userContext) === undefined,
+      (field) =>
+        this.validateField({
+          field,
+          value: valuesByFieldId[field.id],
+          ...rest,
+        }) === undefined
     );
   };
 }

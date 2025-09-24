@@ -32,7 +32,7 @@ export const init = createPluginInitFunction<
             id: field.id,
             defaultValue: field.defaultValue,
             sectionId: section.id,
-          }))
+          })),
         )
         .flat();
 
@@ -40,9 +40,14 @@ export const init = createPluginInitFunction<
         storageHandlerId: "default",
         sections: pluginConfig.sections,
         set: (data, session, userContext) =>
-          implementation.defaultStorageHandlerSetFields(defaultFields, data, session, userContext),
+          implementation.defaultStorageHandlerSetFields({
+            pluginFormFields: defaultFields,
+            data,
+            session,
+            userContext,
+          }),
         get: (session, userContext) =>
-          implementation.defaultStorageHandlerGetFields(defaultFields, session, userContext),
+          implementation.defaultStorageHandlerGetFields({ pluginFormFields: defaultFields, session, userContext }),
       });
     }
 
@@ -66,7 +71,7 @@ export const init = createPluginInitFunction<
                 overrideGlobalClaimValidators: (globalValidators) => {
                   // we should not check if the profile is completed here, because we want to allow users to access the profile page even if they haven't completed the profile
                   return globalValidators.filter(
-                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key
+                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key,
                   );
                 },
               },
@@ -75,7 +80,7 @@ export const init = createPluginInitFunction<
                   throw new Error("Session not found");
                 }
 
-                return implementation.getSessionUserSections(session, userContext);
+                return implementation.getSessionUserSections({ session, userContext });
               }),
             },
             {
@@ -86,7 +91,7 @@ export const init = createPluginInitFunction<
                 overrideGlobalClaimValidators: (globalValidators) => {
                   // we should not check if the profile is completed here, because we want to allow users to access the profile page even if they haven't completed the profile
                   return globalValidators.filter(
-                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key
+                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key,
                   );
                 },
               },
@@ -97,7 +102,7 @@ export const init = createPluginInitFunction<
 
                 const payload: { data: ProfileFormData } = await req.getJSONBody();
 
-                return implementation.setSectionValues(session, payload.data, userContext);
+                return implementation.setSectionValues({ data: payload.data, session, userContext });
               }),
             },
             {
@@ -108,7 +113,7 @@ export const init = createPluginInitFunction<
                 overrideGlobalClaimValidators: (globalValidators) => {
                   // we should not check if the profile is completed here, because we want to allow users to access the profile page even if they haven't completed the profile
                   return globalValidators.filter(
-                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key
+                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key,
                   );
                 },
               },
@@ -117,7 +122,7 @@ export const init = createPluginInitFunction<
                   throw new Error("Session not found");
                 }
 
-                return implementation.getSectionValues(session, userContext);
+                return implementation.getSectionValues({ session, userContext });
               }),
             },
           ],
@@ -142,7 +147,7 @@ export const init = createPluginInitFunction<
                     input.recipeUserId,
                     input.tenantId,
                     input.accessTokenPayload,
-                    input.userContext
+                    input.userContext,
                   )),
                 };
 
@@ -172,5 +177,5 @@ export const init = createPluginInitFunction<
           completed: undefined, // make sure the sections are not marked as completed by default
         })) ?? DEFAULT_SECTIONS,
     };
-  }
+  },
 );
