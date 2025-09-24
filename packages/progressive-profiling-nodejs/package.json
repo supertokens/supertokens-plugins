@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/progressive-profiling-nodejs",
-  "version": "0.0.2-beta.2",
+  "version": "0.0.2",
   "description": "Progressive Profiling Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/progressive-profiling-nodejs/README.md",
   "repository": {

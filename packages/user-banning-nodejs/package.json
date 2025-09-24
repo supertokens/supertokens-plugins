@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/user-banning-nodejs",
-  "version": "0.0.2-beta.2",
+  "version": "0.0.2",
   "description": "User Banning Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/user-banning-nodejs/README.md",
   "repository": {
