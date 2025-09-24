@@ -1,15 +1,14 @@
 {
-  "name": "@shared/react",
-  "version": "0.0.2",
+  "name": "@supertokens-plugins/progressive-profiling-shared",
+  "version": "0.0.1",
   "private": true,
   "exports": {
     ".": "./src/index.ts"
   },
-  "peerDependencies": {
-    "supertokens-js-override": "^0.0.4"
-  },
+  "peerDependencies": {},
   "devDependencies": {
     "@shared/eslint": "*",
     "@shared/tsconfig": "*"
-  }
+  },
+  "dependencies": {}
 }

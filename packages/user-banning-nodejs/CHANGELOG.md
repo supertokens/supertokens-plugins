@@ -1,5 +1,11 @@
 # @supertokens-plugins/user-banning-nodejs
 
+## 0.0.2
+
+### Patch Changes
+
+- 86aa512: Fixed build script to work with symlinked dependencies
+
 ## 0.0.2-beta.2
 
 ### Patch Changes

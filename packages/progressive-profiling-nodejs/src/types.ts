@@ -1,0 +1,21 @@
+import { SessionContainerInterface } from "supertokens-node/recipe/session/types";
+import { ProfileFormData, FormSection as SharedFormSection } from "@supertokens-plugins/progressive-profiling-shared";
+
+export type SuperTokensPluginProfileProgressiveProfilingConfig = {
+  sections?: FormSection[];
+};
+export type SuperTokensPluginProfileProgressiveProfilingNormalisedConfig =
+  Required<SuperTokensPluginProfileProgressiveProfilingConfig>;
+
+export type UserMetadataConfig = {
+  sectionsCompleted: Record<string, boolean>;
+};
+
+export type FormSection = Omit<SharedFormSection, "completed">;
+
+export type RegisterSections = (payload: {
+  storageHandlerId: string;
+  sections: FormSection[];
+  set: (data: ProfileFormData, session: SessionContainerInterface, userContext?: Record<string, any>) => Promise<void>;
+  get: (session: SessionContainerInterface, userContext?: Record<string, any>) => Promise<ProfileFormData>;
+}) => void;

@@ -1,12 +1,12 @@
 {
-  "name": "@supertokens-plugins/user-banning-nodejs",
+  "name": "@supertokens-plugins/progressive-profiling-nodejs",
   "version": "0.0.2",
-  "description": "User Banning Plugin for SuperTokens",
-  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/user-banning-nodejs/README.md",
+  "description": "Progressive Profiling Plugin for SuperTokens",
+  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/progressive-profiling-nodejs/README.md",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/supertokens/supertokens-plugins.git",
-    "directory": "packages/user-banning-nodejs"
+    "directory": "packages/progressive-profiling-nodejs"
   },
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts",
@@ -15,24 +15,25 @@
     "test": "TEST_MODE=testing vitest run --pool=forks"
   },
   "keywords": [
-    "user-banning",
+    "progressive-profiling",
     "plugin",
     "supertokens"
   ],
-  "dependencies": {},
+  "dependencies": {
+    "@supertokens-plugins/progressive-profiling-shared": "*"
+  },
   "peerDependencies": {
     "supertokens-node": ">=23.0.0"
   },
   "devDependencies": {
     "@shared/eslint": "*",
     "@shared/tsconfig": "*",
-    "@types/react": "^17.0.20",
+    "@shared/nodejs": "*",
     "express": "^5.1.0",
     "prettier": "2.0.5",
     "pretty-quick": "^3.1.1",
     "typescript": "^5.8.3",
-    "vitest": "^3.2.4",
-    "@shared/nodejs": "*"
+    "vitest": "^3.2.4"
   },
   "browser": {
     "fs": false
