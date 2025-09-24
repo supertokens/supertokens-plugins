@@ -9,6 +9,7 @@ export interface Toast {
   id: string;
   variant?: "success" | "warning" | "danger";
   message: string;
+  description?: string;
   duration?: number;
   onClose?: () => void;
 }

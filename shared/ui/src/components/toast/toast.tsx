@@ -12,6 +12,7 @@ interface ToastProps extends HTMLElementProps {
   id: string;
   variant?: "success" | "warning" | "danger";
   message: string;
+  description?: string;
   duration?: number;
 }
 
@@ -44,20 +45,26 @@ export const Toast = (props: ToastProps) => {
         "st-toast--visible": isVisible,
       })}
       variant={"neutral"}>
-      <span className={cx("st-toast-icon", props.variant)}>
-        <wa-icon name={getIcon()} variant="regular"></wa-icon>
-      </span>
+      <div className={cx("st-toast-main")}>
+        <span className={cx("st-toast-icon", props.variant)}>
+          <wa-icon name={getIcon()} variant="regular"></wa-icon>
+        </span>
 
-      {props.message}
+        <div className={cx("st-toast-copy")}>
+          <div className={cx("st-toast-message")}>{props.message}</div>
+        </div>
 
-      <Button
-        variant="neutral"
-        size="xsmall"
-        onClick={() => removeToast(props.id)}
-        appearance="plain"
-        className={cx("st-toast-close")}>
-        <wa-icon name="times" label="Close"></wa-icon>
-      </Button>
+        <Button
+          variant="neutral"
+          size="xsmall"
+          onClick={() => removeToast(props.id)}
+          appearance="plain"
+          className={cx("st-toast-close")}>
+          <wa-icon name="times" label="Close"></wa-icon>
+        </Button>
+      </div>
+
+      {!!props.description && <div className={cx("st-toast-description")}>{props.description}</div>}
     </Callout>
   );
 };
