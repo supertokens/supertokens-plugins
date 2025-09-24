@@ -46,7 +46,7 @@ export class Implementation {
         // - performace: avoid calling the storage handlers every time we need to check the claim - they can be anything - a databse, another service, a file, etc
         // - data scoping: the completion of a section is data specific to the plugin so it makes sense to be handled in the plugin. checking the section completion directly in the claim would make the plugin dependent on the storage handlers.
         // - user management: it allows the maintainers/developers to use the dashboard to manage and view the completion status of each section
-        return Implementation.getInstanceOrThrow().areSectionsCompleted({
+        return Implementation.getInstanceOrThrow().areAllSectionsCompleted({
           userId,
           recipeUserId: recipeUserId.getAsString(),
           tenantId,
@@ -276,7 +276,8 @@ export class Implementation {
 
     // refresh the claim to make sure the frontend has the latest value
     // but only if all sections are completed
-    const allSectionsCompleted = await this.areSectionsCompleted({
+    // make use of areAllSectionsCompleted since this is what is checked in the claim
+    const allSectionsCompleted = await this.areAllSectionsCompleted({
       userId,
       userContext,
       recipeUserId: session.getRecipeUserId().getAsString(),
@@ -353,7 +354,7 @@ export class Implementation {
     );
   };
 
-  areSectionsCompleted = async function (
+  areAllSectionsCompleted = async function (
     this: Implementation,
     { userId, userContext }: { userId: string; recipeUserId: string; tenantId: string; userContext: any }
   ) {
