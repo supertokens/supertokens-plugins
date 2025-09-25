@@ -25,7 +25,7 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
 
   const getSections = async () => {
     return await querier.get<{ status: "OK"; sections: BaseFormSection[] }>("/sections", {
-      withSession: false,
+      withSession: true,
     });
   };
 

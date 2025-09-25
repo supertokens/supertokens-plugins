@@ -73,6 +73,14 @@ export const init = createPluginInitFunction<
           return;
         }
 
+        const registerOnLoadHandler = baseProfilePlugin.exports?.registerOnLoadHandler;
+        if (!registerOnLoadHandler) {
+          logDebugMessage(
+            "Base profile plugin does not export registerOnLoadHandler. Not adding common details profile plugin.",
+          );
+          return;
+        }
+
         const querier = getQuerier(new URL(API_PATH, appConfig.appInfo.apiDomain.getAsStringDangerous()).toString());
         const api = getApi(querier);
         const t = getTranslationFunction<TranslationKeys>(defaultTranslationsCommonDetails);
@@ -89,29 +97,28 @@ export const init = createPluginInitFunction<
           t,
         });
 
-        let sectionOrder = 0;
-        await registerSection(async () => ({
-          id: "account",
-          title: t("PL_CD_SECTION_ACCOUNT_LABEL"),
-          order: sectionOrder++,
-          component: () => AccountSectionWrapper.call(null),
-        }));
-
-        await registerSection(async () => {
-          const result = await api.getSections();
-          if (result.status !== "OK") {
-            throw new Error("Error fetching sections");
-          }
-
-          return result.sections.map((section) => ({
-            id: section.id,
-            title: section.label,
-            order: sectionOrder++,
-            component: () =>
-              DetailsSectionWrapper.call(null, {
-                section,
-              }),
+        registerOnLoadHandler(async () => {
+          await registerSection(async () => ({
+            id: "account",
+            title: t("PL_CD_SECTION_ACCOUNT_LABEL"),
+            component: () => AccountSectionWrapper.call(null),
           }));
+
+          await registerSection(async () => {
+            const result = await api.getSections();
+            if (result.status !== "OK") {
+              throw new Error("Error fetching sections");
+            }
+
+            return result.sections.map((section) => ({
+              id: section.id,
+              title: section.label,
+              component: () =>
+                DetailsSectionWrapper.call(null, {
+                  section,
+                }),
+            }));
+          });
         });
       },
     };
