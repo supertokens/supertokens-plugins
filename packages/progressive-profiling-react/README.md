@@ -182,19 +182,17 @@ if (result.status === "OK") {
 
 ## Custom Components
 
-### UserProfileWrapper
+### ProgressiveProfilingWrapper
 
-Use the `UserProfileWrapper` component to add progressive profiling to any part of your application:
+Use the `ProgressiveProfilingWrapper` component to add the progressive profiling logic to any part of your application:
 
 ```typescript
-import { UserProfileWrapper } from "@supertokens-plugins/progressive-profiling-react";
+import { ProgressiveProfilingWrapper } from "@supertokens-plugins/progressive-profiling-react";
 
 function MyApp() {
   return (
     <div>
-      <UserProfileWrapper>
-        {/* Your app content */}
-      </UserProfileWrapper>
+      <ProgressiveProfilingWrapper />
     </div>
   );
 }
