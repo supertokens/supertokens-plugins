@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/tenant-discovery-nodejs",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Tenant Discovery Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/tenant-discovery-nodejs/README.md",
   "repository": {

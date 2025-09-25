@@ -1,5 +1,11 @@
 # @supertokens-plugins/captcha-react
 
+## 0.3.1
+
+### Patch Changes
+
+- Re-publishing with proper latest tag
+
 ## 0.3.0
 
 ### Minor Changes

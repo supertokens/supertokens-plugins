@@ -1,5 +1,11 @@
 # @supertokens-plugins/tenant-discovery-nodejs
 
+## 0.2.1
+
+### Patch Changes
+
+- Re-publishing with proper latest tag
+
 ## 0.2.0
 
 ### Minor Changes
