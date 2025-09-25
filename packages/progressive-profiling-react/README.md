@@ -207,3 +207,4 @@ The plugin automatically integrates with SuperTokens session claims to enforce p
 - When `requireSetup` is `true`, users will be redirected to the setup page until their profile is complete
 - The `ProgressiveProfilingCompletedClaim` tracks completion status
 - Session validation automatically checks the claim on protected routes
+- Once the profile is complete and `requireSetup` is ste to `true`, the user will be redirected through according to the `getRedirectionURL` implementation/override. This is done by rendering the `AuthPage` directly in plugin.
