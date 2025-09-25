@@ -17,6 +17,7 @@ const { usePluginContext, setContext } = buildContext<{
   pluginConfig: SuperTokensPluginProfileConfig;
   getSections: () => SuperTokensPluginProfileSection[];
   registerSection: RegisterSection;
+  getOnLoadHandlers: () => (() => Promise<void>)[];
   t: (key: string, replacements?: Record<string, string>) => string;
 }>();
 export { usePluginContext };
@@ -32,6 +33,14 @@ export const init = createPluginInitFunction<
 
     const getSections = () => {
       return sections.sort((a, b) => a.order - b.order);
+    };
+
+    const onLoadHandlers: (() => Promise<void>)[] = [];
+    const registerOnLoadHandler = (handler: () => Promise<void>) => {
+      onLoadHandlers.push(handler);
+    };
+    const getOnLoadHandlers = () => {
+      return onLoadHandlers;
     };
 
     let sectionOrder = 0;
@@ -82,6 +91,7 @@ export const init = createPluginInitFunction<
           pluginConfig,
           getSections,
           registerSection,
+          getOnLoadHandlers,
           t,
         });
       },
@@ -99,6 +109,7 @@ export const init = createPluginInitFunction<
       exports: {
         getSections,
         registerSection,
+        registerOnLoadHandler,
       },
     };
   },
