@@ -1,12 +1,12 @@
 {
-  "name": "@supertokens-plugins/tenants-react",
-  "version": "0.0.1",
-  "description": "Tenants Base Plugin for SuperTokens",
-  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/tenants-react/README.md",
+  "name": "@supertokens-plugins/tenant-enrollment-react",
+  "version": "0.1.0",
+  "description": "Tenant Enrollment Plugin for SuperTokens",
+  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/tenant-enrollment-react/README.md",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/supertokens/supertokens-plugins.git",
-    "directory": "packages/tenants-react"
+    "directory": "packages/tenant-enrollment-react"
   },
   "scripts": {
     "test": "vitest run",
@@ -16,8 +16,7 @@
     "pretty-check": "npx pretty-quick --check ."
   },
   "keywords": [
-    "tenants",
-    "base",
+    "tenant-enrollment",
     "plugin",
     "supertokens"
   ],
@@ -32,26 +31,24 @@
   },
   "devDependencies": {
     "@shared/eslint": "*",
-    "@shared/js": "*",
-    "@shared/react": "*",
     "@shared/tsconfig": "*",
     "@testing-library/jest-dom": "^6.1.0",
     "@types/react": "^17.0.20",
-    "@vitejs/plugin-react": "^4.5.2",
     "jsdom": "^26.1.0",
     "prettier": "3.6.2",
     "pretty-quick": "^4.2.2",
-    "rollup-plugin-peer-deps-external": "^2.2.4",
     "typescript": "^5.8.3",
+    "vitest": "^1.3.1",
+    "@shared/js": "*",
+    "@shared/react": "*",
     "vite": "^6.3.5",
-    "vite-plugin-css-injected-by-js": "^3.5.2",
+    "@vitejs/plugin-react": "^4.5.2",
     "vite-plugin-dts": "^4.5.4",
-    "vitest": "^1.3.1"
+    "rollup-plugin-peer-deps-external": "^2.2.4"
   },
   "browser": {
     "fs": false
   },
   "main": "./dist/index.js",
-  "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts"
 }
