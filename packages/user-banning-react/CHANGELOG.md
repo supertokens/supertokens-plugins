@@ -1,5 +1,11 @@
 # @supertokens-plugins/user-banning-react
 
+## 0.2.0
+
+### Minor Changes
+
+- a9375c6: add ESM support via module field in package.json
+
 ## 0.0.2-beta.2
 
 ### Patch Changes
