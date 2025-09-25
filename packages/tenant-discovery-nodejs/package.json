@@ -12,7 +12,7 @@
     "build": "tsup src/index.ts --format cjs,esm --dts",
     "pretty": "npx pretty-quick .",
     "pretty-check": "npx pretty-quick --check .",
-    "test": "TEST_MODE=testing vitest run --pool=forks --passWithNoTests"
+    "test": "TEST_MODE=testing vitest run --pool=forks"
   },
   "keywords": [
     "tenant-discovery",

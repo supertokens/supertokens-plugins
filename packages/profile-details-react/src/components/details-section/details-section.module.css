@@ -1,0 +1,124 @@
+.supertokens-plugin-profile-details-section {
+  --border-color: var(--wa-color-neutral-30);
+  --title-color: var(--wa-color-neutral-95);
+  --title-font-size: round(calc(1.25rem * var(--wa-font-size-scale)), 1px);
+  --spacing: 30px;
+
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.supertokens-plugin-profile-details-header {
+  position: relative;
+  margin-bottom: var(--spacing);
+}
+
+.supertokens-plugin-profile-details-header h3 {
+  color: var(--title-color);
+  font-size: var(--title-font-size);
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
+
+.supertokens-plugin-profile-details-header p {
+  margin: 0;
+  font-size: var(--wa-font-size-s);
+  line-height: 1.4;
+}
+
+.supertokens-plugin-profile-details-edit-button {
+  position: absolute;
+  right: 0;
+  top: 0;
+}
+
+.supertokens-plugin-profile-details-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.supertokens-plugin-profile-details-group h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+.supertokens-plugin-profile-details-item {
+  display: flex;
+  flex-direction: row;
+  gap: 0;
+  border-bottom: 1px solid var(--border-color);
+  align-items: center;
+  min-height: 86px;
+}
+
+.supertokens-plugin-profile-details-item:first-child {
+  border-top: 1px solid var(--border-color);
+}
+
+.supertokens-plugin-profile-details-label {
+  font-weight: var(--wa-font-weight-semibold);
+  color: var(--wa-color-neutral-85);
+  font-size: var(--wa-font-size-m);
+  line-height: 1.5;
+  width: 260px;
+}
+
+.supertokens-plugin-profile-details-required {
+  color: var(--wa-color-danger-70);
+}
+
+.supertokens-plugin-profile-details-value {
+  flex: 1;
+  color: var(--wa-color-neutral-95);
+  font-size: var(--wa-font-size-m);
+  line-height: 1.5;
+  font-weight: var(--wa-font-weight-normal);
+}
+
+.supertokens-plugin-profile-details-edit-form {
+  display: flex;
+  flex-direction: column;
+}
+
+.supertokens-plugin-profile-details-edit-form wa-input.st-input::part(label) {
+  display: none;
+}
+
+.supertokens-plugin-profile-details-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-direction: row;
+  gap: 10px;
+  margin-top: var(--spacing);
+}
+
+.supertokens-plugin-profile-details-empty {
+  color: var(--wa-color-neutral-70);
+  font-size: var(--wa-font-size-m);
+  line-height: 1.5;
+  font-weight: var(--wa-font-weight-normal);
+}
+
+.supertokens-plugin-profile-details-image-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.supertokens-plugin-profile-details-image-thumb {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.supertokens-plugin-profile-details-link {
+  color: var(--wa-color-brand-on-quiet);
+  text-decoration: none;
+}
+
+.supertokens-plugin-profile-details-link:hover {
+  text-decoration: underline;
+}

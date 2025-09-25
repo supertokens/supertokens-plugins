@@ -1,5 +1,7 @@
 import React from "react";
 
+import { defaultTranslations } from "./translations";
+
 export type SuperTokensPluginProfileConfig = {
   profilePagePath?: string;
   sections?: SuperTokensPluginProfileSection[];
@@ -20,3 +22,5 @@ export type Section = Omit<SuperTokensPluginProfileSection, "order"> & {
   order?: number;
 };
 export type RegisterSection = (sectionBuilder: () => Promise<Section | Section[]>) => void;
+
+export type TranslationKeys = keyof (typeof defaultTranslations)["en"];

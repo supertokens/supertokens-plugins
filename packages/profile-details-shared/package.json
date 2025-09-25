@@ -1,0 +1,14 @@
+{
+  "name": "@supertokens-plugins/profile-details-shared",
+  "version": "0.0.1",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "peerDependencies": {},
+  "devDependencies": {
+    "@shared/eslint": "*",
+    "@shared/tsconfig": "*"
+  },
+  "dependencies": {}
+}
