@@ -9,7 +9,7 @@
     "directory": "packages/tenant-enrollment-nodejs"
   },
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "build": "vite build && npm run pretty",
     "pretty": "npx pretty-quick .",
     "pretty-check": "npx pretty-quick --check .",
     "test": "TEST_MODE=testing vitest run --pool=forks --passWithNoTests"
@@ -19,9 +19,9 @@
     "plugin",
     "supertokens"
   ],
-  "dependencies": {},
   "peerDependencies": {
-    "supertokens-node": ">=23.0.0"
+    "supertokens-node": ">=23.0.0",
+    "@supertokens-plugins/tenants-nodejs": "*"
   },
   "devDependencies": {
     "@shared/eslint": "*",
