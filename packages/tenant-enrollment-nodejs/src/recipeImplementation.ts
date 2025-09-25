@@ -1,13 +1,13 @@
-import { User } from 'supertokens-node';
-import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantEnrollmentPluginConfig } from './types';
+import { User } from "supertokens-node";
+import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantEnrollmentPluginConfig } from "./types";
 import {
   assignRoleToUserInTenant,
   AssociateAllLoginMethodsOfUserWithTenant,
   SendPluginEmail,
-} from '@supertokens-plugins/tenants-nodejs';
-import { ROLES } from '@shared/tenants';
-import SuperTokens from 'supertokens-node';
-import { UserContext } from 'supertokens-node/lib/build/types';
+} from "@supertokens-plugins/tenants-nodejs";
+import { ROLES } from "@shared/tenants";
+import SuperTokens from "supertokens-node";
+import { UserContext } from "supertokens-node/lib/build/types";
 
 export const getOverrideableTenantFunctionImplementation = (
   config: SuperTokensPluginTenantEnrollmentPluginConfig,
@@ -23,7 +23,7 @@ export const getOverrideableTenantFunctionImplementation = (
        */
 
       // Skip this for the public tenant
-      if (tenantId === 'public') {
+      if (tenantId === "public") {
         return {
           canJoin: true,
           reason: undefined,
@@ -35,21 +35,21 @@ export const getOverrideableTenantFunctionImplementation = (
       if (implementation.isTenantInviteOnly(tenantId)) {
         return {
           canJoin: false,
-          reason: 'INVITE_ONLY',
+          reason: "INVITE_ONLY",
         };
       }
 
       let canJoin = false;
       let reason = undefined;
-      if (emailOrThirdPartyId.type === 'email') {
+      if (emailOrThirdPartyId.type === "email") {
         canJoin = implementation.isMatchingEmailDomain(tenantId, emailOrThirdPartyId.email);
         if (!canJoin) {
-          reason = 'EMAIL_DOMAIN_NOT_ALLOWED';
+          reason = "EMAIL_DOMAIN_NOT_ALLOWED";
         }
-      } else if (emailOrThirdPartyId.type === 'thirdParty') {
+      } else if (emailOrThirdPartyId.type === "thirdParty") {
         canJoin = implementation.isApprovedIdPProvider(tenantId, emailOrThirdPartyId.thirdPartyId);
         if (!canJoin) {
-          reason = 'IDP_NOT_ALLOWED';
+          reason = "IDP_NOT_ALLOWED";
         }
       }
 
@@ -79,7 +79,7 @@ export const getOverrideableTenantFunctionImplementation = (
        * @param associateLoginMethodDef - The function to associate the login methods of the user with the tenant
        */
       // Skip this for the public tenant
-      if (tenantId === 'public') {
+      if (tenantId === "public") {
         return {
           wasAddedToTenant: true,
           reason: undefined,
@@ -99,11 +99,11 @@ export const getOverrideableTenantFunctionImplementation = (
       // and return.
       await associateLoginMethodDef(tenantId, user.id);
 
-      await implementation.sendTenantJoiningRequestEmail(tenantId, user, appUrl, sendEmail, userContext);
+      // await implementation.sendTenantJoiningRequestEmail(tenantId, user, appUrl, sendEmail, userContext);
 
       return {
         wasAddedToTenant: false,
-        reason: 'REQUIRES_APPROVAL',
+        reason: "REQUIRES_APPROVAL",
       };
     },
     isTenantInviteOnly: (tenantId) => {
@@ -113,10 +113,10 @@ export const getOverrideableTenantFunctionImplementation = (
       return config.requiresApprovalTenants?.includes(tenantId) ?? false;
     },
     isApprovedIdPProvider: (thirdPartyId) => {
-      return thirdPartyId.startsWith('boxy-saml');
+      return thirdPartyId.startsWith("boxy-saml");
     },
     isMatchingEmailDomain: (tenantId, email) => {
-      const emailDomain = email.split('@');
+      const emailDomain = email.split("@");
       if (emailDomain.length !== 2) {
         return false;
       }
@@ -150,10 +150,10 @@ export const getOverrideableTenantFunctionImplementation = (
           .map(async (email) => {
             await sendEmail(
               {
-                type: 'TENANT_REQUEST_APPROVAL',
+                type: "TENANT_REQUEST_APPROVAL",
                 email,
                 tenantId,
-                senderEmail: user.emails[0],
+                senderEmail: user.emails[0]!,
                 appUrl,
               },
               userContext,
@@ -162,7 +162,7 @@ export const getOverrideableTenantFunctionImplementation = (
       );
     },
     getUserIdsInTenantWithRole: async (tenantId, role) => {
-      throw new Error('Not implemented');
+      throw new Error("Not implemented");
     },
   };
 

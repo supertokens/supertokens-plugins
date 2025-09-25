@@ -98,25 +98,7 @@ export const init = createPluginInitFunction<
                   };
                 }
 
-                const response = await originalImplementation.signUp(input);
-                if (response.status !== "OK") {
-                  return response;
-                }
-
-                const { wasAddedToTenant, reason: tenantJoiningReason } =
-                  await implementation.handleTenantJoiningApproval(
-                    response.user,
-                    input.tenantId,
-                    associateLoginMethodDef,
-                    sendEmail,
-                    getAppUrlDef(appInfo, undefined, input.userContext),
-                    input.userContext,
-                  );
-                return {
-                  ...response,
-                  wasAddedToTenant,
-                  reason: tenantJoiningReason,
-                };
+                return originalImplementation.signUp(input);
               },
             };
           },
@@ -135,7 +117,30 @@ export const init = createPluginInitFunction<
                   };
                 }
 
-                return response;
+                logDebugMessage(`Got response status for signup: ${response.status}`);
+                if (response.status !== "OK") {
+                  return response;
+                }
+
+                logDebugMessage("Going ahead with checking tenant joining approval");
+                const { wasAddedToTenant, reason: tenantJoiningReason } =
+                  await implementation.handleTenantJoiningApproval(
+                    response.user,
+                    input.tenantId,
+                    associateLoginMethodDef,
+                    sendEmail,
+                    getAppUrlDef(appInfo, undefined, input.userContext),
+                    input.userContext,
+                  );
+                logDebugMessage(`wasAdded: ${wasAddedToTenant}`);
+                logDebugMessage(`reason: ${tenantJoiningReason}`);
+                return {
+                  status: "PENDING_APPROVAL",
+                  wasAddedToTenant,
+                  reason: tenantJoiningReason,
+                };
+
+                // return response;
               },
             };
           },
@@ -297,11 +302,11 @@ export const init = createPluginInitFunction<
                   input.tenantId,
                   deviceInfo.phoneNumber !== undefined
                     ? {
-                      phoneNumber: deviceInfo.phoneNumber!,
-                    }
+                        phoneNumber: deviceInfo.phoneNumber!,
+                      }
                     : {
-                      email: deviceInfo.email!,
-                    },
+                        email: deviceInfo.email!,
+                      },
                 );
                 const isSignUp = accountInfoResponse.length === 0;
 
