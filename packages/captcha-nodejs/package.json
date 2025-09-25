@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/captcha-nodejs",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "SuperTokens plugin for adding CAPTCHA support in your Node.js application.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
