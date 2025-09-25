@@ -38,14 +38,21 @@ export const ToastProvider = ({ children, withFlash = false }: ToastProviderProp
     if (newToast.duration > 0) {
       setTimeout(() => {
         removeToast(id);
-        newToast.onClose?.();
       }, newToast.duration);
     }
   }, []);
 
-  const removeToast = useCallback((id: string) => {
-    setToasts((prevToasts) => prevToasts.filter((toast) => toast.id !== id));
-  }, []);
+  const removeToast = useCallback(
+    (id: string) => {
+      const toast = toasts.find((toast) => toast.id === id);
+      if (!toast) return;
+
+      setToasts((prevToasts) => prevToasts.filter(({ id }) => toast.id !== id));
+
+      toast.onClose?.();
+    },
+    [toasts],
+  );
 
   const clearAllToasts = useCallback(() => {
     setToasts([]);

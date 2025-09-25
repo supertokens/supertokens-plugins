@@ -1,0 +1,47 @@
+{
+  "name": "@supertokens-plugins/progressive-profiling-react",
+  "version": "0.0.4",
+  "description": "Progressive Profiling Plugin for SuperTokens",
+  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/progressive-profiling-react/README.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/supertokens/supertokens-plugins.git",
+    "directory": "packages/progressive-profiling-react"
+  },
+  "scripts": {
+    "build": "vite build && npm run pretty",
+    "pretty": "npx pretty-quick .",
+    "pretty-check": "npx pretty-quick --check ."
+  },
+  "keywords": [
+    "progressive-profiling",
+    "plugin",
+    "supertokens"
+  ],
+  "dependencies": {
+    "supertokens-js-override": "^0.0.4"
+  },
+  "peerDependencies": {
+    "react": ">=18.3.1",
+    "react-dom": ">=18.3.1",
+    "supertokens-auth-react": ">=0.50.0"
+  },
+  "devDependencies": {
+    "@shared/eslint": "*",
+    "@shared/tsconfig": "*",
+    "@types/react": "^17.0.20",
+    "prettier": "3.5.3",
+    "pretty-quick": "^4.2.2",
+    "@shared/js": "*",
+    "@shared/react": "*",
+    "@shared/ui": "*",
+    "@supertokens-plugins/progressive-profiling-shared": "*",
+    "typescript": "^5.8.3"
+  },
+  "browser": {
+    "fs": false
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts"
+}

@@ -3,18 +3,23 @@ import classNames from "classnames/bind";
 import style from "./toast.module.css";
 import { Callout } from "../callout";
 import { BaseWaVariant, HTMLElementProps } from "../types";
+import { Button } from "../button";
+import { useToast } from "./toast-context";
 
 const cx = classNames.bind(style);
 
 interface ToastProps extends HTMLElementProps {
-  id?: string;
-  variant: BaseWaVariant;
+  id: string;
+  variant?: "success" | "warning" | "danger";
   message: string;
+  description?: string;
   duration?: number;
 }
 
 export const Toast = (props: ToastProps) => {
   const [isVisible, setIsVisible] = useState(false);
+
+  const { removeToast } = useToast();
 
   useEffect(() => {
     setIsVisible(true);
@@ -25,13 +30,11 @@ export const Toast = (props: ToastProps) => {
       case "success":
         return "circle-check";
       case "danger":
-        return "circle-exclamation";
+        return "triangle-exclamation";
       case "warning":
         return "triangle-exclamation";
-      // case 'info':
-      //   return 'circle-info';
       default:
-        return "gear";
+        return "circle-info";
     }
   };
 
@@ -41,8 +44,27 @@ export const Toast = (props: ToastProps) => {
       className={cx("st-toast", props.className, {
         "st-toast--visible": isVisible,
       })}
-      icon={getIcon()}>
-      {props.message}
+      variant={"neutral"}>
+      <div className={cx("st-toast-main")}>
+        <span className={cx("st-toast-icon", props.variant)}>
+          <wa-icon name={getIcon()} variant="regular"></wa-icon>
+        </span>
+
+        <div className={cx("st-toast-copy")}>
+          <div className={cx("st-toast-message")}>{props.message}</div>
+        </div>
+
+        <Button
+          variant="neutral"
+          size="xsmall"
+          onClick={() => removeToast(props.id)}
+          appearance="plain"
+          className={cx("st-toast-close")}>
+          <wa-icon name="times" label="Close"></wa-icon>
+        </Button>
+      </div>
+
+      {!!props.description && <div className={cx("st-toast-description")}>{props.description}</div>}
     </Callout>
   );
 };

@@ -1,0 +1,57 @@
+{
+  "name": "@supertokens-plugins/progressive-profiling-nodejs",
+  "version": "0.0.3",
+  "description": "Progressive Profiling Plugin for SuperTokens",
+  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/progressive-profiling-nodejs/README.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/supertokens/supertokens-plugins.git",
+    "directory": "packages/progressive-profiling-nodejs"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "pretty": "npx pretty-quick .",
+    "pretty-check": "npx pretty-quick --check .",
+    "test": "TEST_MODE=testing vitest run --pool=forks"
+  },
+  "keywords": [
+    "progressive-profiling",
+    "plugin",
+    "supertokens"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "supertokens-node": ">=23.0.0"
+  },
+  "devDependencies": {
+    "@supertokens-plugins/progressive-profiling-shared": "*",
+    "@shared/eslint": "*",
+    "@shared/tsconfig": "*",
+    "@shared/nodejs": "*",
+    "express": "^5.1.0",
+    "prettier": "2.0.5",
+    "pretty-quick": "^3.1.1",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "browser": {
+    "fs": false
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    },
+    "./index": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    },
+    "./index.js": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    }
+  }
+}
