@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/user-banning-nodejs",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "User Banning Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/user-banning-nodejs/README.md",
   "repository": {
@@ -39,19 +39,5 @@
   },
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "dist/index.d.ts",
-      "default": "dist/index.js"
-    },
-    "./index": {
-      "types": "dist/index.d.ts",
-      "default": "dist/index.js"
-    },
-    "./index.js": {
-      "types": "dist/index.d.ts",
-      "default": "dist/index.js"
-    }
-  }
+  "types": "./dist/index.d.ts"
 }

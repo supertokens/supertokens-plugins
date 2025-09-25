@@ -1,4 +1,4 @@
-import debug from "debug";
+import debug from "./log";
 
 const getFileLocation = () => {
   let errorObject = new Error();

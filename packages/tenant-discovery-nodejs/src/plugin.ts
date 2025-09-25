@@ -7,7 +7,7 @@ import {
 } from "./types";
 import { HANDLE_BASE_PATH, PLUGIN_ID, PLUGIN_SDK_VERSION } from "./constants";
 import { withRequestHandler } from "@shared/nodejs";
-import { enableDebugLogs } from "./logger";
+import { enableDebugLogs, logDebugMessage } from "./logger";
 
 import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
 
@@ -25,6 +25,7 @@ export const init = createPluginInitFunction<
         if (appConfig.debug) {
           enableDebugLogs();
         }
+        logDebugMessage("Tenant Discovery Node plugin initiate complete");
       },
       routeHandlers: () => {
         return {

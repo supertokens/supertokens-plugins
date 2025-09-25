@@ -1,10 +1,10 @@
 import { ToastContainer, ToastProvider } from "@shared/ui";
 import { FormSection, ProfileFormData } from "@supertokens-plugins/progressive-profiling-shared";
 import { useCallback, useEffect, useState } from "react";
+import { AuthPage } from "supertokens-auth-react/ui";
 
 import { ProgressiveProfilingForm } from "./components";
 import { usePluginContext } from "./plugin";
-import { AuthPage } from "supertokens-auth-react/ui";
 
 export const ProgressiveProfilingWrapper = () => {
   const { api, componentMap, t, pluginConfig } = usePluginContext();

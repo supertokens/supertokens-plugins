@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/progressive-profiling-nodejs",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "description": "Progressive Profiling Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/progressive-profiling-nodejs/README.md",
   "repository": {
@@ -39,19 +39,5 @@
   },
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "dist/index.d.ts",
-      "default": "dist/index.js"
-    },
-    "./index": {
-      "types": "dist/index.d.ts",
-      "default": "dist/index.js"
-    },
-    "./index.js": {
-      "types": "dist/index.d.ts",
-      "default": "dist/index.js"
-    }
-  }
+  "types": "./dist/index.d.ts"
 }

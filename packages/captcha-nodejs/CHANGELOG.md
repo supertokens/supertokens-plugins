@@ -1,5 +1,12 @@
 # @supertokens-plugins/captcha-nodejs
 
+## 0.2.0
+
+### Minor Changes
+
+- a9375c6: add ESM support via module field in package.json
+- No longer subclassing SuperTokensError (an internal error class of the ST node SDK) for plugin related errors
+
 ## 0.1.2
 
 ### Patch Changes
