@@ -10,10 +10,6 @@
   },
   "devDependencies": {
     "@shared/eslint": "*",
-    "@shared/tsconfig": "*",
-    "@types/debug": "^4.1.12"
-  },
-  "dependencies": {
-    "debug": "^4.4.3"
+    "@shared/tsconfig": "*"
   }
 }
