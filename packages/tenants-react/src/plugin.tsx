@@ -21,6 +21,7 @@ import {
   SuperTokensPluginTenantsPluginNormalisedConfig,
   TranslationKeys,
 } from "./types";
+import { TenantCreationRequests } from "./pages/tenant-creation-requests";
 
 const { usePluginContext, setContext } = buildContext<{
   plugins: SuperTokensPublicPlugin[];
@@ -124,6 +125,20 @@ export const init = createPluginInitFunction<
                 id: "tenant-management",
                 label: "Tenant Management",
                 description: "Manage users and invitations for your tenants",
+                fields: [],
+              },
+            }),
+        }));
+
+        registerSection(async () => ({
+          id: "tenant-creation-requests-management",
+          title: "Tenant Creation Requests",
+          order: 1,
+          component: () =>
+            TenantCreationRequests.call(null, {
+              section: {
+                id: "tenant-creation-requests-management",
+                label: "Tenant Creation Requests",
                 fields: [],
               },
             }),

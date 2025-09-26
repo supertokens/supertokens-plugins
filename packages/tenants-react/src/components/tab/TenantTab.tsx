@@ -1,3 +1,4 @@
+import { Card } from "@shared/ui";
 import classNames from "classnames/bind";
 import React from "react";
 
@@ -13,12 +14,12 @@ type TenantTabProps = {
 
 export const TenantTab: React.FC<TenantTabProps> = ({ description, descriptionComponent, children }) => {
   return (
-    <div>
-      <div className={cx("tabDescription")}>
+    <Card className={cx("tenantTabCard")}>
+      <div slot="header" className={cx("tabDescription")}>
         <div className={cx("tabDescriptionText")}>{description}</div>
         {descriptionComponent && <div>{descriptionComponent}</div>}
       </div>
       <div className={cx("tabChildrenWrapper")}>{children}</div>
-    </div>
+    </Card>
   );
 };

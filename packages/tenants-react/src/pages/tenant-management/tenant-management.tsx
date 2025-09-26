@@ -1,17 +1,14 @@
 import { TenantDetails } from "@shared/tenants";
-import { SelectInput, TabGroup, Tab, TabPanel, ToastProvider, ToastContainer } from "@shared/ui";
+import { SelectInput, ToastProvider, ToastContainer } from "@shared/ui";
 // import { BaseFormSection } from "@supertokens-plugin-profile/common-details-shared";
 import classNames from "classnames/bind";
 import { useState, useEffect, useCallback } from "react";
 
-import { Invitations } from "../../components/invitations/Invitations";
-import { TenantRequests } from "../../components/requests/TenantRequests";
 import { TenantTab } from "../../components/tab/TenantTab";
-import { TenantUsers } from "../../components/users/TenantUsers";
-import { logDebugMessage } from "../../logger";
 import { usePluginContext } from "../../plugin";
 
 import style from "./styles.module.scss";
+import { TenantUsersCombined } from "./tenant-users-combined";
 
 const cx = classNames.bind(style);
 
@@ -37,48 +34,6 @@ export const TenantManagementWithoutToastWrapper = ({ section }: { section: any 
     };
     loadTenants();
   }, [fetchTenants]);
-
-  // Users tab functions
-  const onFetchUsers = useCallback(async () => {
-    const response = await getUsers();
-    if (response.status === "ERROR") {
-      throw new Error(response.message);
-    }
-    return { users: response.users };
-  }, [getUsers]);
-
-  const onRoleChange = useCallback(
-    async (userId: string, role: string) => {
-      const response = await changeRole(userId, role);
-      if (response.status === "ERROR") {
-        logDebugMessage(`Got error while changing role: ${response.message}`);
-        return false;
-      }
-      return true;
-    },
-    [changeRole],
-  );
-
-  const onUserRemove = useCallback(
-    async (userId: string): Promise<boolean> => {
-      const response = await removeUserFromTenant(userId);
-      if (response.status === "ERROR") {
-        logDebugMessage(`Got error while removing user: ${response.message}`);
-        return false;
-      }
-      return true;
-    },
-    [removeUserFromTenant],
-  );
-
-  // Invitations tab functions
-  const onFetchInvitations = useCallback(async () => {
-    const response = await getInvitations();
-    if (response.status === "ERROR") {
-      throw new Error(response.message);
-    }
-    return { invitations: response.invitees };
-  }, [getInvitations]);
 
   const handleTenantSwitch = useCallback(
     async (tenantId: string) => {
@@ -120,24 +75,9 @@ export const TenantManagementWithoutToastWrapper = ({ section }: { section: any 
 
       {/* Tab Navigation */}
       <div>
-        <TabGroup>
-          <Tab panel="users">{t("PL_TB_USERS_TAB_LABEL")}</Tab>
-          <Tab panel="invitations">{t("PL_TB_INVITATIONS_TAB_LABEL")}</Tab>
-          <Tab panel="requests">{t("PL_TB_REQUESTS_TAB_LABEL")}</Tab>
-
-          {/* Tab Content */}
-          <TabPanel name="users">
-            <TenantTab description="List of users that are part of your tenant">
-              <TenantUsers onFetch={onFetchUsers} onRoleChange={onRoleChange} onUserRemove={onUserRemove} />
-            </TenantTab>
-          </TabPanel>
-          <TabPanel name="invitations">
-            <Invitations onFetch={onFetchInvitations} selectedTenantId={selectedTenantId} />
-          </TabPanel>
-          <TabPanel name="requests">
-            <TenantRequests />
-          </TabPanel>
-        </TabGroup>
+        <TenantTab description={t("PL_TB_TENANT_USERS_COMBINED_DESCRIPTION")}>
+          <TenantUsersCombined tenantId={selectedTenantId} />
+        </TenantTab>
       </div>
     </div>
   );

@@ -4,8 +4,8 @@
   gap: 18px;
 
   .userAvatar {
-    background-color: #3e63dd;
-    color: #fff;
+    background-color: var(--user-avatar-bg);
+    color: var(--user-avatar-fg);
     text-transform: uppercase;
     border-radius: 4px;
     width: 24px;

@@ -1,10 +1,5 @@
 .tabDescription {
-  background-color: #f9f9f8;
-  border-bottom: 1px solid var(--neutral-color-neutral-6);
-  padding: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  background-color: #ffffff;
 
   .tabDescriptionText {
     font-weight: 500;
@@ -12,13 +7,24 @@
     font-size: 14px;
     line-height: 20px;
     letter-spacing: 0px;
-    color: #60646c;
+    color: var(--neutral-color-neutral-11);
   }
 }
 
 .tabChildrenWrapper {
-  padding: 20px;
   background-color: #ffffff;
   border-bottom-left-radius: 16px;
   border-bottom-right-radius: 16px;
+}
+
+.tenantTabCard {
+  border: 1px solid var(--neutral-color-neutral-6);
+}
+
+.tenantTabCard::part(body) {
+  padding: 20px;
+}
+
+.tenantTabCard::part(header) {
+  padding: 20px;
 }
