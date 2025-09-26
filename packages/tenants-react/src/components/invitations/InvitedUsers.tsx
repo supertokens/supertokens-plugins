@@ -30,20 +30,13 @@ export const InvitedUsers: React.FC<InvitedUsersProps> = ({ onRemove, invitation
     );
   };
 
-  return (
-    <div>
-      {invitations.length > 0 ? (
-        <div>
-          <TenantUsersTable
-            columns={invitations.map((user) => ({
-              emailComponent: <UserDetails email={user.email} />,
-              extraComponent: getExtraComponent(user),
-            }))}
-          />
-        </div>
-      ) : (
-        <NoUsers text={t("PL_TB_NO_INVITATIONS_FOUND_TEXT")} />
-      )}
-    </div>
-  );
+  return invitations.length > 0 ? (
+    <TenantUsersTable
+      emailComponentTitle={`Pending Invites (${invitations.length})`}
+      columns={invitations.map((user) => ({
+        emailComponent: <UserDetails email={user.email} avatarVariant="invite" />,
+        extraComponent: getExtraComponent(user),
+      }))}
+    />
+  ) : null;
 };

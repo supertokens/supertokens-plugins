@@ -29,19 +29,24 @@
 
   h3 {
     margin-bottom: 12px;
-    font-size: 24px;
+    font-size: 20px;
     font-weight: 600;
+    color: var(--neutral-color-neutral-12);
   }
 
   p {
     margin-bottom: 16px;
-    color: #666;
+    color: var(--neutral-color-neutral-11);
   }
 }
 
 .tenantSwitcherWrapper wa-select::part(form-control) {
   display: flex;
   align-items: center;
+}
+
+.tenantSwitcherWrapper wa-select::part(form-control-label) {
+  margin-right: 14px;
 }
 
 .tabNavigation {
@@ -77,4 +82,17 @@
 .tabContent {
   flex: 1;
   min-height: 400px;
+}
+
+.tenantUsersCombinedContainer {
+  :global(.tableContainer:not(:last-child)) {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    border-bottom: none;
+  }
+
+  :global(.tableContainer:not(:first-child)) {
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+  }
 }

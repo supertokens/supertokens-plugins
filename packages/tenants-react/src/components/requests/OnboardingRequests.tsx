@@ -73,18 +73,13 @@ export const OnboardingRequests = () => {
     return <div>{t("PL_TB_TENANTS_LOADING_MESSAGE")}</div>;
   }
 
-  return (
-    <div>
-      {requests.length > 0 ? (
-        <TenantUsersTable
-          columns={requests.map((user) => ({
-            emailComponent: <UserDetails email={user.emails[0]!} />,
-            extraComponent: getExtraComponent(user),
-          }))}
-        />
-      ) : (
-        <NoUsers text="No joining requests available for tenant" />
-      )}
-    </div>
-  );
+  return requests.length > 0 ? (
+    <TenantUsersTable
+      emailComponentTitle={`Tenant Onboarding Requests (${requests.length})`}
+      columns={requests.map((user) => ({
+        emailComponent: <UserDetails email={user.emails[0]!} avatarVariant="request" />,
+        extraComponent: getExtraComponent(user),
+      }))}
+    />
+  ) : null;
 };

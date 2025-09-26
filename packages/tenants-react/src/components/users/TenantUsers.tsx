@@ -130,21 +130,13 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch, onRoleChange,
     return <div>{t("PL_TB_TENANTS_LOADING_MESSAGE")}</div>;
   }
 
-  return (
-    <div>
-      {users.length > 0 ? (
-        <div>
-          <TenantUsersTable
-            extraComponentTitle="Role"
-            columns={users.map((user) => ({
-              emailComponent: <UserDetails email={user.emails[0]!} />,
-              extraComponent: getExtraComponent(user),
-            }))}
-          />
-        </div>
-      ) : (
-        <NoUsers text={t("PL_TB_NO_USERS_FOUND_TEXT")} />
-      )}
-    </div>
-  );
+  return users.length > 0 ? (
+    <TenantUsersTable
+      emailComponentTitle={`Users (${users.length})`}
+      columns={users.map((user) => ({
+        emailComponent: <UserDetails email={user.emails[0]!} />,
+        extraComponent: getExtraComponent(user),
+      }))}
+    />
+  ) : null;
 };
