@@ -41,6 +41,7 @@
     "@shared/js": "*",
     "@shared/nodejs": "*",
     "@shared/react": "*",
-    "tsup": "^8.5.0"
+    "tsup": "^8.5.0",
+    "@supertokens-plugins/tenants-nodejs": "*"
   }
 }
