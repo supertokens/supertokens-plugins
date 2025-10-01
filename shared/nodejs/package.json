@@ -11,5 +11,8 @@
   "devDependencies": {
     "@shared/eslint": "*",
     "@shared/tsconfig": "*"
+  },
+  "dependencies": {
+    "util": "^0.12.5"
   }
 }
