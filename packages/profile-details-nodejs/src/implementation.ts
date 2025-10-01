@@ -81,7 +81,7 @@ export class Implementation {
     );
   };
 
-  getThirdPartyFieldValue = function (
+  getFieldValueFromThirdPartyUserInfo = function (
     this: Implementation,
     providerId: string,
     field: BaseFormField & { sectionId: string },

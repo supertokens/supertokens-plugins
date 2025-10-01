@@ -3,6 +3,7 @@ import type { BaseFormField, BaseFormSection, BaseProfile } from "@supertokens-p
 export type SuperTokensPluginProfileDetailsConfig =
   | {
       sections?: BaseFormSection[];
+      registerSectionsForProgressiveProfiling?: boolean;
     }
   | undefined;
 
@@ -12,11 +13,12 @@ export type SuperTokensPluginProfileDetailsImplementation = {
 
 export type SuperTokensPluginProfileDetailsNormalisedConfig = {
   sections: BaseFormSection[];
+  registerSectionsForProgressiveProfiling: boolean;
 };
 
 export type ThirdPartyFieldMap = (
   providerId: string,
   field: BaseFormField & { sectionId: string },
   rawUserInfoFromProvider: any,
-  profile: BaseProfile,
+  profile: BaseProfile
 ) => BaseProfile[string];

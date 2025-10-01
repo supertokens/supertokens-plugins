@@ -8,3 +8,5 @@ export const METADATA_KEY = `${PLUGIN_ID}`;
 export const METADATA_PROFILE_KEY = "st-profile"; // don't use plugin id, because we need to be able to have the same key in the profile plugin as well
 
 export const SUPERTOKENS_PLUGIN_PROGRESSIVE_PROFILING_ID = "supertokens-plugin-progressive-profiling";
+
+export const DEFAULT_REGISTER_SECTIONS_FOR_PROGRESSIVE_PROFILING = true;

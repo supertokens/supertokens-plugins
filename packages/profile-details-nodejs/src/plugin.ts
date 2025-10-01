@@ -6,6 +6,7 @@ import {
   PLUGIN_SDK_VERSION,
   HANDLE_BASE_PATH,
   SUPERTOKENS_PLUGIN_PROGRESSIVE_PROFILING_ID,
+  DEFAULT_REGISTER_SECTIONS_FOR_PROGRESSIVE_PROFILING,
 } from "./constants";
 import { getUser } from "supertokens-node";
 import { withRequestHandler } from "@shared/nodejs";
@@ -65,7 +66,7 @@ export const init = createPluginInitFunction<
                       .reduce((acc, field) => {
                         if (profile[field.id]) return acc;
 
-                        const value = implementation.getThirdPartyFieldValue(
+                        const value = implementation.getFieldValueFromThirdPartyUserInfo(
                           providerId,
                           field,
                           providerUserInfo,
@@ -104,13 +105,11 @@ export const init = createPluginInitFunction<
           enableDebugLogs();
         }
 
-        const progressiveProfilingPlugin = plugins.find(
+        const progressiveProfilingRegisterSections = plugins.find(
           (plugin: any) => plugin.id === SUPERTOKENS_PLUGIN_PROGRESSIVE_PROFILING_ID
-        );
-        if (progressiveProfilingPlugin?.exports?.registerSections) {
+        )?.exports?.registerSections;
+        if (pluginConfig.registerSectionsForProgressiveProfiling && progressiveProfilingRegisterSections) {
           logDebugMessage("Progressive profiling plugin found. Adding common details profile plugin.");
-
-          const progressiveProfilingRegisterSections = progressiveProfilingPlugin.exports.registerSections;
 
           progressiveProfilingRegisterSections({
             registratorId: PLUGIN_ID,
@@ -231,5 +230,7 @@ export const init = createPluginInitFunction<
   (config) => Implementation.init(config),
   (config) => ({
     sections: config?.sections ?? BASE_FORM_SECTIONS,
+    registerSectionsForProgressiveProfiling:
+      config?.registerSectionsForProgressiveProfiling ?? DEFAULT_REGISTER_SECTIONS_FOR_PROGRESSIVE_PROFILING,
   })
 );
