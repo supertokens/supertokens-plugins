@@ -42,7 +42,7 @@ export const init = createPluginInitFunction<
 
                     const providerId = signUpResult.user.loginMethods.find(
                       (method) =>
-                        method.recipeUserId.getAsString() === signUpResult.session.getRecipeUserId().getAsString()
+                        method.recipeUserId.getAsString() === signUpResult.session.getRecipeUserId().getAsString(),
                     )?.thirdParty?.id;
 
                     if (!providerId) {
@@ -52,14 +52,10 @@ export const init = createPluginInitFunction<
                     const profile = await implementation.getProfile(
                       signUpResult.user.id,
                       signUpResult.session,
-                      input.userContext
+                      input.userContext,
                     );
 
-                    const userInfo = await input.provider.getUserInfo({
-                      oAuthTokens: signUpResult.oAuthTokens,
-                      userContext: input.userContext,
-                    });
-                    const providerUserInfo = userInfo?.rawUserInfoFromProvider?.fromUserInfoAPI;
+                    const providerUserInfo = signUpResult.rawUserInfoFromProvider?.fromUserInfoAPI ?? {};
 
                     const updatedFields = implementation
                       .getPluginFormFields(signUpResult.session, input.userContext)
@@ -70,7 +66,7 @@ export const init = createPluginInitFunction<
                           providerId,
                           field,
                           providerUserInfo,
-                          profile
+                          profile,
                         );
                         if (typeof value === "undefined") return acc;
 
@@ -89,7 +85,7 @@ export const init = createPluginInitFunction<
                         signUpResult.user.id,
                         updatedFields,
                         signUpResult.session,
-                        input.userContext
+                        input.userContext,
                       );
                     }
 
@@ -106,7 +102,7 @@ export const init = createPluginInitFunction<
         }
 
         const progressiveProfilingRegisterSections = plugins.find(
-          (plugin: any) => plugin.id === SUPERTOKENS_PLUGIN_PROGRESSIVE_PROFILING_ID
+          (plugin: any) => plugin.id === SUPERTOKENS_PLUGIN_PROGRESSIVE_PROFILING_ID,
         )?.exports?.registerSections;
         if (pluginConfig.registerSectionsForProgressiveProfiling && progressiveProfilingRegisterSections) {
           logDebugMessage("Progressive profiling plugin found. Adding common details profile plugin.");
@@ -131,7 +127,7 @@ export const init = createPluginInitFunction<
             set: async (
               formData: BaseFormFieldPayload[],
               session: SessionContainerInterface,
-              userContext?: Record<string, any>
+              userContext?: Record<string, any>,
             ) => {
               if (!session) {
                 throw new Error("Session not found");
@@ -232,5 +228,5 @@ export const init = createPluginInitFunction<
     sections: config?.sections ?? BASE_FORM_SECTIONS,
     registerSectionsForProgressiveProfiling:
       config?.registerSectionsForProgressiveProfiling ?? DEFAULT_REGISTER_SECTIONS_FOR_PROGRESSIVE_PROFILING,
-  })
+  }),
 );
