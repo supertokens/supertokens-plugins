@@ -1,6 +1,6 @@
 import { usePrettyAction, Button } from "@shared/ui";
 import classNames from "classnames/bind";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { User } from "supertokens-web-js/types";
 
 import { usePluginContext } from "../../plugin";
@@ -65,10 +65,10 @@ export const AccountDetailsSection = ({
               </span>
             )}
             {accountDetails.emails.map((email, index) => (
-              <>
+              <Fragment key={index}>
                 {email}
                 {index < accountDetails.emails.length - 1 && <br />}
-              </>
+              </Fragment>
             ))}
           </span>
         </div>
@@ -84,10 +84,10 @@ export const AccountDetailsSection = ({
               </span>
             )}
             {accountDetails.phoneNumbers.map((phoneNumber, index) => (
-              <>
+              <Fragment key={index}>
                 {phoneNumber}
                 {index < accountDetails.phoneNumbers.length - 1 && <br />}
-              </>
+              </Fragment>
             ))}
           </span>
         </div>

@@ -1,5 +1,4 @@
 import { ToastContainer, ToastProvider } from "@shared/ui";
-import { BaseFormSection } from "@supertokens-plugins/profile-details-shared";
 import { useCallback } from "react";
 
 import { AccountDetailsSection } from "./components";
