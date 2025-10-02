@@ -3,7 +3,7 @@ import { logDebugMessage } from "./logger";
 import { FormField, FormFieldValue, ProfileFormData } from "@supertokens-plugins/progressive-profiling-shared";
 import { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import { BooleanClaim } from "supertokens-node/recipe/session/claims";
-import { PLUGIN_ID, METADATA_KEY, METADATA_PROFILE_KEY } from "./constants";
+import { METADATA_KEY, METADATA_PROFILE_KEY } from "./constants";
 import { pluginUserMetadata } from "@shared/nodejs";
 import { groupBy, indexBy, mapBy } from "@shared/js";
 
@@ -39,7 +39,7 @@ export class Implementation {
 
   constructor() {
     Implementation.ProgressiveProfilingCompletedClaim = new BooleanClaim({
-      key: `${PLUGIN_ID}-completed`,
+      key: "stpl-pp-completed",
       fetchValue: async (userId, recipeUserId, tenantId, payload, userContext) => {
         // the plugin caches the completion status of each section
         // this is done because of multiple reasons:
@@ -66,7 +66,7 @@ export class Implementation {
       pluginFormFields: (Pick<FormField, "id" | "defaultValue"> & { sectionId: string })[];
       session: SessionContainerInterface;
       userContext?: Record<string, any>;
-    }
+    },
   ): Promise<ProfileFormData> {
     const metadata = pluginUserMetadata<{ profile: Record<string, FormFieldValue> }>(METADATA_PROFILE_KEY);
 
@@ -94,7 +94,7 @@ export class Implementation {
       data: ProfileFormData;
       session: SessionContainerInterface;
       userContext?: Record<string, any>;
-    }
+    },
   ): Promise<void> {
     const metadata = pluginUserMetadata<{ profile: Record<string, FormFieldValue> }>(METADATA_PROFILE_KEY);
 
@@ -111,7 +111,7 @@ export class Implementation {
           [field.id]: newValue ?? existingValue ?? field.defaultValue,
         };
       },
-      { ...existingProfile }
+      { ...existingProfile },
     );
 
     await metadata.set(
@@ -122,7 +122,7 @@ export class Implementation {
           ...profile,
         },
       },
-      userContext
+      userContext,
     );
   };
 
@@ -132,7 +132,7 @@ export class Implementation {
         const existingSection = this.existingSections.find((s) => s.id === section.id);
         if (existingSection) {
           logDebugMessage(
-            `Profile plugin section with id "${section.id}" already registered by "${existingSection.storageHandlerId}". Skipping...`
+            `Profile plugin section with id "${section.id}" already registered by "${existingSection.storageHandlerId}". Skipping...`,
           );
           return false;
         }
@@ -156,14 +156,14 @@ export class Implementation {
   getAllSections = function (
     this: Implementation,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    input: { session: SessionContainerInterface; userContext?: Record<string, any> }
+    input: { session: SessionContainerInterface; userContext?: Record<string, any> },
   ) {
     return this.existingSections;
   };
 
   getSessionUserSections = async function (
     this: Implementation,
-    { session, userContext }: { session: SessionContainerInterface; userContext?: Record<string, any> }
+    { session, userContext }: { session: SessionContainerInterface; userContext?: Record<string, any> },
   ) {
     const userMetadata = await this.metadata.get(session.getUserId(userContext), userContext);
 
@@ -196,7 +196,7 @@ export class Implementation {
       data,
       session,
       userContext,
-    }: { session: SessionContainerInterface; data: ProfileFormData; userContext?: Record<string, any> }
+    }: { session: SessionContainerInterface; data: ProfileFormData; userContext?: Record<string, any> },
   ) {
     const userId = session.getUserId(userContext);
 
@@ -207,31 +207,34 @@ export class Implementation {
     const dataByStorageHandlerId = groupBy(data, (row) => sectionIdToStorageHandlerIdMap[row.sectionId]);
 
     // validate the data
-    const validationErrors = data.reduce((acc, row) => {
-      const field = sectionsById[row.sectionId]?.fields.find((f) => f.id === row.fieldId);
-      if (!field) {
-        return [
-          ...acc,
-          {
-            id: row.fieldId,
-            error: `Field with id "${row.fieldId}" not found`,
-          },
-        ];
-      }
+    const validationErrors = data.reduce(
+      (acc, row) => {
+        const field = sectionsById[row.sectionId]?.fields.find((f) => f.id === row.fieldId);
+        if (!field) {
+          return [
+            ...acc,
+            {
+              id: row.fieldId,
+              error: `Field with id "${row.fieldId}" not found`,
+            },
+          ];
+        }
 
-      const fieldError = this.validateField({
-        field,
-        value: row.value,
-        session,
-        userContext,
-      });
-      if (fieldError) {
-        const fieldErrors = Array.isArray(fieldError) ? fieldError : [fieldError];
-        return [...acc, ...fieldErrors.map((error) => ({ id: field.id, error }))];
-      }
+        const fieldError = this.validateField({
+          field,
+          value: row.value,
+          session,
+          userContext,
+        });
+        if (fieldError) {
+          const fieldErrors = Array.isArray(fieldError) ? fieldError : [fieldError];
+          return [...acc, ...fieldErrors.map((error) => ({ id: field.id, error }))];
+        }
 
-      return acc;
-    }, [] as { id: string; error: string }[]);
+        return acc;
+      },
+      [] as { id: string; error: string }[],
+    );
 
     logDebugMessage(`Validated data. ${validationErrors.length} errors found.`);
 
@@ -292,7 +295,7 @@ export class Implementation {
 
   getSectionValues = async function (
     this: Implementation,
-    { session, userContext }: { session: SessionContainerInterface; userContext?: Record<string, any> }
+    { session, userContext }: { session: SessionContainerInterface; userContext?: Record<string, any> },
   ) {
     const sections = this.getAllSections({ session, userContext });
     const sectionsByStorageHandlerId = indexBy(sections, "storageHandlerId");
@@ -321,7 +324,7 @@ export class Implementation {
       value: FormFieldValue;
       session: SessionContainerInterface;
       userContext?: Record<string, any>;
-    }
+    },
   ): string | string[] | undefined {
     if (field.required && (value === undefined || (typeof value === "string" && value.trim() === ""))) {
       return `The "${field.label}" field is required`;
@@ -341,7 +344,7 @@ export class Implementation {
       data: ProfileFormData;
       session: SessionContainerInterface;
       userContext?: Record<string, any>;
-    }
+    },
   ) {
     const valuesByFieldId = mapBy(data, "fieldId", (row) => row.value);
     return section.fields.every(
@@ -350,17 +353,17 @@ export class Implementation {
           field,
           value: valuesByFieldId[field.id],
           ...rest,
-        }) === undefined
+        }) === undefined,
     );
   };
 
   areAllSectionsCompleted = async function (
     this: Implementation,
-    { userId, userContext }: { userId: string; recipeUserId: string; tenantId: string; userContext: any }
+    { userId, userContext }: { userId: string; recipeUserId: string; tenantId: string; userContext: any },
   ) {
     const userMetadata = await this.metadata.get(userId, userContext);
     return this.existingSections.every(
-      (section) => userMetadata?.profileConfig?.sectionsCompleted?.[section.id] ?? false
+      (section) => userMetadata?.profileConfig?.sectionsCompleted?.[section.id] ?? false,
     );
   };
 
@@ -375,7 +378,7 @@ export class Implementation {
       userId: string;
       session: SessionContainerInterface;
       userContext: any;
-    }
+    },
   ) {
     const userMetadata = await this.metadata.get(userId, userContext);
     const newUserMetadata = {
