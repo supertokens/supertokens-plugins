@@ -126,7 +126,7 @@ describe("progressive-profiling-nodejs", () => {
 
       // @ts-ignore
       expect(claims.invalidClaims).toContainEqual({
-        id: "supertokens-plugin-progressive-profiling-completed",
+        id: "stpl-pp-completed",
         reason: {
           actualValue: false,
           expectedValue: true,
@@ -150,7 +150,7 @@ describe("progressive-profiling-nodejs", () => {
 
       // @ts-expect-error we'd need to do an if check on the status because of the discriminated union type
       expect(claims.invalidClaims).toContainEqual({
-        id: "supertokens-plugin-progressive-profiling-completed",
+        id: "stpl-pp-completed",
         reason: {
           actualValue: false,
           expectedValue: true,
