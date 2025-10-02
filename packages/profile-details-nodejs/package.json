@@ -20,7 +20,6 @@
     "supertokens"
   ],
   "dependencies": {
-    "@supertokens-plugins/profile-details-shared": "*"
   },
   "peerDependencies": {
     "supertokens-node": ">=23.0.0"
@@ -29,6 +28,7 @@
     "@shared/eslint": "*",
     "@shared/tsconfig": "*",
     "@shared/nodejs": "*",
+    "@supertokens-plugins/profile-details-shared": "*",
     "express": "^5.1.0",
     "prettier": "2.0.5",
     "pretty-quick": "^3.1.1",

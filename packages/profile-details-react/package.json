@@ -19,7 +19,6 @@
     "supertokens"
   ],
   "dependencies": {
-    "@supertokens-plugins/profile-details-shared": "*",
     "supertokens-js-override": "^0.0.4"
   },
   "peerDependencies": {
@@ -35,6 +34,7 @@
     "@shared/eslint": "*",
     "@shared/tsconfig": "*",
     "@types/react": "^17.0.20",
+    "@supertokens-plugins/profile-details-shared": "*",
     "prettier": "3.5.3",
     "pretty-quick": "^4.2.2",
     "typescript": "^5.8.3",
