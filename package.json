@@ -43,6 +43,7 @@
     "@shared/react": "*",
     "@shared/ui": "*",
     "@supertokens-plugins/profile-details-shared": "*",
+    "@supertokens-plugins/profile-base-react": "*",
     "tsup": "^8.5.0"
   }
 }

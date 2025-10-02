@@ -28,7 +28,8 @@
   "peerDependencies": {
     "react": ">=18.3.1",
     "react-dom": ">=18.3.1",
-    "supertokens-auth-react": ">=0.50.0"
+    "supertokens-auth-react": ">=0.50.0",
+    "@supertokens-plugins/profile-base-react": ">=0.0.1"
   },
   "devDependencies": {
     "@shared/eslint": "*",
@@ -42,6 +43,7 @@
   "browser": {
     "fs": false
   },
-  "module": "./dist/index.js",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts"
 }

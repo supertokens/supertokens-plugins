@@ -4,6 +4,7 @@ import { BaseFormField } from "@supertokens-plugins/profile-details-shared";
 import { defaultTranslationsCommonDetails } from "./translations";
 
 export type SuperTokensPluginProfileDetailsConfig = undefined;
+export type SuperTokensPluginProfileDetailsNormalisedConfig = undefined;
 
 export type SuperTokensPluginProfileDetailsImplementation = {
   fieldInputComponentMap: (componentMap: FormInputComponentMap) => FormInputComponentMap;

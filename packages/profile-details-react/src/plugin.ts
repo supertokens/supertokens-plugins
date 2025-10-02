@@ -1,5 +1,6 @@
 import { createPluginInitFunction } from "@shared/js";
 import { buildContext, getQuerier } from "@shared/react";
+import SuperTokensPluginProfileBase from "@supertokens-plugins/profile-base-react";
 import {
   getTranslationFunction,
   SuperTokensPlugin,
@@ -19,6 +20,7 @@ import {
   FormInputComponentMap,
   TranslationKeys,
   FormViewComponentMap,
+  SuperTokensPluginProfileDetailsNormalisedConfig,
 } from "./types";
 
 const { usePluginContext, setContext } = buildContext<{
@@ -37,7 +39,8 @@ export { usePluginContext };
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
   SuperTokensPluginProfileDetailsConfig,
-  SuperTokensPluginProfileDetailsImplementation
+  SuperTokensPluginProfileDetailsImplementation,
+  SuperTokensPluginProfileDetailsNormalisedConfig
 >(
   (pluginConfig, implementation) => {
     const fieldInputComponentMap = implementation.fieldInputComponentMap(FIELD_INPUT_COMPONENT_MAP);
@@ -46,6 +49,20 @@ export const init = createPluginInitFunction<
     return {
       id: PLUGIN_ID,
       overrideMap: {},
+      dependencies: (config, pluginsAbove) => {
+        const baseProfilePlugin: SuperTokensPlugin | undefined = pluginsAbove.find(
+          (plugin: any) => plugin.id === "supertokens-plugin-profile-base",
+        );
+        if (baseProfilePlugin) {
+          logDebugMessage("Base profile plugin not found. Registering it.");
+          return { status: "OK", pluginsToAdd: [] };
+        }
+
+        return {
+          status: "OK",
+          pluginsToAdd: [SuperTokensPluginProfileBase.init()],
+        };
+      },
       // even though this is async, it will not be awaited by the sdk
       init: async (appConfig, plugins, sdkVersion) => {
         if (appConfig.enableDebugLogs) {
@@ -56,7 +73,9 @@ export const init = createPluginInitFunction<
           (plugin: any) => plugin.id === "supertokens-plugin-profile-base",
         );
         if (!baseProfilePlugin) {
-          logDebugMessage("Base profile plugin not found. Not adding common details profile plugin.");
+          logDebugMessage(
+            "Should not happen: Base profile plugin not found. Not adding common details profile plugin.",
+          );
           return;
         }
 
