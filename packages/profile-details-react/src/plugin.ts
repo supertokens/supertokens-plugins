@@ -53,11 +53,12 @@ export const init = createPluginInitFunction<
         const baseProfilePlugin: SuperTokensPlugin | undefined = pluginsAbove.find(
           (plugin: any) => plugin.id === "supertokens-plugin-profile-base",
         );
+
         if (baseProfilePlugin) {
-          logDebugMessage("Base profile plugin not found. Registering it.");
           return { status: "OK", pluginsToAdd: [] };
         }
 
+        logDebugMessage("Base profile plugin not found. Registering it.");
         return {
           status: "OK",
           pluginsToAdd: [SuperTokensPluginProfileBase.init()],
