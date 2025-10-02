@@ -44,7 +44,7 @@ export const init = createPluginInitFunction<
     const componentMap = implementation.componentMap();
 
     const ProgressiveProfilingCompletedClaim = new BooleanClaim({
-      id: "stpl-pp-completed",
+      id: "stpl-pp-c",
       refresh: async () => {},
       onFailureRedirection: async () => {
         return pluginConfig.setupPagePath;

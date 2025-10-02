@@ -39,7 +39,7 @@ export class Implementation {
 
   constructor() {
     Implementation.ProgressiveProfilingCompletedClaim = new BooleanClaim({
-      key: "stpl-pp-completed",
+      key: "stpl-pp-c",
       fetchValue: async (userId, recipeUserId, tenantId, payload, userContext) => {
         // the plugin caches the completion status of each section
         // this is done because of multiple reasons:

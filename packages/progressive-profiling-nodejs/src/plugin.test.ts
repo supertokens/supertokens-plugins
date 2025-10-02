@@ -63,7 +63,7 @@ describe("progressive-profiling-nodejs", () => {
 
       const session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       const response = await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/sections`, {
@@ -93,7 +93,7 @@ describe("progressive-profiling-nodejs", () => {
 
       const session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       const response = await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/sections`, {
@@ -118,7 +118,7 @@ describe("progressive-profiling-nodejs", () => {
 
       const session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       const claims = await Session.validateClaimsForSessionHandle(session.getHandle());
@@ -126,7 +126,7 @@ describe("progressive-profiling-nodejs", () => {
 
       // @ts-ignore
       expect(claims.invalidClaims).toContainEqual({
-        id: "stpl-pp-completed",
+        id: "stpl-pp-c",
         reason: {
           actualValue: false,
           expectedValue: true,
@@ -142,7 +142,7 @@ describe("progressive-profiling-nodejs", () => {
 
       const session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       const claims = await Session.validateClaimsForSessionHandle(session.getHandle());
@@ -150,7 +150,7 @@ describe("progressive-profiling-nodejs", () => {
 
       // @ts-expect-error we'd need to do an if check on the status because of the discriminated union type
       expect(claims.invalidClaims).toContainEqual({
-        id: "stpl-pp-completed",
+        id: "stpl-pp-c",
         reason: {
           actualValue: false,
           expectedValue: true,
@@ -170,7 +170,7 @@ describe("progressive-profiling-nodejs", () => {
                 sectionId: section.id,
                 fieldId: field.id,
                 value: "value",
-              }))
+              })),
             )
             .flat(),
         }),
@@ -190,7 +190,7 @@ describe("progressive-profiling-nodejs", () => {
 
       const session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       const response = await fetch(`http://localhost:${testPORT}/check-session`, {
@@ -212,7 +212,7 @@ describe("progressive-profiling-nodejs", () => {
 
       let session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
@@ -227,7 +227,7 @@ describe("progressive-profiling-nodejs", () => {
                 sectionId: section.id,
                 fieldId: field.id,
                 value: "value",
-              }))
+              })),
             )
             .flat(),
         }),
@@ -235,7 +235,7 @@ describe("progressive-profiling-nodejs", () => {
 
       session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       const response = await fetch(`http://localhost:${testPORT}/check-session`, {
@@ -254,7 +254,7 @@ describe("progressive-profiling-nodejs", () => {
 
       let session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
@@ -269,7 +269,7 @@ describe("progressive-profiling-nodejs", () => {
                 sectionId: section.id,
                 fieldId: field.id,
                 value: "value",
-              }))
+              })),
             )
             .flat(),
         }),
@@ -280,9 +280,9 @@ describe("progressive-profiling-nodejs", () => {
       expect(sectionValues.data).toEqual(
         testSections
           .map((section) =>
-            section.fields.map((field) => ({ fieldId: field.id, sectionId: section.id, value: "value" }))
+            section.fields.map((field) => ({ fieldId: field.id, sectionId: section.id, value: "value" })),
           )
-          .flat()
+          .flat(),
       );
     });
 
@@ -297,7 +297,7 @@ describe("progressive-profiling-nodejs", () => {
 
       let session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
@@ -312,7 +312,7 @@ describe("progressive-profiling-nodejs", () => {
                 sectionId: section.id,
                 fieldId: field.id,
                 value: "value",
-              }))
+              })),
             )
             .flat(),
         }),
@@ -323,9 +323,9 @@ describe("progressive-profiling-nodejs", () => {
       expect(sectionValues.data).toEqual(
         testSections
           .map((section) =>
-            section.fields.map((field) => ({ fieldId: field.id, sectionId: section.id, value: field.defaultValue }))
+            section.fields.map((field) => ({ fieldId: field.id, sectionId: section.id, value: field.defaultValue })),
           )
-          .flat()
+          .flat(),
       );
     });
 
@@ -351,7 +351,7 @@ describe("progressive-profiling-nodejs", () => {
 
       const session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
@@ -366,7 +366,7 @@ describe("progressive-profiling-nodejs", () => {
                 sectionId: section.id,
                 fieldId: field.id,
                 value: "value",
-              }))
+              })),
             )
             .flat(),
         }),
@@ -377,7 +377,7 @@ describe("progressive-profiling-nodejs", () => {
       expect(sectionValues.data).toEqual([
         ...testSections
           .map((section) =>
-            section.fields.map((field) => ({ fieldId: field.id, sectionId: section.id, value: "value" }))
+            section.fields.map((field) => ({ fieldId: field.id, sectionId: section.id, value: "value" })),
           )
           .flat(),
         { fieldId: "test2", sectionId: "test" },
@@ -391,7 +391,7 @@ describe("progressive-profiling-nodejs", () => {
 
       const session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       await setSectionValues({
@@ -402,7 +402,7 @@ describe("progressive-profiling-nodejs", () => {
               sectionId: section.id,
               fieldId: field.id,
               value: "value",
-            }))
+            })),
           )
           .flat(),
       });
@@ -420,9 +420,9 @@ describe("progressive-profiling-nodejs", () => {
       expect(result.data).toEqual(
         testSections
           .map((section) =>
-            section.fields.map((field) => ({ fieldId: field.id, sectionId: section.id, value: "value" }))
+            section.fields.map((field) => ({ fieldId: field.id, sectionId: section.id, value: "value" })),
           )
-          .flat()
+          .flat(),
       );
     });
 
@@ -437,7 +437,7 @@ describe("progressive-profiling-nodejs", () => {
 
       const session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       await setSectionValues({
@@ -448,7 +448,7 @@ describe("progressive-profiling-nodejs", () => {
               sectionId: section.id,
               fieldId: field.id,
               value: "value",
-            }))
+            })),
           )
           .flat(),
       });
@@ -476,7 +476,7 @@ describe("progressive-profiling-nodejs", () => {
 
       const session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       const response = await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
@@ -491,7 +491,7 @@ describe("progressive-profiling-nodejs", () => {
                 sectionId: section.id,
                 fieldId: field.id,
                 value: undefined,
-              }))
+              })),
             )
             .flat(),
         }),
@@ -504,7 +504,7 @@ describe("progressive-profiling-nodejs", () => {
         status: "INVALID_FIELDS",
         errors: testSections
           .map((section) =>
-            section.fields.map((field) => ({ id: field.id, error: `The "${field.label}" field is required` }))
+            section.fields.map((field) => ({ id: field.id, error: `The "${field.label}" field is required` })),
           )
           .flat(),
       });
@@ -523,7 +523,7 @@ describe("progressive-profiling-nodejs", () => {
 
       const session = await Session.createNewSessionWithoutRequestResponse(
         "public",
-        SuperTokens.convertToRecipeUserId(user.id)
+        SuperTokens.convertToRecipeUserId(user.id),
       );
 
       const response = await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
@@ -538,7 +538,7 @@ describe("progressive-profiling-nodejs", () => {
                 sectionId: section.id,
                 fieldId: field.id,
                 value: "value",
-              }))
+              })),
             )
             .flat(),
         }),
@@ -578,11 +578,11 @@ describe("progressive-profiling-nodejs", () => {
         });
         const session = await Session.createNewSessionWithoutRequestResponse(
           "public",
-          SuperTokens.convertToRecipeUserId(user.id)
+          SuperTokens.convertToRecipeUserId(user.id),
         );
         const sections = await getAllSections({ session });
         expect(sections).toEqual(
-          testSections.map((section) => ({ ...section, completed: undefined, storageHandlerId: "default" }))
+          testSections.map((section) => ({ ...section, completed: undefined, storageHandlerId: "default" })),
         );
       });
 
@@ -602,12 +602,12 @@ describe("progressive-profiling-nodejs", () => {
 
         const session = await Session.createNewSessionWithoutRequestResponse(
           "public",
-          SuperTokens.convertToRecipeUserId(user.id)
+          SuperTokens.convertToRecipeUserId(user.id),
         );
 
         const sections = getAllSections({ session });
         expect(sections).toEqual(
-          testSections.map((section) => ({ ...section, completed: undefined, storageHandlerId: "defaultOverride" }))
+          testSections.map((section) => ({ ...section, completed: undefined, storageHandlerId: "defaultOverride" })),
         );
       });
     });
