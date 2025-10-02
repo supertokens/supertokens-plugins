@@ -30,9 +30,12 @@ export const MultiSelectInput = (_props: MultiSelectInputProps) => {
     props: _props,
   });
 
+  const onInput = (e: any) => {
+    onChange(e.target.value);
+  };
   const computedProps = {
     ...(props.error ? { withHint: true } : {}),
-    onInput: onChange,
+    onInput,
   };
 
   if (!isDefined) return null;

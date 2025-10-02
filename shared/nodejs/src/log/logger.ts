@@ -3,10 +3,8 @@
  * Provides debug functionality with colors, namespaces, and environment controls
  */
 
-import * as tty from 'tty';
-import * as util from 'util';
-
-const setup = require('./common.js');
+import util from "util";
+import setup from "./common";
 
 interface LoggerConfig {
   colors: number[];
@@ -35,7 +33,7 @@ const EXTENDED_COLORS = [
 function supportsExtendedColors(): boolean {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const supportsColor = require('supports-color');
+    const supportsColor = require("supports-color");
     return supportsColor && (supportsColor.stderr || supportsColor).level >= 2;
   } catch {
     return false;
@@ -46,7 +44,7 @@ function supportsExtendedColors(): boolean {
  * Determine if colors should be used in output
  */
 function shouldUseColors(): boolean {
-  return tty.isatty(process.stderr.fd);
+  return false;
 }
 
 /**
@@ -59,7 +57,7 @@ function formatArgs(this: any, args: any[]): void {
     const colorCode = color < 8 ? `3${color}` : `38;5;${color}`;
     const prefix = `\u001B[${colorCode};1m${namespace}\u001B[0m`;
 
-    args[0] = `${prefix} ${args[0]}`.split('\n').join(`\n${prefix} `);
+    args[0] = `${prefix} ${args[0]}`.split("\n").join(`\n${prefix} `);
     args.push(`\u001B[${colorCode}m+${humanizeTime(this.diff)}\u001B[0m`);
   } else {
     const timestamp = new Date().toISOString();
@@ -71,7 +69,7 @@ function formatArgs(this: any, args: any[]): void {
  * Write formatted output to stderr
  */
 function writeOutput(...args: any[]): void {
-  process.stderr.write(util.format(...args) + '\n');
+  process.stderr.write(util.format(...args) + "\n");
 }
 
 /**
@@ -129,9 +127,9 @@ if (logger.formatters) {
   logger.formatters.o = function (this: any, value: any) {
     return util
       .inspect(value, { colors: this.useColors, compact: true })
-      .split('\n')
+      .split("\n")
       .map((line: string) => line.trim())
-      .join(' ');
+      .join(" ");
   };
 
   logger.formatters.O = function (this: any, value: any) {

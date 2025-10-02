@@ -1,7 +1,7 @@
 {
-  "extends": "@shared/tsconfig/react.json",
+  "extends": "@shared/tsconfig/base.json",
   "compilerOptions": {
-    "lib": ["ES2020", "dom"],
+    "lib": ["ES2020"],
     "outDir": "./dist",
     "declaration": true,
     "declarationDir": "./dist",

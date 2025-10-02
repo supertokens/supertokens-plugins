@@ -1,13 +1,12 @@
 {
-  "name": "@supertokens-plugins/profile-base-react",
-  "version": "0.0.1",
-  "private": true,
-  "description": "Profile Base Plugin for SuperTokens",
-  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/profile-base-react/README.md",
+  "name": "@supertokens-plugins/profile-details-react",
+  "version": "0.0.1-beta.1",
+  "description": "Profile Details Plugin for SuperTokens",
+  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/profile-details-react/README.md",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/supertokens/supertokens-plugins.git",
-    "directory": "packages/profile-base-react"
+    "directory": "packages/profile-details-react"
   },
   "scripts": {
     "build": "vite build && npm run pretty",
@@ -23,25 +22,28 @@
     "@shared/js": "*",
     "@shared/react": "*",
     "@shared/ui": "*",
+    "@supertokens-plugins/profile-details-shared": "*",
     "supertokens-js-override": "^0.0.4"
   },
   "peerDependencies": {
     "react": ">=18.3.1",
     "react-dom": ">=18.3.1",
-    "supertokens-auth-react": ">=0.50.0"
+    "supertokens-auth-react": ">=0.50.0",
+    "@supertokens-plugins/profile-base-react": ">=0.0.1"
   },
   "devDependencies": {
     "@shared/eslint": "*",
     "@shared/tsconfig": "*",
-    "@storybook/react": "^9.1.7",
     "@types/react": "^17.0.20",
     "prettier": "3.5.3",
     "pretty-quick": "^4.2.2",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vite-plugin-css-injected-by-js": "^3.5.2"
   },
   "browser": {
     "fs": false
   },
-  "module": "./dist/index.js",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts"
 }
