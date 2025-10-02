@@ -106,8 +106,6 @@ export class Implementation {
       );
     } else if (field.id === "avatar") {
       return rawUserInfoFromProvider?.user?.avatar_url ?? rawUserInfoFromProvider?.picture;
-    } else if (field.id === "facebookUrl") {
-      return rawUserInfoFromProvider?.user?.facebook_url ?? rawUserInfoFromProvider?.facebook;
     }
 
     return undefined;
