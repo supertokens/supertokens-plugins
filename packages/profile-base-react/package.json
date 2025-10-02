@@ -20,9 +20,6 @@
     "supertokens"
   ],
   "dependencies": {
-    "@shared/js": "*",
-    "@shared/react": "*",
-    "@shared/ui": "*",
     "supertokens-js-override": "^0.0.4"
   },
   "peerDependencies": {
@@ -31,6 +28,9 @@
     "supertokens-auth-react": ">=0.50.0"
   },
   "devDependencies": {
+    "@shared/js": "*",
+    "@shared/react": "*",
+    "@shared/ui": "*",
     "@shared/eslint": "*",
     "@shared/tsconfig": "*",
     "@storybook/react": "^9.1.7",

@@ -19,9 +19,6 @@
     "supertokens"
   ],
   "dependencies": {
-    "@shared/js": "*",
-    "@shared/react": "*",
-    "@shared/ui": "*",
     "@supertokens-plugins/profile-details-shared": "*",
     "supertokens-js-override": "^0.0.4"
   },
@@ -32,6 +29,9 @@
     "@supertokens-plugins/profile-base-react": ">=0.0.1"
   },
   "devDependencies": {
+    "@shared/js": "*",
+    "@shared/react": "*",
+    "@shared/ui": "*",
     "@shared/eslint": "*",
     "@shared/tsconfig": "*",
     "@types/react": "^17.0.20",
