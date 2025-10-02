@@ -1,12 +1,9 @@
-import { HttpRequest, SuperTokensPlugin, UserContext } from "supertokens-node/types";
+import { SuperTokensPlugin } from "supertokens-node/types";
 import { PLUGIN_ID, PLUGIN_SDK_VERSION, validatePluginConfig } from "./config";
 import { OpenTelemetryLoggerPluginConfig } from "./types";
 import { Tracer } from "@opentelemetry/api";
 import { createPluginInitFunction } from "@shared/js";
 import { PluginImpl } from "./pluginImpl";
-
-// import { diag, DiagConsoleLogger, DiagLogLevel } from '@opentelemetry/api';
-// diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.DEBUG);
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
@@ -243,7 +240,7 @@ export const init = createPluginInitFunction<
     };
   },
   (config) => new PluginImpl(config),
-  (config: OpenTelemetryLoggerPluginConfig | undefined) => config ?? {},
+  (config: OpenTelemetryLoggerPluginConfig | undefined) => config ?? {}
 );
 
 function overrideWithLogger<T extends Record<string, undefined |((...args: any[]) => any)>>(logConfig: {
@@ -278,7 +275,7 @@ function fnWithLoggerAsync<T extends(...args: any[]) => Promise<any>>(
     pluginConfig: OpenTelemetryLoggerPluginConfig;
     tracer: Tracer;
     pluginImpl: PluginImpl;
-  },
+  }
 ): T {
   return function (...args: Parameters<T>): Promise<ReturnType<T>> {
     return logConfig.pluginImpl.startActiveSpan(
@@ -300,14 +297,14 @@ function fnWithLoggerAsync<T extends(...args: any[]) => Promise<any>>(
           const resultAttributes = logConfig.pluginImpl.transformResultToAttributes(result);
           span.setAttributes(resultAttributes);
           return result;
-        } catch (error: any) {
+        } catch (error) {
           const errorAttributes = logConfig.pluginImpl.transformErrorToAttributes(error);
           span.setAttributes(errorAttributes);
           throw error;
         } finally {
           span.end();
         }
-      },
+      }
     );
   } as T;
 }
