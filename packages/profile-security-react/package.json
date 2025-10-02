@@ -1,0 +1,46 @@
+{
+  "name": "@supertokens-plugins/profile-security-react",
+  "version": "0.0.1-beta.1",
+  "description": "Profile Security Plugin for SuperTokens",
+  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/profile-security-react/README.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/supertokens/supertokens-plugins.git",
+    "directory": "packages/profile-security-react"
+  },
+  "scripts": {
+    "build": "vite build && npm run pretty",
+    "pretty": "npx pretty-quick .",
+    "pretty-check": "npx pretty-quick --check ."
+  },
+  "keywords": [
+    "base-profile",
+    "plugin",
+    "supertokens"
+  ],
+  "dependencies": {
+    "@shared/js": "*",
+    "@shared/react": "*",
+    "@shared/ui": "*",
+    "supertokens-js-override": "^0.0.4"
+  },
+  "peerDependencies": {
+    "react": ">=18.3.1",
+    "react-dom": ">=18.3.1",
+    "supertokens-auth-react": ">=0.50.0"
+  },
+  "devDependencies": {
+    "@shared/eslint": "*",
+    "@shared/tsconfig": "*",
+    "@types/react": "^17.0.20",
+    "prettier": "3.5.3",
+    "pretty-quick": "^4.2.2",
+    "typescript": "^5.8.3",
+    "vite-plugin-css-injected-by-js": "^3.5.2"
+  },
+  "browser": {
+    "fs": false
+  },
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts"
+}

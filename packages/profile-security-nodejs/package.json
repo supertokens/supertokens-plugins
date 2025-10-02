@@ -1,0 +1,42 @@
+{
+  "name": "@supertokens-plugins/profile-security-nodejs",
+  "version": "0.0.2-beta.2",
+  "description": "Profile Security Plugin for SuperTokens",
+  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/profile-security-nodejs/README.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/supertokens/supertokens-plugins.git",
+    "directory": "packages/profile-security-nodejs"
+  },
+  "scripts": {
+    "build": "vite build && npm run pretty",
+    "pretty": "npx pretty-quick .",
+    "pretty-check": "npx pretty-quick --check .",
+    "test": "TEST_MODE=testing vitest run --pool=forks"
+  },
+  "keywords": [
+    "progressive-profiling",
+    "plugin",
+    "supertokens"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "supertokens-node": ">=23.0.0"
+  },
+  "devDependencies": {
+    "@shared/eslint": "*",
+    "@shared/tsconfig": "*",
+    "@shared/nodejs": "*",
+    "express": "^5.1.0",
+    "prettier": "2.0.5",
+    "pretty-quick": "^3.1.1",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "browser": {
+    "fs": false
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts"
+}
