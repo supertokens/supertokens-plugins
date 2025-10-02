@@ -13,6 +13,11 @@ on:
         required: false
         default: false
         type: boolean
+      tag:
+        description: "NPM tag for release (e.g., beta, alpha, rc)"
+        required: false
+        default: "beta"
+        type: string
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
@@ -25,6 +30,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch }}
+
+      - name: Check for changes to release
+        id: check-changes
+        run: |
+          CHANGESET_COUNT=$(find .changeset -type f -name '*.md' ! -name 'README.md' | wc -l)
+          if [ "$CHANGESET_COUNT" -eq 0 ]; then
+            echo "No changesets found. Nothing to release."
+            echo "has-changes=false" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "Found $CHANGESET_COUNT changeset(s) to release."
+            echo "has-changes=true" >> $GITHUB_OUTPUT
+          fi
 
       - name: Create beta branch
         id: create-branch
@@ -43,8 +61,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Create beta version
-        run: npm run version:private
+      - name: Create snapshot version
+        run: npx changeset version --snapshot ${{ inputs.tag }}
 
       - name: Run tests
         if: ${{ inputs.skip_tests == false }}
@@ -53,12 +71,8 @@ jobs:
       - name: build
         run: npm run build
 
-      - name: Publish
-        uses: changesets/action@v1
-        with:
-          version: npm run version:private
-          publish: npm run release:private
-          createGithubReleases: false
+      - name: Publish to npm
+        run: npx changeset publish --tag ${{ inputs.tag }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
