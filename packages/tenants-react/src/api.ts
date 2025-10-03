@@ -9,6 +9,8 @@ import {
 import Session from "supertokens-auth-react/recipe/session";
 import { User } from "supertokens-web-js/types";
 
+import { UserWithRole } from "./types";
+
 export const getApi = (querier: ReturnType<typeof getQuerier>) => {
   const fetchTenants = async () => {
     const response = await querier.get<({ status: "OK" } & TenantList) | { status: "ERROR"; message: string }>(
@@ -57,7 +59,7 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
   };
 
   const getUsers = async () => {
-    const response = await querier.post<{ status: "OK"; users: User[] } | { status: "ERROR"; message: string }>(
+    const response = await querier.post<{ status: "OK"; users: UserWithRole[] } | { status: "ERROR"; message: string }>(
       "/users",
       {},
       { withSession: true },
@@ -143,7 +145,7 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     return response;
   };
 
-  const acceptOnboardingAccept = async (userId: string) => {
+  const acceptOnboardingRequest = async (userId: string) => {
     return querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
       "/request/accept",
       { userId },
@@ -151,7 +153,7 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     );
   };
 
-  const declineOnboardingAccept = async (userId: string) => {
+  const declineOnboardingRequest = async (userId: string) => {
     return querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
       "/request/reject",
       { userId },
@@ -196,8 +198,8 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     changeRole,
     removeUserFromTenant,
     getOnboardingRequests,
-    acceptOnboardingAccept,
-    declineOnboardingAccept,
+    acceptOnboardingRequest,
+    declineOnboardingRequest,
     getCreationRequests,
     acceptCreationRequest,
     declineCreationRequest,

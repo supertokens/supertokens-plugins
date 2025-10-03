@@ -1,77 +1,46 @@
 import { usePrettyAction } from "@shared/ui";
-import { useEffect, useState } from "react";
 import { User } from "supertokens-web-js/types";
 
 import { usePluginContext } from "../../plugin";
 import { TenantUsersTable } from "../table/TenantTable";
-import { NoUsers } from "../users/NoUsers";
 import { UserDetails } from "../users/UserDetails";
 
 import { Action } from "./Action";
 
-export const OnboardingRequests = () => {
+type OnboardingRequestsProps = {
+  requests: User[];
+  onAcceptRequest: (userId: string) => Promise<boolean>;
+  onDeclineRequest: (userId: string) => Promise<boolean>;
+};
+
+export const OnboardingRequests: React.FC<OnboardingRequestsProps> = ({ requests, onAcceptRequest, onDeclineRequest }) => {
   const { t, api } = usePluginContext();
-  const [requests, setRequests] = useState<User[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
 
-  const { getOnboardingRequests, acceptOnboardingAccept, declineOnboardingAccept } = api;
-
-  const getUsers = usePrettyAction(
-    async () => {
-      setIsLoading(true);
-      try {
-        const onboardingRequestsResponse = await getOnboardingRequests();
-        if (onboardingRequestsResponse.status === "ERROR") {
-          throw new Error(onboardingRequestsResponse.message);
-        }
-        setRequests(onboardingRequestsResponse.users);
-      } finally {
-        setIsLoading(false);
-      }
-    },
-    [getOnboardingRequests],
-    { errorMessage: "Failed to get requests for tenant" },
-  );
-
-  const onAcceptRequest = usePrettyAction(
+  const handleAcceptRequest = usePrettyAction(
     async (userId: string) => {
-      const acceptResponse = await acceptOnboardingAccept(userId);
-      if (acceptResponse.status === "ERROR") {
-        throw new Error(acceptResponse.message);
+      const acceptResponse = await onAcceptRequest(userId);
+      if (!acceptResponse) {
+        throw new Error("Failed to accept onboarding request, please try again");
       }
-
-      // Remove the request from the list of requests.
-      setRequests((existingRequests) => existingRequests.filter((req) => req.id !== userId));
     },
-    [acceptOnboardingAccept],
+    [onAcceptRequest],
     { errorMessage: "Failed to accept onboarding request, please try again" },
   );
 
-  const onDeclineRequest = usePrettyAction(
+  const handleDeclineRequest = usePrettyAction(
     async (userId: string) => {
-      const declineResponse = await declineOnboardingAccept(userId);
-      if (declineResponse.status === "ERROR") {
-        throw new Error(declineResponse.message);
+      const declineResponse = await onDeclineRequest(userId);
+      if (!declineResponse) {
+        throw new Error("Failed to decline onboarding request, please try again");
       }
-
-      // Remove the request from the list of requests.
-      setRequests((existingRequests) => existingRequests.filter((req) => req.id !== userId));
     },
-    [declineOnboardingAccept],
+    [onDeclineRequest],
     { errorMessage: "Failed to decline onboarding request, please try again" },
   );
 
-  useEffect(() => {
-    getUsers();
-  }, []);
-
   const getExtraComponent = (user: User) => {
-    return <Action onAccept={() => onAcceptRequest(user.id)} onDecline={() => onDeclineRequest(user.id)} />;
+    return <Action onAccept={() => handleAcceptRequest(user.id)} onDecline={() => handleDeclineRequest(user.id)} />;
   };
-
-  if (isLoading) {
-    return <div>{t("PL_TB_TENANTS_LOADING_MESSAGE")}</div>;
-  }
 
   return requests.length > 0 ? (
     <TenantUsersTable

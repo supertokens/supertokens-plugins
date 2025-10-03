@@ -8,7 +8,7 @@ export const SelectTenantPage = () => {
   return (
     <SuperTokensWrapper>
       <SessionAuth>
-        <PageWrapper style={{ width: "700px", margin: "100px auto" }}>
+        <PageWrapper style={{ width: "1000px", margin: "100px auto" }}>
           <TenantCardWrapper />
         </PageWrapper>
       </SessionAuth>

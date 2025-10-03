@@ -1,3 +1,5 @@
+import { User } from "supertokens-web-js/types";
+
 import { defaultTranslationsTenants } from "./translations";
 
 
@@ -10,3 +12,5 @@ export type SuperTokensPluginTenantsPluginNormalisedConfig = {
 };
 
 export type TranslationKeys = keyof (typeof defaultTranslationsTenants)["en"];
+
+export type UserWithRole = { roles: string[] } & User;

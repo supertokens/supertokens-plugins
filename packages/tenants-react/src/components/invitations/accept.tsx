@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import { redirectToAuth } from "supertokens-auth-react";
 import { useSessionContext } from "supertokens-auth-react/recipe/session";
 
+import { usePluginContext } from "../../plugin";
+
 import style from "./invitations.module.scss";
 
 const cx = classNames.bind(style);
@@ -19,6 +21,7 @@ export const AcceptInvitation = ({
   const [error, setError] = useState<string>("");
 
   const session = useSessionContext();
+  const { t } = usePluginContext();
 
   useEffect(() => {
     // Parse the code from URL query parameters
@@ -37,7 +40,7 @@ export const AcceptInvitation = ({
   }, []);
 
   if (session.loading) {
-    return <div>Loading...</div>;
+    return <div>{t("PL_TB_TENANTS_LOADING_MESSAGE")}</div>;
   }
 
   const handleAccept = async () => {
@@ -73,8 +76,8 @@ export const AcceptInvitation = ({
     return (
       <div className={cx("invitationDetailsSection")}>
         <div className={cx("invitationDetailsHeader")}>
-          <h3>Invalid Invitation</h3>
-          <p>No invitation code found. Redirecting to dashboard...</p>
+          <h3>{t("PL_TB_INVITATIONS_INVALID_INVITATION_MESSAGE")}</h3>
+          <p>{t("PL_TB_INVITATIONS_INVALID_INVITATION_REDIRECTING_TO_DASHBOARD_MESSAGE")}</p>
         </div>
       </div>
     );
@@ -83,15 +86,16 @@ export const AcceptInvitation = ({
   return (
     <Card>
       <div slot="header" className={cx("invitationAcceptHeader")}>
-        Accept Invitation
+        {t("PL_TB_INVITATIONS_ACCEPT_INVITATION_MESSAGE")}
       </div>
       <Card className={cx("invitationDetailsChild")}>
         <div slot="header" className={cx("invitationDetailsChildHeader")}>
-          You have been invited to join "<span className={cx("tenantName")}>{tenantId}</span>" tenant. Click the button
-          below to accept the invitation.
+          {t("PL_TB_INVITATIONS_DESCRIPTION_MESSAGE_PREFIX")}
+          <span className={cx("tenantName")}>{`"${tenantId}"`}</span>
+          {t("PL_TB_INVITATIONS_DESCRIPTION_MESSAGE_POSTFIX")}
         </div>
         <div className={cx("invitationDetailsCodeContainer")}>
-          <div>Invitation code:</div>
+          <div>{t("PL_TB_INVITATIONS_INVITATION_CODE_LABEL")}</div>
           <div className={cx("invitationCodeContainer")}>{code}</div>
         </div>
       </Card>
@@ -102,7 +106,7 @@ export const AcceptInvitation = ({
           </Button>
         ) : (
           <Button onClick={handleRedirectToAuth} variant="brand" appearance="accent">
-            Authenticate and accept invitation
+            {t("PL_TB_INVITATIONS_AUTHENTICATE_AND_ACCEPT_MESSAGE")}
           </Button>
         )}
       </div>

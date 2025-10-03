@@ -8,6 +8,7 @@ import { SelectInput } from "../../../../../shared/ui/src/components";
 import { usePrettyAction } from "../../../../../shared/ui/src/hooks";
 import { logDebugMessage } from "../../logger";
 import { usePluginContext } from "../../plugin";
+import { UserWithRole } from "../../types";
 import { RemoveInvitation } from "../invitations/RemoveInvitation";
 import { TenantUsersTable } from "../table/TenantTable";
 
@@ -19,38 +20,29 @@ const cx = classNames.bind(style);
 
 // import { BaseFormSection } from '@supertokens-plugin-profile/common-details-shared';
 
-type UserWithRole = { roles: string[] } & User;
-
 type TenantUsersProps = {
-  onFetch: () => Promise<{ users: UserWithRole[] }>;
+  users: UserWithRole[];
   onRoleChange: (userId: string, role: string) => Promise<boolean>;
   onUserRemove: (userId: string) => Promise<boolean>;
 };
 
-export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch, onRoleChange, onUserRemove }) => {
+export const TenantUsers: React.FC<TenantUsersProps> = ({ users, onRoleChange, onUserRemove }) => {
   const { t } = usePluginContext();
-  const [users, setUsers] = useState<UserWithRole[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
   const [currentUserDetails, setCurrentUserDetails] = useState<UserWithRole | null>(null);
   const isCurrentUserAdmin = useMemo(() => currentUserDetails?.roles.includes(ROLES.ADMIN), [currentUserDetails]);
   const [isRoleChanging, setRoleChanging] = useState(false);
 
-  const loadDetails = useCallback(async () => {
-    const details = await onFetch();
-    // Show the users that have a valid role
-    setUsers(details.users.filter((user) => user.roles.length !== 0));
-
-    const userIdFromSession = await Session.getUserId();
-    setUserId(userIdFromSession);
-
-    // determine if the current user is admin or not.
-    const currentUserDetailsWithRole = details.users.find((user) => user.id === userIdFromSession);
-    setCurrentUserDetails(currentUserDetailsWithRole ?? null);
-  }, [onFetch]);
-
   useEffect(() => {
-    loadDetails();
-  }, [loadDetails]);
+    (async () => {
+      const userIdFromSession = await Session.getUserId();
+      setUserId(userIdFromSession);
+
+      // determine if the current user is admin or not.
+      const currentUserDetailsWithRole = users.find((user) => user.id === userIdFromSession);
+      setCurrentUserDetails(currentUserDetailsWithRole ?? null);
+    })();
+  }, [users]);
 
   const availableRoles = [
     {
@@ -81,12 +73,7 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ onFetch, onRoleChange,
   const handleUserRemove = usePrettyAction(
     async (userId: string) => {
       logDebugMessage(`Removing user from tenant: ${userId}`);
-      const wasRemoved = await onUserRemove(userId);
-
-      // Update the list of users if it was successful.
-      if (wasRemoved) {
-        setUsers((currenUsers) => currenUsers.filter((user) => user.id !== userId));
-      }
+      onUserRemove(userId);
     },
     [onUserRemove],
     { errorMessage: "Failed to remove user" },

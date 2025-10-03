@@ -14,7 +14,7 @@ const cx = classNames.bind(style);
 
 export const TenantManagementWithoutToastWrapper = ({ section }: { section: any }) => {
   const { api, t } = usePluginContext();
-  const { getUsers, getInvitations, removeInvitation, removeUserFromTenant, fetchTenants, switchTenant, changeRole } =
+  const { fetchTenants, switchTenant } =
     api;
   const [tenants, setTenants] = useState<TenantDetails[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState<string>("public");

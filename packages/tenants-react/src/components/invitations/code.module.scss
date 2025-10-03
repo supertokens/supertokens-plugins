@@ -5,7 +5,7 @@
 
   .rawCodeContainer {
     border-radius: 4px;
-    padding: 4px;
+    padding-left: 8px;
     background-color: var(--wa-color-neutral-10);
     border: 1px solid var(--wa-color-neutral-40);
     display: flex;
@@ -33,5 +33,9 @@
     line-height: 16px;
     letter-spacing: 0.04px;
     vertical-align: middle;
+  }
+
+  .copyCodeButton::part(base) {
+    padding: 8px !important;
   }
 }

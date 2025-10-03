@@ -22,9 +22,9 @@ export const Code: React.FC<CodeProps> = ({ code, tenantId }) => {
   const handleCodeCopyClick = usePrettyAction(
     async () => {
       const origin = window.location.origin;
-      const urlToCopy = `${origin}/user/invite/accept?tenantId=${encodeURIComponent(tenantId)}&code=${encodeURIComponent(
-        code,
-      )}`;
+      const urlToCopy = `${origin}/user/invite/accept?tenantId=${encodeURIComponent(
+        tenantId,
+      )}&code=${encodeURIComponent(code)}`;
       try {
         if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
           await navigator.clipboard.writeText(urlToCopy);
@@ -47,7 +47,7 @@ export const Code: React.FC<CodeProps> = ({ code, tenantId }) => {
         <div className={cx("rawCodeContainer")}>
           <div className={cx("textContainer")}>{code}</div>
           <Button variant="neutral" appearance="plain" onClick={() => setShowRawCode(false)}>
-            <Icon name="xmark" label="Hide Code" />
+            <Icon name="x" library="bundled" label="Hide Code" />
           </Button>
         </div>
       ) : (
@@ -58,7 +58,7 @@ export const Code: React.FC<CodeProps> = ({ code, tenantId }) => {
           </div>
         </Button>
       )}
-      <Button appearance="filled" variant="neutral" onClick={handleCodeCopyClick}>
+      <Button appearance="filled" variant="neutral" onClick={handleCodeCopyClick} className="copyCodeButton">
         <Copy label="Copy Invite Link" />
       </Button>
     </div>
