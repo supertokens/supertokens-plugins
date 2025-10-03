@@ -10,7 +10,6 @@ import style from "./tenant-card.module.scss";
 const cx = classNames.bind(style);
 
 interface TenantCardProps {
-  data: TenantList;
   onJoin: (data: TenantJoinData) => Promise<{ status: "OK" } | { status: "ERROR"; message: string }>;
   onCreate: (
     data: TenantCreateData,
@@ -18,7 +17,7 @@ interface TenantCardProps {
   isLoading: boolean;
 }
 
-export const TenantCard = ({ data, onJoin, onCreate, isLoading }: TenantCardProps) => {
+export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => {
   const [newTenantName, setNewTenantName] = useState<string>("");
   const { t } = usePluginContext();
 

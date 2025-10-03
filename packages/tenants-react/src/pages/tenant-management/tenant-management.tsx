@@ -1,19 +1,19 @@
 import { TenantDetails } from "@shared/tenants";
 import { SelectInput, ToastProvider, ToastContainer } from "@shared/ui";
-// import { BaseFormSection } from "@supertokens-plugin-profile/common-details-shared";
+import { FormSection } from "@supertokens-plugins/progressive-profiling-shared";
 import classNames from "classnames/bind";
 import { useState, useEffect, useCallback } from "react";
+import Session from "supertokens-auth-react/recipe/session";
 
 import { TenantTab } from "../../components/tab/TenantTab";
 import { usePluginContext } from "../../plugin";
 
 import style from "./styles.module.scss";
 import { TenantUsersCombined } from "./tenant-users-combined";
-import { AddInvitation } from "../../components/invitations/AddInvitation";
 
 const cx = classNames.bind(style);
 
-export const TenantManagementWithoutToastWrapper = ({ section }: { section: any }) => {
+export const TenantManagementWithoutToastWrapper = ({ section }: { section: FormSection }) => {
   const { api, t } = usePluginContext();
   const { fetchTenants, switchTenant } = api;
   const [tenants, setTenants] = useState<TenantDetails[]>([]);
@@ -25,9 +25,14 @@ export const TenantManagementWithoutToastWrapper = ({ section }: { section: any 
       const response = await fetchTenants();
       if (response.status === "OK") {
         setTenants(response.tenants);
+        const accessTokenPayload = await Session.getAccessTokenPayloadSecurely();
+        const currentTenantId = accessTokenPayload.tId;
 
-        // TODO: Set the selected tenant from the user details
-        if (response.tenants.length > 0) {
+        // Find the tenantId in the list of tenants else fallback
+        // to the first tenant in the list.
+        if (response.tenants.includes(currentTenantId)) {
+          setSelectedTenantId(currentTenantId);
+        } else if (response.tenants.length > 0) {
           setSelectedTenantId(response.tenants[0]!.tenantId);
         }
       }

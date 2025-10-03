@@ -49,11 +49,9 @@ export const init = createPluginInitFunction<
       },
     });
 
-    // TODO: Update this to parse it from the exports of that
-    // plugin so that we don't have to depend on that plugin.
-    // Essentially, if that plugin is enabled, only then we need to use
-    // the ID.
-    const PROGRESSIVE_PROFILING_COMPLETED_CLAIM_ID = "some-id";
+    // The progressive profiling completed claim ID to ensure
+    // the correct order of the claims
+    const PROGRESSIVE_PROFILING_COMPLETED_CLAIM_ID = "stpl-pp-c";
 
     const extractCodeAndTenantId = (url: string) => {
       const urlParams = new URLSearchParams(url);
