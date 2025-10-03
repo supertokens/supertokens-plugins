@@ -935,6 +935,20 @@ export const init = createPluginInitFunction<
 
                 let tenantId = input.tenantId;
 
+                // If the input tenantId is non public, we will use that directly
+                // and won't try to find a non public tenant.
+                if (tenantId !== "public") {
+                  logDebugMessage(`Creating new session with tenant: ${tenantId} since it's a non public ID`);
+                  return Session.createNewSessionWithoutRequestResponse(
+                    tenantId,
+                    input.recipeUserId,
+                    input.accessTokenPayload,
+                    input.sessionDataInDatabase,
+                    input.disableAntiCsrf,
+                    input.userContext,
+                  );
+                }
+
                 // If they have a non public tenant, that gets the preference
                 // when creating the session.
 
