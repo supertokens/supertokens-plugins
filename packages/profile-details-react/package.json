@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/profile-details-react",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Profile Details Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/profile-details-react/README.md",
   "repository": {
