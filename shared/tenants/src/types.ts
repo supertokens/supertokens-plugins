@@ -30,7 +30,10 @@ export type TenantCreationRequest = {
   requestId: string;
 };
 
-export type TenantCreationRequestWithUser = TenantCreationRequest & { user: User };
+export type TenantCreationRequestWithUser = TenantCreationRequest & { 
+  id: string;
+  emails: string[];
+ };
 
 export type TenantMetadata = {
   invitees: InviteeDetails[];

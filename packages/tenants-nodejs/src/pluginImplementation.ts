@@ -311,7 +311,6 @@ export const getOverrideableTenantFunctionImplementation = (
       const tenantCreateRequestMetadata = await metadata.get(TENANT_CREATE_METADATA_REQUESTS_KEY);
 
       // Fetch the user details for each user
-      const requestsWithUserId = tenantCreateRequestMetadata.requests;
       const requestsWithUser: TenantCreationRequestWithUser[] = [];
 
       for (const request of tenantCreateRequestMetadata.requests) {
@@ -323,7 +322,7 @@ export const getOverrideableTenantFunctionImplementation = (
           continue;
         }
 
-        requestsWithUser.push({ ...request, user: userDetails });
+        requestsWithUser.push({ ...request, id: userDetails.id, emails: userDetails.emails });
       }
 
       return {

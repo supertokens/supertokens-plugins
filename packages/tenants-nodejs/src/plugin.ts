@@ -417,7 +417,18 @@ export const init = createPluginInitFunction<
                 const tenantIdToUse = session.getTenantId();
                 const getUsersResponse = await implementation.getTenantUsers(tenantIdToUse);
 
-                return getUsersResponse;
+                if (getUsersResponse.status !== "OK") {
+                  return getUsersResponse;
+                }
+
+                // Remove the loginMethods and toJson attributes from the users
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                const users = getUsersResponse.users.map(({ toJson, loginMethods, ...others }) => others);
+
+                return {
+                  status: "OK",
+                  users,
+                };
               }),
             },
             {
@@ -674,7 +685,8 @@ export const init = createPluginInitFunction<
 
                 return {
                   status: "OK",
-                  users: usersWithoutRole,
+                  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                  users: usersWithoutRole.map(({ toJson, loginMethods, ...rest }) => rest),
                 };
               }),
             },
@@ -929,12 +941,12 @@ export const init = createPluginInitFunction<
                   ...input.accessTokenPayload,
                   ...(pluginConfig.requireNonPublicTenantAssociation
                     ? await MultipleTenantsPresentClaim.build(
-                        input.userId,
-                        input.recipeUserId,
-                        tenantId,
-                        input.accessTokenPayload,
-                        input.userContext,
-                      )
+                      input.userId,
+                      input.recipeUserId,
+                      tenantId,
+                      input.accessTokenPayload,
+                      input.userContext,
+                    )
                     : {}),
                 };
 

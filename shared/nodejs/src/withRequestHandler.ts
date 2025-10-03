@@ -6,7 +6,6 @@ export const withRequestHandler = (
   ) => Promise<
     | ({ status: "OK" } & JSONObject)
     | ({ status: string; code?: number } & JSONObject)
-    | ({ status: string; code?: number } & Object)
   >,
 ): PluginRouteHandler["handler"] => {
   return async (req, res, session, userContext) => {
