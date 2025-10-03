@@ -20,6 +20,7 @@ export type TenantList = {
 
 export type InviteeDetails = {
   email: string;
+  role: string;
   code: string;
 };
 

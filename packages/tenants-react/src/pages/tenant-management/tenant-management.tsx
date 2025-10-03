@@ -9,13 +9,13 @@ import { usePluginContext } from "../../plugin";
 
 import style from "./styles.module.scss";
 import { TenantUsersCombined } from "./tenant-users-combined";
+import { AddInvitation } from "../../components/invitations/AddInvitation";
 
 const cx = classNames.bind(style);
 
 export const TenantManagementWithoutToastWrapper = ({ section }: { section: any }) => {
   const { api, t } = usePluginContext();
-  const { fetchTenants, switchTenant } =
-    api;
+  const { fetchTenants, switchTenant } = api;
   const [tenants, setTenants] = useState<TenantDetails[]>([]);
   const [selectedTenantId, setSelectedTenantId] = useState<string>("public");
 

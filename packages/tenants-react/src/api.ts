@@ -86,10 +86,10 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     return response;
   };
 
-  const addInvitation = async (email: string) => {
+  const addInvitation = async (email: string, role: string) => {
     const response = await querier.post<{ status: "OK"; code: string } | { status: "ERROR"; message: string }>(
       "/invite/add",
-      { email },
+      { email, role },
       { withSession: true },
     );
 

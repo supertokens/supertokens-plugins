@@ -73,7 +73,7 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ users, onRoleChange, o
   const handleUserRemove = usePrettyAction(
     async (userId: string) => {
       logDebugMessage(`Removing user from tenant: ${userId}`);
-      onUserRemove(userId);
+      await onUserRemove(userId);
     },
     [onUserRemove],
     { errorMessage: "Failed to remove user" },
@@ -104,7 +104,7 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ users, onRoleChange, o
           <div>
             <RemoveInvitation
               onRemove={() => handleUserRemove(user.id)}
-              disabled={currentUserDetails!.id === user.id}
+              disabled={currentUserDetails === null ? true : currentUserDetails.id === user.id}
             />
           </div>
         </div>

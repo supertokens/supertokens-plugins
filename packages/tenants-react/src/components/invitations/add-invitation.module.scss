@@ -1,5 +1,15 @@
 .addInvitationWrapper {
   display: flex;
-  align-items: center;
+  align-items: end;
   gap: 10px;
+
+  .emailInputWrapper {
+    width: 65%;
+  }
+
+  .remainingWrapper {
+    width: 35%;
+    display: flex;
+    gap: 10px;
+  }
 }

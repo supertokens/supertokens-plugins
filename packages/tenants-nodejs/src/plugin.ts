@@ -20,7 +20,7 @@ import { BooleanClaim } from "supertokens-node/lib/build/recipe/session/claims";
 import { ROLES, TenantCreationRequestMetadata, TenantMetadata } from "@shared/tenants";
 import { assignAdminToUserInTenant, assignRoleToUserInTenant, createRoles, getUserIdsInTenantWithRole } from "./roles";
 import { extractInvitationCodeAndTenantId, validateWithoutClaim } from "./util";
-import { getOverrideableTenantFunctionImplementation, rejectRequestToJoinTenant } from "./recipeImplementation";
+import { getOverrideableTenantFunctionImplementation, rejectRequestToJoinTenant } from "./pluginImplementation";
 import { EmailDeliveryInterface } from "supertokens-node/lib/build/ingredients/emaildelivery/types";
 import { DefaultPluginEmailService } from "./defaultEmailService";
 
@@ -505,18 +505,19 @@ export const init = createPluginInitFunction<
                 }
 
                 // Parse the tenantId from the body
-                const payload: { email: string } | undefined = await req.getJSONBody();
+                const payload: { email: string; role: string } | undefined = await req.getJSONBody();
                 const tenantId = session.getTenantId();
                 const email = payload?.email?.trim();
+                const role = payload?.role;
 
-                if (!email) {
+                if (!email || !role) {
                   return {
                     status: "ERROR",
-                    message: "Email is required",
+                    message: "Email and role are required",
                   };
                 }
 
-                return implementation.addInvitation(email, tenantId, metadata);
+                return implementation.addInvitation(email, tenantId, role, metadata);
               }),
             },
             {

@@ -104,6 +104,7 @@ export type OverrideableTenantFunctionImplementation = {
   addInvitation: (
     email: string,
     tenantId: string,
+    role: string,
     metadata: MetadataType,
   ) => Promise<{ status: "OK"; code: string } | NonOkResponse | ErrorResponse>;
   removeInvitation: (

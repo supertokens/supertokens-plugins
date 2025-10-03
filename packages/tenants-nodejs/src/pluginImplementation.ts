@@ -15,7 +15,7 @@ import {
 import { logDebugMessage } from "supertokens-node/lib/build/logger";
 import UserRoles from "supertokens-node/recipe/userroles";
 import { LoginMethod } from "supertokens-node/lib/build/user";
-import { assignAdminToUserInTenant, getUserIdsInTenantWithRole } from "./roles";
+import { assignAdminToUserInTenant, assignRoleToUserInTenant, getUserIdsInTenantWithRole } from "./roles";
 import { TENANT_CREATE_METADATA_REQUESTS_KEY } from "./constants";
 
 export const getOverrideableTenantFunctionImplementation = (
@@ -71,6 +71,7 @@ export const getOverrideableTenantFunctionImplementation = (
     addInvitation: async (
       email: string,
       tenantId: string,
+      role: string,
       metadata: MetadataType,
     ): Promise<{ status: "OK"; code: string } | NonOkResponse | ErrorResponse> => {
       // Check if the user:
@@ -80,8 +81,6 @@ export const getOverrideableTenantFunctionImplementation = (
       const getUsersResponse = await supertokens.getUsersOldestFirst({
         tenantId: tenantId,
       });
-
-      // TODO: Add support for role
 
       // We will have to find whether the user is already associated
       // by searching with the email.
@@ -114,7 +113,7 @@ export const getOverrideableTenantFunctionImplementation = (
       // Invite the user to the tenant
       await metadata.set(tenantId, {
         ...tenantMetadata,
-        invitees: [...tenantMetadata.invitees, { email, role: "user", code }],
+        invitees: [...tenantMetadata.invitees, { email, role, code }],
       });
 
       return {
@@ -211,7 +210,8 @@ export const getOverrideableTenantFunctionImplementation = (
       });
       logDebugMessage(`Removed invitation from tenant ${tenantId}`);
 
-      // TODO: Add the user with the role
+      // Add the user with the role
+      await assignRoleToUserInTenant(tenantId, session.getUserId(), inviteeDetails.role);
 
       return {
         status: "OK",

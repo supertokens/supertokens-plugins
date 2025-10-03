@@ -21,5 +21,13 @@ export const defaultTranslationsTenants = {
     PL_TB_CREATE_TENANT_AWAITING_APPROVAL_MESSAGE:
       "It is essential to await the app administrator's approval before proceeding with the",
     PL_TB_CREATE_TENANT_AWAITING_APPROVAL_MESSAGE_HIGHLIGHT: "creation of the new tenant",
+    PL_TB_INVITATIONS_INVALID_INVITATION_MESSAGE: "Invalid invitation",
+    PL_TB_INVITATIONS_INVALID_INVITATION_REDIRECTING_TO_DASHBOARD_MESSAGE:
+      "No invitation code found. Redirecting to dashboard...",
+    PL_TB_INVITATIONS_ACCEPT_INVITATION_MESSAGE: "Accept Invitation",
+    PL_TB_INVITATIONS_INVITATION_CODE_LABEL: "Invitation Code: ",
+    PL_TB_INVITATIONS_AUTHENTICATE_AND_ACCEPT_MESSAGE: "Authenticate and accept invitation",
+    PL_TB_INVITATIONS_DESCRIPTION_MESSAGE_PREFIX: "You have been invited to join",
+    PL_TB_INVITATIONS_DESCRIPTION_MESSAGE_POSTFIX: "tenant. Click the button below to accept the invitation.",
   },
 } as const;
