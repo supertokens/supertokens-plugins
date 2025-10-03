@@ -7,7 +7,6 @@ import { User, UserContext } from "supertokens-node/types";
 import {
   ErrorResponse,
   MetadataType,
-  NonOkResponse,
   OverrideableTenantFunctionImplementation,
   SuperTokensPluginTenantPluginConfig,
   TenantCreationRequestMetadataType,
@@ -73,7 +72,7 @@ export const getOverrideableTenantFunctionImplementation = (
       tenantId: string,
       role: string,
       metadata: MetadataType,
-    ): Promise<{ status: "OK"; code: string } | NonOkResponse | ErrorResponse> => {
+    ): Promise<{ status: "OK"; code: string } | ErrorResponse> => {
       // Check if the user:
       // 1. is already associated with the tenant
       // 2. is already invited to the tenant
@@ -87,7 +86,7 @@ export const getOverrideableTenantFunctionImplementation = (
       const userDetails = getUsersResponse.users.find((user) => user.emails.some((userEmail) => userEmail === email));
       if (userDetails) {
         return {
-          status: "USER_ALREADY_ASSOCIATED",
+          status: "ERROR",
           message: "User already associated with tenant",
         };
       }
@@ -96,7 +95,7 @@ export const getOverrideableTenantFunctionImplementation = (
       let tenantMetadata = await metadata.get(tenantId);
       if (tenantMetadata?.invitees.some((invitee) => invitee.email === email)) {
         return {
-          status: "USER_ALREADY_INVITED",
+          status: "ERROR",
           message: "User already invited to tenant",
         };
       }
@@ -118,7 +117,6 @@ export const getOverrideableTenantFunctionImplementation = (
 
       return {
         status: "OK",
-        message: "User invited to tenant",
         code,
       };
     },
@@ -126,7 +124,7 @@ export const getOverrideableTenantFunctionImplementation = (
       email: string,
       tenantId: string,
       metadata: MetadataType,
-    ): Promise<{ status: "OK" } | NonOkResponse | ErrorResponse> => {
+    ): Promise<{ status: "OK" } | ErrorResponse> => {
       // Check if the user is invited to the tenant
       const tenantMetadata = await metadata.get(tenantId);
       if (!tenantMetadata) {
@@ -153,13 +151,12 @@ export const getOverrideableTenantFunctionImplementation = (
 
       return {
         status: "OK",
-        message: "Invitation removed from tenant",
       };
     },
     getInvitations: async (
       tenantId: string,
       metadata: MetadataType,
-    ): Promise<{ status: "OK"; invitees: InviteeDetails[] } | NonOkResponse | ErrorResponse> => {
+    ): Promise<{ status: "OK"; invitees: InviteeDetails[] } | ErrorResponse> => {
       const tenantMetadata = await metadata.get(tenantId);
       if (!tenantMetadata) {
         return {
@@ -178,7 +175,7 @@ export const getOverrideableTenantFunctionImplementation = (
       tenantId: string,
       session: SessionContainerInterface,
       metadata: MetadataType,
-    ): Promise<{ status: "OK" } | NonOkResponse | ErrorResponse> => {
+    ): Promise<{ status: "OK" } | ErrorResponse> => {
       // Check if the user is invited to the tenant
       const tenantMetadata = await metadata.get(tenantId);
       if (!tenantMetadata) {
@@ -215,7 +212,6 @@ export const getOverrideableTenantFunctionImplementation = (
 
       return {
         status: "OK",
-        message: "Invitation accepted",
       };
     },
     isAllowedToJoinTenant: async (user: User, session: SessionContainerInterface) => {
@@ -463,7 +459,7 @@ export const getOverrideableTenantFunctionImplementation = (
 export const rejectRequestToJoinTenant = async (
   tenantId: string,
   userId: string,
-): Promise<{ status: "OK" } | NonOkResponse | ErrorResponse> => {
+): Promise<{ status: "OK" } | ErrorResponse> => {
   // We need to check that the user doesn't have an existing role, in which
   // case we cannot "accept" the request.
   const role = await UserRoles.getRolesForUser(tenantId, userId);
@@ -492,6 +488,5 @@ export const rejectRequestToJoinTenant = async (
 
   return {
     status: "OK",
-    message: "Request rejected",
   };
 };

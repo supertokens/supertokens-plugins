@@ -2,7 +2,7 @@ import { NormalisedAppinfo, SuperTokensPlugin, UserContext } from "supertokens-n
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
 import Session from "supertokens-node/recipe/session";
 import { logDebugMessage } from "supertokens-node/lib/build/logger";
-import supertokens, { RecipeUserId } from "supertokens-node";
+import supertokens, { getUser, RecipeUserId } from "supertokens-node";
 import UserRoles from "supertokens-node/recipe/userroles";
 
 import { createPluginInitFunction } from "@shared/js";
@@ -42,7 +42,7 @@ export const init = createPluginInitFunction<
     // This defaults to `false` and is only enabled if the `requireNonPublicTenantAssociation`
     // is set to `true`.
     const MultipleTenantsPresentClaim = new BooleanClaim({
-      key: `${PLUGIN_ID}-multiple-tenants-present`,
+      key: "stpl-tm-ta",
       fetchValue: async (userId) => {
         const userDetails = await supertokens.getUser(userId);
         if (!userDetails) {
@@ -107,11 +107,18 @@ export const init = createPluginInitFunction<
                   throw new Error("Session not found");
                 }
 
+                if (!pluginConfig.enableTenantListAPI) {
+                  return {
+                    status: "TENANT_SELECTOR_NOT_ENABLED",
+                    message: "Tenant Selector is not enabled",
+                  };
+                }
+
                 return implementation.getTenants(session);
               }),
             },
             {
-              path: `${HANDLE_BASE_PATH}/create`,
+              path: `${HANDLE_BASE_PATH}/create-tenant`,
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
@@ -269,7 +276,7 @@ export const init = createPluginInitFunction<
               }),
             },
             {
-              path: `${HANDLE_BASE_PATH}/join`,
+              path: `${HANDLE_BASE_PATH}/join-tenant`,
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
@@ -340,7 +347,7 @@ export const init = createPluginInitFunction<
               }),
             },
             {
-              path: `${HANDLE_BASE_PATH}/leave`,
+              path: `${HANDLE_BASE_PATH}/leave-tenant`,
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
@@ -822,6 +829,15 @@ export const init = createPluginInitFunction<
                   };
                 }
 
+                // Check if the user is associated with the tenant or not.
+                const userDetails = await getUser(session.getUserId(), userContext);
+                if (!userDetails?.tenantIds.includes(tenantId)) {
+                  return {
+                    status: "ERROR_NOT_ALLOWED",
+                    message: "Cannot switch to tenant",
+                  };
+                }
+
                 // Since the user has a role, ensure that it is a valid one.
                 if (!roles.includes(ROLES.ADMIN) && !roles.includes(ROLES.MEMBER)) {
                   return {
@@ -1072,5 +1088,6 @@ export const init = createPluginInitFunction<
   (config) => ({
     requireNonPublicTenantAssociation: config.requireNonPublicTenantAssociation ?? false,
     requireTenantCreationRequestApproval: config.requireTenantCreationRequestApproval ?? true,
+    enableTenantListAPI: config.enableTenantListAPI ?? false,
   }),
 );

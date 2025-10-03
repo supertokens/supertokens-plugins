@@ -48,7 +48,7 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     const response = await querier.post<
       { status: "OK"; pendingApproval: boolean; requestId: string } | { status: "ERROR"; message: string }
     >(
-      "/create",
+      "/create-tenant",
       {
         ...data,
       },

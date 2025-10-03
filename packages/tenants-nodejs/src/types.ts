@@ -17,7 +17,6 @@ export type ErrorResponse = {
   message: string;
 };
 
-export type NonOkResponse = ErrorResponse | { status: string; message: string };
 export type MetadataType = ReturnType<typeof pluginUserMetadata<TenantMetadata>>;
 export type TenantCreationRequestMetadataType = ReturnType<typeof pluginUserMetadata<TenantCreationRequestMetadata>>;
 
@@ -43,6 +42,7 @@ export type PluginEmailDeliveryInput =
 export type SuperTokensPluginTenantPluginConfig = {
   requireNonPublicTenantAssociation?: boolean;
   requireTenantCreationRequestApproval?: boolean;
+  enableTenantListAPI?: boolean;
 
   // Email delivery configuration - service is optional, override can provide sendEmail implementation
   emailDelivery?: {
@@ -56,6 +56,7 @@ export type SuperTokensPluginTenantPluginConfig = {
 export type SuperTokensPluginTenantPluginNormalisedConfig = {
   requireNonPublicTenantAssociation: boolean;
   requireTenantCreationRequestApproval: boolean;
+  enableTenantListAPI: boolean;
 
   // Email delivery configuration - service is optional, override can provide sendEmail implementation
   emailDelivery?: {
@@ -106,22 +107,22 @@ export type OverrideableTenantFunctionImplementation = {
     tenantId: string,
     role: string,
     metadata: MetadataType,
-  ) => Promise<{ status: "OK"; code: string } | NonOkResponse | ErrorResponse>;
+  ) => Promise<{ status: "OK"; code: string } | ErrorResponse>;
   removeInvitation: (
     email: string,
     tenantId: string,
     metadata: MetadataType,
-  ) => Promise<{ status: "OK" } | NonOkResponse | ErrorResponse>;
+  ) => Promise<{ status: "OK" } | ErrorResponse>;
   acceptInvitation: (
     code: string,
     tenantId: string,
     session: SessionContainerInterface,
     metadata: MetadataType,
-  ) => Promise<{ status: "OK" } | NonOkResponse | ErrorResponse>;
+  ) => Promise<{ status: "OK" } | ErrorResponse>;
   getInvitations: (
     tenantId: string,
     metadata: MetadataType,
-  ) => Promise<{ status: "OK"; invitees: InviteeDetails[] } | NonOkResponse | ErrorResponse>;
+  ) => Promise<{ status: "OK"; invitees: InviteeDetails[] } | ErrorResponse>;
   associateAllLoginMethodsOfUserWithTenant: AssociateAllLoginMethodsOfUserWithTenant;
   addTenantCreationRequest: (
     session: SessionContainerInterface,
@@ -133,21 +134,21 @@ export type OverrideableTenantFunctionImplementation = {
     appUrl: string,
     userContext: UserContext,
     sendEmail: SendPluginEmail,
-  ) => Promise<{ status: "OK" } | NonOkResponse | ErrorResponse>;
+  ) => Promise<{ status: "OK" } | ErrorResponse>;
   getTenantCreationRequests: (
     metadata: TenantCreationRequestMetadataType,
     userContext: UserContext,
-  ) => Promise<({ status: "OK" } & { requests: TenantCreationRequestWithUser[] }) | NonOkResponse | ErrorResponse>;
+  ) => Promise<({ status: "OK" } & { requests: TenantCreationRequestWithUser[] }) | ErrorResponse>;
   acceptTenantCreationRequest: (
     requestId: string,
     session: SessionContainerInterface,
     metadata: TenantCreationRequestMetadataType,
-  ) => Promise<{ status: "OK" } | NonOkResponse | ErrorResponse>;
+  ) => Promise<{ status: "OK" } | ErrorResponse>;
   rejectTenantCreationRequest: (
     requestId: string,
     session: SessionContainerInterface,
     metadata: TenantCreationRequestMetadataType,
-  ) => Promise<{ status: "OK" } | NonOkResponse | ErrorResponse>;
+  ) => Promise<{ status: "OK" } | ErrorResponse>;
   sendTenantCreationRequestEmail: (
     tenantId: string,
     creatorEmail: string,
