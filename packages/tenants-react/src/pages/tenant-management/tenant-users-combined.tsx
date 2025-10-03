@@ -1,4 +1,4 @@
-import { InviteeDetails } from "@shared/tenants";
+import { InviteeDetails, ROLES } from "@shared/tenants";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import classNames from "classnames/bind";
 
@@ -148,10 +148,14 @@ export const TenantUsersCombined: React.FC<TenantUsersCombinedProps> = ({ tenant
       }
 
       // Remove the request from the list of requests.
+      const requestUser = requests.find((request) => request.id === userId);
       setRequests((existingRequests) => existingRequests.filter((req) => req.id !== userId));
+
+      // Add the user to the list of existing users in the tenant
+      setTenantUsers((existingUsers) => [...existingUsers, { ...requestUser!, roles: [ROLES.MEMBER] }]);
       return true;
     },
-    [acceptOnboardingRequest],
+    [acceptOnboardingRequest, requests],
   );
 
   const onDeclineRequest = useCallback(

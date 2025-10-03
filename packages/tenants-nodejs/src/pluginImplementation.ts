@@ -137,7 +137,7 @@ export const getOverrideableTenantFunctionImplementation = (
       }
 
       // Check if the user is invited to the tenant
-      const isInvited = tenantMetadata.invitees.some((invitee) => invitee.email === email && invitee.role === "user");
+      const isInvited = tenantMetadata.invitees.some((invitee) => invitee.email === email);
       if (!isInvited) {
         return {
           status: "ERROR",
