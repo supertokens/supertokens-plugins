@@ -1,0 +1,60 @@
+{
+  "name": "@supertokens-plugins/tenants-nodejs",
+  "version": "0.0.1",
+  "description": "Tenants Base Plugin for SuperTokens",
+  "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/tenants-nodejs/README.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/supertokens/supertokens-plugins.git",
+    "directory": "packages/tenants-nodejs"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "pretty": "npx pretty-quick .",
+    "pretty-check": "npx pretty-quick --check .",
+    "test": "TEST_MODE=testing vitest run --pool=forks --passWithNoTests"
+  },
+  "keywords": [
+    "tenant",
+    "tenant-base",
+    "plugin",
+    "supertokens"
+  ],
+  "peerDependencies": {
+    "nodemailer": "^6.0.0",
+    "supertokens-node": ">=23.0.0"
+  },
+  "devDependencies": {
+    "@shared/eslint": "*",
+    "@shared/nodejs": "*",
+    "@shared/tenants": "*",
+    "@shared/tsconfig": "*",
+    "@types/nodemailer": "^7.0.1",
+    "@types/react": "^17.0.20",
+    "express": "^5.1.0",
+    "prettier": "3.6.2",
+    "pretty-quick": "^4.2.2",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "browser": {
+    "fs": false
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    },
+    "./index": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    },
+    "./index.js": {
+      "types": "dist/index.d.ts",
+      "default": "dist/index.js"
+    }
+  }
+}

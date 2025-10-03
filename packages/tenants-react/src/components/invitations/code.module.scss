@@ -1,0 +1,41 @@
+.codeWrapper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+
+  .rawCodeContainer {
+    border-radius: 4px;
+    padding-left: 8px;
+    background-color: var(--wa-color-neutral-10);
+    border: 1px solid var(--wa-color-neutral-40);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+    .textContainer {
+      font-weight: 400;
+      font-style: Regular;
+      font-size: 14px;
+      line-height: 20px;
+      letter-spacing: 0px;
+      color: var(--wa-color-brand-90);
+    }
+  }
+
+  .viewCodeButtonWrapper {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+
+    font-weight: 500;
+    font-style: Medium;
+    font-size: 12px;
+    line-height: 16px;
+    letter-spacing: 0.04px;
+    vertical-align: middle;
+  }
+
+  .copyCodeButton::part(base) {
+    padding: 8px !important;
+  }
+}

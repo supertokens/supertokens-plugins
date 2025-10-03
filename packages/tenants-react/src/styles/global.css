@@ -1,0 +1,44 @@
+/* Tab related styling */
+
+.st-tab-group::part(base) {
+  border: 1px solid #dddde3;
+  border-radius: 12px;
+  background-color: #ffffff;
+
+  --indicator-color: var(--accent-color-accent-9);
+
+  /* Make the track color same as background color to hide it */
+  --track-color: var(--neutral-color-neutral-8);
+}
+
+.st-tab-group::part(tabs) {
+  gap: 30px;
+}
+
+.st-tab::part(base) {
+  padding: 12px 16px;
+  font-weight: 500;
+  font-style: Medium;
+  font-size: 14px;
+  line-height: 20px;
+  letter-spacing: 0px;
+}
+
+.st-tab:not([active])::part(base) {
+  color: var(--neutral-color-neutral-12);
+}
+
+.st-tab-panel::part(base) {
+  padding: 0;
+}
+
+.tenantRequestsWrapper .st-tab-group::part(base) {
+  background-color: #f9f9f8;
+  border: none;
+  border-radius: 0;
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
+  box-shadow: none;
+
+  --track-color: var(--neutral-color-neutral-6);
+}

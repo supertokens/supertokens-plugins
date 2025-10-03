@@ -1,0 +1,31 @@
+.userRow {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+
+  .userAvatar {
+    background-color: var(--user-avatar-bg);
+    color: var(--user-avatar-fg);
+    text-transform: uppercase;
+    border-radius: 4px;
+    width: 24px;
+    height: 24px;
+    padding: 4px 8px;
+
+    font-weight: 500;
+    font-style: Medium;
+    font-size: 12px;
+    line-height: 16px;
+    letter-spacing: 0.04px;
+    text-align: center;
+  }
+
+  .userEmail {
+    font-weight: 400;
+    font-style: Regular;
+    font-size: 14px;
+    line-height: 20px;
+    letter-spacing: 0px;
+    color: #1c2024;
+  }
+}

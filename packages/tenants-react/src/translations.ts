@@ -1,0 +1,33 @@
+export const defaultTranslationsTenants = {
+  en: {
+    PL_TB_USERS_TAB_LABEL: "Users",
+    PL_TB_INVITATIONS_TAB_LABEL: "Invitations",
+    PL_TB_REQUESTS_TAB_LABEL: "Requests",
+    PL_TB_NO_USERS_FOUND_TEXT: "No users have been found linked to this tenant.",
+    PL_TB_NO_INVITATIONS_FOUND_TEXT: "There are currently no pending invites.",
+    PL_TB_ADD_INVITE_BUTTON_TEXT: "+ Invite",
+    PL_TB_VIEW_CODE_TEXT: "Code",
+    PL_TB_TENANT_REQUESTS_ONBOARDING_TAB_LABEL: "Tenant Onboarding",
+    PL_TB_TENANT_REQUESTS_CREATION_TAB_LABEL: "Tenant Creation",
+    PL_TB_TENANT_REQUESTS_CREATION_DESCRIPTION: "List of requests to create new tenant in your app.",
+    PL_TB_TENANT_USERS_COMBINED_DESCRIPTION: "List of users, invitations and requests for your tenant",
+    PL_TB_TENANTS_LOADING_MESSAGE: "Loading...",
+    PL_TB_TENANTS_REQUESTS_ACCEPT_BUTTON_TEXT: "Accept",
+    PL_TB_TENANTS_REQUESTS_DECLINE_BUTTON_TEXT: "Decline",
+    PL_TB_CREATE_TENANT_LABEL: "Create Tenant",
+    PL_TB_CREATE_TENANT_BUTTON_TEXT: "Create and Join",
+    PL_TB_CREATE_TENANT_ENTER_NAME_LABEL: "Enter name of your tenant",
+    PL_TB_CREATE_TENANT_AWAITING_APPROVAL_HEADER: "Awaiting app admin approval",
+    PL_TB_CREATE_TENANT_AWAITING_APPROVAL_MESSAGE:
+      "It is essential to await the app administrator's approval before proceeding with the",
+    PL_TB_CREATE_TENANT_AWAITING_APPROVAL_MESSAGE_HIGHLIGHT: "creation of the new tenant",
+    PL_TB_INVITATIONS_INVALID_INVITATION_MESSAGE: "Invalid invitation",
+    PL_TB_INVITATIONS_INVALID_INVITATION_REDIRECTING_TO_DASHBOARD_MESSAGE:
+      "No invitation code found. Redirecting to dashboard...",
+    PL_TB_INVITATIONS_ACCEPT_INVITATION_MESSAGE: "Accept Invitation",
+    PL_TB_INVITATIONS_INVITATION_CODE_LABEL: "Invitation Code: ",
+    PL_TB_INVITATIONS_AUTHENTICATE_AND_ACCEPT_MESSAGE: "Authenticate and accept invitation",
+    PL_TB_INVITATIONS_DESCRIPTION_MESSAGE_PREFIX: "You have been invited to join",
+    PL_TB_INVITATIONS_DESCRIPTION_MESSAGE_POSTFIX: "tenant. Click the button below to accept the invitation.",
+  },
+} as const;

@@ -1,0 +1,50 @@
+// Very aggressive stroke removal - targets all possible selectors
+:global(wa-icon),
+:global(wa-icon) :global(svg),
+:global(wa-icon) :global(svg) :global(*) {
+  stroke: none !important;
+  stroke-width: 0 !important;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+// Ensure fill is used instead
+:global(wa-icon) :global(svg) {
+  fill: currentColor !important;
+}
+
+:global(.plugin-profile) {
+  .st-icon {
+    stroke: none !important;
+    stroke-width: 0 !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+
+    // Target the internal SVG element
+    :global(svg) {
+      stroke: none !important;
+      stroke-width: 0 !important;
+      border: none !important;
+      outline: none !important;
+      box-shadow: none !important;
+      background: transparent !important;
+      fill: currentColor !important;
+    }
+
+    // Target all elements inside SVG
+    :global(svg) :global(*) {
+      stroke: none !important;
+      stroke-width: 0 !important;
+    }
+
+    // Specifically target path elements
+    :global(svg) :global(path) {
+      stroke: none !important;
+      stroke-width: 0 !important;
+      fill: currentColor !important;
+    }
+  }
+}
