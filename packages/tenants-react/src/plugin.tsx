@@ -1,5 +1,6 @@
 import { createPluginInitFunction } from "@shared/js";
 import { buildContext, getQuerier } from "@shared/react";
+import SuperTokensPluginProfileBase from "@supertokens-plugins/profile-base-react";
 import {
   getTranslationFunction,
   SuperTokensPlugin,
@@ -11,17 +12,17 @@ import { BooleanClaim } from "supertokens-auth-react/recipe/session";
 import { getApi } from "./api";
 import { API_PATH, PLUGIN_ID } from "./constants";
 import "./styles/global.css";
-import { InvitationAcceptWrapper } from "./invitation-accept-wrapper";
-import { enableDebugLogs } from "./logger";
+import { enableDebugLogs, logDebugMessage } from "./logger";
+import { InvitationAcceptWrapper } from "./pages/InvitationAcceptPage";
+import { SelectTenantPage } from "./pages/select-tenant";
+import { TenantCreationRequests } from "./pages/tenant-creation-requests";
 import { TenantManagement } from "./pages/tenant-management/tenant-management";
-import { SelectTenantPage } from "./select-tenant-page";
 import { defaultTranslationsTenants } from "./translations";
 import {
   SuperTokensPluginTenantsPluginConfig,
   SuperTokensPluginTenantsPluginNormalisedConfig,
   TranslationKeys,
 } from "./types";
-import { TenantCreationRequests } from "./pages/tenant-creation-requests";
 
 const { usePluginContext, setContext } = buildContext<{
   plugins: SuperTokensPublicPlugin[];
@@ -55,9 +56,9 @@ export const init = createPluginInitFunction<
 
     const extractCodeAndTenantId = (url: string) => {
       const urlParams = new URLSearchParams(url);
-      const code = urlParams.get("code");
+      const code = urlParams.get("tenantInviteCode");
       const tenantId = urlParams.get("tenantId");
-      return { code, tenantId, shouldAcceptInvite: Boolean(code) && Boolean(tenantId) };
+      return { code, tenantId, shouldAcceptInvite: code !== "" && tenantId !== "" };
     };
 
     const extractAndInjectCodeAndTenantId = (context: any) => {
@@ -89,6 +90,21 @@ export const init = createPluginInitFunction<
 
     return {
       id: PLUGIN_ID,
+      dependencies: (config, pluginsAbove) => {
+        const baseProfilePlugin: SuperTokensPlugin | undefined = pluginsAbove.find(
+          (plugin: any) => plugin.id === "supertokens-plugin-profile-base",
+        );
+
+        if (baseProfilePlugin) {
+          return { status: "OK", pluginsToAdd: [] };
+        }
+
+        logDebugMessage("Base profile plugin not found. Registering it.");
+        return {
+          status: "OK",
+          pluginsToAdd: [SuperTokensPluginProfileBase.init()],
+        };
+      },
       init: (config, plugins, sdkVersion) => {
         if (config.enableDebugLogs) {
           enableDebugLogs();
@@ -96,7 +112,9 @@ export const init = createPluginInitFunction<
 
         const baseProfilePlugin = plugins.find((plugin: any) => plugin.id === "supertokens-plugin-profile-base");
         if (!baseProfilePlugin) {
-          console.warn("Base profile plugin not found. Not adding common details profile plugin.");
+          logDebugMessage(
+            "Should not happen: Base profile plugin not found. Not adding common details profile plugin.",
+          );
           return;
         }
 

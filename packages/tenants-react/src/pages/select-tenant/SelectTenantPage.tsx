@@ -1,8 +1,9 @@
 import { SuperTokensWrapper } from "supertokens-auth-react";
 import { SessionAuth } from "supertokens-auth-react/recipe/session";
 
-import { PageWrapper } from "./components";
-import TenantCardWrapper from "./tenant-wrapper";
+import { PageWrapper } from "../../components";
+
+import TenantCardWrapper from "./TenantWrapper";
 
 export const SelectTenantPage = () => {
   return (

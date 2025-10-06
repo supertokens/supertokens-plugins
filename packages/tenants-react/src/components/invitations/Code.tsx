@@ -24,7 +24,7 @@ export const Code: React.FC<CodeProps> = ({ code, tenantId }) => {
       const origin = window.location.origin;
       const urlToCopy = `${origin}/user/invite/accept?tenantId=${encodeURIComponent(
         tenantId,
-      )}&code=${encodeURIComponent(code)}`;
+      )}&tenantInviteCode=${encodeURIComponent(code)}`;
       try {
         if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
           await navigator.clipboard.writeText(urlToCopy);

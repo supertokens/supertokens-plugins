@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
+import crypto from "crypto";
 import supertokens from "supertokens-node";
 import { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
@@ -36,7 +37,6 @@ export const getOverrideableTenantFunctionImplementation = (
 
       const tenantDetails = await MultiTenancy.listAllTenants();
 
-      // Return the tenants that the user is not a member of
       return {
         status: "OK",
         tenants: tenantDetails.tenants.map((tenant) => ({ tenantId: tenant.tenantId, displayName: tenant.tenantId })),
@@ -107,7 +107,7 @@ export const getOverrideableTenantFunctionImplementation = (
       }
 
       // Generate a random string for the code
-      const code = Math.random().toString(36).substring(2, 15);
+      const code = crypto.randomBytes(10).toString("hex").substring(0, 15);
 
       // Invite the user to the tenant
       await metadata.set(tenantId, {
@@ -260,7 +260,7 @@ export const getOverrideableTenantFunctionImplementation = (
       }
     },
     doesTenantCreationRequireApproval: async (session: SessionContainerInterface) => {
-      // By default, tenant creation does not require approval.
+      // By default, tenant creation does require approval.
       return pluginConfig.requireTenantCreationRequestApproval ?? true;
     },
     addTenantCreationRequest: async (session, tenantDetails, metadata, appUrl, userContext, sendEmail) => {
@@ -275,7 +275,7 @@ export const getOverrideableTenantFunctionImplementation = (
       }
 
       // Add the new creation request
-      const requestId = Math.random().toString(36).substring(2, 15);
+      const requestId = crypto.randomBytes(10).toString("hex").substring(0, 13);
       await metadata.set(TENANT_CREATE_METADATA_REQUESTS_KEY, {
         ...tenantCreateRequestMetadata,
         requests: [
@@ -451,42 +451,47 @@ export const getOverrideableTenantFunctionImplementation = (
       });
       return `${websiteDomain ? "https://" : "http://"}${websiteDomain ?? "localhost"}${appInfo.websiteBasePath ?? ""}`;
     },
+    rejectRequestToJoinTenant: async (tenantId: string, userId: string): Promise<{ status: "OK" } | ErrorResponse> => {
+      // We need to check that the user doesn't have an existing role, in which
+      // case we cannot "accept" the request.
+      const role = await UserRoles.getRolesForUser(tenantId, userId);
+      if (role.roles.length > 0) {
+        return {
+          status: "ERROR",
+          message: "Request already accepted",
+        };
+      }
+
+      // Find all the recipeUserIds for the user
+      // Remove the user from the tenant
+      const userDetails = await supertokens.getUser(userId);
+      if (!userDetails) {
+        return {
+          status: "ERROR",
+          message: "User not found",
+        };
+      }
+
+      // For each of the loginMethods, associate the user with the tenant
+      for (const loginMethod of userDetails.loginMethods) {
+        await MultiTenancy.disassociateUserFromTenant(tenantId, loginMethod.recipeUserId);
+        logDebugMessage(`Disassociated user ${userDetails.id} from tenant ${tenantId}`);
+      }
+
+      return {
+        status: "OK",
+      };
+    },
+    getPreferredTenantId: (tenantIds: string[]): string | undefined => {
+      /**
+       * Find the preferred tenant ID from the list of tenant IDs.
+       *
+       * By default we will find the first non public tenant Id and return
+       * that.
+       */
+      return tenantIds.find((tenantId) => tenantId !== "public");
+    }
   };
 
   return implementation;
-};
-
-export const rejectRequestToJoinTenant = async (
-  tenantId: string,
-  userId: string,
-): Promise<{ status: "OK" } | ErrorResponse> => {
-  // We need to check that the user doesn't have an existing role, in which
-  // case we cannot "accept" the request.
-  const role = await UserRoles.getRolesForUser(tenantId, userId);
-  if (role.roles.length > 0) {
-    return {
-      status: "ERROR",
-      message: "Request already accepted",
-    };
-  }
-
-  // Find all the recipeUserIds for the user
-  // Remove the user from the tenant
-  const userDetails = await supertokens.getUser(userId);
-  if (!userDetails) {
-    return {
-      status: "ERROR",
-      message: "User not found",
-    };
-  }
-
-  // For each of the loginMethods, associate the user with the tenant
-  for (const loginMethod of userDetails.loginMethods) {
-    await MultiTenancy.disassociateUserFromTenant(tenantId, loginMethod.recipeUserId);
-    logDebugMessage(`Disassociated user ${userDetails.id} from tenant ${tenantId}`);
-  }
-
-  return {
-    status: "OK",
-  };
 };

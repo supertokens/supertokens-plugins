@@ -157,4 +157,9 @@ export type OverrideableTenantFunctionImplementation = {
     sendEmail: SendPluginEmail,
   ) => Promise<void>;
   getAppUrl: GetAppUrl;
+  rejectRequestToJoinTenant: (
+    tenantId: string,
+    userId: string,
+  ) => Promise<{ status: "OK" } | ErrorResponse>;
+  getPreferredTenantId: (tenantIds: string[]) => string | undefined;
 };

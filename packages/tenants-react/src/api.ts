@@ -25,10 +25,8 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
 
   const joinTenant = async (data: TenantJoinData) => {
     const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
-      "/join",
-      {
-        ...data,
-      },
+      "/join-tenant",
+      data,
       { withSession: true },
     );
 
@@ -49,9 +47,7 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
       { status: "OK"; pendingApproval: boolean; requestId: string } | { status: "ERROR"; message: string }
     >(
       "/create-tenant",
-      {
-        ...data,
-      },
+      data,
       { withSession: true },
     );
 

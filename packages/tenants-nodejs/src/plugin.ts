@@ -20,7 +20,7 @@ import { BooleanClaim } from "supertokens-node/lib/build/recipe/session/claims";
 import { ROLES, TenantCreationRequestMetadata, TenantMetadata } from "@shared/tenants";
 import { assignAdminToUserInTenant, assignRoleToUserInTenant, createRoles, getUserIdsInTenantWithRole } from "./roles";
 import { extractInvitationCodeAndTenantId, validateWithoutClaim } from "./util";
-import { getOverrideableTenantFunctionImplementation, rejectRequestToJoinTenant } from "./pluginImplementation";
+import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
 import { EmailDeliveryInterface } from "supertokens-node/lib/build/ingredients/emaildelivery/types";
 import { DefaultPluginEmailService } from "./defaultEmailService";
 
@@ -43,9 +43,17 @@ export const init = createPluginInitFunction<
     // is set to `true`.
     const MultipleTenantsPresentClaim = new BooleanClaim({
       key: "stpl-tm-ta",
-      fetchValue: async (userId) => {
-        const userDetails = await supertokens.getUser(userId);
+      fetchValue: async (userId, rId, tId, cP, userContext) => {
+        const userDetails = await supertokens.getUser(userId, userContext);
         if (!userDetails) {
+          logDebugMessage("Should never happen");
+          return false;
+        }
+
+        // Get the roles for the user and check if they are an app admin
+        // If they are, we don't need to enforce the claim.
+        const usersRoles = await UserRoles.getRolesForUser("public", userId, userContext);
+        if (usersRoles.roles.includes(ROLES.APP_ADMIN)) {
           return false;
         }
 
@@ -764,7 +772,7 @@ export const init = createPluginInitFunction<
                   };
                 }
 
-                return rejectRequestToJoinTenant(tenantIdToUse, payload.userId);
+                return implementation.rejectRequestToJoinTenant(tenantIdToUse, payload.userId);
               }),
             },
             {
@@ -952,7 +960,7 @@ export const init = createPluginInitFunction<
                 // If they have a non public tenant, that gets the preference
                 // when creating the session.
 
-                const firstNonPublicTenantId = userDetails.tenantIds.find((tenantId) => tenantId !== "public");
+                const firstNonPublicTenantId = implementation.getPreferredTenantId(userDetails.tenantIds);
                 if (firstNonPublicTenantId && firstNonPublicTenantId !== input.tenantId) {
                   logDebugMessage(`Creating new session with tenant: ${firstNonPublicTenantId}`);
                   return Session.createNewSessionWithoutRequestResponse(

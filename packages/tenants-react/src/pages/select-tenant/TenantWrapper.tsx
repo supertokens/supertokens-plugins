@@ -2,30 +2,16 @@ import { TenantCreateData, TenantJoinData, TenantList } from "@shared/tenants";
 import { ToastProvider, ToastContainer } from "@shared/ui";
 import { useEffect, useState } from "react";
 
-import { TenantCard } from "./components";
-import { AwaitingApprovalMessage } from "./components/tenant-card/awaiting-approval";
-import { logDebugMessage } from "./logger";
-import { usePluginContext } from "./plugin";
+import { TenantCard } from "../../components";
+import { AwaitingApprovalMessage } from "../../components/tenant-card/awaiting-approval";
+import { logDebugMessage } from "../../logger";
+import { usePluginContext } from "../../plugin";
 
 const TenantCardWrapper = () => {
   const { api } = usePluginContext();
-  const { fetchTenants, joinTenant, createTenant } = api;
-  const [data, setData] = useState<TenantList>({
-    tenants: [],
-    joinedTenantIds: [],
-  });
+  const { joinTenant, createTenant } = api;
   const [isLoading, setIsLoading] = useState(true);
   const [isPendingApproval, setIsPendingApproval] = useState(false);
-
-  useEffect(() => {
-    setIsLoading(true);
-    fetchTenants().then((result) => {
-      if (result.status === "OK") {
-        setData(result);
-      }
-      setIsLoading(false);
-    });
-  }, []);
 
   const handleOnJoin = async (data: TenantJoinData) => {
     setIsLoading(true);
@@ -78,7 +64,7 @@ const TenantCardWrapper = () => {
   return isPendingApproval ? (
     <AwaitingApprovalMessage />
   ) : (
-    <TenantCard data={data} onJoin={handleOnJoin} onCreate={handleOnCreate} isLoading={isLoading} />
+    <TenantCard onJoin={handleOnJoin} onCreate={handleOnCreate} isLoading={isLoading} />
   );
 };
 
