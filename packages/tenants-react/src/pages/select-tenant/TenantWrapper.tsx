@@ -1,6 +1,6 @@
-import { TenantCreateData, TenantJoinData, TenantList } from "@shared/tenants";
+import { TenantCreateData, TenantJoinData } from "@shared/tenants";
 import { ToastProvider, ToastContainer } from "@shared/ui";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { TenantCard } from "../../components";
 import { AwaitingApprovalMessage } from "../../components/tenant-card/awaiting-approval";
@@ -27,11 +27,7 @@ const TenantCardWrapper = () => {
       // If it was successful, redirect the user to `/user/profile`.
       if (result.status === "OK") {
         logDebugMessage("Successfully joined tenant");
-        if (result.wasSessionRefreshed) {
-          logDebugMessage("Session was refreshed");
-        } else {
-          logDebugMessage("Please go to `/user/profile` to continue");
-        }
+        window.location.assign("/user/profile");
       }
 
       return result;

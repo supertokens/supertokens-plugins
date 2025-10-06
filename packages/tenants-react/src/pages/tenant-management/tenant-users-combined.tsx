@@ -1,19 +1,19 @@
 import { InviteeDetails, ROLES } from "@shared/tenants";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import classNames from "classnames/bind";
-
 import { usePrettyAction } from "@shared/ui";
+import classNames from "classnames/bind";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { User } from "supertokens-web-js/types";
+
+import { AddInvitation } from "../../components/invitations/AddInvitation";
 import { InvitedUsers } from "../../components/invitations/InvitedUsers";
 import { OnboardingRequests } from "../../components/requests/OnboardingRequests";
+import { NoUsers } from "../../components/users/NoUsers";
 import { TenantUsers } from "../../components/users/TenantUsers";
 import { logDebugMessage } from "../../logger";
 import { usePluginContext } from "../../plugin";
+import { UserWithRole } from "../../types";
 
 import style from "./styles.module.scss";
-import { UserWithRole } from "../../types";
-import { User } from "supertokens-web-js/types";
-import { NoUsers } from "../../components/users/NoUsers";
-import { AddInvitation } from "../../components/invitations/AddInvitation";
 
 const cx = classNames.bind(style);
 
@@ -152,7 +152,7 @@ export const TenantUsersCombined: React.FC<TenantUsersCombinedProps> = ({ tenant
       setRequests((existingRequests) => existingRequests.filter((req) => req.id !== userId));
 
       // Add the user to the list of existing users in the tenant
-      setTenantUsers((existingUsers) => [...existingUsers, { ...requestUser!, roles: [ROLES.MEMBER] }]);
+      setTenantUsers((existingUsers) => [...existingUsers, { ...requestUser!, roles: [ROLES.TENANT_MEMBER] }]);
       return true;
     },
     [acceptOnboardingRequest, requests],

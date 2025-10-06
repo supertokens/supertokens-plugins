@@ -24,32 +24,19 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
   };
 
   const joinTenant = async (data: TenantJoinData) => {
-    const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>(
-      "/join-tenant",
-      data,
-      { withSession: true },
-    );
-
-    // Refresh the session if the status was OK
-    let wasSessionRefreshed = false;
-    if (response.status === "OK") {
-      wasSessionRefreshed = await Session.attemptRefreshingSession();
-    }
+    const response = await querier.post<{ status: "OK" } | { status: "ERROR"; message: string }>("/join-tenant", data, {
+      withSession: true,
+    });
 
     return {
       ...response,
-      wasSessionRefreshed,
     };
   };
 
   const createTenant = async (data: TenantCreateData) => {
     const response = await querier.post<
       { status: "OK"; pendingApproval: boolean; requestId: string } | { status: "ERROR"; message: string }
-    >(
-      "/create-tenant",
-      data,
-      { withSession: true },
-    );
+    >("/create-tenant", data, { withSession: true });
 
     return response;
   };

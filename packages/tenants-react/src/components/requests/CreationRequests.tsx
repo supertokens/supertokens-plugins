@@ -90,7 +90,7 @@ export const CreationRequests = () => {
       {requests.length > 0 ? (
         <TenantUsersTable
           columns={requests.map((request) => ({
-            emailComponent: <UserDetails email={request.user.emails[0]!} />,
+            emailComponent: <UserDetails email={request.emails[0]!} />,
             extraComponent: getExtraComponent(request),
           }))}
           extraComponentTitle="Tenant ID"

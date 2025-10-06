@@ -17,7 +17,7 @@ export const AddInvitation: React.FC<AddInvitationProps> = ({ onCreate }) => {
   const { t } = usePluginContext();
   const [inviteEmail, setInviteEmail] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [inviteeRole, setInviteeRole] = useState<string>(ROLES.MEMBER);
+  const [inviteeRole, setInviteeRole] = useState<string>(ROLES.TENANT_MEMBER);
 
   const handleAddInvite = usePrettyAction(
     async () => {
@@ -35,7 +35,7 @@ export const AddInvitation: React.FC<AddInvitationProps> = ({ onCreate }) => {
       onSuccess: async () => {
         // Clear the email input
         setInviteEmail("");
-        setInviteeRole(ROLES.MEMBER);
+        setInviteeRole(ROLES.TENANT_MEMBER);
       },
     },
   );
@@ -62,11 +62,11 @@ export const AddInvitation: React.FC<AddInvitationProps> = ({ onCreate }) => {
           name="Tenant Switcher"
           options={[
             {
-              value: ROLES.MEMBER,
+              value: ROLES.TENANT_MEMBER,
               label: "Member",
             },
             {
-              value: ROLES.ADMIN,
+              value: ROLES.TENANT_ADMIN,
               label: "Admin",
             },
           ]}

@@ -30,7 +30,10 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ users, onRoleChange, o
   const { t } = usePluginContext();
   const [userId, setUserId] = useState<string | null>(null);
   const [currentUserDetails, setCurrentUserDetails] = useState<UserWithRole | null>(null);
-  const isCurrentUserAdmin = useMemo(() => currentUserDetails?.roles.includes(ROLES.ADMIN), [currentUserDetails]);
+  const isCurrentUserTENANT_ADMIN = useMemo(
+    () => currentUserDetails?.roles.includes(ROLES.TENANT_ADMIN),
+    [currentUserDetails],
+  );
   const [isRoleChanging, setRoleChanging] = useState(false);
 
   useEffect(() => {
@@ -38,7 +41,7 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ users, onRoleChange, o
       const userIdFromSession = await Session.getUserId();
       setUserId(userIdFromSession);
 
-      // determine if the current user is admin or not.
+      // determine if the current user is TENANT_ADMIN or not.
       const currentUserDetailsWithRole = users.find((user) => user.id === userIdFromSession);
       setCurrentUserDetails(currentUserDetailsWithRole ?? null);
     })();
@@ -46,12 +49,12 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ users, onRoleChange, o
 
   const availableRoles = [
     {
-      label: "Admin",
-      value: ROLES.ADMIN,
+      label: "TENANT_ADMIN",
+      value: ROLES.TENANT_ADMIN,
     },
     {
-      label: "Member",
-      value: ROLES.MEMBER,
+      label: "TENANT_MEMBER",
+      value: ROLES.TENANT_MEMBER,
     },
   ];
 
@@ -82,7 +85,7 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ users, onRoleChange, o
   const getExtraComponent = useCallback(
     (user: { roles: string[] } & User) => {
       // It's safe to assume that they would have one role
-      const currentRole = user.roles[0] ?? ROLES.MEMBER;
+      const currentRole = user.roles[0] ?? ROLES.TENANT_MEMBER;
 
       const getRoleChangeWrapper = (userId: string) => {
         return async (newValue: string) => {
@@ -98,7 +101,7 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ users, onRoleChange, o
               value={currentRole}
               onChange={(e: any) => getRoleChangeWrapper(user.id)(e)}
               options={availableRoles}
-              disabled={!isCurrentUserAdmin || isRoleChanging}
+              disabled={!isCurrentUserTENANT_ADMIN || isRoleChanging}
             />
           </div>
           <div>
@@ -110,7 +113,7 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ users, onRoleChange, o
         </div>
       );
     },
-    [isCurrentUserAdmin, isRoleChanging, handleRoleChange, handleUserRemove, currentUserDetails],
+    [isCurrentUserTENANT_ADMIN, isRoleChanging, handleRoleChange, handleUserRemove, currentUserDetails],
   );
 
   if (!userId) {
