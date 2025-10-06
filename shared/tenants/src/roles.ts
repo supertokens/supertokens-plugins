@@ -1,8 +1,8 @@
 export const ROLES = {
   // Admins of the tenant
-  ADMIN: 'tenant-admin',
+  TENANT_ADMIN: 'tenant-admin',
   // Member of the tenant
-  MEMBER: 'tenant-member',
+  TENANT_MEMBER: 'tenant-member',
   // Admin of the app
   APP_ADMIN: 'app-admin',
   // Anyone else, i.e no assigned role will be considered

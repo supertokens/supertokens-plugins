@@ -673,7 +673,7 @@ export const init = createPluginInitFunction<
                 await assignRoleToUserInTenant(tenantId, session.getUserId(), ROLES.APP_ADMIN);
                 logDebugMessage(`App Admin role assigned to user: ${session.getUserId()}`);
 
-                const roles = await UserRoles.getUsersThatHaveRole(tenantId, ROLES.ADMIN);
+                const roles = await UserRoles.getUsersThatHaveRole(tenantId, ROLES.TENANT_ADMIN);
                 logDebugMessage(`roles: ${JSON.stringify(roles)}`);
 
                 // Do session.revoke and create a new session instead of the above
@@ -717,8 +717,8 @@ export const init = createPluginInitFunction<
                 }
 
                 // Find all the users that have the admin and member role
-                const adminUsers = await getUserIdsInTenantWithRole(tenantIdToUse, ROLES.ADMIN);
-                const memberUsers = await getUserIdsInTenantWithRole(tenantIdToUse, ROLES.MEMBER);
+                const adminUsers = await getUserIdsInTenantWithRole(tenantIdToUse, ROLES.TENANT_ADMIN);
+                const memberUsers = await getUserIdsInTenantWithRole(tenantIdToUse, ROLES.TENANT_MEMBER);
 
                 // Find all the users that do not have a role
                 const usersWithoutRole = tenantUsers.users.filter(
@@ -787,7 +787,7 @@ export const init = createPluginInitFunction<
                   };
                 }
 
-                await assignRoleToUserInTenant(tenantIdToUse, payload.userId, ROLES.MEMBER);
+                await assignRoleToUserInTenant(tenantIdToUse, payload.userId, ROLES.TENANT_MEMBER);
 
                 return {
                   status: "OK",
@@ -897,7 +897,7 @@ export const init = createPluginInitFunction<
                 }
 
                 // Since the user has a role, ensure that it is a valid one.
-                if (!roles.includes(ROLES.ADMIN) && !roles.includes(ROLES.MEMBER)) {
+                if (!roles.includes(ROLES.TENANT_ADMIN) && !roles.includes(ROLES.TENANT_MEMBER)) {
                   return {
                     status: "ERROR_NOT_ALLOWED",
                     message: "Requires member or higher role",
