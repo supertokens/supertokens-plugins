@@ -49,11 +49,11 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ users, onRoleChange, o
 
   const availableRoles = [
     {
-      label: "TENANT_ADMIN",
+      label: "Admin",
       value: ROLES.TENANT_ADMIN,
     },
     {
-      label: "TENANT_MEMBER",
+      label: "Member",
       value: ROLES.TENANT_MEMBER,
     },
   ];
