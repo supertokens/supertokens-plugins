@@ -20,7 +20,7 @@ import { HANDLE_BASE_PATH, METADATA_KEY, PLUGIN_ID, PLUGIN_SDK_VERSION } from ".
 import { BooleanClaim } from "supertokens-node/lib/build/recipe/session/claims";
 import { PERMISSIONS, ROLES, TenantCreationRequestMetadata, TenantMetadata } from "@shared/tenants";
 import { assignAdminToUserInTenant, createRoles, getUserIdsInTenantWithRole } from "./roles";
-import { extractInvitationCodeAndTenantId, validateWithoutClaim } from "./util";
+import { extractInvitationCodeAndTenantId, validateWithoutClaims } from "./util";
 import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
 import { EmailDeliveryInterface } from "supertokens-node/lib/build/ingredients/emaildelivery/types";
 import { DefaultPluginEmailService } from "./defaultEmailService";
@@ -114,7 +114,7 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) =>
-                  validateWithoutClaim(globalValidators, MultipleTenantsPresentClaim.key),
+                  validateWithoutClaims(globalValidators, [MultipleTenantsPresentClaim.key, "st-perm"]),
               },
               handler: withRequestHandler(async (req, res, session) => {
                 if (!session) {
@@ -137,7 +137,7 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) =>
-                  validateWithoutClaim(globalValidators, MultipleTenantsPresentClaim.key),
+                  validateWithoutClaims(globalValidators, [MultipleTenantsPresentClaim.key, "st-perm"]),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -296,7 +296,7 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) =>
-                  validateWithoutClaim(globalValidators, MultipleTenantsPresentClaim.key),
+                  validateWithoutClaims(globalValidators, [MultipleTenantsPresentClaim.key, "st-perm"]),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -362,7 +362,7 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) =>
-                  validateWithoutClaim(globalValidators, MultipleTenantsPresentClaim.key),
+                  validateWithoutClaims(globalValidators, [MultipleTenantsPresentClaim.key, "st-perm"]),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -961,11 +961,25 @@ export const init = createPluginInitFunction<
             return {
               ...originalImplementation,
               getGlobalClaimValidators: async function (input) {
-                if (!pluginConfig.requireNonPublicTenantAssociation) {
-                  return input.claimValidatorsAddedByOtherRecipes;
+                logDebugMessage("Overriding getGlobalClaimValidators");
+
+                // We will add a new validator to check that the user
+                // can access the tenant.
+                const additionalValidators = [PermissionClaim.validators.includes(PERMISSIONS.TENANT_ACCESS)];
+                logDebugMessage("Adding tenant-access permission claim");
+
+                if (pluginConfig.requireNonPublicTenantAssociation) {
+                  logDebugMessage("requireNonPublicTenantAssociation enabled, adding MultipleTenantsPresentClaim");
+                  additionalValidators.push(MultipleTenantsPresentClaim.validators.isTrue());
                 }
 
-                return [...input.claimValidatorsAddedByOtherRecipes, MultipleTenantsPresentClaim.validators.isTrue()];
+                return originalImplementation.getGlobalClaimValidators({
+                  ...input,
+                  claimValidatorsAddedByOtherRecipes: [
+                    ...input.claimValidatorsAddedByOtherRecipes,
+                    ...additionalValidators,
+                  ],
+                });
               },
               createNewSession: async (input) => {
                 const userDetails = await supertokens.getUser(input.userId);
@@ -994,7 +1008,10 @@ export const init = createPluginInitFunction<
                 // If they have a non public tenant, that gets the preference
                 // when creating the session.
 
-                const firstNonPublicTenantId = implementation.getPreferredTenantId(userDetails.tenantIds, input.tenantId);
+                const firstNonPublicTenantId = implementation.getPreferredTenantId(
+                  userDetails.tenantIds,
+                  input.tenantId,
+                );
                 if (firstNonPublicTenantId && firstNonPublicTenantId !== input.tenantId) {
                   logDebugMessage(`Creating new session with tenant: ${firstNonPublicTenantId}`);
                   return Session.createNewSessionWithoutRequestResponse(

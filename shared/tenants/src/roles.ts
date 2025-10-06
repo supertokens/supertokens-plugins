@@ -16,4 +16,5 @@ export const PERMISSIONS = {
   MANAGE_JOIN_REQUESTS: "manage-join-requests",
   MANAGE_CREATE_REQUESTS: "manage-create-requests",
   MANAGE_INVITATIONS: "manage-invitations",
+  TENANT_ACCESS: "tenant-access",
 };

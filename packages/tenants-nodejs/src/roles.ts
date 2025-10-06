@@ -12,8 +12,11 @@ export const createRoles = async () => {
     PERMISSIONS.CHANGE_USER_ROLES,
     PERMISSIONS.MANAGE_JOIN_REQUESTS,
     PERMISSIONS.MANAGE_INVITATIONS,
+    PERMISSIONS.TENANT_ACCESS,
   ]);
-  const memberCreateResponse = await UserRoles.createNewRoleOrAddPermissions(ROLES.TENANT_MEMBER, []);
+  const memberCreateResponse = await UserRoles.createNewRoleOrAddPermissions(ROLES.TENANT_MEMBER, [
+    PERMISSIONS.TENANT_ACCESS,
+  ]);
   const appAdminCreateResponse = await UserRoles.createNewRoleOrAddPermissions(ROLES.APP_ADMIN, [
     PERMISSIONS.MANAGE_CREATE_REQUESTS
   ]);
