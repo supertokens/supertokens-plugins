@@ -845,8 +845,8 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 // NOTE: This is a special case where we cannot
-                // use role based claims for checking if user can
-                // switch to tenant.
+                // use role based claims or permission claims for
+                // checking if user can switch to tenant.
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -871,6 +871,16 @@ export const init = createPluginInitFunction<
                   };
                 }
 
+                const allPermissions: string[] = [];
+                for (const role of roles) {
+                  const rolePermissions = await UserRoles.getPermissionsForRole(role, userContext);
+                  if (rolePermissions.status === "OK") {
+                    for (const perm of rolePermissions.permissions) {
+                      allPermissions.push(perm);
+                    }
+                  }
+                }
+
                 // Check if the user is associated with the tenant or not.
                 const userDetails = await getUser(session.getUserId(), userContext);
                 if (!userDetails?.tenantIds.includes(tenantId)) {
@@ -880,11 +890,11 @@ export const init = createPluginInitFunction<
                   };
                 }
 
-                // Since the user has a role, ensure that it is a valid one.
-                if (!roles.includes(ROLES.TENANT_ADMIN) && !roles.includes(ROLES.TENANT_MEMBER)) {
+                // User needs to have the tenant access permission
+                if (!allPermissions.includes(PERMISSIONS.TENANT_ACCESS)) {
                   return {
                     status: "ERROR_NOT_ALLOWED",
-                    message: "Requires member or higher role",
+                    message: "Requires tenant-access permission",
                     roles: roles,
                   };
                 }
