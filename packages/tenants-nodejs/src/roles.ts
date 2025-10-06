@@ -23,6 +23,8 @@ export const createRoles = async () => {
   logDebugMessage(`App admin role created, already exists: ${!appAdminCreateResponse.createdNewRole}`);
 };
 
+// Default definition of `assignRoleToUserInTenant` to be exported
+// to be usable without having to initialize the plugin.
 export const assignRoleToUserInTenant = async (tenantId: string, userId: string, role: string) => {
   /**
    * Function to assign the passed role to the passed user in the passed tenant.

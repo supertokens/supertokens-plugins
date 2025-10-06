@@ -15,7 +15,11 @@ import {
 import { logDebugMessage } from "supertokens-node/lib/build/logger";
 import UserRoles from "supertokens-node/recipe/userroles";
 import { LoginMethod } from "supertokens-node/lib/build/user";
-import { assignAdminToUserInTenant, assignRoleToUserInTenant, getUserIdsInTenantWithRole } from "./roles";
+import {
+  assignAdminToUserInTenant,
+  assignRoleToUserInTenant as defaultAssignRoleToUserInTenant,
+  getUserIdsInTenantWithRole,
+} from "./roles";
 import { TENANT_CREATE_METADATA_REQUESTS_KEY } from "./constants";
 
 export const getOverrideableTenantFunctionImplementation = (
@@ -208,7 +212,7 @@ export const getOverrideableTenantFunctionImplementation = (
       logDebugMessage(`Removed invitation from tenant ${tenantId}`);
 
       // Add the user with the role
-      await assignRoleToUserInTenant(tenantId, session.getUserId(), inviteeDetails.role);
+      await this.assignRoleToUserInTenant(tenantId, session.getUserId(), inviteeDetails.role);
 
       return {
         status: "OK",
@@ -263,14 +267,7 @@ export const getOverrideableTenantFunctionImplementation = (
       // By default, tenant creation does require approval.
       return pluginConfig.requireTenantCreationRequestApproval ?? true;
     },
-    addTenantCreationRequest: async function (
-      session,
-      tenantDetails,
-      metadata,
-      appUrl,
-      userContext,
-      sendEmail,
-    ) {
+    addTenantCreationRequest: async function (session, tenantDetails, metadata, appUrl, userContext, sendEmail) {
       // Add tenant creation request to metadata
       let tenantCreateRequestMetadata = await metadata.get(TENANT_CREATE_METADATA_REQUESTS_KEY);
 
@@ -322,10 +319,9 @@ export const getOverrideableTenantFunctionImplementation = (
           logDebugMessage(
             `Couldn't find user details for tenant request ${request.requestId} and user: ${request.userId}`,
           );
-          continue;
+        } else {
+          requestsWithUser.push({ ...request, id: userDetails.id, emails: userDetails.emails });
         }
-
-        requestsWithUser.push({ ...request, id: userDetails.id, emails: userDetails.emails });
       }
 
       return {
@@ -333,11 +329,7 @@ export const getOverrideableTenantFunctionImplementation = (
         requests: requestsWithUser,
       };
     },
-    acceptTenantCreationRequest: async function (
-      requestId,
-      session,
-      metadata,
-    ) {
+    acceptTenantCreationRequest: async function (requestId, session, metadata) {
       /**
        * Mark the request as accepted by creating the tenant
        * and remove the create request.
@@ -510,14 +502,30 @@ export const getOverrideableTenantFunctionImplementation = (
         status: "OK",
       };
     },
-    getPreferredTenantId: (tenantIds: string[]): string | undefined => {
+    getPreferredTenantId: (tenantIds: string[], inputTenantId: string): string | undefined => {
       /**
        * Find the preferred tenant ID from the list of tenant IDs.
        *
        * By default we will find the first non public tenant Id and return
        * that.
        */
+      // If the requireNonPublicTenantAssociation is not enabled, we will return the
+      // input tenant ID directly.
+      if (!pluginConfig.requireNonPublicTenantAssociation) {
+        return inputTenantId;
+      }
+
       return tenantIds.find((tenantId) => tenantId !== "public");
+    },
+    assignRoleToUserInTenant: (tenantId: string, userId: string, role: string): Promise<void> => {
+      /**
+       * Assign the passed role to the user in tenantId.
+       *
+       * @param tenantId - The tenant id to assign the role to.
+       * @param userId - The user id to assign the role to.
+       * @param role - The role to assign to the user.
+       */
+      return defaultAssignRoleToUserInTenant(tenantId, userId, role);
     },
   };
 

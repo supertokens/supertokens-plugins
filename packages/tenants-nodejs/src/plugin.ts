@@ -1,7 +1,7 @@
 import { NormalisedAppinfo, SuperTokensPlugin, UserContext } from "supertokens-node/types";
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
 import Session from "supertokens-node/recipe/session";
-import { logDebugMessage } from "supertokens-node/lib/build/logger";
+import { enableDebugLogs, logDebugMessage } from "supertokens-node/lib/build/logger";
 import supertokens, { getUser, RecipeUserId } from "supertokens-node";
 import UserRoles from "supertokens-node/recipe/userroles";
 import { PermissionClaim } from "supertokens-node/recipe/userroles";
@@ -19,7 +19,7 @@ import {
 import { HANDLE_BASE_PATH, METADATA_KEY, PLUGIN_ID, PLUGIN_SDK_VERSION } from "./constants";
 import { BooleanClaim } from "supertokens-node/lib/build/recipe/session/claims";
 import { PERMISSIONS, ROLES, TenantCreationRequestMetadata, TenantMetadata } from "@shared/tenants";
-import { assignAdminToUserInTenant, assignRoleToUserInTenant, createRoles, getUserIdsInTenantWithRole } from "./roles";
+import { assignAdminToUserInTenant, createRoles, getUserIdsInTenantWithRole } from "./roles";
 import { extractInvitationCodeAndTenantId, validateWithoutClaim } from "./util";
 import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
 import { EmailDeliveryInterface } from "supertokens-node/lib/build/ingredients/emaildelivery/types";
@@ -58,8 +58,7 @@ export const init = createPluginInitFunction<
           return false;
         }
 
-        // Do not assume that everyone is part of public tenant
-        return userDetails.tenantIds.length === 1;
+        return userDetails.tenantIds.filter((tenantId) => tenantId !== "public").length === 0;
       },
     });
 
@@ -89,7 +88,18 @@ export const init = createPluginInitFunction<
       id: PLUGIN_ID,
       compatibleSDKVersions: PLUGIN_SDK_VERSION,
       init: async (appConfig) => {
-        await createRoles();
+        if (appConfig.debug) {
+          enableDebugLogs();
+        }
+
+        // NOTE: If this flag is false, we can assume that the user has
+        // overridden the `assignRoleToUserInTenant` to define and use their
+        // own custom roles.
+        if (pluginConfig.createRolesOnInit) {
+          logDebugMessage("Creating roles...");
+          await createRoles();
+        }
+
         logDebugMessage("TenantPlugin initialized with email service");
 
         appInfo = appConfig.appInfo;
@@ -103,13 +113,8 @@ export const init = createPluginInitFunction<
               method: "get",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  if (!pluginConfig.requireNonPublicTenantAssociation) {
-                    return globalValidators;
-                  }
-
-                  return validateWithoutClaim(globalValidators, MultipleTenantsPresentClaim.key);
-                },
+                overrideGlobalClaimValidators: (globalValidators) =>
+                  validateWithoutClaim(globalValidators, MultipleTenantsPresentClaim.key),
               },
               handler: withRequestHandler(async (req, res, session) => {
                 if (!session) {
@@ -131,13 +136,8 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  if (!pluginConfig.requireNonPublicTenantAssociation) {
-                    return globalValidators;
-                  }
-
-                  return validateWithoutClaim(globalValidators, MultipleTenantsPresentClaim.key);
-                },
+                overrideGlobalClaimValidators: (globalValidators) =>
+                  validateWithoutClaim(globalValidators, MultipleTenantsPresentClaim.key),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -152,7 +152,7 @@ export const init = createPluginInitFunction<
                 }
 
                 const payload: { name?: string; firstFactors?: string[] } | undefined = await req.getJSONBody();
-                if (!payload?.name?.trim()) {
+                if (payload?.name === undefined || payload?.name.trim() === "") {
                   return {
                     status: "ERROR",
                     message: "Name is required",
@@ -295,13 +295,8 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  if (!pluginConfig.requireNonPublicTenantAssociation) {
-                    return globalValidators;
-                  }
-
-                  return validateWithoutClaim(globalValidators, MultipleTenantsPresentClaim.key);
-                },
+                overrideGlobalClaimValidators: (globalValidators) =>
+                  validateWithoutClaim(globalValidators, MultipleTenantsPresentClaim.key),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -366,13 +361,8 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  if (!pluginConfig.requireNonPublicTenantAssociation) {
-                    return globalValidators;
-                  }
-
-                  return validateWithoutClaim(globalValidators, MultipleTenantsPresentClaim.key);
-                },
+                overrideGlobalClaimValidators: (globalValidators) =>
+                  validateWithoutClaim(globalValidators, MultipleTenantsPresentClaim.key),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -425,10 +415,7 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [
-                    ...globalValidators,
-                    PermissionClaim.validators.includesAny([PERMISSIONS.LIST_USERS]),
-                  ];
+                  return [...globalValidators, PermissionClaim.validators.includesAny([PERMISSIONS.LIST_USERS])];
                 },
               },
               handler: withRequestHandler(async (req, res, session) => {
@@ -459,10 +446,7 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [
-                    ...globalValidators,
-                    PermissionClaim.validators.includesAny([PERMISSIONS.REMOVE_USERS]),
-                  ];
+                  return [...globalValidators, PermissionClaim.validators.includesAny([PERMISSIONS.REMOVE_USERS])];
                 },
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
@@ -485,7 +469,7 @@ export const init = createPluginInitFunction<
                 if (!targetUserDetails) {
                   return {
                     status: "ERROR",
-                    message: "User to remove not found"
+                    message: "User to remove not found",
                   };
                 }
 
@@ -560,7 +544,7 @@ export const init = createPluginInitFunction<
                 if (!(await implementation.canCreateInvitation(email, role, tenantId, session))) {
                   return {
                     status: "ERROR",
-                    message: "Cannot create invitation for user"
+                    message: "Cannot create invitation for user",
                   };
                 }
 
@@ -670,7 +654,7 @@ export const init = createPluginInitFunction<
                 await assignAdminToUserInTenant(tenantId, session.getUserId());
                 logDebugMessage(`Admin role assigned to user: ${session.getUserId()}`);
 
-                await assignRoleToUserInTenant(tenantId, session.getUserId(), ROLES.APP_ADMIN);
+                await implementation.assignRoleToUserInTenant(tenantId, session.getUserId(), ROLES.APP_ADMIN);
                 logDebugMessage(`App Admin role assigned to user: ${session.getUserId()}`);
 
                 const roles = await UserRoles.getUsersThatHaveRole(tenantId, ROLES.TENANT_ADMIN);
@@ -775,7 +759,7 @@ export const init = createPluginInitFunction<
                 if (!targetUserDetails) {
                   return {
                     status: "ERROR",
-                    message: "Join request user not found"
+                    message: "Join request user not found",
                   };
                 }
 
@@ -783,11 +767,11 @@ export const init = createPluginInitFunction<
                 if (!(await implementation.canApproveJoinRequest(targetUserDetails, session))) {
                   return {
                     status: "ERROR",
-                    message: "User is not allowed to join"
+                    message: "User is not allowed to join",
                   };
                 }
 
-                await assignRoleToUserInTenant(tenantIdToUse, payload.userId, ROLES.TENANT_MEMBER);
+                await implementation.assignRoleToUserInTenant(tenantIdToUse, payload.userId, ROLES.TENANT_MEMBER);
 
                 return {
                   status: "OK",
@@ -929,10 +913,7 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [
-                    ...globalValidators,
-                    PermissionClaim.validators.includesAny([PERMISSIONS.CHANGE_USER_ROLES]),
-                  ];
+                  return [...globalValidators, PermissionClaim.validators.includesAny([PERMISSIONS.CHANGE_USER_ROLES])];
                 },
               },
               handler: withRequestHandler(async (req, res, session) => {
@@ -963,7 +944,7 @@ export const init = createPluginInitFunction<
 
                 // NOTE: We are assuming that the role passed in the payload
                 // is a valid one.
-                await assignRoleToUserInTenant(tenantIdToUse, payload.userId, payload.role);
+                await implementation.assignRoleToUserInTenant(tenantIdToUse, payload.userId, payload.role);
 
                 return {
                   status: "OK",
@@ -1013,7 +994,7 @@ export const init = createPluginInitFunction<
                 // If they have a non public tenant, that gets the preference
                 // when creating the session.
 
-                const firstNonPublicTenantId = implementation.getPreferredTenantId(userDetails.tenantIds);
+                const firstNonPublicTenantId = implementation.getPreferredTenantId(userDetails.tenantIds, input.tenantId);
                 if (firstNonPublicTenantId && firstNonPublicTenantId !== input.tenantId) {
                   logDebugMessage(`Creating new session with tenant: ${firstNonPublicTenantId}`);
                   return Session.createNewSessionWithoutRequestResponse(
@@ -1164,5 +1145,6 @@ export const init = createPluginInitFunction<
     requireNonPublicTenantAssociation: config.requireNonPublicTenantAssociation ?? false,
     requireTenantCreationRequestApproval: config.requireTenantCreationRequestApproval ?? true,
     enableTenantListAPI: config.enableTenantListAPI ?? false,
+    createRolesOnInit: config.createRolesOnInit ?? true,
   }),
 );
