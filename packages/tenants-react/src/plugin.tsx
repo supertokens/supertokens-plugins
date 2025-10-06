@@ -58,7 +58,8 @@ export const init = createPluginInitFunction<
       const urlParams = new URLSearchParams(url);
       const code = urlParams.get("tenantInviteCode");
       const tenantId = urlParams.get("tenantId");
-      return { code, tenantId, shouldAcceptInvite: code !== "" && tenantId !== "" };
+
+      return { code, tenantId, shouldAcceptInvite: (code ?? "") !== "" && (tenantId ?? "") !== "" };
     };
 
     const extractAndInjectCodeAndTenantId = (context: any) => {
