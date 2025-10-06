@@ -170,12 +170,12 @@ export const getOverrideableTenantFunctionImplementation = (
         invitees: tenantMetadata.invitees,
       };
     },
-    acceptInvitation: async (
+    acceptInvitation: async function (
       code: string,
       tenantId: string,
       session: SessionContainerInterface,
       metadata: MetadataType,
-    ): Promise<{ status: "OK" } | ErrorResponse> => {
+    ): Promise<{ status: "OK" } | ErrorResponse> {
       // Check if the user is invited to the tenant
       const tenantMetadata = await metadata.get(tenantId);
       if (!tenantMetadata) {
@@ -194,7 +194,7 @@ export const getOverrideableTenantFunctionImplementation = (
         };
       }
 
-      await implementation.associateAllLoginMethodsOfUserWithTenant(
+      await this.associateAllLoginMethodsOfUserWithTenant(
         tenantId,
         session.getUserId(),
         (loginMethod) => loginMethod.email === inviteeDetails.email,
@@ -214,7 +214,7 @@ export const getOverrideableTenantFunctionImplementation = (
         status: "OK",
       };
     },
-    isAllowedToJoinTenant: async (user: User, session: SessionContainerInterface) => {
+    isAllowedToJoinTenant: async (targetUser: User, session: SessionContainerInterface) => {
       // By default we will allow all users to join a tenant.
       return true;
     },
@@ -222,21 +222,21 @@ export const getOverrideableTenantFunctionImplementation = (
       // By default we will allow all users to create a tenant.
       return true;
     },
-    canCreateInvitation: async (user: User, role: string, session: SessionContainerInterface) => {
-      // By default, only owners can create invitations.
-      return role === ROLES.ADMIN;
+    canCreateInvitation: async (email: string, role: string, tenantId: string, session: SessionContainerInterface) => {
+      // By default, any user can be invited.
+      return true;
     },
-    canApproveJoinRequest: async (user: User, role: string, session: SessionContainerInterface) => {
-      // By default, only owners can approve join requests.
-      return role === ROLES.ADMIN;
+    canApproveJoinRequest: async (targetUser: User, session: SessionContainerInterface) => {
+      // By default, all users can be approved to join
+      return true;
     },
-    canApproveTenantCreationRequest: async (user: User, role: string, session: SessionContainerInterface) => {
-      // By default, only owners can approve tenant creation requests.
-      return role === ROLES.ADMIN;
+    canApproveTenantCreationRequest: async (targetUser: User, session: SessionContainerInterface) => {
+      // By default, all users' tenant creation requests can be approved
+      return true;
     },
-    canRemoveUserFromTenant: async (user: User, roles: string[], session: SessionContainerInterface) => {
-      // By default, only owners can remove users from a tenant.
-      return roles.includes(ROLES.ADMIN);
+    canRemoveTargetUserFromTenant: async (targetUser: User, tenantId: string, session: SessionContainerInterface) => {
+      // By default, can remove anyone from tenant
+      return true;
     },
     associateAllLoginMethodsOfUserWithTenant: async (
       tenantId: string,
@@ -263,7 +263,14 @@ export const getOverrideableTenantFunctionImplementation = (
       // By default, tenant creation does require approval.
       return pluginConfig.requireTenantCreationRequestApproval ?? true;
     },
-    addTenantCreationRequest: async (session, tenantDetails, metadata, appUrl, userContext, sendEmail) => {
+    addTenantCreationRequest: async function (
+      session,
+      tenantDetails,
+      metadata,
+      appUrl,
+      userContext,
+      sendEmail,
+    ) {
       // Add tenant creation request to metadata
       let tenantCreateRequestMetadata = await metadata.get(TENANT_CREATE_METADATA_REQUESTS_KEY);
 
@@ -290,7 +297,7 @@ export const getOverrideableTenantFunctionImplementation = (
       const creatorEmail = userDetails?.emails[0];
 
       // Notify app admins
-      await implementation.sendTenantCreationRequestEmail(
+      await this.sendTenantCreationRequestEmail(
         tenantDetails.name,
         creatorEmail ?? creatorUserId,
         appUrl,
@@ -326,7 +333,11 @@ export const getOverrideableTenantFunctionImplementation = (
         requests: requestsWithUser,
       };
     },
-    acceptTenantCreationRequest: async (requestId, session, metadata) => {
+    acceptTenantCreationRequest: async function (
+      requestId,
+      session,
+      metadata,
+    ) {
       /**
        * Mark the request as accepted by creating the tenant
        * and remove the create request.
@@ -353,8 +364,25 @@ export const getOverrideableTenantFunctionImplementation = (
         };
       }
 
+      const targetUserDetails = await supertokens.getUser(request.userId);
+
+      if (!targetUserDetails) {
+        return {
+          status: "ERROR",
+          message: "User of tenant creation request not found",
+        };
+      }
+
+      // Check if the tenant creation request can be approved.
+      if (!(await this.canApproveTenantCreationRequest(targetUserDetails, session))) {
+        return {
+          status: "ERROR",
+          message: "User not allowed to create tenant",
+        };
+      }
+
       // Create the tenant and assign admin to the user that added the request.
-      const createResponse = await implementation.createTenantAndAssignAdmin(
+      const createResponse = await this.createTenantAndAssignAdmin(
         {
           name: request.name,
           firstFactors: request.firstFactors,
@@ -490,7 +518,7 @@ export const getOverrideableTenantFunctionImplementation = (
        * that.
        */
       return tenantIds.find((tenantId) => tenantId !== "public");
-    }
+    },
   };
 
   return implementation;

@@ -85,13 +85,13 @@ export type GetAppUrl = (
 
 export type OverrideableTenantFunctionImplementation = {
   getTenants: (session: SessionContainerInterface | string) => Promise<({ status: "OK" } & TenantList) | ErrorResponse>;
-  isAllowedToJoinTenant: (user: User, session: SessionContainerInterface) => Promise<boolean>;
+  isAllowedToJoinTenant: (targetUser: User, session: SessionContainerInterface) => Promise<boolean>;
   isAllowedToCreateTenant: (session: SessionContainerInterface) => Promise<boolean>;
   doesTenantCreationRequireApproval: (session: SessionContainerInterface) => Promise<boolean>;
-  canCreateInvitation: (user: User, role: string, session: SessionContainerInterface) => Promise<boolean>;
-  canApproveJoinRequest: (user: User, role: string, session: SessionContainerInterface) => Promise<boolean>;
-  canApproveTenantCreationRequest: (user: User, role: string, session: SessionContainerInterface) => Promise<boolean>;
-  canRemoveUserFromTenant: (user: User, roles: string[], session: SessionContainerInterface) => Promise<boolean>;
+  canCreateInvitation: (email: string, role: string, tenantId: string, session: SessionContainerInterface) => Promise<boolean>;
+  canApproveJoinRequest: (targetUser: User, session: SessionContainerInterface) => Promise<boolean>;
+  canApproveTenantCreationRequest: (targetUser: User, session: SessionContainerInterface) => Promise<boolean>;
+  canRemoveTargetUserFromTenant: (targetUser: User, tenantId: string, session: SessionContainerInterface) => Promise<boolean>;
   createTenantAndAssignAdmin: (
     tenantDetails: {
       name: string;

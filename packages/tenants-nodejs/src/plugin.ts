@@ -4,6 +4,7 @@ import Session from "supertokens-node/recipe/session";
 import { logDebugMessage } from "supertokens-node/lib/build/logger";
 import supertokens, { getUser, RecipeUserId } from "supertokens-node";
 import UserRoles from "supertokens-node/recipe/userroles";
+import { PermissionClaim } from "supertokens-node/recipe/userroles";
 
 import { createPluginInitFunction } from "@shared/js";
 import { pluginUserMetadata, withRequestHandler } from "@shared/nodejs";
@@ -17,7 +18,7 @@ import {
 } from "./types";
 import { HANDLE_BASE_PATH, METADATA_KEY, PLUGIN_ID, PLUGIN_SDK_VERSION } from "./constants";
 import { BooleanClaim } from "supertokens-node/lib/build/recipe/session/claims";
-import { ROLES, TenantCreationRequestMetadata, TenantMetadata } from "@shared/tenants";
+import { PERMISSIONS, ROLES, TenantCreationRequestMetadata, TenantMetadata } from "@shared/tenants";
 import { assignAdminToUserInTenant, assignRoleToUserInTenant, createRoles, getUserIdsInTenantWithRole } from "./roles";
 import { extractInvitationCodeAndTenantId, validateWithoutClaim } from "./util";
 import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
@@ -210,9 +211,11 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                // Should only be accessible to app admin roles
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [...globalValidators, UserRoles.UserRoleClaim.validators.includesAny([ROLES.APP_ADMIN])];
+                  return [
+                    ...globalValidators,
+                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_CREATE_REQUESTS]),
+                  ];
                 },
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
@@ -228,9 +231,11 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                // Should only be accessible to app admin roles
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [...globalValidators, UserRoles.UserRoleClaim.validators.includesAny([ROLES.APP_ADMIN])];
+                  return [
+                    ...globalValidators,
+                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_CREATE_REQUESTS]),
+                  ];
                 },
               },
               handler: withRequestHandler(async (req, res, session) => {
@@ -258,9 +263,11 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                // Should only be accessible to app admin roles
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [...globalValidators, UserRoles.UserRoleClaim.validators.includesAny([ROLES.APP_ADMIN])];
+                  return [
+                    ...globalValidators,
+                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_CREATE_REQUESTS]),
+                  ];
                 },
               },
               handler: withRequestHandler(async (req, res, session) => {
@@ -420,7 +427,7 @@ export const init = createPluginInitFunction<
                 overrideGlobalClaimValidators: (globalValidators) => {
                   return [
                     ...globalValidators,
-                    UserRoles.UserRoleClaim.validators.includesAny([ROLES.ADMIN, ROLES.MEMBER]),
+                    PermissionClaim.validators.includesAny([PERMISSIONS.LIST_USERS]),
                   ];
                 },
               },
@@ -452,7 +459,10 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [...globalValidators, UserRoles.UserRoleClaim.validators.includesAny([ROLES.ADMIN])];
+                  return [
+                    ...globalValidators,
+                    PermissionClaim.validators.includesAny([PERMISSIONS.REMOVE_USERS]),
+                  ];
                 },
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
@@ -462,28 +472,29 @@ export const init = createPluginInitFunction<
 
                 const tenantIdToUse = session.getTenantId();
 
-                const userDetails = await supertokens.getUser(session.getUserId());
-                const userRoleInTenant = await UserRoles.getRolesForUser(
-                  tenantIdToUse,
-                  session.getUserId(),
-                  userContext,
-                );
-
-                // Check if the current logged in user can remove the user
-                // from tenant.
-                if (!implementation.canRemoveUserFromTenant(userDetails!, userRoleInTenant.roles, session)) {
-                  return {
-                    status: "ERROR",
-                    message: "Logged in user not allowed to remove user from tenant",
-                  };
-                }
-
                 const payload: { userId: string } | undefined = await req.getJSONBody();
 
                 if (!payload?.userId) {
                   return {
                     status: "ERROR",
                     message: "userId is required to remove from tenant",
+                  };
+                }
+
+                const targetUserDetails = await supertokens.getUser(payload.userId);
+                if (!targetUserDetails) {
+                  return {
+                    status: "ERROR",
+                    message: "User to remove not found"
+                  };
+                }
+
+                // Check if the current logged in user can remove the user
+                // from tenant.
+                if (!implementation.canRemoveTargetUserFromTenant(targetUserDetails, tenantIdToUse, session)) {
+                  return {
+                    status: "ERROR",
+                    message: "User cannot be removed from tenant",
                   };
                 }
 
@@ -522,7 +533,10 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [...globalValidators, UserRoles.UserRoleClaim.validators.includesAny([ROLES.ADMIN])];
+                  return [
+                    ...globalValidators,
+                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_INVITATIONS]),
+                  ];
                 },
               },
               handler: withRequestHandler(async (req, res, session) => {
@@ -543,6 +557,13 @@ export const init = createPluginInitFunction<
                   };
                 }
 
+                if (!(await implementation.canCreateInvitation(email, role, tenantId, session))) {
+                  return {
+                    status: "ERROR",
+                    message: "Cannot create invitation for user"
+                  };
+                }
+
                 return implementation.addInvitation(email, tenantId, role, metadata);
               }),
             },
@@ -552,7 +573,10 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [...globalValidators, UserRoles.UserRoleClaim.validators.includesAny([ROLES.ADMIN])];
+                  return [
+                    ...globalValidators,
+                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_INVITATIONS]),
+                  ];
                 },
               },
               handler: withRequestHandler(async (req, res, session) => {
@@ -582,7 +606,7 @@ export const init = createPluginInitFunction<
                 overrideGlobalClaimValidators: (globalValidators) => {
                   return [
                     ...globalValidators,
-                    UserRoles.UserRoleClaim.validators.includesAny([ROLES.ADMIN, ROLES.MEMBER]),
+                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_INVITATIONS]),
                   ];
                 },
               },
@@ -669,7 +693,10 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [...globalValidators, UserRoles.UserRoleClaim.validators.includesAny([ROLES.ADMIN])];
+                  return [
+                    ...globalValidators,
+                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_JOIN_REQUESTS]),
+                  ];
                 },
               },
               handler: withRequestHandler(async (req, res, session) => {
@@ -711,7 +738,10 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [...globalValidators, UserRoles.UserRoleClaim.validators.includesAny([ROLES.ADMIN])];
+                  return [
+                    ...globalValidators,
+                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_JOIN_REQUESTS]),
+                  ];
                 },
               },
               handler: withRequestHandler(async (req, res, session) => {
@@ -740,6 +770,23 @@ export const init = createPluginInitFunction<
                   };
                 }
 
+                const targetUserDetails = await supertokens.getUser(payload.userId);
+
+                if (!targetUserDetails) {
+                  return {
+                    status: "ERROR",
+                    message: "Join request user not found"
+                  };
+                }
+
+                // Check if the user is allowed to join
+                if (!(await implementation.canApproveJoinRequest(targetUserDetails, session))) {
+                  return {
+                    status: "ERROR",
+                    message: "User is not allowed to join"
+                  };
+                }
+
                 await assignRoleToUserInTenant(tenantIdToUse, payload.userId, ROLES.MEMBER);
 
                 return {
@@ -754,7 +801,10 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [...globalValidators, UserRoles.UserRoleClaim.validators.includesAny([ROLES.ADMIN])];
+                  return [
+                    ...globalValidators,
+                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_JOIN_REQUESTS]),
+                  ];
                 },
               },
               handler: withRequestHandler(async (req, res, session) => {
@@ -879,7 +929,10 @@ export const init = createPluginInitFunction<
               verifySessionOptions: {
                 sessionRequired: true,
                 overrideGlobalClaimValidators: (globalValidators) => {
-                  return [...globalValidators, UserRoles.UserRoleClaim.validators.includesAny([ROLES.ADMIN])];
+                  return [
+                    ...globalValidators,
+                    PermissionClaim.validators.includesAny([PERMISSIONS.CHANGE_USER_ROLES]),
+                  ];
                 },
               },
               handler: withRequestHandler(async (req, res, session) => {

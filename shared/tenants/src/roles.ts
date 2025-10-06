@@ -10,7 +10,10 @@ export const ROLES = {
 };
 
 export const PERMISSIONS = {
-  READ: 'read',
-  WRITE: 'write',
-  DELETE: 'delete',
+  LIST_USERS: "list-users",
+  REMOVE_USERS: "remove-users",
+  CHANGE_USER_ROLES: "change-user-roles",
+  MANAGE_JOIN_REQUESTS: "manage-join-requests",
+  MANAGE_CREATE_REQUESTS: "manage-create-requests",
+  MANAGE_INVITATIONS: "manage-invitations",
 };

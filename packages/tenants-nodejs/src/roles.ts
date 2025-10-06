@@ -7,18 +7,15 @@ import { GetUserIdsInTenantWithRole } from "./types";
 export const createRoles = async () => {
   // Create the roles
   const adminCreateResponse = await UserRoles.createNewRoleOrAddPermissions(ROLES.ADMIN, [
-    PERMISSIONS.READ,
-    PERMISSIONS.WRITE,
-    PERMISSIONS.DELETE,
+    PERMISSIONS.LIST_USERS,
+    PERMISSIONS.REMOVE_USERS,
+    PERMISSIONS.CHANGE_USER_ROLES,
+    PERMISSIONS.MANAGE_JOIN_REQUESTS,
+    PERMISSIONS.MANAGE_INVITATIONS,
   ]);
-  const memberCreateResponse = await UserRoles.createNewRoleOrAddPermissions(ROLES.MEMBER, [
-    PERMISSIONS.READ,
-    PERMISSIONS.WRITE,
-  ]);
+  const memberCreateResponse = await UserRoles.createNewRoleOrAddPermissions(ROLES.MEMBER, []);
   const appAdminCreateResponse = await UserRoles.createNewRoleOrAddPermissions(ROLES.APP_ADMIN, [
-    PERMISSIONS.READ,
-    PERMISSIONS.WRITE,
-    PERMISSIONS.DELETE,
+    PERMISSIONS.MANAGE_CREATE_REQUESTS
   ]);
 
   logDebugMessage(`Admin role created, already exists: ${!adminCreateResponse.createdNewRole}`);
