@@ -1,5 +1,5 @@
 import classNames from "classnames/bind";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import styles from "./icon.module.scss";
 import { useWebComponent } from "../utils";
 import { HTMLElementProps } from "../types";
@@ -18,6 +18,8 @@ export interface IconProps extends HTMLElementProps {
 }
 
 export const Icon = (_props: IconProps) => {
+  console.log("[Icon] Component rendering with props:", _props);
+
   const { isDefined, props } = useWebComponent({
     name: "wa-icon",
     className: cx("st-icon"),
@@ -25,14 +27,14 @@ export const Icon = (_props: IconProps) => {
     importCallback: () => import("@awesome.me/webawesome/dist/components/icon/icon.js"),
   });
 
-  // Initialize bundled icons when component mounts
-  useEffect(() => {
-    if (_props.library === "bundled") {
-      IconManager.initialize().catch(console.error);
-    }
-  }, [_props.library]);
+  console.log("[Icon] isDefined:", isDefined);
+  console.log("[Icon] Final props being passed to wa-icon:", props);
 
-  if (!isDefined) return null;
+  if (!isDefined) {
+    console.log("[Icon] Not rendering - wa-icon not defined yet");
+    return null;
+  }
 
+  console.log("[Icon] Rendering wa-icon");
   return <wa-icon {...props}></wa-icon>;
 };

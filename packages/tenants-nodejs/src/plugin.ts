@@ -19,7 +19,7 @@ import {
 import { HANDLE_BASE_PATH, METADATA_KEY, PLUGIN_ID, PLUGIN_SDK_VERSION } from "./constants";
 import { BooleanClaim } from "supertokens-node/lib/build/recipe/session/claims";
 import { PERMISSIONS, ROLES, TenantCreationRequestMetadata, TenantMetadata } from "@shared/tenants";
-import { assignAdminToUserInTenant, createRoles, getUserIdsInTenantWithRole } from "./roles";
+import { createRoles, getUserIdsInTenantWithRole } from "./roles";
 import { extractInvitationCodeAndTenantId, hasPermissions, validateWithoutClaims } from "./util";
 import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
 import { EmailDeliveryInterface } from "supertokens-node/lib/build/ingredients/emaildelivery/types";
@@ -593,49 +593,6 @@ export const init = createPluginInitFunction<
                 return implementation.acceptInvitation(code, tenantId, session, metadata);
               }),
             },
-            {
-              // TODO: Remove this before merging
-              path: `${HANDLE_BASE_PATH}/become-admin`,
-              method: "post",
-              verifySessionOptions: {
-                sessionRequired: true,
-              },
-              handler: withRequestHandler(async (req, res, session) => {
-                if (!session) {
-                  throw new Error("Session not found");
-                }
-
-                const payload: { tenantId: string } | undefined = await req.getJSONBody();
-                const tenantId = payload?.tenantId;
-                if (!tenantId) {
-                  return {
-                    status: "ERROR",
-                    message: "Tenant ID is required",
-                  };
-                }
-
-                // Associate the user with the tenant
-                await MultiTenancy.associateUserToTenant(tenantId, session.getRecipeUserId());
-
-                await assignAdminToUserInTenant(tenantId, session.getUserId());
-                logDebugMessage(`Admin role assigned to user: ${session.getUserId()}`);
-
-                await implementation.assignRoleToUserInTenant(tenantId, session.getUserId(), ROLES.APP_ADMIN);
-                logDebugMessage(`App Admin role assigned to user: ${session.getUserId()}`);
-
-                const roles = await UserRoles.getUsersThatHaveRole(tenantId, ROLES.TENANT_ADMIN);
-                logDebugMessage(`roles: ${JSON.stringify(roles)}`);
-
-                // Do session.revoke and create a new session instead of the above
-                await session.fetchAndSetClaim(UserRoles.UserRoleClaim);
-
-                return {
-                  status: "OK",
-                  message: "Admin role assigned to user",
-                  roles: roles,
-                };
-              }),
-            },
             // Request related routes
             {
               path: `${HANDLE_BASE_PATH}/request/list`,
@@ -979,12 +936,12 @@ export const init = createPluginInitFunction<
                   ...input.accessTokenPayload,
                   ...(pluginConfig.requireNonPublicTenantAssociation
                     ? await MultipleTenantsPresentClaim.build(
-                      input.userId,
-                      input.recipeUserId,
-                      tenantId,
-                      input.accessTokenPayload,
-                      input.userContext,
-                    )
+                        input.userId,
+                        input.recipeUserId,
+                        tenantId,
+                        input.accessTokenPayload,
+                        input.userContext,
+                      )
                     : {}),
                 };
 
