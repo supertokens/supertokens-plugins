@@ -29,5 +29,7 @@ export const defaultTranslationsTenants = {
     PL_TB_INVITATIONS_AUTHENTICATE_AND_ACCEPT_MESSAGE: "Authenticate and accept invitation",
     PL_TB_INVITATIONS_DESCRIPTION_MESSAGE_PREFIX: "You have been invited to join",
     PL_TB_INVITATIONS_DESCRIPTION_MESSAGE_POSTFIX: "tenant. Click the button below to accept the invitation.",
+    PL_TB_INVITE_ACCEPT_AUTHENTICATION_HEADER_MESSAGE:
+      "If you authenticate, invitation will be accepted automatically.",
   },
 } as const;

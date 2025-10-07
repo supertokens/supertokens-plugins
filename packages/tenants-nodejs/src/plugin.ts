@@ -574,6 +574,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
+                overrideGlobalClaimValidators: validateWithoutClaims(["st-perm"]),
               },
               handler: withRequestHandler(async (req, res, session) => {
                 if (!session) {

@@ -10,7 +10,7 @@ import { usePluginContext } from "../../plugin";
 const TenantCardWrapper = () => {
   const { api, pluginConfig } = usePluginContext();
   const { joinTenant, createTenant } = api;
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
   const [isPendingApproval, setIsPendingApproval] = useState(false);
 
   const handleOnJoin = async (data: TenantJoinData) => {

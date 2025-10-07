@@ -18,8 +18,6 @@ export interface IconProps extends HTMLElementProps {
 }
 
 export const Icon = (_props: IconProps) => {
-  console.log("[Icon] Component rendering with props:", _props);
-
   const { isDefined, props } = useWebComponent({
     name: "wa-icon",
     className: cx("st-icon"),
@@ -27,14 +25,9 @@ export const Icon = (_props: IconProps) => {
     importCallback: () => import("@awesome.me/webawesome/dist/components/icon/icon.js"),
   });
 
-  console.log("[Icon] isDefined:", isDefined);
-  console.log("[Icon] Final props being passed to wa-icon:", props);
-
   if (!isDefined) {
-    console.log("[Icon] Not rendering - wa-icon not defined yet");
     return null;
   }
 
-  console.log("[Icon] Rendering wa-icon");
   return <wa-icon {...props}></wa-icon>;
 };

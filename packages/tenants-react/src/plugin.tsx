@@ -46,7 +46,7 @@ export const init = createPluginInitFunction<
       id: `${PLUGIN_ID}-multiple-tenants-present`,
       refresh: async () => {},
       onFailureRedirection: async ({ reason }) => {
-        return "/user/tenants/select";
+        return "/user/tenants/create";
       },
     });
 
@@ -55,7 +55,7 @@ export const init = createPluginInitFunction<
     const PROGRESSIVE_PROFILING_COMPLETED_CLAIM_ID = "stpl-pp-c";
 
     const extractCodeAndTenantId = (url: string) => {
-      const urlParams = new URLSearchParams(url);
+      const urlParams = new URL(url).searchParams;
       const code = urlParams.get("tenantInviteCode");
       const tenantId = urlParams.get("tenantId");
 
@@ -63,8 +63,10 @@ export const init = createPluginInitFunction<
     };
 
     const extractAndInjectCodeAndTenantId = (context: any) => {
-      const { code, tenantId, shouldAcceptInvite } = extractCodeAndTenantId(context.url);
+      const { code, tenantId, shouldAcceptInvite } = extractCodeAndTenantId(window.location.href);
 
+      logDebugMessage(`extractAndInjectCodeAndTenantId, code: ${code}, tenantId: ${tenantId}`);
+      logDebugMessage(`extractAndInjectCodeAndTenantId - shouldAcceptInvite: ${shouldAcceptInvite}`);
       if (!shouldAcceptInvite) {
         return {
           requestInit: context.requestInit,
@@ -254,11 +256,11 @@ export const init = createPluginInitFunction<
         AuthPageHeader_Override: ({ DefaultComponent, ...props }) => {
           // If the code and tenantId, we need to show the message that
           // the invitation will be accepted automatically.
-          const { shouldAcceptInvite } = extractCodeAndTenantId((globalThis as any).location.search);
+          const { shouldAcceptInvite } = extractCodeAndTenantId((globalThis as any).location.href);
 
           return (
             <div>
-              {shouldAcceptInvite && "If you authenticate, invitation will be accepted automatically."}
+              {shouldAcceptInvite && <h4>{translations("PL_TB_INVITE_ACCEPT_AUTHENTICATION_HEADER_MESSAGE")}</h4>}
               {/* @ts-ignore */}
               <DefaultComponent {...props} />
             </div>

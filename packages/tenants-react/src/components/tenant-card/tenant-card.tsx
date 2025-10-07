@@ -19,11 +19,11 @@ interface TenantCardProps {
 
 export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => {
   const [newTenantName, setNewTenantName] = useState<string>("");
-  const { t } = usePluginContext();
+  const { t, pluginConfig } = usePluginContext();
 
   const onSuccess = () => {
     // Redirect the user to the app.
-    console.log("Redirecting...");
+    (globalThis as any).location.href = pluginConfig.redirectToUrlOnJoiningTenant;
   };
 
   const handleCreateAndJoin = usePrettyAction(
