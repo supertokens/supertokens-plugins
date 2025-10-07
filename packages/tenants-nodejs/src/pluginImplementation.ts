@@ -3,7 +3,7 @@ import crypto from "crypto";
 import supertokens from "supertokens-node";
 import { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
-import { InviteeDetails, ROLES, TenantCreationRequestWithUser, TenantList } from "@shared/tenants";
+import { InviteeDetails, ROLES, TenantCreationRequest, TenantCreationRequestWithUser, TenantList } from "@shared/tenants";
 import { User, UserContext } from "supertokens-node/types";
 import {
   ErrorResponse,
@@ -111,7 +111,7 @@ export const getOverrideableTenantFunctionImplementation = (
       }
 
       // Generate a random string for the code
-      const code = crypto.randomBytes(10).toString("hex").substring(0, 15);
+      const code = crypto.randomBytes(10).toString("hex");
 
       // Invite the user to the tenant
       await metadata.set(tenantId, {
@@ -230,11 +230,11 @@ export const getOverrideableTenantFunctionImplementation = (
       // By default, any user can be invited.
       return true;
     },
-    canApproveJoinRequest: async (targetUser: User, session: SessionContainerInterface) => {
+    canApproveJoinRequest: async (targetUser: User, tenantId: string, session: SessionContainerInterface) => {
       // By default, all users can be approved to join
       return true;
     },
-    canApproveTenantCreationRequest: async (targetUser: User, session: SessionContainerInterface) => {
+    canApproveTenantCreationRequest: async (targetUser: User, creationRequest: TenantCreationRequest, session: SessionContainerInterface) => {
       // By default, all users' tenant creation requests can be approved
       return true;
     },
@@ -366,7 +366,7 @@ export const getOverrideableTenantFunctionImplementation = (
       }
 
       // Check if the tenant creation request can be approved.
-      if (!(await this.canApproveTenantCreationRequest(targetUserDetails, session))) {
+      if (!(await this.canApproveTenantCreationRequest(targetUserDetails, request, session))) {
         return {
           status: "ERROR",
           message: "User not allowed to create tenant",

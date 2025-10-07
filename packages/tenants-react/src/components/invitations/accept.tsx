@@ -21,7 +21,7 @@ export const AcceptInvitation = ({
   const [error, setError] = useState<string>("");
 
   const session = useSessionContext();
-  const { t } = usePluginContext();
+  const { t, pluginConfig } = usePluginContext();
 
   useEffect(() => {
     // Parse the code from URL query parameters
@@ -31,7 +31,7 @@ export const AcceptInvitation = ({
 
     if (!inviteCode || !tenantId) {
       // Redirect to dashboard if no code is present
-      (globalThis as any).location.href = "/user/tenants";
+      (globalThis as any).location.href = pluginConfig.redirectToUrlOnJoiningTenant;
       return;
     }
 
@@ -53,8 +53,8 @@ export const AcceptInvitation = ({
 
     try {
       await onAccept(code, tenantId);
-      // Redirect to /user/tenants after successful acceptance
-      (globalThis as any).location.href = "/user/tenants";
+      // Redirect user after successful acceptance
+      (globalThis as any).location.href = pluginConfig.redirectToUrlOnJoiningTenant;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to accept invitation");
     } finally {

@@ -271,5 +271,6 @@ export const init = createPluginInitFunction<
   undefined,
   (pluginConfig) => ({
     requireTenantCreation: pluginConfig.requireTenantCreation ?? true,
+    redirectToUrlOnJoiningTenant: pluginConfig.redirectToUrlOnJoiningTenant ?? "/user/profile"
   }),
 );

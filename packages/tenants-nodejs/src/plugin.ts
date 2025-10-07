@@ -20,7 +20,7 @@ import { HANDLE_BASE_PATH, METADATA_KEY, PLUGIN_ID, PLUGIN_SDK_VERSION } from ".
 import { BooleanClaim } from "supertokens-node/lib/build/recipe/session/claims";
 import { PERMISSIONS, ROLES, TenantCreationRequestMetadata, TenantMetadata } from "@shared/tenants";
 import { assignAdminToUserInTenant, createRoles, getUserIdsInTenantWithRole } from "./roles";
-import { extractInvitationCodeAndTenantId, validateWithoutClaims } from "./util";
+import { extractInvitationCodeAndTenantId, hasPermissions, validateWithoutClaims } from "./util";
 import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
 import { EmailDeliveryInterface } from "supertokens-node/lib/build/ingredients/emaildelivery/types";
 import { DefaultPluginEmailService } from "./defaultEmailService";
@@ -58,7 +58,7 @@ export const init = createPluginInitFunction<
           return false;
         }
 
-        return userDetails.tenantIds.filter((tenantId) => tenantId !== "public").length === 0;
+        return !userDetails.tenantIds.some((tenantId) => tenantId !== "public");
       },
     });
 
@@ -113,8 +113,7 @@ export const init = createPluginInitFunction<
               method: "get",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) =>
-                  validateWithoutClaims(globalValidators, [MultipleTenantsPresentClaim.key, "st-perm"]),
+                overrideGlobalClaimValidators: validateWithoutClaims([MultipleTenantsPresentClaim.key, "st-perm"]),
               },
               handler: withRequestHandler(async (req, res, session) => {
                 if (!session) {
@@ -136,8 +135,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) =>
-                  validateWithoutClaims(globalValidators, [MultipleTenantsPresentClaim.key, "st-perm"]),
+                overrideGlobalClaimValidators: validateWithoutClaims([MultipleTenantsPresentClaim.key, "st-perm"]),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -211,12 +209,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  return [
-                    ...globalValidators,
-                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_CREATE_REQUESTS]),
-                  ];
-                },
+                overrideGlobalClaimValidators: hasPermissions([PERMISSIONS.MANAGE_CREATE_REQUESTS]),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -231,12 +224,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  return [
-                    ...globalValidators,
-                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_CREATE_REQUESTS]),
-                  ];
-                },
+                overrideGlobalClaimValidators: hasPermissions([PERMISSIONS.MANAGE_CREATE_REQUESTS]),
               },
               handler: withRequestHandler(async (req, res, session) => {
                 if (!session) {
@@ -263,12 +251,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  return [
-                    ...globalValidators,
-                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_CREATE_REQUESTS]),
-                  ];
-                },
+                overrideGlobalClaimValidators: hasPermissions([PERMISSIONS.MANAGE_CREATE_REQUESTS]),
               },
               handler: withRequestHandler(async (req, res, session) => {
                 if (!session) {
@@ -295,8 +278,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) =>
-                  validateWithoutClaims(globalValidators, [MultipleTenantsPresentClaim.key, "st-perm"]),
+                overrideGlobalClaimValidators: validateWithoutClaims([MultipleTenantsPresentClaim.key, "st-perm"]),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -361,8 +343,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) =>
-                  validateWithoutClaims(globalValidators, [MultipleTenantsPresentClaim.key, "st-perm"]),
+                overrideGlobalClaimValidators: validateWithoutClaims([MultipleTenantsPresentClaim.key, "st-perm"]),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -414,9 +395,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  return [...globalValidators, PermissionClaim.validators.includesAny([PERMISSIONS.LIST_USERS])];
-                },
+                overrideGlobalClaimValidators: hasPermissions([PERMISSIONS.LIST_USERS]),
               },
               handler: withRequestHandler(async (req, res, session) => {
                 if (!session) {
@@ -445,9 +424,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  return [...globalValidators, PermissionClaim.validators.includesAny([PERMISSIONS.REMOVE_USERS])];
-                },
+                overrideGlobalClaimValidators: hasPermissions([PERMISSIONS.REMOVE_USERS]),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -493,7 +470,7 @@ export const init = createPluginInitFunction<
                 }
 
                 // Remove all roles of the user from the tenant
-                const allUserRolesInTenant = await UserRoles.getRolesForUser(tenantIdToUse, userToRemove.id);
+                const allUserRolesInTenant = await UserRoles.getRolesForUser(tenantIdToUse, userToRemove.id, userContext);
                 for (const role of allUserRolesInTenant.roles) {
                   await UserRoles.removeUserRole(tenantIdToUse, userToRemove.id, role, userContext);
                 }
@@ -516,12 +493,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  return [
-                    ...globalValidators,
-                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_INVITATIONS]),
-                  ];
-                },
+                overrideGlobalClaimValidators: hasPermissions([PERMISSIONS.MANAGE_INVITATIONS]),
               },
               handler: withRequestHandler(async (req, res, session) => {
                 if (!session) {
@@ -556,12 +528,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  return [
-                    ...globalValidators,
-                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_INVITATIONS]),
-                  ];
-                },
+                overrideGlobalClaimValidators: hasPermissions([PERMISSIONS.MANAGE_INVITATIONS]),
               },
               handler: withRequestHandler(async (req, res, session) => {
                 if (!session) {
@@ -587,12 +554,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  return [
-                    ...globalValidators,
-                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_INVITATIONS]),
-                  ];
-                },
+                overrideGlobalClaimValidators: hasPermissions([PERMISSIONS.MANAGE_INVITATIONS]),
               },
               handler: withRequestHandler(async (req, res, session) => {
                 if (!session) {
@@ -676,12 +638,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  return [
-                    ...globalValidators,
-                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_JOIN_REQUESTS]),
-                  ];
-                },
+                overrideGlobalClaimValidators: hasPermissions([PERMISSIONS.MANAGE_JOIN_REQUESTS]),
               },
               handler: withRequestHandler(async (req, res, session) => {
                 if (!session) {
@@ -721,14 +678,9 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  return [
-                    ...globalValidators,
-                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_JOIN_REQUESTS]),
-                  ];
-                },
+                overrideGlobalClaimValidators: hasPermissions([PERMISSIONS.MANAGE_JOIN_REQUESTS]),
               },
-              handler: withRequestHandler(async (req, res, session) => {
+              handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
                   throw new Error("Session not found");
                 }
@@ -746,7 +698,7 @@ export const init = createPluginInitFunction<
 
                 // We need to check that the user doesn't have an existing role, in which
                 // case we cannot "accept" the request.
-                const role = await UserRoles.getRolesForUser(tenantIdToUse, payload.userId);
+                const role = await UserRoles.getRolesForUser(tenantIdToUse, payload.userId, userContext);
                 if (role.roles.length > 0) {
                   return {
                     status: "ERROR",
@@ -764,7 +716,7 @@ export const init = createPluginInitFunction<
                 }
 
                 // Check if the user is allowed to join
-                if (!(await implementation.canApproveJoinRequest(targetUserDetails, session))) {
+                if (!(await implementation.canApproveJoinRequest(targetUserDetails, tenantIdToUse, session))) {
                   return {
                     status: "ERROR",
                     message: "User is not allowed to join",
@@ -784,12 +736,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  return [
-                    ...globalValidators,
-                    PermissionClaim.validators.includesAny([PERMISSIONS.MANAGE_JOIN_REQUESTS]),
-                  ];
-                },
+                overrideGlobalClaimValidators: hasPermissions([PERMISSIONS.MANAGE_JOIN_REQUESTS]),
               },
               handler: withRequestHandler(async (req, res, session) => {
                 if (!session) {
@@ -863,7 +810,8 @@ export const init = createPluginInitFunction<
                 }
 
                 // Check if the user has the role of member or admin in the tenant.
-                const roles = (await UserRoles.getRolesForUser(tenantId, session.getUserId())).roles;
+                const roles = (await UserRoles.getRolesForUser(tenantId, session.getUserId(userContext), userContext))
+                  .roles;
                 if (roles.length === 0) {
                   return {
                     status: "ERROR_NOT_ALLOWED",
@@ -922,11 +870,9 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  return [...globalValidators, PermissionClaim.validators.includesAny([PERMISSIONS.CHANGE_USER_ROLES])];
-                },
+                overrideGlobalClaimValidators: hasPermissions([PERMISSIONS.CHANGE_USER_ROLES]),
               },
-              handler: withRequestHandler(async (req, res, session) => {
+              handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
                   throw new Error("Session not found");
                 }
@@ -947,7 +893,7 @@ export const init = createPluginInitFunction<
 
                 // We need to check that the user doesn't have an existing role, in which
                 // case we cannot "accept" the request.
-                const roleDetails = await UserRoles.getRolesForUser(tenantIdToUse, payload.userId);
+                const roleDetails = await UserRoles.getRolesForUser(tenantIdToUse, payload.userId, userContext);
                 for (const role of roleDetails.roles) {
                   UserRoles.removeUserRole(tenantIdToUse, payload.userId, role);
                 }

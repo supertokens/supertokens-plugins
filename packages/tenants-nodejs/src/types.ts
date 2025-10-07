@@ -2,6 +2,7 @@ import { SessionContainerInterface } from "supertokens-node/recipe/session/types
 import { pluginUserMetadata } from "@shared/nodejs";
 import {
   InviteeDetails,
+  TenantCreationRequest,
   TenantCreationRequestMetadata,
   TenantCreationRequestWithUser,
   TenantList,
@@ -91,8 +92,8 @@ export type OverrideableTenantFunctionImplementation = {
   isAllowedToCreateTenant: (session: SessionContainerInterface) => Promise<boolean>;
   doesTenantCreationRequireApproval: (session: SessionContainerInterface) => Promise<boolean>;
   canCreateInvitation: (email: string, role: string, tenantId: string, session: SessionContainerInterface) => Promise<boolean>;
-  canApproveJoinRequest: (targetUser: User, session: SessionContainerInterface) => Promise<boolean>;
-  canApproveTenantCreationRequest: (targetUser: User, session: SessionContainerInterface) => Promise<boolean>;
+  canApproveJoinRequest: (targetUser: User, tenantId: string, session: SessionContainerInterface) => Promise<boolean>;
+  canApproveTenantCreationRequest: (targetUser: User, creationRequest: TenantCreationRequest, session: SessionContainerInterface) => Promise<boolean>;
   canRemoveTargetUserFromTenant: (targetUser: User, tenantId: string, session: SessionContainerInterface) => Promise<boolean>;
   createTenantAndAssignAdmin: (
     tenantDetails: {

@@ -8,7 +8,7 @@ import { logDebugMessage } from "../../logger";
 import { usePluginContext } from "../../plugin";
 
 const TenantCardWrapper = () => {
-  const { api } = usePluginContext();
+  const { api, pluginConfig } = usePluginContext();
   const { joinTenant, createTenant } = api;
   const [isLoading, setIsLoading] = useState(true);
   const [isPendingApproval, setIsPendingApproval] = useState(false);
@@ -24,10 +24,10 @@ const TenantCardWrapper = () => {
         return result;
       }
 
-      // If it was successful, redirect the user to `/user/profile`.
+      // If it was successful, redirect the user.
       if (result.status === "OK") {
         logDebugMessage("Successfully joined tenant");
-        window.location.assign("/user/profile");
+        window.location.assign(pluginConfig.redirectToUrlOnJoiningTenant);
       }
 
       return result;

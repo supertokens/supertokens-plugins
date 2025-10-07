@@ -5,10 +5,12 @@ import { defaultTranslationsTenants } from "./translations";
 
 export type SuperTokensPluginTenantsPluginConfig = {
   requireTenantCreation?: boolean;
+  redirectToUrlOnJoiningTenant?: string;
 };
 
 export type SuperTokensPluginTenantsPluginNormalisedConfig = {
   requireTenantCreation?: boolean;
+  redirectToUrlOnJoiningTenant: string;
 };
 
 export type TranslationKeys = keyof (typeof defaultTranslationsTenants)["en"];
