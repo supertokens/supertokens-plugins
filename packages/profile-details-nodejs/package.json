@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/profile-details-nodejs",
-  "version": "0.0.2-beta.2",
+  "version": "0.1.0",
   "description": "Profile Details Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/profile-details-nodejs/README.md",
   "repository": {
@@ -19,8 +19,7 @@
     "plugin",
     "supertokens"
   ],
-  "dependencies": {
-  },
+  "dependencies": {},
   "peerDependencies": {
     "supertokens-node": ">=23.0.0"
   },

@@ -1,5 +1,11 @@
 # @supertokens-plugins/profile-base-react
 
+## 0.1.0
+
+### Minor Changes
+
+- f2fe80d: Initial release
+
 ## 0.0.1
 
 ### Patch Changes

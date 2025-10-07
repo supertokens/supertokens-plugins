@@ -108,7 +108,7 @@ export const init = createPluginInitFunction<
           logDebugMessage("Progressive profiling plugin found. Adding common details profile plugin.");
 
           progressiveProfilingRegisterSections({
-            registratorId: PLUGIN_ID,
+            storageHandlerId: PLUGIN_ID,
             sections: pluginConfig.sections.map((section) => ({
               ...section,
               fields: section.fields.map(({ ...field }) => ({
