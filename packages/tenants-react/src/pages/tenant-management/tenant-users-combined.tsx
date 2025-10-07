@@ -49,7 +49,7 @@ export const TenantUsersCombined: React.FC<TenantUsersCombinedProps> = ({ tenant
       throw new Error("Failed to get invitation");
     }
     setInvitations(invitationResponse.invitees);
-  }, [getInvitations]);
+  }, [getInvitations, selectedTenantId]);
 
   const loadTenantUsers = useCallback(async () => {
     const response = await getUsers();
@@ -58,7 +58,7 @@ export const TenantUsersCombined: React.FC<TenantUsersCombinedProps> = ({ tenant
     }
     // Show the users that have a valid role
     setTenantUsers(response.users.filter((user) => user.roles.length !== 0));
-  }, [getUsers]);
+  }, [getUsers, selectedTenantId]);
 
   const loadRequests = usePrettyAction(
     async () => {
@@ -68,13 +68,13 @@ export const TenantUsersCombined: React.FC<TenantUsersCombinedProps> = ({ tenant
       }
       setRequests(onboardingRequestsResponse.users);
     },
-    [getOnboardingRequests],
+    [getOnboardingRequests, selectedTenantId],
     { errorMessage: "Failed to get requests for tenant" },
   );
 
   useEffect(() => {
     Promise.all([loadInvitations(), loadTenantUsers(), loadRequests()]);
-  }, [loadInvitations, loadTenantUsers, loadRequests]);
+  }, [loadInvitations, loadTenantUsers, loadRequests, selectedTenantId]);
 
   const onCreateInvite = useCallback(
     async (email: string, role: string) => {

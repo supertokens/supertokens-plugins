@@ -3,7 +3,13 @@ import crypto from "crypto";
 import supertokens from "supertokens-node";
 import { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
-import { InviteeDetails, ROLES, TenantCreationRequest, TenantCreationRequestWithUser, TenantList } from "@shared/tenants";
+import {
+  InviteeDetails,
+  ROLES,
+  TenantCreationRequest,
+  TenantCreationRequestWithUser,
+  TenantList,
+} from "@shared/tenants";
 import { User, UserContext } from "supertokens-node/types";
 import {
   ErrorResponse,
@@ -164,8 +170,8 @@ export const getOverrideableTenantFunctionImplementation = (
       const tenantMetadata = await metadata.get(tenantId);
       if (!tenantMetadata) {
         return {
-          status: "ERROR",
-          message: "Tenant not found",
+          status: "OK",
+          invitees: [],
         };
       }
 
@@ -234,7 +240,11 @@ export const getOverrideableTenantFunctionImplementation = (
       // By default, all users can be approved to join
       return true;
     },
-    canApproveTenantCreationRequest: async (targetUser: User, creationRequest: TenantCreationRequest, session: SessionContainerInterface) => {
+    canApproveTenantCreationRequest: async (
+      targetUser: User,
+      creationRequest: TenantCreationRequest,
+      session: SessionContainerInterface,
+    ) => {
       // By default, all users' tenant creation requests can be approved
       return true;
     },

@@ -150,7 +150,7 @@ export const init = createPluginInitFunction<
         registerSection(async () => ({
           id: "tenant-creation-requests-management",
           title: "Tenant Creation Requests",
-          order: 1,
+          order: 2,
           component: () =>
             TenantCreationRequests.call(null, {
               section: {
@@ -271,6 +271,6 @@ export const init = createPluginInitFunction<
   undefined,
   (pluginConfig) => ({
     requireTenantCreation: pluginConfig.requireTenantCreation ?? true,
-    redirectToUrlOnJoiningTenant: pluginConfig.redirectToUrlOnJoiningTenant ?? "/user/profile"
+    redirectToUrlOnJoiningTenant: pluginConfig.redirectToUrlOnJoiningTenant ?? "/user/profile",
   }),
 );

@@ -30,7 +30,7 @@ export const TenantManagementWithoutToastWrapper = ({ section }: { section: Form
 
         // Find the tenantId in the list of tenants else fallback
         // to the first tenant in the list.
-        if (response.tenants.includes(currentTenantId)) {
+        if (response.tenants.some((tenant) => tenant.tenantId === currentTenantId)) {
           setSelectedTenantId(currentTenantId);
         } else if (response.tenants.length > 0) {
           setSelectedTenantId(response.tenants[0]!.tenantId);
@@ -67,7 +67,7 @@ export const TenantManagementWithoutToastWrapper = ({ section }: { section: Form
               id="tenant-select"
               label="Select Tenant:"
               value={selectedTenantId}
-              onChange={(e: any) => handleTenantSwitch(e.target.value)}
+              onChange={(e: any) => handleTenantSwitch(e)}
               name="Tenant Switcher"
               options={tenants.map(({ tenantId }) => ({
                 label: tenantId === "public" ? "Public" : tenantId,
