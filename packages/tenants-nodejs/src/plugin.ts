@@ -470,7 +470,11 @@ export const init = createPluginInitFunction<
                 }
 
                 // Remove all roles of the user from the tenant
-                const allUserRolesInTenant = await UserRoles.getRolesForUser(tenantIdToUse, userToRemove.id, userContext);
+                const allUserRolesInTenant = await UserRoles.getRolesForUser(
+                  tenantIdToUse,
+                  userToRemove.id,
+                  userContext,
+                );
                 for (const role of allUserRolesInTenant.roles) {
                   await UserRoles.removeUserRole(tenantIdToUse, userToRemove.id, role, userContext);
                 }
@@ -815,7 +819,7 @@ export const init = createPluginInitFunction<
                 if (roles.length === 0) {
                   return {
                     status: "ERROR_NOT_ALLOWED",
-                    message: "Cannot switch to tenant",
+                    message: "Cannot switch to tenant, not enough roles",
                   };
                 }
 
@@ -831,10 +835,10 @@ export const init = createPluginInitFunction<
 
                 // Check if the user is associated with the tenant or not.
                 const userDetails = await getUser(session.getUserId(), userContext);
-                if (!userDetails?.tenantIds.includes(tenantId)) {
+                if (!userDetails?.tenantIds.some((id) => id.toLowerCase() === tenantId.toLowerCase())) {
                   return {
                     status: "ERROR_NOT_ALLOWED",
-                    message: "Cannot switch to tenant",
+                    message: "User is not associated with tenant",
                   };
                 }
 
@@ -949,35 +953,24 @@ export const init = createPluginInitFunction<
 
                 // If the input tenantId is non public, we will use that directly
                 // and won't try to find a non public tenant.
-                if (tenantId !== "public") {
-                  logDebugMessage(`Creating new session with tenant: ${tenantId} since it's a non public ID`);
-                  return Session.createNewSessionWithoutRequestResponse(
-                    tenantId,
-                    input.recipeUserId,
-                    input.accessTokenPayload,
-                    input.sessionDataInDatabase,
-                    input.disableAntiCsrf,
-                    input.userContext,
+                if (tenantId === "public") {
+                  // If they have a non public tenant, that gets the preference
+                  // when creating the session.
+                  const firstNonPublicTenantId = implementation.getPreferredTenantId(
+                    userDetails.tenantIds,
+                    input.tenantId,
                   );
-                }
-
-                // If they have a non public tenant, that gets the preference
-                // when creating the session.
-
-                const firstNonPublicTenantId = implementation.getPreferredTenantId(
-                  userDetails.tenantIds,
-                  input.tenantId,
-                );
-                if (firstNonPublicTenantId && firstNonPublicTenantId !== input.tenantId) {
-                  logDebugMessage(`Creating new session with tenant: ${firstNonPublicTenantId}`);
-                  return Session.createNewSessionWithoutRequestResponse(
-                    firstNonPublicTenantId,
-                    input.recipeUserId,
-                    input.accessTokenPayload,
-                    input.sessionDataInDatabase,
-                    input.disableAntiCsrf,
-                    input.userContext,
-                  );
+                  if (firstNonPublicTenantId && firstNonPublicTenantId !== input.tenantId) {
+                    logDebugMessage(`Creating new session with tenant: ${firstNonPublicTenantId}`);
+                    return Session.createNewSessionWithoutRequestResponse(
+                      firstNonPublicTenantId,
+                      input.recipeUserId,
+                      input.accessTokenPayload,
+                      input.sessionDataInDatabase,
+                      input.disableAntiCsrf,
+                      input.userContext,
+                    );
+                  }
                 }
 
                 logDebugMessage(`Tenant ID to use for new session: ${tenantId}`);
