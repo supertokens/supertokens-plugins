@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/profile-details-react",
-  "version": "0.0.1-beta.1",
+  "version": "0.1.0",
   "description": "Profile Details Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/profile-details-react/README.md",
   "repository": {
@@ -19,22 +19,22 @@
     "supertokens"
   ],
   "dependencies": {
-    "@shared/js": "*",
-    "@shared/react": "*",
-    "@shared/ui": "*",
-    "@supertokens-plugins/profile-details-shared": "*",
     "supertokens-js-override": "^0.0.4"
   },
   "peerDependencies": {
     "react": ">=18.3.1",
     "react-dom": ">=18.3.1",
     "supertokens-auth-react": ">=0.50.0",
-    "@supertokens-plugins/profile-base-react": ">=0.0.1"
+    "@supertokens-plugins/profile-base-react": ">=0.1.0"
   },
   "devDependencies": {
+    "@shared/js": "*",
+    "@shared/react": "*",
+    "@shared/ui": "*",
     "@shared/eslint": "*",
     "@shared/tsconfig": "*",
     "@types/react": "^17.0.20",
+    "@supertokens-plugins/profile-details-shared": "*",
     "prettier": "3.5.3",
     "pretty-quick": "^4.2.2",
     "typescript": "^5.8.3",
