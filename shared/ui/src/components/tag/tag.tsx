@@ -6,11 +6,11 @@ import { HTMLElementProps, BaseWaProps } from "../types";
 const cx = classNames.bind(styles);
 
 export interface TagProps extends HTMLElementProps {
-  variant: "brand" | "neutral" | "success" | "warning" | "danger";
+  variant?: "brand" | "neutral" | "success" | "warning" | "danger";
   /** The tag's visual appearance. */
-  appearance: "accent" | "outlined accent" | "filled" | "outlined" | "outlined filled";
+  appearance?: "accent" | "outlined accent" | "filled" | "outlined" | "outlined filled";
   /** The tag's size. */
-  size: "xsmall" | "small" | "medium" | "large";
+  size?: "xsmall" | "small" | "medium" | "large";
   children: React.ReactNode;
 }
 

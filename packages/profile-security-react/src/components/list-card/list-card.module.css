@@ -1,0 +1,52 @@
+.supertokens-plugin-list-card {
+  --spacing: 10px;
+}
+
+.supertokens-plugin-list-card h2 {
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+
+.supertokens-plugin-list-card-container {
+  margin-left: calc(var(--spacing) * -1);
+  margin-right: calc(var(--spacing) * -1);
+  padding: 0 var(--spacing);
+  border-top: 1px solid var(--border-color);
+}
+.supertokens-plugin-list-card-container-no-title {
+  border-top: none;
+}
+
+.supertokens-plugin-list-card-item {
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  padding: 10px 0;
+}
+.supertokens-plugin-list-card-item:last-child {
+  border-bottom: none;
+}
+.supertokens-plugin-list-card-container-no-title .supertokens-plugin-list-card-item:first-child {
+  padding-top: 0;
+}
+
+.supertokens-plugin-list-card-item-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.supertokens-plugin-list-card-footer {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  border-top: 1px solid var(--border-color);
+  margin: 0 calc(var(--spacing) * -1);
+  padding-left: var(--spacing);
+  padding-right: var(--spacing);
+  padding-top: var(--spacing);
+}
