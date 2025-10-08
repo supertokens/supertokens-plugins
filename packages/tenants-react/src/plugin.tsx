@@ -46,7 +46,7 @@ export const init = createPluginInitFunction<
 >(
   (pluginConfig) => {
     const MultipleTenantsPresentClaim = new BooleanClaim({
-      id: `${PLUGIN_ID}-multiple-tenants-present`,
+      id: "stpl-tm-ta",
       refresh: async () => {},
       onFailureRedirection: async ({ reason }) => {
         return "/user/tenants/create";
@@ -236,6 +236,7 @@ export const init = createPluginInitFunction<
               getGlobalClaimValidators(input) {
                 // If the profile claim is present, make sure the tenant
                 // one is added after it.
+                logDebugMessage(`All validators: ${input.claimValidatorsAddedByOtherRecipes}`);
                 const profileClaimValidators = input.claimValidatorsAddedByOtherRecipes.filter(
                   (validator) => validator.id === PROGRESSIVE_PROFILING_COMPLETED_CLAIM_ID,
                 );
@@ -243,12 +244,16 @@ export const init = createPluginInitFunction<
                   (validator) => validator.id !== PROGRESSIVE_PROFILING_COMPLETED_CLAIM_ID,
                 );
 
+                logDebugMessage(`profile validators: ${profileClaimValidators}`);
+                logDebugMessage(`others validators: ${otherClaimValidators}`);
+
                 const claimValidators = [
                   ...otherClaimValidators,
                   ...profileClaimValidators,
                   ...(pluginConfig.requireTenantCreation ? [MultipleTenantsPresentClaim.validators.isTrue()] : []),
                 ];
 
+                logDebugMessage(`updated validators: ${claimValidators}`);
                 return claimValidators;
               },
             };
