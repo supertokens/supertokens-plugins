@@ -2,7 +2,7 @@ import { NormalisedAppinfo, SuperTokensPlugin, UserContext } from "supertokens-n
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
 import Session from "supertokens-node/recipe/session";
 import { enableDebugLogs, logDebugMessage } from "supertokens-node/lib/build/logger";
-import supertokens, { getUser, RecipeUserId } from "supertokens-node";
+import supertokens from "supertokens-node";
 import UserRoles from "supertokens-node/recipe/userroles";
 import { PermissionClaim } from "supertokens-node/recipe/userroles";
 
@@ -24,6 +24,8 @@ import { extractInvitationCodeAndTenantId, hasPermissions, validateWithoutClaims
 import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
 import { EmailDeliveryInterface } from "supertokens-node/lib/build/ingredients/emaildelivery/types";
 import { DefaultPluginEmailService } from "./defaultEmailService";
+
+const { getUser, RecipeUserId } = supertokens;
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
@@ -78,7 +80,7 @@ export const init = createPluginInitFunction<
           ...input,
           userContext,
         });
-      } catch (error: any) {
+      } catch (error) {
         logDebugMessage(`Failed to send email: ${error.message}`);
         throw new Error(`Failed to send ${input.type.toLowerCase()} email: ${error.message}`);
       }
