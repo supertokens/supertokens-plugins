@@ -7,7 +7,10 @@ import {
   SuperTokensPublicConfig,
   SuperTokensPublicPlugin,
 } from "supertokens-auth-react";
-import { BooleanClaim } from "supertokens-auth-react/recipe/session";
+import { BooleanClaim, getAccessTokenPayloadSecurely } from "supertokens-auth-react/recipe/session";
+import UserRoles from "supertokens-auth-react/recipe/userroles";
+
+import { PERMISSIONS } from "../../../shared/tenants/src/roles";
 
 import { getApi } from "./api";
 import { API_PATH, PLUGIN_ID } from "./constants";
@@ -134,6 +137,14 @@ export const init = createPluginInitFunction<
           return;
         }
 
+        const registerOnLoadHandler = baseProfilePlugin.exports?.registerOnLoadHandler;
+        if (!registerOnLoadHandler) {
+          logDebugMessage(
+            "Base profile plugin does not export registerOnLoadHandler. Not adding common details profile plugin.",
+          );
+          return;
+        }
+
         registerSection(async () => ({
           id: "tenant-management",
           title: "Tenants",
@@ -149,19 +160,44 @@ export const init = createPluginInitFunction<
             }),
         }));
 
-        registerSection(async () => ({
-          id: "tenant-creation-requests-management",
-          title: "Tenant Creation Requests",
-          order: 2,
-          component: () =>
-            TenantCreationRequests.call(null, {
-              section: {
-                id: "tenant-creation-requests-management",
-                label: "Tenant Creation Requests",
-                fields: [],
-              },
-            }),
-        }));
+        registerOnLoadHandler(async () => {
+          // Check if the logged in user has the tenant create
+          // permission.
+          const accessTokenPayload = await getAccessTokenPayloadSecurely();
+          const perms: string[] = (accessTokenPayload?.perms as string[]) ?? [];
+          logDebugMessage(`Available permissions: ${perms}`);
+
+          if (perms.some((permission) => permission === PERMISSIONS.MANAGE_CREATE_REQUESTS)) {
+            logDebugMessage("Registering creation requests section since user has permission");
+            registerSection(async () => ({
+              id: "tenant-creation-requests-management",
+              title: "Tenant Creation Requests",
+              order: 2,
+              component: () =>
+                TenantCreationRequests.call(null, {
+                  section: {
+                    id: "tenant-creation-requests-management",
+                    label: "Tenant Creation Requests",
+                    fields: [],
+                  },
+                }),
+            }));
+          }
+        });
+
+        // registerSection(async () => ({
+        //   id: "tenant-creation-requests-management",
+        //   title: "Tenant Creation Requests",
+        //   order: 2,
+        //   component: () =>
+        //     TenantCreationRequests.call(null, {
+        //       section: {
+        //         id: "tenant-creation-requests-management",
+        //         label: "Tenant Creation Requests",
+        //         fields: [],
+        //       },
+        //     }),
+        // }));
 
         const querier = getQuerier(new URL(API_PATH, config.appInfo.apiDomain.getAsStringDangerous()).toString());
         const api = getApi(querier);
