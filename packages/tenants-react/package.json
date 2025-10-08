@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/tenants-react",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Tenants Base Plugin for SuperTokens",
   "homepage": "https://github.com/supertokens/supertokens-plugins/blob/main/packages/tenants-react/README.md",
   "repository": {
