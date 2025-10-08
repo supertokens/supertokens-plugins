@@ -18,7 +18,13 @@ import {
 } from "./types";
 import { HANDLE_BASE_PATH, METADATA_KEY, PLUGIN_ID, PLUGIN_SDK_VERSION } from "./constants";
 import { BooleanClaim } from "supertokens-node/lib/build/recipe/session/claims";
-import { FilterGlobalClaimValidators, PERMISSIONS, ROLES, TenantCreationRequestMetadata, TenantMetadata } from "@shared/tenants";
+import {
+  FilterGlobalClaimValidators,
+  PERMISSIONS,
+  ROLES,
+  TenantCreationRequestMetadata,
+  TenantMetadata,
+} from "@shared/tenants";
 import { createRoles, getUserIdsInTenantWithRole } from "./roles";
 import { extractInvitationCodeAndTenantId, hasPermissions, validateWithoutClaims } from "./util";
 import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
@@ -81,8 +87,11 @@ export const init = createPluginInitFunction<
           userContext,
         });
       } catch (error) {
-        logDebugMessage(`Failed to send email: ${error.message}`);
-        throw new Error(`Failed to send ${input.type.toLowerCase()} email: ${error.message}`);
+        if (error instanceof Error) {
+          logDebugMessage(`Failed to send email: ${error.message}`);
+          throw new Error(`Failed to send ${input.type.toLowerCase()} email: ${error.message}`);
+        }
+        throw error;
       }
     };
 
@@ -106,14 +115,21 @@ export const init = createPluginInitFunction<
 
         appInfo = appConfig.appInfo;
 
-        const progressiveProfilingPlugin = plugins.find((plugin: any) => plugin.id === "supertokens-plugin-progressive-profiling");
-        if (progressiveProfilingPlugin !== undefined && progressiveProfilingPlugin.exports !== undefined && progressiveProfilingPlugin.exports.registerFilterGlobalClaimValidators !== undefined) {
+        const progressiveProfilingPlugin = plugins.find(
+          (plugin: any) => plugin.id === "supertokens-plugin-progressive-profiling",
+        );
+        if (
+          progressiveProfilingPlugin !== undefined &&
+          progressiveProfilingPlugin.exports !== undefined &&
+          progressiveProfilingPlugin.exports.registerGlobalClaimValidatorOverride !== undefined
+        ) {
           // The progressive profiling plugin is defined so we need to override the
           // global claim validators
           logDebugMessage("registering override fn");
-          const registerFilterGlobalClaimValidators: (fn: FilterGlobalClaimValidators) => void = progressiveProfilingPlugin.exports.registerFilterGlobalClaimValidators;
+          const registerGlobalClaimValidatorOverride: (fn: FilterGlobalClaimValidators) => void =
+            progressiveProfilingPlugin.exports.registerGlobalClaimValidatorOverride;
 
-          registerFilterGlobalClaimValidators(async (gv) => {
+          registerGlobalClaimValidatorOverride(async (gv) => {
             logDebugMessage("Removing tenant-access permission form claims");
             return gv.filter((v: SessionClaimValidator) => v.id !== "st-perm");
           });

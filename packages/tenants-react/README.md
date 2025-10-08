@@ -45,10 +45,10 @@ SuperTokens.init({
 
 ## Configuration Options
 
-| Option                          | Type      | Default | Description                                                       |
-| ------------------------------- | --------- | ------- | ----------------------------------------------------------------- |
-| `requireTenantCreation`         | `boolean` | `false` | Whether users must create a tenant before accessing the app       |
-| `redirectToUrlOnJoiningTenant`  | `string`  | `"/"`   | URL to redirect to after successfully joining or switching tenant |
+| Option                          | Type                      | Default | Description                                                       |
+| ------------------------------- | ------------------------- | ------- | ----------------------------------------------------------------- |
+| `requireTenantCreation`         | `boolean`                 | `false` | Whether users must create a tenant before accessing the app       |
+| `redirectToUrlOnJoiningTenant`  | `string or (() => void)`  | `"/"`   | URL to redirect to or function that does the redirection after successfully joining tenants |
 
 ## Features
 
@@ -83,9 +83,6 @@ The plugin automatically integrates with the profile base plugin to provide:
 ## Available Pages
 
 The plugin provides the following pre-built pages:
-
-### Select Tenant Page
-Displays a list of available tenants for the user to switch between.
 
 ### Tenant Management Page
 Comprehensive tenant management interface including:

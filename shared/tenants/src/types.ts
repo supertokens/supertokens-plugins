@@ -1,5 +1,4 @@
-import { User } from 'supertokens-node';
-import { SessionClaimValidator } from 'supertokens-node/recipe/session';
+import { SessionClaimValidator } from "supertokens-node/recipe/session";
 
 export type TenantJoinData = {
   tenantId: string;
@@ -46,4 +45,4 @@ export type TenantCreationRequestMetadata = {
 
 export type FilterGlobalClaimValidators = (
   globalValidators: SessionClaimValidator[],
-) => Promise<SessionClaimValidator[]>;
+) => SessionClaimValidator[] | Promise<SessionClaimValidator[]>;

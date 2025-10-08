@@ -219,7 +219,7 @@ describe("profile-details-nodejs", () => {
             value: "John",
           },
         ],
-        session
+        session,
       );
 
       const response = await fetch(`http://localhost:${testPORT}${HANDLE_BASE_PATH}/profile`, {
@@ -264,7 +264,7 @@ describe("profile-details-nodejs", () => {
             value: "John",
           },
         ],
-        session
+        session,
       );
       const profile = await getProfile(user.id, session, {});
       expect(profile).toHaveProperty("firstName", "John");
@@ -304,7 +304,7 @@ describe("profile-details-nodejs", () => {
         given_name: "John",
       };
 
-      const value = impl.getThirdPartyFieldValue("google", field, rawUserInfo, {});
+      const value = impl.getFieldValueFromThirdPartyUserInfo("google", field, rawUserInfo, {});
       expect(value).toBe("John Doe");
     });
 
@@ -327,7 +327,7 @@ describe("profile-details-nodejs", () => {
         firstName: "Existing Name",
       };
 
-      const value = impl.getThirdPartyFieldValue("google", field, rawUserInfo, existingProfile);
+      const value = impl.getFieldValueFromThirdPartyUserInfo("google", field, rawUserInfo, existingProfile);
       expect(value).toBeUndefined();
     });
 
@@ -346,7 +346,7 @@ describe("profile-details-nodejs", () => {
         picture: "https://example.com/avatar.jpg",
       };
 
-      const value = impl.getThirdPartyFieldValue("google", field, rawUserInfo, {});
+      const value = impl.getFieldValueFromThirdPartyUserInfo("google", field, rawUserInfo, {});
       expect(value).toBe("https://example.com/avatar.jpg");
     });
   });
@@ -426,7 +426,7 @@ async function setup(pluginConfig?: SuperTokensPluginProfileDetailsConfig) {
     user = signupResponse.user;
     session = await Session.createNewSessionWithoutRequestResponse(
       "public",
-      SuperTokens.convertToRecipeUserId(user.id)
+      SuperTokens.convertToRecipeUserId(user.id),
     );
   } else {
     const userResponse = await SuperTokens.listUsersByAccountInfo("public", {
@@ -435,7 +435,7 @@ async function setup(pluginConfig?: SuperTokensPluginProfileDetailsConfig) {
     user = userResponse[0];
     session = await Session.createNewSessionWithoutRequestResponse(
       "public",
-      SuperTokens.convertToRecipeUserId(user.id)
+      SuperTokens.convertToRecipeUserId(user.id),
     );
   }
 

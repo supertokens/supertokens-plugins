@@ -24,13 +24,13 @@ export const AcceptInvitation = ({
 
   useEffect(() => {
     // Parse the code from URL query parameters
-    const urlParams = new URLSearchParams((globalThis as any).location.search);
+    const urlParams = new URLSearchParams(window.location.search);
     const inviteCode = urlParams.get("tenantInviteCode");
     const tenantId = urlParams.get("tenantId");
 
     if (inviteCode === null || inviteCode.trim() === "" || tenantId === null || tenantId.trim() === "") {
       // Redirect to dashboard if no code is present
-      (globalThis as any).location.href = pluginConfig.redirectToUrlOnJoiningTenant;
+      pluginConfig.redirectOnJoiningTenantFn();
       return;
     }
 
@@ -44,7 +44,7 @@ export const AcceptInvitation = ({
         const res = await onAccept(code, tenantId);
         if (res.status === "OK") {
           // Redirect user after successful acceptance
-          (globalThis as any).location.href = pluginConfig.redirectToUrlOnJoiningTenant;
+          pluginConfig.redirectOnJoiningTenantFn();
           return;
         }
 

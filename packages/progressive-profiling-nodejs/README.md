@@ -335,18 +335,18 @@ const sections = await ProgressiveProfilingPlugin.getAllSections({
 console.log("Available sections:", sections);
 ```
 
-### registerFilterGlobalClaimValidators
+### registerGlobalClaimValidatorOverride
 
 Register function to filter global claim validators in all endpoints
 
 ```typescript
-import { registerFilterGlobalClaimValidators } from "@supertokens-plugins/progressive-profiling-nodejs";
-import { SessionClaimValidator } from 'supertokens-node/recipe/session';
+import { registerGlobalClaimValidatorOverride } from "@supertokens-plugins/progressive-profiling-nodejs";
+import { SessionClaimValidator } from "supertokens-node/recipe/session";
 
-registerFilterGlobalClaimValidators((globalValidators: SessionClaimValidators[]) => {
+registerGlobalClaimValidatorOverride((globalValidators: SessionClaimValidators[]) => {
   // Filter the validators.
   return globalValidators;
-})
+});
 ```
 
 ### getFilterGlobalClaimValidatorsFn
@@ -361,7 +361,6 @@ if (filterFn !== undefined) {
   // Do something with the function.
 }
 ```
-
 
 ## Custom Storage Handlers
 

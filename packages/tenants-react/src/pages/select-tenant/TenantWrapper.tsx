@@ -27,7 +27,7 @@ const TenantCardWrapper = () => {
       // If it was successful, redirect the user.
       if (result.status === "OK") {
         logDebugMessage("Successfully joined tenant");
-        window.location.assign(pluginConfig.redirectToUrlOnJoiningTenant);
+        pluginConfig.redirectOnJoiningTenantFn();
       }
 
       return result;

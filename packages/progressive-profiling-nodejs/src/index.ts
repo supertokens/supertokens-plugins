@@ -28,12 +28,8 @@ const getAllSections = (input: { session: SessionContainerInterface; userContext
   return Implementation.getInstanceOrThrow().getAllSections(input);
 };
 
-const registerFilterGlobalClaimValidators = (fn: FilterGlobalClaimValidators) => {
-  return Implementation.getInstanceOrThrow().registerFilterGlobalClaimValidators(fn);
-};
-
-const getFilterGlobalClaimValidatorsFn = () => {
-  return Implementation.getInstanceOrThrow().getFilterGlobalClaimValidatorsFn();
+const registerGlobalClaimValidatorOverride = (fn: FilterGlobalClaimValidators) => {
+  return Implementation.getInstanceOrThrow().registerGlobalClaimValidatorOverride(fn);
 };
 
 export { init, PLUGIN_ID, PLUGIN_VERSION, getSectionValues, setSectionValues, registerSections, getAllSections };
@@ -45,6 +41,5 @@ export default {
   setSectionValues,
   registerSections,
   getAllSections,
-  registerFilterGlobalClaimValidators,
-  getFilterGlobalClaimValidatorsFn,
+  registerGlobalClaimValidatorOverride,
 };

@@ -92,7 +92,7 @@ export const init = createPluginInitFunction<
       };
     };
 
-    let translations: ReturnType<typeof getTranslationFunction<TranslationKeys>>;
+    let translations: (key: TranslationKeys, replacements?: Record<string, string>) => string;
 
     return {
       id: PLUGIN_ID,
@@ -297,7 +297,7 @@ export const init = createPluginInitFunction<
         AuthPageHeader_Override: ({ DefaultComponent, ...props }) => {
           // If the code and tenantId, we need to show the message that
           // the invitation will be accepted automatically.
-          const { shouldAcceptInvite } = extractCodeAndTenantId((globalThis as any).location.href);
+          const { shouldAcceptInvite } = extractCodeAndTenantId(window.location.href);
 
           return (
             <div>
@@ -312,8 +312,16 @@ export const init = createPluginInitFunction<
     };
   },
   undefined,
-  (pluginConfig) => ({
-    requireTenantCreation: pluginConfig.requireTenantCreation ?? true,
-    redirectToUrlOnJoiningTenant: pluginConfig.redirectToUrlOnJoiningTenant ?? "/user/profile",
-  }),
+  (pluginConfig) => {
+    return {
+      requireTenantCreation: pluginConfig.requireTenantCreation ?? true,
+      redirectOnJoiningTenantFn:
+        typeof pluginConfig.redirectToUrlOnJoiningTenant === "function"
+          ? pluginConfig.redirectToUrlOnJoiningTenant
+          : () => {
+              // We can cast redirectToUrlOnJoiningTenant to string because we know we don't change pluginConfig
+              window.location.assign((pluginConfig.redirectToUrlOnJoiningTenant as string) ?? "/");
+            },
+    };
+  },
 );

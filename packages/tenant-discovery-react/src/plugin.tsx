@@ -45,7 +45,7 @@ export const init = createPluginInitFunction<
 >(
   (pluginConfig, implementation) => {
     let apiBasePath: string;
-    let translations: ReturnType<typeof getTranslationFunction<TranslationKeys>>;
+    let translations: (key: TranslationKeys, replacements?: Record<string, string>) => string;
 
     const customSignInOverride = async (input) => {
       // If the selector is showing up, we will make a call to
@@ -73,7 +73,7 @@ export const init = createPluginInitFunction<
             withSession: false,
           },
         );
-      } catch (e: any) {
+      } catch (e) {
         if (e.payload?.status === "NOT_ALLOWED") {
           logDebugMessage(`Got message from /from-email: ${e.payload?.message}`);
           const e_ = Error(e.payload?.message);

@@ -14,7 +14,7 @@ export class Implementation {
   protected existingSections: (FormSection & { storageHandlerId: string })[] = [];
   protected existingStorageHandlers: Record<string, Pick<Parameters<RegisterSections>[0], "set" | "get">> = {};
   protected metadata = pluginUserMetadata<{ profileConfig?: UserMetadataConfig }>(METADATA_KEY);
-  protected filterGlobalClaimValidatorsFn: FilterGlobalClaimValidators | undefined = undefined;
+  protected globalClaimValidatorOverrides: FilterGlobalClaimValidators[] = [];
 
   static ProgressiveProfilingCompletedClaim: BooleanClaim;
 
@@ -396,16 +396,11 @@ export class Implementation {
     await this.metadata.set(userId, newUserMetadata, userContext);
   };
 
-  registerFilterGlobalClaimValidators = async function (
-    this: Implementation,
-    fn: FilterGlobalClaimValidators
-  ) {
-    this.filterGlobalClaimValidatorsFn = fn;
+  registerGlobalClaimValidatorOverride = async function (this: Implementation, fn: FilterGlobalClaimValidators) {
+    this.globalClaimValidatorOverrides.push(fn);
   };
 
-  getFilterGlobalClaimValidatorsFn = function (
-    this: Implementation,
-  ) {
-    return this.filterGlobalClaimValidatorsFn;
+  getGlobalClaimValidatorOverrides = function (this: Implementation) {
+    return this.globalClaimValidatorOverrides;
   };
 }

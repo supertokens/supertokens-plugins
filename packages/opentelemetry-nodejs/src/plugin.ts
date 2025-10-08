@@ -1,4 +1,4 @@
-import { HttpRequest, SuperTokensPlugin, UserContext } from "supertokens-node/types";
+import { SuperTokensPlugin } from "supertokens-node/types";
 import { PLUGIN_ID, PLUGIN_SDK_VERSION, validatePluginConfig } from "./config";
 import { OpenTelemetryLoggerPluginConfig } from "./types";
 import { Tracer } from "@opentelemetry/api";
@@ -246,7 +246,7 @@ export const init = createPluginInitFunction<
   (config: OpenTelemetryLoggerPluginConfig | undefined) => config ?? {},
 );
 
-function overrideWithLogger<T extends Record<string, undefined |((...args: any[]) => any)>>(logConfig: {
+function overrideWithLogger<T extends Record<string, undefined | ((...args: any[]) => any)>>(logConfig: {
   type: "api" | "function";
   recipeId: string;
   pluginConfig: OpenTelemetryLoggerPluginConfig;
@@ -269,7 +269,7 @@ function overrideWithLogger<T extends Record<string, undefined |((...args: any[]
   };
 }
 
-function fnWithLoggerAsync<T extends(...args: any[]) => Promise<any>>(
+function fnWithLoggerAsync<T extends (...args: any[]) => Promise<any>>(
   fn: T,
   logConfig: {
     type: "api" | "function";
@@ -300,7 +300,7 @@ function fnWithLoggerAsync<T extends(...args: any[]) => Promise<any>>(
           const resultAttributes = logConfig.pluginImpl.transformResultToAttributes(result);
           span.setAttributes(resultAttributes);
           return result;
-        } catch (error: any) {
+        } catch (error) {
           const errorAttributes = logConfig.pluginImpl.transformErrorToAttributes(error);
           span.setAttributes(errorAttributes);
           throw error;

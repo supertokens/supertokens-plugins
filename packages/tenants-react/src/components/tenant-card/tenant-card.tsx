@@ -28,11 +28,6 @@ export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => 
     return validPattern.test(name);
   };
 
-  const onSuccess = () => {
-    // Redirect the user to the app.
-    (globalThis as any).location.href = pluginConfig.redirectToUrlOnJoiningTenant;
-  };
-
   const handleCreateAndJoin = usePrettyAction(
     async () => {
       if (newTenantName.trim().length === 0) {
@@ -59,7 +54,7 @@ export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => 
       successMessage: "Tenant created, redirecting...",
       errorMessage: "Failed to create tenant",
       onSuccess: async () => {
-        onSuccess();
+        pluginConfig.redirectOnJoiningTenantFn();
       },
     },
   );

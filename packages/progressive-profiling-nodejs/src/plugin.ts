@@ -12,6 +12,7 @@ import {
 import { HANDLE_BASE_PATH, PLUGIN_ID, METADATA_KEY, PLUGIN_SDK_VERSION, DEFAULT_SECTIONS } from "./constants";
 import { enableDebugLogs } from "./logger";
 import { Implementation } from "./implementation";
+import { FilterGlobalClaimValidators } from "@shared/tenants";
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
@@ -68,16 +69,7 @@ export const init = createPluginInitFunction<
               method: "get",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  // we should not check if the profile is completed here, because we want to allow users to access the profile page even if they haven't completed the profile
-                  const updatedValidators = globalValidators.filter(
-                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key,
-                  );
-
-                  const filterFn = implementation.getFilterGlobalClaimValidatorsFn();
-                  if (filterFn === undefined) return updatedValidators;
-                  return filterFn(updatedValidators);
-                },
+                overrideGlobalClaimValidators: getGlobalClaimValidatorFilter(implementation),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -92,16 +84,7 @@ export const init = createPluginInitFunction<
               method: "post",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  // we should not check if the profile is completed here, because we want to allow users to access the profile page even if they haven't completed the profile
-                  const updatedValidators = globalValidators.filter(
-                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key,
-                  );
-
-                  const filterFn = implementation.getFilterGlobalClaimValidatorsFn();
-                  if (filterFn === undefined) return updatedValidators;
-                  return filterFn(updatedValidators);
-                },
+                overrideGlobalClaimValidators: getGlobalClaimValidatorFilter(implementation),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -118,16 +101,7 @@ export const init = createPluginInitFunction<
               method: "get",
               verifySessionOptions: {
                 sessionRequired: true,
-                overrideGlobalClaimValidators: (globalValidators) => {
-                  // we should not check if the profile is completed here, because we want to allow users to access the profile page even if they haven't completed the profile
-                  const updatedValidators = globalValidators.filter(
-                    (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key,
-                  );
-
-                  const filterFn = implementation.getFilterGlobalClaimValidatorsFn();
-                  if (filterFn === undefined) return updatedValidators;
-                  return filterFn(updatedValidators);
-                },
+                overrideGlobalClaimValidators: getGlobalClaimValidatorFilter(implementation),
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
                 if (!session) {
@@ -175,7 +149,7 @@ export const init = createPluginInitFunction<
         getSections: implementation.getAllSections,
         setSectionValues: implementation.setSectionValues,
         getSectionValues: implementation.getSectionValues,
-        registerFilterGlobalClaimValidators: implementation.registerFilterGlobalClaimValidators,
+        registerGlobalClaimValidatorOverride: implementation.registerGlobalClaimValidatorOverride,
       },
     };
   },
@@ -192,3 +166,19 @@ export const init = createPluginInitFunction<
     };
   },
 );
+
+function getGlobalClaimValidatorFilter(implementation: Implementation): FilterGlobalClaimValidators {
+  return async (globalValidators) => {
+    // we should not check if the profile is completed here, because we want to allow users to access the profile page even if they haven't completed the profile
+    let updatedValidators = globalValidators.filter(
+      (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key,
+    );
+
+    const filterFn = implementation.getGlobalClaimValidatorOverrides();
+    if (filterFn === undefined) return updatedValidators;
+    for (const fn of filterFn) {
+      updatedValidators = await fn(updatedValidators);
+    }
+    return updatedValidators;
+  };
+}
