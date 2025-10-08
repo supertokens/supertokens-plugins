@@ -144,57 +144,55 @@ export const MfaSection = ({
   }
 
   return (
-    <div className={cx("plugin-profile-security-second-factor")}>
+    <div className={cx("supertokens-plugin-profile-security-second-factor")}>
       {secondaryFactors.map((factor) => (
-        <div key={factor.id} className={cx("plugin-profile-security-second-factor-method")}>
-          <div className={cx("plugin-profile-security-second-factor-method-header")}>
-            <span className={cx("plugin-profile-security-second-factor-method-label")}>
-              {t(factor.name as TranslationKeys)}
-            </span>
+        <div key={factor.id} className={cx("supertokens-plugin-profile-security-second-factor-method")}>
+          <div className={cx("supertokens-plugin-profile-security-second-factor-method-header")}>
+            <div className={cx("supertokens-plugin-profile-security-second-factor-method-header-content")}>
+              <span className={cx("supertokens-plugin-profile-security-second-factor-method-label")}>
+                {t(factor.name as TranslationKeys)}
+              </span>
 
-            {factor.setup && (
-              <Tag variant="success" size="small">
-                {t("PL_SEC_MFA_SETUP")}
-              </Tag>
-            )}
+              <span className={cx("supertokens-plugin-profile-security-second-factor-method-description")}>
+                {t(factor.description as TranslationKeys)}
+              </span>
+            </div>
 
-            {factor.setup && (
-              <ToggleInput
-                className={cx("plugin-profile-security-second-factor-method-action")}
-                value={factor.required}
-                id={`required-${factor.id}`}
-                label=""
-                placeholder=""
-                size="small"
-                onChange={() => toggleSecondaryFactor(factor.id)}
-              />
-            )}
+            <div className={cx("supertokens-plugin-profile-security-second-factor-method-header-actions")}>
+              {factor.setup && (
+                <ToggleInput
+                  className={cx("plugin-profile-security-second-factor-method-action")}
+                  value={factor.required}
+                  id={`required-${factor.id}`}
+                  label=""
+                  placeholder=""
+                  size="small"
+                  onChange={() => toggleSecondaryFactor(factor.id)}
+                />
+              )}
 
-            {!factor.setup && factorBeingSetup !== factor.id && (
-              <Button
-                appearance="filled"
-                variant="brand"
-                size="small"
-                onClick={() => setFactorBeingSetup(factor.id as keyof typeof manageFactorComponents)}
-                className={cx("plugin-profile-security-second-factor-method-action")}>
-                {t("PL_SEC_MFA_SETUP_BUTTON")}
-              </Button>
-            )}
+              {!factor.setup && factorBeingSetup !== factor.id && (
+                <Button
+                  appearance="filled"
+                  variant="brand"
+                  size="small"
+                  onClick={() => setFactorBeingSetup(factor.id as keyof typeof manageFactorComponents)}
+                  className={cx("plugin-profile-security-second-factor-method-action")}>
+                  {t("PL_SEC_MFA_SETUP_BUTTON")}
+                </Button>
+              )}
 
-            {!factor.setup && factorBeingSetup === factor.id && (
-              <Button
-                appearance="plain"
-                size="small"
-                onClick={() => setFactorBeingSetup(undefined)}
-                className={cx("plugin-profile-security-second-factor-method-action")}>
-                {t("PL_SEC_MFA_SETUP_CANCEL_BUTTON")}
-              </Button>
-            )}
+              {!factor.setup && factorBeingSetup === factor.id && (
+                <Button
+                  appearance="plain"
+                  size="small"
+                  onClick={() => setFactorBeingSetup(undefined)}
+                  className={cx("plugin-profile-security-second-factor-method-action")}>
+                  {t("PL_SEC_MFA_SETUP_CANCEL_BUTTON")}
+                </Button>
+              )}
+            </div>
           </div>
-
-          <span className={cx("plugin-profile-security-second-factor-method-description")}>
-            {t(factor.description as TranslationKeys)}
-          </span>
 
           {factor.ManageComponent && factorBeingSetup === factor.id && (
             <factor.ManageComponent.Setup user={user!} onSuccess={_onSuccess} />

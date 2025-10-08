@@ -83,23 +83,23 @@ export const SecurityDetailsSection = () => {
   }, [isLoaded, loadConfig, loadUserInfo]);
 
   return (
-    <div className={cx("plugin-profile-security-section")}>
-      <div className={cx("plugin-profile-security-header")}>
+    <div className={cx("supertokens-plugin-profile-security-section")}>
+      <div className={cx("supertokens-plugin-profile-security-header")}>
         <h3>{t("PL_SEC_HEADER_TITLE")}</h3>
         <p>{t("PL_SEC_HEADER_DESCRIPTION")}</p>
       </div>
 
       <div>
         {hasPasswordRecipe && hasPasswordLoginMethod && (
-          <section className={cx("plugin-profile-security-group")}>
-            <h3>{t("PL_SEC_CHANGE_PASSWORD_TITLE")}</h3>
+          <section className={cx("supertokens-plugin-profile-security-group")}>
+            <h4>{t("PL_SEC_CHANGE_PASSWORD_TITLE")}</h4>
             <ChangePasswordSection isLoading={isLoading} setIsLoading={setIsLoading} />
           </section>
         )}
 
         {config?.enableSettingPassword && hasPasswordRecipe && !hasPasswordLoginMethod && (
-          <section className={cx("plugin-profile-security-group")}>
-            <h3>{t("PL_SEC_SET_PASSWORD_TITLE")}</h3>
+          <section className={cx("supertokens-plugin-profile-security-group")}>
+            <h4>{t("PL_SEC_SET_PASSWORD_TITLE")}</h4>
             <SetPasswordSection
               user={user!}
               isLoading={isLoading}
@@ -110,8 +110,8 @@ export const SecurityDetailsSection = () => {
         )}
 
         {hasWebauthnRecipe && !hasWebauthnLoginMethod && (
-          <section className={cx("plugin-profile-security-group")}>
-            <h3>{t("PL_SEC_SET_WEBAUTHN_TITLE")}</h3>
+          <section className={cx("supertokens-plugin-profile-security-group")}>
+            <h4>{t("PL_SEC_SET_WEBAUTHN_TITLE")}</h4>
             <SetWebAuthnSection
               user={user!}
               isLoading={isLoading}
@@ -122,15 +122,15 @@ export const SecurityDetailsSection = () => {
         )}
 
         {hasWebauthnRecipe && hasWebauthnLoginMethod && (
-          <section className={cx("plugin-profile-security-group")}>
-            <h3>{t("PL_SEC_WEBAUTHN_TITLE")}</h3>
+          <section className={cx("supertokens-plugin-profile-security-group")}>
+            <h4>{t("PL_SEC_WEBAUTHN_TITLE")}</h4>
             <WebauthnSection user={user!} isLoading={isLoading} setIsLoading={setIsLoading} onSuccess={loadUserInfo} />
           </section>
         )}
 
         {config?.enableThirdPartyLinkning && hasThirdpartyRecipe && (
-          <section className={cx("plugin-profile-security-group")}>
-            <h3>{t("PL_SEC_TP_TITLE")}</h3>
+          <section className={cx("supertokens-plugin-profile-security-group")}>
+            <h4>{t("PL_SEC_TP_TITLE")}</h4>
             <ThirdPartySection
               user={user!}
               isLoading={isLoading}
@@ -141,8 +141,8 @@ export const SecurityDetailsSection = () => {
         )}
 
         {config?.enableMfaConfiguration && hasMultiFactorAuthRecipe && (
-          <section className={cx("plugin-profile-security-group")}>
-            <h3>{t("PL_SEC_MFA_TITLE")}</h3>
+          <section className={cx("supertokens-plugin-profile-security-group")}>
+            <h4>{t("PL_SEC_MFA_TITLE")}</h4>
             <MfaSection user={user!} isLoading={isLoading} setIsLoading={setIsLoading} onSuccess={loadUserInfo} />
           </section>
         )}

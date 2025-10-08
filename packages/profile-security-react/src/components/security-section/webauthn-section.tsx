@@ -1,4 +1,4 @@
-import { Button, SelectInput, usePrettyAction } from "@shared/ui";
+import { Button, Card, SelectInput, usePrettyAction } from "@shared/ui";
 import classNames from "classnames/bind";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -9,6 +9,7 @@ import {
 import { User } from "supertokens-web-js/types";
 
 import { usePluginContext } from "../../plugin";
+import { ListCard } from "../list-card";
 
 import style from "./security-section.module.css";
 
@@ -130,57 +131,62 @@ export const WebauthnSection = ({
   }
 
   return (
-    <div className={cx(".plugin-profile-security-manage")}>
-      {credentials.map((credential) => (
-        <div key={credential.webauthnCredentialId} className={cx("plugin-profile-security-manage-item")}>
-          <span>
-            {webauthnEmail}
-            {t("PL_SEC_DOT_SEPARATOR")}
-            {new Date(credential.createdAt).toLocaleString()}
-          </span>
-
-          <div className={cx("plugin-profile-security-manage-item-actions")}>
+    <div>
+      <ListCard
+        // title={t("PL_SEC_WEBAUTHN_TITLE")}
+        items={credentials.map((credential) => ({
+          Content: () => (
+            <>
+              <span className={cx("supertokens-plugin-profile-security-passkey-email")}>{webauthnEmail}</span>
+              <span className={cx("supertokens-plugin-profile-security-passkey-date")}>
+                {new Date(credential.createdAt).toLocaleString()}
+              </span>
+            </>
+          ),
+          Actions: () => (
             <Button
-              variant="neutral"
+              variant="danger"
               size="small"
               appearance="plain"
-              className={cx("plugin-profile-security-manage-item-remove")}
+              className={cx("supertokens-plugin-profile-security-manage-passkey-remove")}
               onClick={() => _removeCredential(credential.webauthnCredentialId)}
               disabled={credentials.length <= 1}>
               {t("PL_SEC_WEBAUTHN_REMOVE_BUTTON")}
             </Button>
-          </div>
-        </div>
-      ))}
+          ),
+        }))}
+        FooterComponent={() => (
+          <>
+            <div className={cx("supertokens-plugin-profile-security-passkey-email-select-label")}>
+              {t("PL_SEC_WEBAUTHN_SELECT_EMAIL_LABEL")}
+            </div>
 
-      <div className={cx("plugin-profile-security-manage-container")}>
-        <h4>{t("PL_SEC_WEBAUTHN_ADD_CREDENTIAL_TITLE")}</h4>
+            <SelectInput
+              className={cx("supertokens-plugin-profile-security-passkey-email-select")}
+              id="change-email"
+              value={webauthnEmail}
+              onChange={(value) => {
+                if (!value) {
+                  return;
+                }
+                setWebauthnEmail(value as string);
+              }}
+              options={webAuthnEmails.map((email) => ({ label: email, value: email })) ?? []}
+              disabled={webAuthnEmails.length <= 1}
+            />
 
-        <p className={cx("plugin-profile-security-item-description")}>
-          {t("PL_SEC_WEBAUTHN_ADD_CREDENTIAL_DESCRIPTION")}
-        </p>
-        <br />
-
-        <SelectInput
-          label={t("PL_SEC_WEBAUTHN_SELECT_EMAIL_LABEL")}
-          id="change-email"
-          value={webauthnEmail}
-          onChange={(value) => {
-            if (!value) {
-              return;
-            }
-            setWebauthnEmail(value as string);
-          }}
-          options={webAuthnEmails.map((email) => ({ label: email, value: email })) ?? []}
-          disabled={webAuthnEmails.length <= 1}
-        />
-        <br />
-        <div className={cx("plugin-profile-details-form-actions")}>
-          <Button onClick={addCredential} disabled={isLoading} size="small" variant="brand" appearance="accent">
-            {t("PL_SEC_WEBAUTHN_ADD_CREDENTIAL_BUTTON")}
-          </Button>
-        </div>
-      </div>
+            <Button
+              className={cx("supertokens-plugin-profile-security-add-passkey-button")}
+              onClick={addCredential}
+              disabled={isLoading}
+              size="small"
+              variant="brand"
+              appearance="accent">
+              {t("PL_SEC_WEBAUTHN_ADD_CREDENTIAL_BUTTON")}
+            </Button>
+          </>
+        )}
+      />
     </div>
   );
 };

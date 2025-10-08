@@ -1,54 +1,218 @@
-.plugin-profile-security-section {
+.supertokens-plugin-profile-security-section {
+  --border-color: var(--wa-color-neutral-30);
+  --title-color: var(--wa-color-neutral-95);
+  --title-font-size: round(calc(1.25rem * var(--wa-font-size-scale)), 1px);
+  --spacing: 30px;
+
   display: flex;
   flex-direction: column;
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 0;
-  font-family: var(--plugin-font-family);
-  color: #333;
   width: 100%;
 }
 
-.plugin-profile-security-header {
+.supertokens-plugin-profile-security-header {
   position: relative;
-  padding-bottom: 24px;
-  margin-bottom: 24px;
-  border-bottom: 1px solid #eee;
+  margin-bottom: var(--spacing);
 }
 
-.plugin-profile-security-header h3 {
-  margin-bottom: 12px;
+.supertokens-plugin-profile-security-header h3 {
+  color: var(--title-color);
+  font-size: var(--title-font-size);
+  line-height: 1.4;
+  margin-bottom: 8px;
 }
 
-.plugin-profile-security-group {
+.supertokens-plugin-profile-security-header p {
+  margin: 0;
+  font-size: var(--wa-font-size-s);
+  line-height: 1.4;
+}
+
+.supertokens-plugin-profile-security-group {
   display: flex;
   flex-direction: column;
-  gap: var(--plugin-spacing-xl);
-
-  padding-bottom: 24px;
-  margin-bottom: 20px;
-
-  border-bottom: 1px solid #eee;
+  border-bottom: 1px solid var(--border-color);
+  padding: 30px 0;
 }
-
-.plugin-profile-security-group:last-child {
+.supertokens-plugin-profile-security-group:first-child {
+  border-top: 1px solid var(--border-color);
+}
+.supertokens-plugin-profile-security-group:last-child {
   border-bottom: none;
-  margin-bottom: 0;
   padding-bottom: 0;
 }
 
-.plugin-profile-security-group h3 {
-  font-size: 16px;
-  font-weight: 600;
-  margin: 0 0 8px;
+.supertokens-plugin-profile-security-group h4 {
+  color: var(--title-color);
+  font-size: var(--wa-font-size-l);
+  line-height: 1.4;
+  margin-bottom: 30px;
+  margin-top: 0;
 }
 
-.plugin-profile-security-group h4 {
-  color: var(--plugin-text-secondary);
-  font-size: 14px;
-  font-weight: 600;
-  margin: 0 0 4px;
+.supertokens-plugin-profile-security-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
+
+.supertokens-plugin-profile-security-edit-form wa-input.st-input::part(label) {
+  display: none;
+}
+
+.supertokens-plugin-profile-security-item {
+  display: flex;
+  flex-direction: row;
+  gap: 0;
+  align-items: start;
+}
+
+.supertokens-plugin-profile-security-label {
+  font-weight: var(--wa-font-weight-semibold);
+  color: var(--wa-color-neutral-85);
+  font-size: var(--wa-font-size-m);
+  line-height: 1.5;
+  width: 260px;
+}
+
+.supertokens-plugin-profile-security-required {
+  color: var(--wa-color-danger-70);
+}
+
+.supertokens-plugin-profile-security-value {
+  flex: 1;
+  color: var(--wa-color-neutral-95);
+  font-size: var(--wa-font-size-m);
+  line-height: 1.5;
+  font-weight: var(--wa-font-weight-normal);
+}
+
+.supertokens-plugin-profile-security-form-actions {
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.supertokens-plugin-profile-security-no-linked-accounts {
+  margin-bottom: 13px;
+  color: var(--wa-color-neutral-95);
+}
+
+/* Linked accounts */
+.supertokens-plugin-profile-security-linked-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 10px;
+}
+
+.supertokens-plugin-profile-security-link-account-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.supertokens-plugin-profile-security-linked-account {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.supertokens-plugin-profile-security-linked-account-tag {
+  font-size: 20px;
+}
+
+.supertokens-plugin-profile-security-linked-account-name {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.supertokens-plugin-profile-security-linked-account-name,
+.supertokens-plugin-profile-security-linked-account-email {
+  font-weight: 500;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.supertokens-plugin-profile-security-linked-account-unlink-button {
+  margin-left: auto;
+}
+
+/* Link accounts */
+.supertokens-plugin-profile-security-link-account-button::part(label) {
+  align-items: center;
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+}
+.supertokens-plugin-profile-security-link-account-button-logo {
+  line-height: 0;
+}
+
+.supertokens-plugin-profile-security-passkey-date {
+  margin-left: auto;
+}
+
+.supertokens-plugin-profile-security-passkey-email-select {
+  width: 100%;
+}
+
+.supertokens-plugin-profile-security-passkey-email-select-label {
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: 500;
+  word-break: keep-all;
+}
+
+/* MFA */
+.supertokens-plugin-profile-security-second-factor {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 10px;
+}
+
+.supertokens-plugin-profile-security-second-factor-method {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+.supertokens-plugin-profile-security-second-factor-method:first-child {
+  padding-top: 0;
+}
+.supertokens-plugin-profile-security-second-factor-method:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.supertokens-plugin-profile-security-second-factor-method-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+.supertokens-plugin-profile-security-second-factor-method-header-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.supertokens-plugin-profile-security-second-factor-method-label {
+  font-weight: 500;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--title-color);
+}
+
+.supertokens-plugin-profile-security-second-factor-method-description {
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.supertokens-plugin-profile-security-second-factor-method-header-actions {
+  margin-left: auto;
+}
+
+/* ------------------------------------------------------------ */
 
 .plugin-profile-security-link {
   color: #07c;
@@ -59,61 +223,8 @@
   }
 }
 
-.plugin-profile-security-linked-account {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.plugin-profile-security-linked-account-provider {
-  display: flex;
-  align-items: center;
-  gap: var(--plugin-spacing-md);
-  font-weight: 500;
-}
-
-.plugin-profile-security-linked-account-provider-logo {
-  margin-right: var(--plugin-spacing-md);
-  line-height: 0;
-}
-
-.plugin-profile-security-linked-account-unlink-button {
-  margin-left: auto;
-}
-
-.plugin-profile-security-link-account-buttons {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.plugin-profile-security-second-factor {
-  display: flex;
-  flex-direction: column;
-  gap: var(--plugin-spacing-2xl);
-}
-
-.plugin-profile-security-second-factor-method-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .plugin-profile-security-second-factor-method-action {
   margin-left: auto;
-}
-
-.plugin-profile-security-second-factor-method-label {
-  font-weight: var(--plugin-font-weight-medium);
-  font-size: var(--plugin-font-size-md);
-  line-height: var(--plugin-line-height-normal);
-  color: var(--plugin-text-secondary);
-}
-
-.plugin-profile-security-second-factor-method-description {
-  color: var(--plugin-text-secondary);
-  font-size: var(--plugin-font-size-sm);
-  line-height: var(--plugin-line-height-tight);
 }
 
 .plugin-profile-security-second-factor-method-button {
@@ -124,27 +235,6 @@
   margin-top: var(--plugin-spacing-xl);
   padding-left: var(--plugin-spacing-xl);
   border-left: 2px solid var(--plugin-color-primary);
-}
-
-.plugin-profile-security-manage-item {
-  display: flex;
-  flex-direction: row;
-  align-items: baseline;
-  gap: var(--plugin-spacing-md);
-  margin-bottom: var(--plugin-spacing-md);
-}
-
-.plugin-profile-security-manage-item-actions {
-  display: flex;
-  flex-direction: row;
-  gap: var(--plugin-spacing-md);
-  margin-left: auto;
-}
-
-.plugin-profile-security-manage-container {
-  border-top: 1px solid var(--plugin-border-secondary);
-  padding-top: var(--plugin-spacing-lg);
-  margin-top: var(--plugin-spacing-lg);
 }
 
 .plugin-profile-security-item-description {

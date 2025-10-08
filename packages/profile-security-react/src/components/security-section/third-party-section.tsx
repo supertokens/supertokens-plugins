@@ -1,4 +1,4 @@
-import { Button, usePrettyAction, useToast } from "@shared/ui";
+import { Button, Callout, Tag, usePrettyAction, useToast } from "@shared/ui";
 import classNames from "classnames/bind";
 import { useMemo } from "react";
 import {
@@ -137,42 +137,63 @@ export const ThirdPartySection = ({
   return (
     <>
       {connectedAccounts.length === 0 && (
-        <span className={style["plugin-profile-details-value"]}>{t("PL_SEC_TP_NO_LINKED_ACCOUNTS")}</span>
+        <Callout
+          className={cx("supertokens-plugin-profile-security-no-linked-accounts")}
+          icon="circle-info"
+          appearance="filled"
+          variant="brand"
+          size="small">
+          {t("PL_SEC_TP_NO_LINKED_ACCOUNTS")}
+        </Callout>
       )}
-      {connectedAccounts.map((account, index) => (
-        <div key={index} className={cx("plugin-profile-security-linked-account")}>
-          <span className={cx("plugin-profile-security-linked-account-provider")}>
-            {thirdPartyIdToProviderMap[account.providerId as keyof typeof thirdPartyIdToProviderMap].getLogo()}
-            {thirdPartyIdToProviderMap[account.providerId as keyof typeof thirdPartyIdToProviderMap].name}
-          </span>
-          <span className={cx("plugin-profile-security-linked-account-email")}>{account.email}</span>
-          <Button
-            onClick={() => unlinkAccount(account.recipeUserId)}
-            size="small"
-            variant="brand"
-            appearance="plain"
-            className={cx("plugin-profile-security-linked-account-unlink-button")}
-            loading={isLoading}>
-            {t("PL_SEC_TP_UNLINK_ACCOUNT_BUTTON")}
-          </Button>
+
+      {connectedAccounts.length > 0 && (
+        <div className={cx("supertokens-plugin-profile-security-linked-accounts")}>
+          {connectedAccounts.map((account, index) => (
+            <div key={index} className={cx("supertokens-plugin-profile-security-linked-account")}>
+              <Tag
+                size="medium"
+                variant="neutral"
+                appearance="filled"
+                className={cx("supertokens-plugin-profile-security-linked-account-tag")}>
+                <span className={cx("supertokens-plugin-profile-security-linked-account-name")}>
+                  {thirdPartyIdToProviderMap[account.providerId as keyof typeof thirdPartyIdToProviderMap].getLogo()}
+                  {thirdPartyIdToProviderMap[account.providerId as keyof typeof thirdPartyIdToProviderMap].name}
+                </span>
+              </Tag>
+              <span className={cx("supertokens-plugin-profile-security-linked-account-email")}>{account.email}</span>
+              <Button
+                onClick={() => unlinkAccount(account.recipeUserId)}
+                size="small"
+                variant="danger"
+                appearance="plain"
+                className={cx("supertokens-plugin-profile-security-linked-account-unlink-button")}
+                loading={isLoading}>
+                {t("PL_SEC_TP_UNLINK_ACCOUNT_BUTTON")}
+              </Button>
+            </div>
+          ))}
         </div>
-      ))}
+      )}
 
       {availableSignUpProviders.length > 0 && (
-        <div className={cx("plugin-profile-security-link-account-buttons")}>
+        <div className={cx("supertokens-plugin-profile-security-link-account-buttons")}>
           {availableSignUpProviders.map((provider) => (
             <Button
               key={provider.id}
+              className={cx("supertokens-plugin-profile-security-link-account-button")}
               variant="brand"
               onClick={() => linkAccount(provider.id)}
               loading={isLoading}
-              size="small"
+              size="medium"
               appearance="outlined">
-              <span className={cx("plugin-profile-security-linked-account-provider-logo")}>
+              <span className={cx("supertokens-plugin-profile-security-link-account-button-logo")}>
                 {thirdPartyIdToProviderMap[provider.id as keyof typeof thirdPartyIdToProviderMap].getLogo()}
               </span>
-              {t("PL_SEC_TP_LINK_ACCOUNT_BUTTON")}{" "}
-              {thirdPartyIdToProviderMap[provider.id as keyof typeof thirdPartyIdToProviderMap].name}
+              <span className={cx("supertokens-plugin-profile-security-link-account-button-name")}>
+                {t("PL_SEC_TP_LINK_ACCOUNT_BUTTON")}{" "}
+                {thirdPartyIdToProviderMap[provider.id as keyof typeof thirdPartyIdToProviderMap].name}
+              </span>
             </Button>
           ))}
         </div>
