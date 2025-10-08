@@ -62,7 +62,8 @@ jobs:
         run: npm ci
 
       - name: Create snapshot version
-        run: npx changeset version --snapshot ${{ inputs.tag }}
+        if: ${{ steps.check-changes.has-changes == true }}
+        run: npm run version:private -- ${{ inputs.tag }}
 
       - name: Run tests
         if: ${{ inputs.skip_tests == false }}
@@ -72,7 +73,8 @@ jobs:
         run: npm run build
 
       - name: Publish to npm
-        run: npx changeset publish --tag ${{ inputs.tag }}
+        if: ${{ steps.check-changes.has-changes == true }}
+        run: npm run publish:private -- ${{ inputs.tag }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
