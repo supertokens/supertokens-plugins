@@ -1,4 +1,4 @@
-import { Card, Button } from "@shared/ui";
+import { Card, Button, usePrettyAction } from "@shared/ui";
 import classNames from "classnames/bind";
 import { useEffect, useState } from "react";
 import { redirectToAuth } from "supertokens-auth-react";
@@ -18,7 +18,6 @@ export const AcceptInvitation = ({
   const [code, setCode] = useState<string>("");
   const [tenantId, setTenantId] = useState<string>("");
   const [isAccepting, setIsAccepting] = useState(false);
-  const [error, setError] = useState<string>("");
 
   const session = useSessionContext();
   const { t, pluginConfig } = usePluginContext();
@@ -39,9 +38,28 @@ export const AcceptInvitation = ({
     setTenantId(tenantId);
   }, []);
 
-  if (session.loading) {
-    return <div>{t("PL_TB_TENANTS_LOADING_MESSAGE")}</div>;
-  }
+  const onAcceptWrapper = usePrettyAction(
+    async () => {
+      try {
+        const res = await onAccept(code, tenantId);
+        if (res.status === "OK") {
+          // Redirect user after successful acceptance
+          (globalThis as any).location.href = pluginConfig.redirectToUrlOnJoiningTenant;
+          return;
+        }
+
+        // Throw the error for it to be picked up.
+        throw new Error(res.message);
+      } finally {
+        setIsAccepting(false);
+      }
+    },
+    [onAccept],
+    {
+      successMessage: "Invitation accepted successfully!",
+      errorMessage: "Failed to accept invitation, please try again",
+    },
+  );
 
   const handleAccept = async () => {
     if (!code) {
@@ -49,17 +67,7 @@ export const AcceptInvitation = ({
     }
 
     setIsAccepting(true);
-    setError("");
-
-    try {
-      await onAccept(code, tenantId);
-      // Redirect user after successful acceptance
-      (globalThis as any).location.href = pluginConfig.redirectToUrlOnJoiningTenant;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to accept invitation");
-    } finally {
-      setIsAccepting(false);
-    }
+    await onAcceptWrapper();
   };
 
   const handleRedirectToAuth = () => {
@@ -71,6 +79,10 @@ export const AcceptInvitation = ({
       redirectBack: false,
     });
   };
+
+  if (session.loading) {
+    return <div>{t("PL_TB_TENANTS_LOADING_MESSAGE")}</div>;
+  }
 
   if (!code) {
     return (
