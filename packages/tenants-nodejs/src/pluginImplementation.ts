@@ -320,6 +320,13 @@ export const getOverrideableTenantFunctionImplementation = (
     getTenantCreationRequests: async (metadata: TenantCreationRequestMetadataType, userContext: UserContext) => {
       const tenantCreateRequestMetadata = await metadata.get(TENANT_CREATE_METADATA_REQUESTS_KEY);
 
+      if (!tenantCreateRequestMetadata) {
+        return {
+          status: "OK",
+          requests: [],
+        };
+      }
+
       // Fetch the user details for each user
       const requestsWithUser: TenantCreationRequestWithUser[] = [];
 

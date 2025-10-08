@@ -164,12 +164,12 @@ export const init = createPluginInitFunction<
           // Check if the logged in user has the tenant create
           // permission.
           const accessTokenPayload = await getAccessTokenPayloadSecurely();
-          const perms: string[] = (accessTokenPayload?.perms as string[]) ?? [];
+          const perms: string[] = (accessTokenPayload?.["st-perm"]?.v as string[]) ?? [];
           logDebugMessage(`Available permissions: ${perms}`);
 
           if (perms.some((permission) => permission === PERMISSIONS.MANAGE_CREATE_REQUESTS)) {
             logDebugMessage("Registering creation requests section since user has permission");
-            registerSection(async () => ({
+            await registerSection(async () => ({
               id: "tenant-creation-requests-management",
               title: "Tenant Creation Requests",
               order: 2,
