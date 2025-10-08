@@ -1,4 +1,5 @@
-import { User } from "supertokens-node";
+import { User } from 'supertokens-node';
+import { SessionClaimValidator } from 'supertokens-node/recipe/session';
 
 export type TenantJoinData = {
   tenantId: string;
@@ -30,10 +31,10 @@ export type TenantCreationRequest = {
   requestId: string;
 };
 
-export type TenantCreationRequestWithUser = TenantCreationRequest & { 
+export type TenantCreationRequestWithUser = TenantCreationRequest & {
   id: string;
   emails: string[];
- };
+};
 
 export type TenantMetadata = {
   invitees: InviteeDetails[];
@@ -42,3 +43,7 @@ export type TenantMetadata = {
 export type TenantCreationRequestMetadata = {
   requests: (TenantCreationRequest & { userId: string })[];
 };
+
+export type FilterGlobalClaimValidators = (
+  globalValidators: SessionClaimValidator[],
+) => Promise<SessionClaimValidator[]>;
