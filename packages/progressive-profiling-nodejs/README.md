@@ -335,6 +335,34 @@ const sections = await ProgressiveProfilingPlugin.getAllSections({
 console.log("Available sections:", sections);
 ```
 
+### registerFilterGlobalClaimValidators
+
+Register function to filter global claim validators in all endpoints
+
+```typescript
+import { registerFilterGlobalClaimValidators } from "@supertokens-plugins/progressive-profiling-nodejs";
+import { SessionClaimValidator } from 'supertokens-node/recipe/session';
+
+registerFilterGlobalClaimValidators((globalValidators: SessionClaimValidators[]) => {
+  // Filter the validators.
+  return globalValidators;
+})
+```
+
+### getFilterGlobalClaimValidatorsFn
+
+Get the registered function to filter global claim validators in all endpoints
+
+```typescript
+import { getFilterGlobalClaimValidatorsFn } from "@supertokens-plugins/progressive-profiling-nodejs";
+
+const filterFn = getFilterGlobalClaimValidatorsFn();
+if (filterFn !== undefined) {
+  // Do something with the function.
+}
+```
+
+
 ## Custom Storage Handlers
 
 By default, the user profile data is handled by the user metadata through the `defaultStorageHandlerSetFields` and `defaultStorageHandlerGetFields` methods. These are used whenever sections are added through the plugin config. These methods can also be overriden in order to make use of your own storage system (database, files, third-parties, etc).

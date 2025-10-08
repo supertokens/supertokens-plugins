@@ -3,7 +3,6 @@ import { SuperTokensPlugin } from "supertokens-node/types";
 import { pluginUserMetadata, withRequestHandler } from "@shared/nodejs";
 import { createPluginInitFunction } from "@shared/js";
 import { ProfileFormData } from "@supertokens-plugins/progressive-profiling-shared";
-import { FilterGlobalClaimValidators } from "@shared/tenants";
 
 import {
   SuperTokensPluginProfileProgressiveProfilingConfig,
@@ -25,7 +24,6 @@ export const init = createPluginInitFunction<
     Implementation.instance = implementation;
 
     const metadata = pluginUserMetadata<{ profileConfig?: UserMetadataConfig }>(METADATA_KEY);
-    let filterGlobalClaimValidatorsFn: FilterGlobalClaimValidators | undefined = undefined;
 
     if (pluginConfig.sections.length > 0) {
       const defaultFields = pluginConfig.sections
@@ -53,10 +51,6 @@ export const init = createPluginInitFunction<
       });
     }
 
-    const registerFilterGlobalClaimValidators = (fn: FilterGlobalClaimValidators) => {
-      filterGlobalClaimValidatorsFn = fn;
-    };
-
     return {
       id: PLUGIN_ID,
       compatibleSDKVersions: PLUGIN_SDK_VERSION,
@@ -80,8 +74,9 @@ export const init = createPluginInitFunction<
                     (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key,
                   );
 
-                  if (filterGlobalClaimValidatorsFn === undefined) return updatedValidators;
-                  return filterGlobalClaimValidatorsFn(updatedValidators);
+                  const filterFn = implementation.getFilterGlobalClaimValidatorsFn();
+                  if (filterFn === undefined) return updatedValidators;
+                  return filterFn(updatedValidators);
                 },
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
@@ -103,8 +98,9 @@ export const init = createPluginInitFunction<
                     (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key,
                   );
 
-                  if (filterGlobalClaimValidatorsFn === undefined) return updatedValidators;
-                  return filterGlobalClaimValidatorsFn(updatedValidators);
+                  const filterFn = implementation.getFilterGlobalClaimValidatorsFn();
+                  if (filterFn === undefined) return updatedValidators;
+                  return filterFn(updatedValidators);
                 },
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
@@ -128,8 +124,9 @@ export const init = createPluginInitFunction<
                     (validator) => validator.id !== Implementation.ProgressiveProfilingCompletedClaim.key,
                   );
 
-                  if (filterGlobalClaimValidatorsFn === undefined) return updatedValidators;
-                  return filterGlobalClaimValidatorsFn(updatedValidators);
+                  const filterFn = implementation.getFilterGlobalClaimValidatorsFn();
+                  if (filterFn === undefined) return updatedValidators;
+                  return filterFn(updatedValidators);
                 },
               },
               handler: withRequestHandler(async (req, res, session, userContext) => {
@@ -178,7 +175,7 @@ export const init = createPluginInitFunction<
         getSections: implementation.getAllSections,
         setSectionValues: implementation.setSectionValues,
         getSectionValues: implementation.getSectionValues,
-        registerFilterGlobalClaimValidators,
+        registerFilterGlobalClaimValidators: implementation.registerFilterGlobalClaimValidators,
       },
     };
   },
