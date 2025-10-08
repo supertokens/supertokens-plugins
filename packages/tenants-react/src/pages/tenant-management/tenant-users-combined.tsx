@@ -45,22 +45,34 @@ export const TenantUsersCombined: React.FC<TenantUsersCombinedProps> = ({ tenant
   );
   const [permissions, setPermissions] = useState<string[]>([]);
 
-  const loadInvitations = useCallback(async () => {
-    const invitationResponse = await getInvitations();
-    if (invitationResponse.status !== "OK") {
-      throw new Error("Failed to get invitation");
-    }
-    setInvitations(invitationResponse.invitees);
-  }, [getInvitations]);
+  const loadInvitations = usePrettyAction(
+    async () => {
+      const invitationResponse = await getInvitations();
+      if (invitationResponse.status !== "OK") {
+        throw new Error("Failed to get invitation");
+      }
+      setInvitations(invitationResponse.invitees);
+    },
+    [getInvitations],
+    {
+      errorMessage: "Failed to get invitations for tenant",
+    },
+  );
 
-  const loadTenantUsers = useCallback(async () => {
-    const response = await getUsers();
-    if (response.status === "ERROR") {
-      throw new Error(response.message);
-    }
-    // Show the users that have a valid role
-    setTenantUsers(response.users.filter((user) => user.roles.length !== 0));
-  }, [getUsers]);
+  const loadTenantUsers = usePrettyAction(
+    async () => {
+      const response = await getUsers();
+      if (response.status === "ERROR") {
+        throw new Error(response.message);
+      }
+      // Show the users that have a valid role
+      setTenantUsers(response.users.filter((user) => user.roles.length !== 0));
+    },
+    [getUsers],
+    {
+      errorMessage: "Failed to get users for tenant",
+    },
+  );
 
   const loadRequests = usePrettyAction(
     async () => {
@@ -98,6 +110,7 @@ export const TenantUsersCombined: React.FC<TenantUsersCombinedProps> = ({ tenant
   }, [loadInvitations, loadTenantUsers, loadRequests]);
 
   useEffect(() => {
+    logDebugMessage("users combined useEffect");
     fetchAllUserDetails();
   }, [selectedTenantId]);
 
