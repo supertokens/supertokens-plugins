@@ -1,5 +1,11 @@
 # @supertokens-plugins/progressive-profiling-nodejs
 
+## 0.3.0
+
+### Minor Changes
+
+- 61c3e50: Adds support for registerGlobalClaimValidatorOverride to filter the globalClaimValidators in all progressive profiling routes
+
 ## 0.2.0
 
 ### Minor Changes
