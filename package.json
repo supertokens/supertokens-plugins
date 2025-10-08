@@ -10,9 +10,9 @@
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "changeset": "changeset",
     "version": "changeset version",
-    "version:private": "changeset version --snapshot beta",
+    "version:private": "changeset version --snapshot",
     "release": "changeset publish",
-    "release:private": "changeset publish --tag beta"
+    "release:private": "changeset publish --tag"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.1",
