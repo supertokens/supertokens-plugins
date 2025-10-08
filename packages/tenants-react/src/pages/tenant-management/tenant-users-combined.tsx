@@ -1,7 +1,8 @@
-import { InviteeDetails, ROLES } from "@shared/tenants";
+import { InviteeDetails, PERMISSIONS, ROLES } from "@shared/tenants";
 import { usePrettyAction } from "@shared/ui";
 import classNames from "classnames/bind";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { getAccessTokenPayloadSecurely } from "supertokens-auth-react/recipe/session";
 import { User } from "supertokens-web-js/types";
 
 import { AddInvitation } from "../../components/invitations/AddInvitation";
@@ -42,6 +43,7 @@ export const TenantUsersCombined: React.FC<TenantUsersCombinedProps> = ({ tenant
     () => tenantUsers.length === 0 && invitations.length === 0 && requests.length === 0,
     [tenantUsers, invitations, requests],
   );
+  const [permissions, setPermissions] = useState<string[]>([]);
 
   const loadInvitations = useCallback(async () => {
     const invitationResponse = await getInvitations();
@@ -49,7 +51,7 @@ export const TenantUsersCombined: React.FC<TenantUsersCombinedProps> = ({ tenant
       throw new Error("Failed to get invitation");
     }
     setInvitations(invitationResponse.invitees);
-  }, [getInvitations, selectedTenantId]);
+  }, [getInvitations]);
 
   const loadTenantUsers = useCallback(async () => {
     const response = await getUsers();
@@ -58,7 +60,7 @@ export const TenantUsersCombined: React.FC<TenantUsersCombinedProps> = ({ tenant
     }
     // Show the users that have a valid role
     setTenantUsers(response.users.filter((user) => user.roles.length !== 0));
-  }, [getUsers, selectedTenantId]);
+  }, [getUsers]);
 
   const loadRequests = usePrettyAction(
     async () => {
@@ -68,13 +70,36 @@ export const TenantUsersCombined: React.FC<TenantUsersCombinedProps> = ({ tenant
       }
       setRequests(onboardingRequestsResponse.users);
     },
-    [getOnboardingRequests, selectedTenantId],
+    [getOnboardingRequests],
     { errorMessage: "Failed to get requests for tenant" },
   );
 
+  const fetchAllUserDetails = useCallback(async () => {
+    const accessTokenPayload = await getAccessTokenPayloadSecurely();
+    const perms: string[] = (accessTokenPayload?.["st-perm"]?.v as string[]) ?? [];
+    logDebugMessage(`Available permissions: ${perms}`);
+
+    setPermissions(perms);
+
+    const toFetch: Promise<any>[] = [];
+    if (perms.includes(PERMISSIONS.LIST_USERS)) {
+      toFetch.push(loadTenantUsers());
+    }
+
+    if (perms.includes(PERMISSIONS.MANAGE_INVITATIONS)) {
+      toFetch.push(loadInvitations());
+    }
+
+    if (perms.includes(PERMISSIONS.MANAGE_JOIN_REQUESTS)) {
+      toFetch.push(loadRequests());
+    }
+
+    Promise.all(toFetch);
+  }, [loadInvitations, loadTenantUsers, loadRequests]);
+
   useEffect(() => {
-    Promise.all([loadInvitations(), loadTenantUsers(), loadRequests()]);
-  }, [loadInvitations, loadTenantUsers, loadRequests, selectedTenantId]);
+    fetchAllUserDetails();
+  }, [selectedTenantId]);
 
   const onCreateInvite = useCallback(
     async (email: string, role: string) => {
@@ -174,14 +199,22 @@ export const TenantUsersCombined: React.FC<TenantUsersCombinedProps> = ({ tenant
 
   return (
     <div>
-      <div className={cx("addInvitationWrapper")}>
-        <AddInvitation onCreate={onCreateInvite} />
-      </div>
+      {permissions.includes(PERMISSIONS.MANAGE_INVITATIONS) && (
+        <div className={cx("addInvitationWrapper")}>
+          <AddInvitation onCreate={onCreateInvite} />
+        </div>
+      )}
       {isNoUsers ? (
         <NoUsers text={t("PL_TB_NO_USERS_FOUND_TEXT")} />
       ) : (
         <div className={cx("tenantUsersCombinedContainer")}>
-          <TenantUsers users={tenantUsers} onRoleChange={onRoleChange} onUserRemove={onUserRemove} />
+          <TenantUsers
+            users={tenantUsers}
+            onRoleChange={onRoleChange}
+            onUserRemove={onUserRemove}
+            hasPermissionToRemove={permissions.includes(PERMISSIONS.REMOVE_USERS)}
+            hasPermissionToChangeRole={permissions.includes(PERMISSIONS.CHANGE_USER_ROLES)}
+          />
           <InvitedUsers onRemove={onRemoveInvite} invitations={invitations} tenantId={selectedTenantId} />
           <OnboardingRequests
             requests={requests}

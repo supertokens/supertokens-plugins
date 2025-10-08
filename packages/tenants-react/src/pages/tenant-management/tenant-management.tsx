@@ -24,7 +24,7 @@ export const TenantManagementWithoutToastWrapper = ({ section }: { section: Form
     const loadTenants = async () => {
       const response = await fetchTenants();
       if (response.status === "OK") {
-        setTenants(response.tenants);
+        setTenants(response.tenants.filter((tenant) => response.joinedTenantIds.includes(tenant.tenantId)));
         const accessTokenPayload = await Session.getAccessTokenPayloadSecurely();
         const currentTenantId = accessTokenPayload.tId;
 

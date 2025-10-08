@@ -24,9 +24,17 @@ type TenantUsersProps = {
   users: UserWithRole[];
   onRoleChange: (userId: string, role: string) => Promise<boolean>;
   onUserRemove: (userId: string) => Promise<boolean>;
+  hasPermissionToRemove: boolean;
+  hasPermissionToChangeRole: boolean;
 };
 
-export const TenantUsers: React.FC<TenantUsersProps> = ({ users, onRoleChange, onUserRemove }) => {
+export const TenantUsers: React.FC<TenantUsersProps> = ({
+  users,
+  onRoleChange,
+  onUserRemove,
+  hasPermissionToChangeRole,
+  hasPermissionToRemove,
+}) => {
   const { t } = usePluginContext();
   const [userId, setUserId] = useState<string | null>(null);
   const [currentUserDetails, setCurrentUserDetails] = useState<UserWithRole | null>(null);
@@ -101,15 +109,17 @@ export const TenantUsers: React.FC<TenantUsersProps> = ({ users, onRoleChange, o
               value={currentRole}
               onChange={(e: any) => getRoleChangeWrapper(user.id)(e)}
               options={availableRoles}
-              disabled={!isCurrentUserTENANT_ADMIN || isRoleChanging}
+              disabled={!isCurrentUserTENANT_ADMIN || isRoleChanging || !hasPermissionToChangeRole}
             />
           </div>
-          <div>
-            <RemoveInvitation
-              onRemove={() => handleUserRemove(user.id)}
-              disabled={currentUserDetails === null ? true : currentUserDetails.id === user.id}
-            />
-          </div>
+          {hasPermissionToRemove && (
+            <div>
+              <RemoveInvitation
+                onRemove={() => handleUserRemove(user.id)}
+                disabled={currentUserDetails === null ? true : currentUserDetails.id === user.id}
+              />
+            </div>
+          )}
         </div>
       );
     },

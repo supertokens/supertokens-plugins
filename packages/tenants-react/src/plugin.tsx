@@ -145,21 +145,6 @@ export const init = createPluginInitFunction<
           return;
         }
 
-        registerSection(async () => ({
-          id: "tenant-management",
-          title: "Tenants",
-          order: 1,
-          component: () =>
-            TenantManagement.call(null, {
-              section: {
-                id: "tenant-management",
-                label: "Tenant Management",
-                description: "Manage users and invitations for your tenants",
-                fields: [],
-              },
-            }),
-        }));
-
         registerOnLoadHandler(async () => {
           // Check if the logged in user has the tenant create
           // permission.
@@ -167,6 +152,8 @@ export const init = createPluginInitFunction<
           const perms: string[] = (accessTokenPayload?.["st-perm"]?.v as string[]) ?? [];
           logDebugMessage(`Available permissions: ${perms}`);
 
+          // Register the tenant creation requests if that permission
+          // is available.
           if (perms.some((permission) => permission === PERMISSIONS.MANAGE_CREATE_REQUESTS)) {
             logDebugMessage("Registering creation requests section since user has permission");
             await registerSection(async () => ({
@@ -183,21 +170,34 @@ export const init = createPluginInitFunction<
                 }),
             }));
           }
-        });
 
-        // registerSection(async () => ({
-        //   id: "tenant-creation-requests-management",
-        //   title: "Tenant Creation Requests",
-        //   order: 2,
-        //   component: () =>
-        //     TenantCreationRequests.call(null, {
-        //       section: {
-        //         id: "tenant-creation-requests-management",
-        //         label: "Tenant Creation Requests",
-        //         fields: [],
-        //       },
-        //     }),
-        // }));
+          // Register the tenants management section if one of these are available
+          // - list users
+          // - manage invitations
+          // - manage join requests
+          const permissionsAsSet = new Set(perms);
+          const hasAnyRequiredPermission = [
+            PERMISSIONS.LIST_USERS,
+            PERMISSIONS.MANAGE_INVITATIONS,
+            PERMISSIONS.MANAGE_JOIN_REQUESTS,
+          ].some((permission) => permissionsAsSet.has(permission));
+          if (hasAnyRequiredPermission) {
+            registerSection(async () => ({
+              id: "tenant-management",
+              title: "Tenants",
+              order: 1,
+              component: () =>
+                TenantManagement.call(null, {
+                  section: {
+                    id: "tenant-management",
+                    label: "Tenant Management",
+                    description: "Manage users and invitations for your tenants",
+                    fields: [],
+                  },
+                }),
+            }));
+          }
+        });
 
         const querier = getQuerier(new URL(API_PATH, config.appInfo.apiDomain.getAsStringDangerous()).toString());
         const api = getApi(querier);
