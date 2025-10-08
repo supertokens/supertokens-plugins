@@ -5,9 +5,6 @@ import { Tracer } from "@opentelemetry/api";
 import { createPluginInitFunction } from "@shared/js";
 import { PluginImpl } from "./pluginImpl";
 
-// import { diag, DiagConsoleLogger, DiagLogLevel } from '@opentelemetry/api';
-// diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.DEBUG);
-
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
   OpenTelemetryLoggerPluginConfig,
@@ -243,7 +240,7 @@ export const init = createPluginInitFunction<
     };
   },
   (config) => new PluginImpl(config),
-  (config: OpenTelemetryLoggerPluginConfig | undefined) => config ?? {},
+  (config: OpenTelemetryLoggerPluginConfig | undefined) => config ?? {}
 );
 
 function overrideWithLogger<T extends Record<string, undefined | ((...args: any[]) => any)>>(logConfig: {
@@ -278,7 +275,7 @@ function fnWithLoggerAsync<T extends (...args: any[]) => Promise<any>>(
     pluginConfig: OpenTelemetryLoggerPluginConfig;
     tracer: Tracer;
     pluginImpl: PluginImpl;
-  },
+  }
 ): T {
   return function (...args: Parameters<T>): Promise<ReturnType<T>> {
     return logConfig.pluginImpl.startActiveSpan(
@@ -307,7 +304,7 @@ function fnWithLoggerAsync<T extends (...args: any[]) => Promise<any>>(
         } finally {
           span.end();
         }
-      },
+      }
     );
   } as T;
 }
