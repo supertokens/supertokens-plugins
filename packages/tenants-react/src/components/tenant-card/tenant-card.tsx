@@ -19,7 +19,14 @@ interface TenantCardProps {
 
 export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => {
   const [newTenantName, setNewTenantName] = useState<string>("");
+  const [validationError, setValidationError] = useState<string>("");
   const { t, pluginConfig } = usePluginContext();
+
+  const validateTenantName = (name: string): boolean => {
+    // Allow only alphanumeric characters and dashes, no spaces or special characters
+    const validPattern = /^[a-zA-Z0-9-]+$/;
+    return validPattern.test(name);
+  };
 
   const onSuccess = () => {
     // Redirect the user to the app.
@@ -69,7 +76,7 @@ export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => 
       <div slot="footer" className={cx("createTenantFooter")}>
         <Button
           onClick={() => handleCreateAndJoin()}
-          disabled={newTenantName.trim() === ""}
+          disabled={newTenantName.trim() === "" || validationError !== ""}
           variant="brand"
           appearance="accent">
           {t("PL_TB_CREATE_TENANT_BUTTON_TEXT")}
@@ -87,12 +94,19 @@ export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => 
               value={newTenantName}
               onChange={(value) => {
                 setNewTenantName(value);
+                // Validate in real-time as user types
+                if (value.trim().length > 0 && !validateTenantName(value)) {
+                  setValidationError("Tenant name can only contain letters, numbers, and dashes");
+                } else {
+                  setValidationError("");
+                }
               }}
               type="text"
               appearance="outlined"
               className={cx("createTenantInput")}
             />
           </div>
+          {validationError && <div className={cx("validationError")}>{validationError}</div>}
         </Card>
       </div>
     </Card>

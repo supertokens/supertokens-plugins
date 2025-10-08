@@ -28,6 +28,12 @@
       width: 100%;
     }
   }
+
+  .validationError {
+    color: var(--wa-color-danger-70);
+    font-size: 14px;
+    padding: 12px;
+  }
 }
 
 .createTenantHeader {
