@@ -64,10 +64,6 @@ export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => 
     },
   );
 
-  if (isLoading) {
-    return <Card description="Loading..." />;
-  }
-
   return (
     <Card>
       <div slot="header" className={cx("createTenantHeader")}>
@@ -76,10 +72,10 @@ export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => 
       <div slot="footer" className={cx("createTenantFooter")}>
         <Button
           onClick={() => handleCreateAndJoin()}
-          disabled={newTenantName.trim() === "" || validationError !== ""}
+          disabled={newTenantName.trim() === "" || validationError !== "" || isLoading}
           variant="brand"
           appearance="accent">
-          {t("PL_TB_CREATE_TENANT_BUTTON_TEXT")}
+          {isLoading ? t("PL_TB_TENANTS_LOADING_MESSAGE") : t("PL_TB_CREATE_TENANT_BUTTON_TEXT")}
         </Button>
       </div>
       <div>
@@ -104,6 +100,8 @@ export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => 
               type="text"
               appearance="outlined"
               className={cx("createTenantInput")}
+              disabled={isLoading}
+              onKeyDown={() => handleCreateAndJoin()}
             />
           </div>
           {validationError && <div className={cx("validationError")}>{validationError}</div>}
