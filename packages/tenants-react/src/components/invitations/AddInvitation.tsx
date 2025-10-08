@@ -1,6 +1,6 @@
 import { Button, SelectInput, TextInput, usePrettyAction } from "@shared/ui";
 import classNames from "classnames/bind";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { ROLES } from "../../../../../shared/tenants/src/roles";
 import { usePluginContext } from "../../plugin";
