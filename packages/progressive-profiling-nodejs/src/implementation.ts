@@ -6,6 +6,7 @@ import { BooleanClaim } from "supertokens-node/recipe/session/claims";
 import { METADATA_KEY, METADATA_PROFILE_KEY } from "./constants";
 import { pluginUserMetadata } from "@shared/nodejs";
 import { groupBy, indexBy, mapBy } from "@shared/js";
+import { FilterGlobalClaimValidators } from "@shared/tenants";
 
 export class Implementation {
   static instance: Implementation | undefined;
@@ -13,6 +14,7 @@ export class Implementation {
   protected existingSections: (FormSection & { storageHandlerId: string })[] = [];
   protected existingStorageHandlers: Record<string, Pick<Parameters<RegisterSections>[0], "set" | "get">> = {};
   protected metadata = pluginUserMetadata<{ profileConfig?: UserMetadataConfig }>(METADATA_KEY);
+  protected globalClaimValidatorOverrides: FilterGlobalClaimValidators[] = [];
 
   static ProgressiveProfilingCompletedClaim: BooleanClaim;
 
@@ -392,5 +394,13 @@ export class Implementation {
       },
     };
     await this.metadata.set(userId, newUserMetadata, userContext);
+  };
+
+  registerGlobalClaimValidatorOverride = async function (this: Implementation, fn: FilterGlobalClaimValidators) {
+    this.globalClaimValidatorOverrides.push(fn);
+  };
+
+  getGlobalClaimValidatorOverrides = function (this: Implementation) {
+    return this.globalClaimValidatorOverrides;
   };
 }

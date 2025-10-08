@@ -1,0 +1,241 @@
+import { InviteeDetails, PERMISSIONS, ROLES } from "@shared/tenants";
+import { usePrettyAction } from "@shared/ui";
+import classNames from "classnames/bind";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { getAccessTokenPayloadSecurely } from "supertokens-auth-react/recipe/session";
+import { User } from "supertokens-web-js/types";
+
+import { AddInvitation } from "../../components/invitations/AddInvitation";
+import { InvitedUsers } from "../../components/invitations/InvitedUsers";
+import { OnboardingRequests } from "../../components/requests/OnboardingRequests";
+import { NoUsers } from "../../components/users/NoUsers";
+import { TenantUsers } from "../../components/users/TenantUsers";
+import { logDebugMessage } from "../../logger";
+import { usePluginContext } from "../../plugin";
+import { UserWithRole } from "../../types";
+
+import style from "./styles.module.scss";
+
+const cx = classNames.bind(style);
+
+type TenantUsersCombinedProps = {
+  tenantId: string;
+};
+
+export const TenantUsersCombined: React.FC<TenantUsersCombinedProps> = ({ tenantId: selectedTenantId }) => {
+  const { api, t } = usePluginContext();
+  const {
+    getUsers,
+    getInvitations,
+    removeInvitation,
+    addInvitation,
+    removeUserFromTenant,
+    changeRole,
+    getOnboardingRequests,
+    acceptOnboardingRequest,
+    declineOnboardingRequest,
+  } = api;
+
+  const [invitations, setInvitations] = useState<InviteeDetails[]>([]);
+  const [tenantUsers, setTenantUsers] = useState<UserWithRole[]>([]);
+  const [requests, setRequests] = useState<User[]>([]);
+  const isNoUsers = useMemo(
+    () => tenantUsers.length === 0 && invitations.length === 0 && requests.length === 0,
+    [tenantUsers, invitations, requests],
+  );
+  const [permissions, setPermissions] = useState<string[]>([]);
+
+  const loadInvitations = usePrettyAction(
+    async () => {
+      const invitationResponse = await getInvitations();
+      if (invitationResponse.status !== "OK") {
+        throw new Error("Failed to get invitation");
+      }
+      setInvitations(invitationResponse.invitees);
+    },
+    [getInvitations],
+    {
+      errorMessage: "Failed to get invitations for tenant",
+    },
+  );
+
+  const loadTenantUsers = usePrettyAction(
+    async () => {
+      const response = await getUsers();
+      if (response.status === "ERROR") {
+        throw new Error(response.message);
+      }
+      // Show the users that have a valid role
+      setTenantUsers(response.users.filter((user) => user.roles.length !== 0));
+    },
+    [getUsers],
+    {
+      errorMessage: "Failed to get users for tenant",
+    },
+  );
+
+  const loadRequests = usePrettyAction(
+    async () => {
+      const onboardingRequestsResponse = await getOnboardingRequests();
+      if (onboardingRequestsResponse.status === "ERROR") {
+        throw new Error(onboardingRequestsResponse.message);
+      }
+      setRequests(onboardingRequestsResponse.users);
+    },
+    [getOnboardingRequests],
+    { errorMessage: "Failed to get requests for tenant" },
+  );
+
+  const fetchAllUserDetails = useCallback(async () => {
+    const accessTokenPayload = await getAccessTokenPayloadSecurely();
+    const perms: string[] = (accessTokenPayload?.["st-perm"]?.v as string[]) ?? [];
+    logDebugMessage(`Available permissions: ${perms}`);
+
+    setPermissions(perms);
+
+    const toFetch: Promise<any>[] = [];
+    if (perms.includes(PERMISSIONS.LIST_USERS)) {
+      toFetch.push(loadTenantUsers());
+    }
+
+    if (perms.includes(PERMISSIONS.MANAGE_INVITATIONS)) {
+      toFetch.push(loadInvitations());
+    }
+
+    if (perms.includes(PERMISSIONS.MANAGE_JOIN_REQUESTS)) {
+      toFetch.push(loadRequests());
+    }
+
+    Promise.all(toFetch);
+  }, [loadInvitations, loadTenantUsers, loadRequests]);
+
+  useEffect(() => {
+    logDebugMessage("users combined useEffect");
+    fetchAllUserDetails();
+  }, [selectedTenantId]);
+
+  const onCreateInvite = useCallback(
+    async (email: string, role: string) => {
+      const response = await addInvitation(email, role);
+      if (response.status === "ERROR") {
+        throw new Error(response.message);
+      }
+
+      // If `OK` status, add the newly added invitation to the
+      // list of invitations.
+      setInvitations((currentInvitations) => [
+        ...currentInvitations,
+        {
+          email,
+          code: response.code,
+          role,
+        },
+      ]);
+    },
+    [addInvitation],
+  );
+
+  const onRemoveInvite = usePrettyAction(
+    async (email: string) => {
+      const response = await removeInvitation(email);
+      if (response.status === "ERROR") {
+        throw new Error(response.message);
+      }
+
+      // If it was successful, remove the invitation from the
+      // list.
+      setInvitations((currentInvitations) => currentInvitations.filter((invitation) => invitation.email !== email));
+    },
+    [removeInvitation],
+    { errorMessage: "Failed to remove invitation, please try again" },
+  );
+
+  const onRoleChange = useCallback(
+    async (userId: string, role: string) => {
+      const response = await changeRole(userId, role);
+      if (response.status === "ERROR") {
+        logDebugMessage(`Got error while changing role: ${response.message}`);
+        return false;
+      }
+      return true;
+    },
+    [changeRole],
+  );
+
+  const onUserRemove = useCallback(
+    async (userId: string): Promise<boolean> => {
+      const response = await removeUserFromTenant(userId);
+      if (response.status === "ERROR") {
+        logDebugMessage(`Got error while removing user: ${response.message}`);
+        return false;
+      }
+
+      // Remove the user from the list of tenant users
+      setTenantUsers((currentUsers) => currentUsers.filter((user) => user.id !== userId));
+
+      return true;
+    },
+    [removeUserFromTenant],
+  );
+
+  const onAcceptRequest = useCallback(
+    async (userId: string) => {
+      const response = await acceptOnboardingRequest(userId);
+      if (response.status === "ERROR") {
+        return false;
+      }
+
+      // Remove the request from the list of requests.
+      const requestUser = requests.find((request) => request.id === userId);
+      setRequests((existingRequests) => existingRequests.filter((req) => req.id !== userId));
+
+      // Add the user to the list of existing users in the tenant
+      setTenantUsers((existingUsers) => [...existingUsers, { ...requestUser!, roles: [ROLES.TENANT_MEMBER] }]);
+      return true;
+    },
+    [acceptOnboardingRequest, requests],
+  );
+
+  const onDeclineRequest = useCallback(
+    async (userId: string) => {
+      const response = await declineOnboardingRequest(userId);
+      if (response.status === "ERROR") {
+        return false;
+      }
+
+      // Remove the request from the list of requests.
+      setRequests((existingRequests) => existingRequests.filter((req) => req.id !== userId));
+      return true;
+    },
+    [declineOnboardingRequest],
+  );
+
+  return (
+    <div>
+      {permissions.includes(PERMISSIONS.MANAGE_INVITATIONS) && (
+        <div className={cx("addInvitationWrapper")}>
+          <AddInvitation onCreate={onCreateInvite} />
+        </div>
+      )}
+      {isNoUsers ? (
+        <NoUsers text={t("PL_TB_NO_USERS_FOUND_TEXT")} />
+      ) : (
+        <div className={cx("tenantUsersCombinedContainer")}>
+          <TenantUsers
+            users={tenantUsers}
+            onRoleChange={onRoleChange}
+            onUserRemove={onUserRemove}
+            hasPermissionToRemove={permissions.includes(PERMISSIONS.REMOVE_USERS)}
+            hasPermissionToChangeRole={permissions.includes(PERMISSIONS.CHANGE_USER_ROLES)}
+          />
+          <InvitedUsers onRemove={onRemoveInvite} invitations={invitations} tenantId={selectedTenantId} />
+          <OnboardingRequests
+            requests={requests}
+            onAcceptRequest={onAcceptRequest}
+            onDeclineRequest={onDeclineRequest}
+          />
+        </div>
+      )}
+    </div>
+  );
+};

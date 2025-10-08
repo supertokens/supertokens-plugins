@@ -1,0 +1,29 @@
+:global(.tenantRequestsWrapper) {
+}
+
+.actionWrapper {
+  display: flex;
+  align-items: end;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.tenantCreateActionWrapper {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  .tenantName {
+    background-color: var(--neutral-color-neutral-3);
+    border-radius: 3px;
+    padding: 2px 8px;
+
+    font-weight: 500;
+    font-style: Medium;
+    font-size: 12px;
+    line-height: 16px;
+    letter-spacing: 0.04px;
+    vertical-align: middle;
+    color: var(--neutral-color-neutral-11);
+  }
+}

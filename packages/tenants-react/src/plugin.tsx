@@ -1,0 +1,327 @@
+import { createPluginInitFunction } from "@shared/js";
+import { buildContext, getQuerier } from "@shared/react";
+import SuperTokensPluginProfileBase from "@supertokens-plugins/profile-base-react";
+import {
+  getTranslationFunction,
+  SuperTokensPlugin,
+  SuperTokensPublicConfig,
+  SuperTokensPublicPlugin,
+} from "supertokens-auth-react";
+import { BooleanClaim, getAccessTokenPayloadSecurely } from "supertokens-auth-react/recipe/session";
+import UserRoles from "supertokens-auth-react/recipe/userroles";
+
+import { PERMISSIONS } from "../../../shared/tenants/src/roles";
+
+import { getApi } from "./api";
+import { API_PATH, PLUGIN_ID } from "./constants";
+import "./styles/global.css";
+import { enableDebugLogs, logDebugMessage } from "./logger";
+import { InvitationAcceptWrapper } from "./pages/InvitationAcceptPage";
+import { SelectTenantPage } from "./pages/select-tenant";
+import { TenantCreationRequests } from "./pages/tenant-creation-requests";
+import { TenantManagement } from "./pages/tenant-management/tenant-management";
+import { defaultTranslationsTenants } from "./translations";
+import {
+  SuperTokensPluginTenantsPluginConfig,
+  SuperTokensPluginTenantsPluginNormalisedConfig,
+  TranslationKeys,
+} from "./types";
+
+const { usePluginContext, setContext } = buildContext<{
+  plugins: SuperTokensPublicPlugin[];
+  sdkVersion: string;
+  appConfig: SuperTokensPublicConfig;
+  pluginConfig: SuperTokensPluginTenantsPluginNormalisedConfig;
+  querier: ReturnType<typeof getQuerier>;
+  api: ReturnType<typeof getApi>;
+  t: (key: TranslationKeys) => string;
+}>();
+export { usePluginContext };
+
+export const init = createPluginInitFunction<
+  SuperTokensPlugin,
+  SuperTokensPluginTenantsPluginConfig,
+  undefined,
+  SuperTokensPluginTenantsPluginNormalisedConfig
+>(
+  (pluginConfig) => {
+    const MultipleTenantsPresentClaim = new BooleanClaim({
+      id: "stpl-tm-ta",
+      refresh: async () => {},
+      onFailureRedirection: async ({ reason }) => {
+        return "/user/tenants/create";
+      },
+    });
+
+    // The progressive profiling completed claim ID to ensure
+    // the correct order of the claims
+    const PROGRESSIVE_PROFILING_COMPLETED_CLAIM_ID = "stpl-pp-c";
+
+    const extractCodeAndTenantId = (url: string) => {
+      const urlParams = new URL(url).searchParams;
+      const code = urlParams.get("tenantInviteCode");
+      const tenantId = urlParams.get("tenantId");
+
+      return { code, tenantId, shouldAcceptInvite: (code ?? "") !== "" && (tenantId ?? "") !== "" };
+    };
+
+    const extractAndInjectCodeAndTenantId = (context: any) => {
+      const { code, tenantId, shouldAcceptInvite } = extractCodeAndTenantId(window.location.href);
+
+      logDebugMessage(`extractAndInjectCodeAndTenantId, code: ${code}, tenantId: ${tenantId}`);
+      logDebugMessage(`extractAndInjectCodeAndTenantId - shouldAcceptInvite: ${shouldAcceptInvite}`);
+      if (!shouldAcceptInvite) {
+        return {
+          requestInit: context.requestInit,
+          url: context.url,
+        };
+      }
+
+      let requestInit = context.requestInit;
+      let body = context.requestInit.body;
+      if (body !== undefined) {
+        let bodyJson = JSON.parse(body as string);
+        bodyJson.code = code;
+        bodyJson.tenantId = tenantId;
+        requestInit.body = JSON.stringify(bodyJson);
+      }
+
+      return {
+        requestInit,
+        url: context.url,
+      };
+    };
+
+    let translations: (key: TranslationKeys, replacements?: Record<string, string>) => string;
+
+    return {
+      id: PLUGIN_ID,
+      dependencies: (config, pluginsAbove) => {
+        const baseProfilePlugin: SuperTokensPlugin | undefined = pluginsAbove.find(
+          (plugin: any) => plugin.id === "supertokens-plugin-profile-base",
+        );
+
+        if (baseProfilePlugin) {
+          return { status: "OK", pluginsToAdd: [] };
+        }
+
+        logDebugMessage("Base profile plugin not found. Registering it.");
+        return {
+          status: "OK",
+          pluginsToAdd: [SuperTokensPluginProfileBase.init()],
+        };
+      },
+      init: (config, plugins, sdkVersion) => {
+        if (config.enableDebugLogs) {
+          enableDebugLogs();
+        }
+
+        const baseProfilePlugin = plugins.find((plugin: any) => plugin.id === "supertokens-plugin-profile-base");
+        if (!baseProfilePlugin) {
+          logDebugMessage(
+            "Should not happen: Base profile plugin not found. Not adding common details profile plugin.",
+          );
+          return;
+        }
+
+        if (!baseProfilePlugin.exports) {
+          console.warn("Base profile plugin does not export anything. Not adding common details profile plugin.");
+          return;
+        }
+
+        const registerSection = baseProfilePlugin.exports?.registerSection;
+        if (!registerSection) {
+          console.warn(
+            "Base profile plugin does not export registerSection. Not adding common details profile plugin.",
+          );
+          return;
+        }
+
+        const registerOnLoadHandler = baseProfilePlugin.exports?.registerOnLoadHandler;
+        if (!registerOnLoadHandler) {
+          logDebugMessage(
+            "Base profile plugin does not export registerOnLoadHandler. Not adding common details profile plugin.",
+          );
+          return;
+        }
+
+        registerOnLoadHandler(async () => {
+          // Check if the logged in user has the tenant create
+          // permission.
+          const accessTokenPayload = await getAccessTokenPayloadSecurely();
+          const perms: string[] = (accessTokenPayload?.["st-perm"]?.v as string[]) ?? [];
+          logDebugMessage(`Available permissions: ${perms}`);
+
+          // Register the tenant creation requests if that permission
+          // is available.
+          if (perms.some((permission) => permission === PERMISSIONS.MANAGE_CREATE_REQUESTS)) {
+            logDebugMessage("Registering creation requests section since user has permission");
+            await registerSection(async () => ({
+              id: "tenant-creation-requests-management",
+              title: "Tenant Creation Requests",
+              order: 2,
+              component: () =>
+                TenantCreationRequests.call(null, {
+                  section: {
+                    id: "tenant-creation-requests-management",
+                    label: "Tenant Creation Requests",
+                    fields: [],
+                  },
+                }),
+            }));
+          }
+
+          // Register the tenants management section if one of these are available
+          // - list users
+          // - manage invitations
+          // - manage join requests
+          const permissionsAsSet = new Set(perms);
+          const hasAnyRequiredPermission = [
+            PERMISSIONS.LIST_USERS,
+            PERMISSIONS.MANAGE_INVITATIONS,
+            PERMISSIONS.MANAGE_JOIN_REQUESTS,
+          ].some((permission) => permissionsAsSet.has(permission));
+          if (hasAnyRequiredPermission) {
+            registerSection(async () => ({
+              id: "tenant-management",
+              title: "Tenants",
+              order: 1,
+              component: () =>
+                TenantManagement.call(null, {
+                  section: {
+                    id: "tenant-management",
+                    label: "Tenant Management",
+                    description: "Manage users and invitations for your tenants",
+                    fields: [],
+                  },
+                }),
+            }));
+          }
+        });
+
+        const querier = getQuerier(new URL(API_PATH, config.appInfo.apiDomain.getAsStringDangerous()).toString());
+        const api = getApi(querier);
+        translations = getTranslationFunction<TranslationKeys>(defaultTranslationsTenants);
+
+        setContext({
+          plugins,
+          sdkVersion,
+          appConfig: config,
+          pluginConfig,
+          querier,
+          api,
+          t: translations,
+        });
+      },
+      routeHandlers: (appConfig: any, plugins: any, sdkVersion: any) => {
+        return {
+          status: "OK",
+          routeHandlers: [
+            {
+              path: "/user/tenants/create",
+              handler: () => SelectTenantPage.call(null),
+            },
+            {
+              path: "/user/invite/accept",
+              handler: () => InvitationAcceptWrapper.call(null),
+            },
+          ],
+        };
+      },
+      overrideMap: {
+        session: {
+          functions: (originalImplementation) => {
+            return {
+              ...originalImplementation,
+              getGlobalClaimValidators(input) {
+                // If the profile claim is present, make sure the tenant
+                // one is added after it.
+                logDebugMessage(`All validators: ${input.claimValidatorsAddedByOtherRecipes}`);
+                const profileClaimValidators = input.claimValidatorsAddedByOtherRecipes.filter(
+                  (validator) => validator.id === PROGRESSIVE_PROFILING_COMPLETED_CLAIM_ID,
+                );
+                const otherClaimValidators = input.claimValidatorsAddedByOtherRecipes.filter(
+                  (validator) => validator.id !== PROGRESSIVE_PROFILING_COMPLETED_CLAIM_ID,
+                );
+
+                logDebugMessage(`profile validators: ${profileClaimValidators}`);
+                logDebugMessage(`others validators: ${otherClaimValidators}`);
+
+                const claimValidators = [
+                  ...otherClaimValidators,
+                  ...profileClaimValidators,
+                  ...(pluginConfig.requireTenantCreation ? [MultipleTenantsPresentClaim.validators.isTrue()] : []),
+                ];
+
+                logDebugMessage(`updated validators: ${claimValidators}`);
+                return claimValidators;
+              },
+            };
+          },
+        },
+        emailpassword: {
+          config: (config) => ({
+            ...config,
+            preAPIHook: async (context) => {
+              if (context.action === "EMAIL_PASSWORD_SIGN_IN" || context.action === "EMAIL_PASSWORD_SIGN_UP") {
+                return extractAndInjectCodeAndTenantId(context);
+              }
+              return context;
+            },
+          }),
+        },
+        passwordless: {
+          config: (config) => ({
+            ...config,
+            preAPIHook: async (context) => {
+              if (context.action === "PASSWORDLESS_CONSUME_CODE") {
+                return extractAndInjectCodeAndTenantId(context);
+              }
+              return context;
+            },
+          }),
+        },
+        thirdparty: {
+          config: (config) => ({
+            ...config,
+            preAPIHook: async (context) => {
+              if (context.action === "THIRD_PARTY_SIGN_IN_UP") {
+                return extractAndInjectCodeAndTenantId(context);
+              }
+              return context;
+            },
+          }),
+        },
+      },
+      generalAuthRecipeComponentOverrides: {
+        AuthPageHeader_Override: ({ DefaultComponent, ...props }) => {
+          // If the code and tenantId, we need to show the message that
+          // the invitation will be accepted automatically.
+          const { shouldAcceptInvite } = extractCodeAndTenantId(window.location.href);
+
+          return (
+            <div>
+              {shouldAcceptInvite && <h4>{translations("PL_TB_INVITE_ACCEPT_AUTHENTICATION_HEADER_MESSAGE")}</h4>}
+              {/* @ts-ignore */}
+              <DefaultComponent {...props} />
+            </div>
+          );
+        },
+      },
+      exports: {},
+    };
+  },
+  undefined,
+  (pluginConfig) => {
+    return {
+      requireTenantCreation: pluginConfig.requireTenantCreation ?? true,
+      redirectOnJoiningTenantFn:
+        typeof pluginConfig.redirectToUrlOnJoiningTenant === "function"
+          ? pluginConfig.redirectToUrlOnJoiningTenant
+          : () => {
+              // We can cast redirectToUrlOnJoiningTenant to string because we know we don't change pluginConfig
+              window.location.assign((pluginConfig.redirectToUrlOnJoiningTenant as string) ?? "/");
+            },
+    };
+  },
+);

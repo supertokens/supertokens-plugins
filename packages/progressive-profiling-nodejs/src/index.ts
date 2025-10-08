@@ -4,6 +4,7 @@ import { Implementation } from "./implementation";
 import { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import { ProfileFormData } from "@supertokens-plugins/progressive-profiling-shared";
 import { RegisterSections } from "./types";
+import { FilterGlobalClaimValidators } from "@shared/tenants";
 
 export type { RegisterSections as RegisterSection } from "./types";
 
@@ -27,6 +28,10 @@ const getAllSections = (input: { session: SessionContainerInterface; userContext
   return Implementation.getInstanceOrThrow().getAllSections(input);
 };
 
+const registerGlobalClaimValidatorOverride = (fn: FilterGlobalClaimValidators) => {
+  return Implementation.getInstanceOrThrow().registerGlobalClaimValidatorOverride(fn);
+};
+
 export { init, PLUGIN_ID, PLUGIN_VERSION, getSectionValues, setSectionValues, registerSections, getAllSections };
 export default {
   init,
@@ -36,4 +41,5 @@ export default {
   setSectionValues,
   registerSections,
   getAllSections,
+  registerGlobalClaimValidatorOverride,
 };

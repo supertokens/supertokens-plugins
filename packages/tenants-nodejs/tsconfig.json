@@ -1,0 +1,13 @@
+{
+  "extends": "@shared/tsconfig/node.json",
+  "compilerOptions": {
+    "lib": ["ES2020"],
+    "outDir": "./dist",
+    "declaration": true,
+    "declarationDir": "./dist",
+    "types": ["node"],
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.spec.ts"]
+}

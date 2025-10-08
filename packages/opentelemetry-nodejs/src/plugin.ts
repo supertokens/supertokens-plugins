@@ -243,7 +243,7 @@ export const init = createPluginInitFunction<
   (config: OpenTelemetryLoggerPluginConfig | undefined) => config ?? {}
 );
 
-function overrideWithLogger<T extends Record<string, undefined |((...args: any[]) => any)>>(logConfig: {
+function overrideWithLogger<T extends Record<string, undefined | ((...args: any[]) => any)>>(logConfig: {
   type: "api" | "function";
   recipeId: string;
   pluginConfig: OpenTelemetryLoggerPluginConfig;
@@ -266,7 +266,7 @@ function overrideWithLogger<T extends Record<string, undefined |((...args: any[]
   };
 }
 
-function fnWithLoggerAsync<T extends(...args: any[]) => Promise<any>>(
+function fnWithLoggerAsync<T extends (...args: any[]) => Promise<any>>(
   fn: T,
   logConfig: {
     type: "api" | "function";

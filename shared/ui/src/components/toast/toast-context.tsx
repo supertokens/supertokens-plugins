@@ -42,17 +42,15 @@ export const ToastProvider = ({ children, withFlash = false }: ToastProviderProp
     }
   }, []);
 
-  const removeToast = useCallback(
-    (id: string) => {
-      const toast = toasts.find((toast) => toast.id === id);
-      if (!toast) return;
-
-      setToasts((prevToasts) => prevToasts.filter(({ id }) => toast.id !== id));
+  const removeToast = useCallback((id: string) => {
+    setToasts((prevToasts) => {
+      const toast = prevToasts.find((toast) => toast.id === id);
+      if (!toast) return prevToasts;
 
       toast.onClose?.();
-    },
-    [toasts],
-  );
+      return prevToasts.filter((t) => t.id !== id);
+    });
+  }, []);
 
   const clearAllToasts = useCallback(() => {
     setToasts([]);
