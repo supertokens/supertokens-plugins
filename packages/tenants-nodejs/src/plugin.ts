@@ -63,10 +63,10 @@ export const init = createPluginInitFunction<
         // If they are, we don't need to enforce the claim.
         const usersRoles = await UserRoles.getRolesForUser("public", userId, userContext);
         if (usersRoles.roles.includes(ROLES.APP_ADMIN)) {
-          return false;
+          return true;
         }
 
-        return !userDetails.tenantIds.some((tenantId) => tenantId !== "public");
+        return userDetails.tenantIds.some((tenantId) => tenantId !== "public");
       },
     });
 
@@ -1101,5 +1101,6 @@ export const init = createPluginInitFunction<
     requireTenantCreationRequestApproval: config.requireTenantCreationRequestApproval ?? true,
     enableTenantListAPI: config.enableTenantListAPI ?? false,
     createRolesOnInit: config.createRolesOnInit ?? true,
+    emailDelivery: config.emailDelivery ?? undefined,
   }),
 );

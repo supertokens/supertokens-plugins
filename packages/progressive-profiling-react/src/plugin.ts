@@ -13,7 +13,7 @@ import {
   DEFAULT_SHOW_START_SECTION,
   PLUGIN_ID,
 } from "./constants";
-import { enableDebugLogs } from "./logger";
+import { enableDebugLogs, logDebugMessage } from "./logger";
 import { ProgressiveProfilingSetupPage } from "./progressive-profiling-setup-page";
 import { defaultTranslationsProgressiveProfiling } from "./translations";
 import {
@@ -50,6 +50,10 @@ export const init = createPluginInitFunction<
         return pluginConfig.setupPagePath;
       },
     });
+
+    // The progressive profiling completed claim ID to ensure
+    // the correct order of the claims
+    const MULTIPLE_TENANTS_PRESENT_CLAIM_ID = "stpl-tm-ta";
 
     return {
       id: PLUGIN_ID,
@@ -88,12 +92,23 @@ export const init = createPluginInitFunction<
             return {
               ...originalImplementation,
               getGlobalClaimValidators(input) {
-                return pluginConfig.requireSetup
-                  ? [
-                      ...originalImplementation.getGlobalClaimValidators(input),
-                      ProgressiveProfilingCompletedClaim.validators.isTrue(),
-                    ]
-                  : originalImplementation.getGlobalClaimValidators(input);
+                logDebugMessage(`validators from progressive profiling: ${JSON.stringify(input)}`);
+                const allValidators = originalImplementation.getGlobalClaimValidators(input);
+
+                // Check if the tenant management validator is added, in which
+                // case we want to add it "after" the progressive profiling one.
+                const tmClaimValidators = allValidators.filter(
+                  (validator) => validator.id === MULTIPLE_TENANTS_PRESENT_CLAIM_ID,
+                );
+                const otherClaimValidators = allValidators.filter(
+                  (validator) => validator.id !== MULTIPLE_TENANTS_PRESENT_CLAIM_ID,
+                );
+
+                return [
+                  ...otherClaimValidators,
+                  ...(pluginConfig.requireSetup ? [ProgressiveProfilingCompletedClaim.validators.isTrue()] : []),
+                  ...tmClaimValidators,
+                ];
               },
             };
           },

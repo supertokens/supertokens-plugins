@@ -1,6 +1,6 @@
 import { TenantCreateData, TenantJoinData } from "@shared/tenants";
 import { ToastProvider, ToastContainer } from "@shared/ui";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
 import { TenantCard } from "../../components";
 import { AwaitingApprovalMessage } from "../../components/tenant-card/awaiting-approval";
@@ -13,28 +13,31 @@ const TenantCardWrapper = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isPendingApproval, setIsPendingApproval] = useState(false);
 
-  const handleOnJoin = async (data: TenantJoinData) => {
-    setIsLoading(true);
-    try {
-      const result = await joinTenant(data);
+  const handleOnJoin = useCallback(
+    async (data: TenantJoinData) => {
+      setIsLoading(true);
+      try {
+        const result = await joinTenant(data);
 
-      // If there was an error, show that
-      if (result.status === "ERROR") {
-        console.error(result.message);
+        // If there was an error, show that
+        if (result.status === "ERROR") {
+          console.error(result.message);
+          return result;
+        }
+
+        // If it was successful, redirect the user.
+        if (result.status === "OK" && !isPendingApproval) {
+          logDebugMessage("Successfully joined tenant");
+          pluginConfig.redirectOnJoiningTenantFn();
+        }
+
         return result;
+      } finally {
+        setIsLoading(false);
       }
-
-      // If it was successful, redirect the user.
-      if (result.status === "OK") {
-        logDebugMessage("Successfully joined tenant");
-        pluginConfig.redirectOnJoiningTenantFn();
-      }
-
-      return result;
-    } finally {
-      setIsLoading(false);
-    }
-  };
+    },
+    [isPendingApproval, joinTenant, pluginConfig],
+  );
 
   const handleOnCreate = async (data: TenantCreateData) => {
     setIsLoading(true);

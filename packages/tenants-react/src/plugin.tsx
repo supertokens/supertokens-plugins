@@ -236,11 +236,14 @@ export const init = createPluginInitFunction<
               getGlobalClaimValidators(input) {
                 // If the profile claim is present, make sure the tenant
                 // one is added after it.
+                const updatedValidators = originalImplementation.getGlobalClaimValidators(input);
+                logDebugMessage(`validators input: ${JSON.stringify(input)}`);
+                logDebugMessage(`validators input updated: ${JSON.stringify(updatedValidators)}`);
                 logDebugMessage(`All validators: ${input.claimValidatorsAddedByOtherRecipes}`);
-                const profileClaimValidators = input.claimValidatorsAddedByOtherRecipes.filter(
+                const profileClaimValidators = updatedValidators.filter(
                   (validator) => validator.id === PROGRESSIVE_PROFILING_COMPLETED_CLAIM_ID,
                 );
-                const otherClaimValidators = input.claimValidatorsAddedByOtherRecipes.filter(
+                const otherClaimValidators = updatedValidators.filter(
                   (validator) => validator.id !== PROGRESSIVE_PROFILING_COMPLETED_CLAIM_ID,
                 );
 
@@ -253,7 +256,7 @@ export const init = createPluginInitFunction<
                   ...(pluginConfig.requireTenantCreation ? [MultipleTenantsPresentClaim.validators.isTrue()] : []),
                 ];
 
-                logDebugMessage(`updated validators: ${claimValidators}`);
+                logDebugMessage(`updated validators: ${JSON.stringify(input)}`);
                 return claimValidators;
               },
             };
@@ -314,7 +317,7 @@ export const init = createPluginInitFunction<
   undefined,
   (pluginConfig) => {
     return {
-      requireTenantCreation: pluginConfig.requireTenantCreation ?? true,
+      requireTenantCreation: pluginConfig.requireTenantCreation ?? false,
       redirectOnJoiningTenantFn:
         typeof pluginConfig.redirectToUrlOnJoiningTenant === "function"
           ? pluginConfig.redirectToUrlOnJoiningTenant
