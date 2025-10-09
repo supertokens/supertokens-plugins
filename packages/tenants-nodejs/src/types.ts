@@ -45,6 +45,7 @@ export type SuperTokensPluginTenantPluginConfig = {
   requireTenantCreationRequestApproval?: boolean;
   enableTenantListAPI?: boolean;
   createRolesOnInit?: boolean;
+  allowPublicTenantAccess?: boolean;
 
   // Email delivery configuration - service is optional, override can provide sendEmail implementation
   emailDelivery?: {
@@ -60,6 +61,7 @@ export type SuperTokensPluginTenantPluginNormalisedConfig = {
   requireTenantCreationRequestApproval: boolean;
   enableTenantListAPI: boolean;
   createRolesOnInit: boolean;
+  allowPublicTenantAccess: boolean;
 
   // Email delivery configuration - service is optional, override can provide sendEmail implementation
   emailDelivery?: {
@@ -177,4 +179,9 @@ export type OverrideableTenantFunctionImplementation = {
   doesUserHaveTenantCreationRequest: (userId: string, metadata: TenantCreationRequestMetadataType) => Promise<boolean>;
   getPreferredTenantId: (tenantIds: string[], inputTenantId: string) => string | undefined;
   assignRoleToUserInTenant: (tenantId: string, userId: string, role: string) => Promise<void>;
+  shouldHaveTenantAccess: (
+    userId: string,
+    tenantId: string,
+    userContext: UserContext,
+  ) => Promise<{ canAccess: boolean; reason?: string }>;
 };

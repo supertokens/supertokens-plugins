@@ -31,7 +31,7 @@ import { getOverrideableTenantFunctionImplementation } from "./pluginImplementat
 import { EmailDeliveryInterface } from "supertokens-node/lib/build/ingredients/emaildelivery/types";
 import { DefaultPluginEmailService } from "./defaultEmailService";
 
-const { getUser, RecipeUserId } = supertokens;
+const { RecipeUserId } = supertokens;
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
@@ -51,6 +51,7 @@ export const init = createPluginInitFunction<
     // This defaults to `false` and is only enabled if the `requireNonPublicTenantAssociation`
     // is set to `true`.
     const MULTIPLE_TENANTS_PRESENT_CLAIM_ID = "stpl-tm-ta";
+    const TENANT_ACCESS_CLAIM_ID = "stpl-tm-access";
     const MultipleTenantsPresentClaim = new BooleanClaim({
       key: MULTIPLE_TENANTS_PRESENT_CLAIM_ID,
       fetchValue: async (userId, rId, tId, cP, userContext) => {
@@ -68,6 +69,18 @@ export const init = createPluginInitFunction<
         }
 
         return userDetails.tenantIds.some((tenantId) => tenantId !== "public");
+      },
+    });
+
+    const TenantAccessPresentClaim = new BooleanClaim({
+      key: TENANT_ACCESS_CLAIM_ID,
+      fetchValue: async (userId, rId, tId, cP, userContext) => {
+        if (pluginConfig.allowPublicTenantAccess && tId === "public") {
+          return true;
+        }
+
+        const { canAccess } = await implementation.shouldHaveTenantAccess(userId, tId, userContext);
+        return canAccess;
       },
     });
 
@@ -841,41 +854,15 @@ export const init = createPluginInitFunction<
                   };
                 }
 
-                // Check if the user has the role of member or admin in the tenant.
-                const roles = (await UserRoles.getRolesForUser(tenantId, session.getUserId(userContext), userContext))
-                  .roles;
-                if (roles.length === 0) {
+                const { canAccess: canAccessTenant, reason } = await implementation.shouldHaveTenantAccess(
+                  session.getUserId(userContext),
+                  tenantId,
+                  userContext,
+                );
+                if (!canAccessTenant) {
                   return {
                     status: "ERROR_NOT_ALLOWED",
-                    message: "Cannot switch to tenant, not enough roles",
-                  };
-                }
-
-                const allPermissions: string[] = [];
-                for (const role of roles) {
-                  const rolePermissions = await UserRoles.getPermissionsForRole(role, userContext);
-                  if (rolePermissions.status === "OK") {
-                    for (const perm of rolePermissions.permissions) {
-                      allPermissions.push(perm);
-                    }
-                  }
-                }
-
-                // Check if the user is associated with the tenant or not.
-                const userDetails = await getUser(session.getUserId(), userContext);
-                if (!userDetails?.tenantIds.some((id) => id.toLowerCase() === tenantId.toLowerCase())) {
-                  return {
-                    status: "ERROR_NOT_ALLOWED",
-                    message: "User is not associated with tenant",
-                  };
-                }
-
-                // User needs to have the tenant access permission
-                if (!allPermissions.includes(PERMISSIONS.TENANT_ACCESS)) {
-                  return {
-                    status: "ERROR_NOT_ALLOWED",
-                    message: "Requires tenant-access permission",
-                    roles: roles,
+                    message: reason,
                   };
                 }
 
@@ -953,7 +940,10 @@ export const init = createPluginInitFunction<
 
                 // We will add a new validator to check that the user
                 // can access the tenant.
-                const additionalValidators = [PermissionClaim.validators.includes(PERMISSIONS.TENANT_ACCESS)];
+                const additionalValidators = [
+                  PermissionClaim.validators.includes(PERMISSIONS.TENANT_ACCESS),
+                  TenantAccessPresentClaim.validators.isTrue(),
+                ];
                 logDebugMessage("Adding tenant-access permission claim");
 
                 if (pluginConfig.requireNonPublicTenantAssociation) {
@@ -1141,5 +1131,6 @@ export const init = createPluginInitFunction<
     enableTenantListAPI: config.enableTenantListAPI ?? false,
     createRolesOnInit: config.createRolesOnInit ?? true,
     emailDelivery: config.emailDelivery ?? undefined,
+    allowPublicTenantAccess: config.allowPublicTenantAccess ?? false,
   }),
 );

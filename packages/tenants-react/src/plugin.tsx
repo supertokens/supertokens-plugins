@@ -54,6 +54,14 @@ export const init = createPluginInitFunction<
       },
     });
 
+    const TenantAccessPresentClaim = new BooleanClaim({
+      id: "stpl-tm-access",
+      refresh: async () => {},
+      onFailureRedirection: async () => {
+        return "/user/tenants/blocked";
+      },
+    });
+
     const extractCodeAndTenantId = (url: string) => {
       const urlParams = new URL(url).searchParams;
       const code = urlParams.get("tenantInviteCode");
@@ -234,7 +242,7 @@ export const init = createPluginInitFunction<
           functions: (originalImplementation) => {
             return {
               ...originalImplementation,
-              getGlobalClaimValidators(input) {
+              getGlobalClaimValidators: (input) => {
                 // If the profile claim is present, make sure the tenant
                 // one is added after it.
                 const updatedValidators = originalImplementation.getGlobalClaimValidators(input);
@@ -248,16 +256,7 @@ export const init = createPluginInitFunction<
 
                 // Add the permission check after the multiple tenants present claim
                 // is added.
-                updatedValidators.push({
-                  ...UserRoles.PermissionClaim.validators.includes(
-                    PERMISSIONS.TENANT_ACCESS,
-                    undefined,
-                    "stpl-tm-access",
-                  ),
-                  onFailureRedirection: () => {
-                    return "/user/tenants/blocked";
-                  },
-                });
+                updatedValidators.push(TenantAccessPresentClaim.validators.isTrue());
 
                 logDebugMessage(`updated validators: ${JSON.stringify(updatedValidators)}`);
                 return updatedValidators;
