@@ -211,18 +211,6 @@ export const init = createPluginInitFunction<
                     sendPluginEmail,
                   );
 
-                  // Do session.revoke and create a new session instead of the above
-                  await session.revokeSession();
-                  await Session.createNewSession(
-                    req,
-                    res,
-                    session.getTenantId(),
-                    session.getRecipeUserId(),
-                    session.getAccessTokenPayload(),
-                    undefined,
-                    userContext,
-                  );
-
                   return {
                     ...addTenantCreationRequestResponse,
                     pendingApproval: true,
@@ -243,11 +231,12 @@ export const init = createPluginInitFunction<
                 }
 
                 // Do session.revoke and create a new session instead of the above
+                // to switch the user to the new tenant that was just created
                 await session.revokeSession();
                 await Session.createNewSession(
                   req,
                   res,
-                  session.getTenantId(),
+                  payload.name,
                   session.getRecipeUserId(),
                   session.getAccessTokenPayload(),
                   undefined,
