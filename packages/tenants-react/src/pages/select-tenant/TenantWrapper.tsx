@@ -1,6 +1,6 @@
 import { TenantCreateData, TenantJoinData } from "@shared/tenants";
-import { ToastProvider, ToastContainer } from "@shared/ui";
-import { useCallback, useState } from "react";
+import { ToastProvider, ToastContainer, usePrettyAction } from "@shared/ui";
+import { useCallback, useEffect, useState } from "react";
 
 import { TenantCard } from "../../components";
 import { AwaitingApprovalMessage } from "../../components/tenant-card/awaiting-approval";
@@ -59,6 +59,26 @@ const TenantCardWrapper = () => {
       setIsLoading(false);
     }
   };
+
+  const fetchIfThereIsExistingRequest = usePrettyAction(async () => {
+    try {
+      setIsLoading(true);
+      const existingRequestRes = await api.doesUserHaveExistingCreationRequest();
+      if (existingRequestRes.status === "ERROR") {
+        throw new Error(existingRequestRes.message);
+      }
+
+      if (existingRequestRes.exists === true) {
+        setIsPendingApproval(true);
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  }, [api.doesUserHaveExistingCreationRequest]);
+
+  useEffect(() => {
+    fetchIfThereIsExistingRequest();
+  }, []);
 
   return isPendingApproval ? (
     <AwaitingApprovalMessage />

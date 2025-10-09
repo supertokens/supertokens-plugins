@@ -91,10 +91,23 @@ export type OverrideableTenantFunctionImplementation = {
   isAllowedToJoinTenant: (targetUser: User, session: SessionContainerInterface) => Promise<boolean>;
   isAllowedToCreateTenant: (session: SessionContainerInterface) => Promise<boolean>;
   doesTenantCreationRequireApproval: (session: SessionContainerInterface) => Promise<boolean>;
-  canCreateInvitation: (email: string, role: string, tenantId: string, session: SessionContainerInterface) => Promise<boolean>;
+  canCreateInvitation: (
+    email: string,
+    role: string,
+    tenantId: string,
+    session: SessionContainerInterface,
+  ) => Promise<boolean>;
   canApproveJoinRequest: (targetUser: User, tenantId: string, session: SessionContainerInterface) => Promise<boolean>;
-  canApproveTenantCreationRequest: (targetUser: User, creationRequest: TenantCreationRequest, session: SessionContainerInterface) => Promise<boolean>;
-  canRemoveTargetUserFromTenant: (targetUser: User, tenantId: string, session: SessionContainerInterface) => Promise<boolean>;
+  canApproveTenantCreationRequest: (
+    targetUser: User,
+    creationRequest: TenantCreationRequest,
+    session: SessionContainerInterface,
+  ) => Promise<boolean>;
+  canRemoveTargetUserFromTenant: (
+    targetUser: User,
+    tenantId: string,
+    session: SessionContainerInterface,
+  ) => Promise<boolean>;
   createTenantAndAssignAdmin: (
     tenantDetails: {
       name: string;
@@ -160,10 +173,8 @@ export type OverrideableTenantFunctionImplementation = {
     sendEmail: SendPluginEmail,
   ) => Promise<void>;
   getAppUrl: GetAppUrl;
-  rejectRequestToJoinTenant: (
-    tenantId: string,
-    userId: string,
-  ) => Promise<{ status: "OK" } | ErrorResponse>;
+  rejectRequestToJoinTenant: (tenantId: string, userId: string) => Promise<{ status: "OK" } | ErrorResponse>;
+  doesUserHaveTenantCreationRequest: (userId: string, metadata: TenantCreationRequestMetadataType) => Promise<boolean>;
   getPreferredTenantId: (tenantIds: string[], inputTenantId: string) => string | undefined;
   assignRoleToUserInTenant: (tenantId: string, userId: string, role: string) => Promise<void>;
 };

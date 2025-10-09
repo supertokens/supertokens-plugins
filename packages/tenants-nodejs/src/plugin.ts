@@ -50,8 +50,9 @@ export const init = createPluginInitFunction<
     //
     // This defaults to `false` and is only enabled if the `requireNonPublicTenantAssociation`
     // is set to `true`.
+    const MULTIPLE_TENANTS_PRESENT_CLAIM_ID = "stpl-tm-ta";
     const MultipleTenantsPresentClaim = new BooleanClaim({
-      key: "stpl-tm-ta",
+      key: MULTIPLE_TENANTS_PRESENT_CLAIM_ID,
       fetchValue: async (userId, rId, tId, cP, userContext) => {
         const userDetails = await supertokens.getUser(userId, userContext);
         if (!userDetails) {
@@ -63,6 +64,16 @@ export const init = createPluginInitFunction<
         // If they are, we don't need to enforce the claim.
         const usersRoles = await UserRoles.getRolesForUser("public", userId, userContext);
         if (usersRoles.roles.includes(ROLES.APP_ADMIN)) {
+          return true;
+        }
+
+        // Check if the user already has an existing request pending approval
+        const doesUserHaveExistingCreationRequest = await implementation.doesUserHaveTenantCreationRequest(
+          userId,
+          tenantCreationRequestMetadata,
+        );
+
+        if (doesUserHaveExistingCreationRequest) {
           return true;
         }
 
@@ -130,8 +141,10 @@ export const init = createPluginInitFunction<
             progressiveProfilingPlugin.exports.registerGlobalClaimValidatorOverride;
 
           registerGlobalClaimValidatorOverride(async (gv) => {
-            logDebugMessage("Removing tenant-access permission form claims");
-            return gv.filter((v: SessionClaimValidator) => v.id !== "st-perm");
+            logDebugMessage("Removing tenant-access and tenant-present permission from claims");
+            return gv.filter(
+              (v: SessionClaimValidator) => !["st-perm", MULTIPLE_TENANTS_PRESENT_CLAIM_ID].includes(v.id),
+            );
           });
         }
       },
@@ -208,6 +221,18 @@ export const init = createPluginInitFunction<
                     sendPluginEmail,
                   );
 
+                  // Do session.revoke and create a new session instead of the above
+                  await session.revokeSession();
+                  await Session.createNewSession(
+                    req,
+                    res,
+                    session.getTenantId(),
+                    session.getRecipeUserId(),
+                    session.getAccessTokenPayload(),
+                    undefined,
+                    userContext,
+                  );
+
                   return {
                     ...addTenantCreationRequestResponse,
                     pendingApproval: true,
@@ -226,6 +251,18 @@ export const init = createPluginInitFunction<
                 if (createResponse.status !== "OK") {
                   return createResponse;
                 }
+
+                // Do session.revoke and create a new session instead of the above
+                await session.revokeSession();
+                await Session.createNewSession(
+                  req,
+                  res,
+                  session.getTenantId(),
+                  session.getRecipeUserId(),
+                  session.getAccessTokenPayload(),
+                  undefined,
+                  userContext,
+                );
 
                 return {
                   status: "OK",
@@ -302,6 +339,29 @@ export const init = createPluginInitFunction<
                   session,
                   tenantCreationRequestMetadata,
                 );
+              }),
+            },
+            {
+              path: `${HANDLE_BASE_PATH}/tenant-requests/exists`,
+              method: "get",
+              verifySessionOptions: {
+                sessionRequired: true,
+                overrideGlobalClaimValidators: validateWithoutClaims([MultipleTenantsPresentClaim.key, "st-perm"]),
+              },
+              handler: withRequestHandler(async (req, res, session, userContext) => {
+                if (!session) {
+                  throw new Error("Session not found");
+                }
+
+                const doesUserHaveExistingCreationRequest = await implementation.doesUserHaveTenantCreationRequest(
+                  session.getUserId(userContext),
+                  tenantCreationRequestMetadata,
+                );
+
+                return {
+                  status: "OK",
+                  exists: doesUserHaveExistingCreationRequest,
+                };
               }),
             },
             {
@@ -968,12 +1028,12 @@ export const init = createPluginInitFunction<
                   ...input.accessTokenPayload,
                   ...(pluginConfig.requireNonPublicTenantAssociation
                     ? await MultipleTenantsPresentClaim.build(
-                        input.userId,
-                        input.recipeUserId,
-                        tenantId,
-                        input.accessTokenPayload,
-                        input.userContext,
-                      )
+                      input.userId,
+                      input.recipeUserId,
+                      tenantId,
+                      input.accessTokenPayload,
+                      input.userContext,
+                    )
                     : {}),
                 };
 
