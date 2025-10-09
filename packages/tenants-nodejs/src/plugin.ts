@@ -942,7 +942,6 @@ export const init = createPluginInitFunction<
                 // can access the tenant.
                 const additionalValidators = [
                   PermissionClaim.validators.includes(PERMISSIONS.TENANT_ACCESS),
-                  TenantAccessPresentClaim.validators.isTrue(),
                 ];
                 logDebugMessage("Adding tenant-access permission claim");
 
@@ -997,13 +996,20 @@ export const init = createPluginInitFunction<
                   ...input.accessTokenPayload,
                   ...(pluginConfig.requireNonPublicTenantAssociation
                     ? await MultipleTenantsPresentClaim.build(
-                        input.userId,
-                        input.recipeUserId,
-                        tenantId,
-                        input.accessTokenPayload,
-                        input.userContext,
-                      )
+                      input.userId,
+                      input.recipeUserId,
+                      tenantId,
+                      input.accessTokenPayload,
+                      input.userContext,
+                    )
                     : {}),
+                  ...(await TenantAccessPresentClaim.build(
+                    input.userId,
+                    input.recipeUserId,
+                    tenantId,
+                    input.accessTokenPayload,
+                    input.userContext,
+                  )),
                 };
 
                 return originalImplementation.createNewSession({
