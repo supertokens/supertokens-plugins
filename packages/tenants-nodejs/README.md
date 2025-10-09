@@ -54,6 +54,7 @@ SuperTokens.init({
 | `requireTenantCreationRequestApproval`| `boolean` | `true`  | Whether tenant creation requires approval from an admin                |
 | `enableTenantListAPI`                 | `boolean` | `false` | Enable the API to list all available tenants                           |
 | `createRolesOnInit`                   | `boolean` | `true`  | Automatically create required roles (TENANT_ADMIN, TENANT_MEMBER) on initialization |
+| `allowPublicTenantAccess`                       | `boolean` | `false` | Whether public tenant access should be allowed without an assigned role |
 | `emailDelivery`                       | `object`  | -       | Configure email delivery service and overrides                         |
 
 ## API Endpoints
