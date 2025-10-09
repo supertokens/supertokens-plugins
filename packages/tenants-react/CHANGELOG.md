@@ -1,5 +1,11 @@
 # @supertokens-plugins/tenants-react
 
+## 0.1.1
+
+### Patch Changes
+
+- 7e1e7bc: adds fixes related to claim orders in progressive-profiling and tenants, a access tenants blocked screen and other improvements
+
 ## 0.1.0
 
 ### Minor Changes
