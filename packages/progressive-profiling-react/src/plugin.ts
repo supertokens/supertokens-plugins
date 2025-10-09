@@ -100,14 +100,17 @@ export const init = createPluginInitFunction<
                 const tmClaimValidators = allValidators.filter(
                   (validator) => validator.id === MULTIPLE_TENANTS_PRESENT_CLAIM_ID,
                 );
+                const tenantAccessValidator = allValidators.filter((v) => v.id === "stpl-tm-access");
                 const otherClaimValidators = allValidators.filter(
-                  (validator) => validator.id !== MULTIPLE_TENANTS_PRESENT_CLAIM_ID,
+                  (validator) =>
+                    validator.id !== MULTIPLE_TENANTS_PRESENT_CLAIM_ID && validator.id !== "stpl-tm-access",
                 );
 
                 return [
                   ...otherClaimValidators,
                   ...(pluginConfig.requireSetup ? [ProgressiveProfilingCompletedClaim.validators.isTrue()] : []),
                   ...tmClaimValidators,
+                  ...tenantAccessValidator,
                 ];
               },
             };

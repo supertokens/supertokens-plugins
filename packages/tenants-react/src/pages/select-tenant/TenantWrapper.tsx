@@ -8,7 +8,7 @@ import { logDebugMessage } from "../../logger";
 import { usePluginContext } from "../../plugin";
 
 const TenantCardWrapper = () => {
-  const { api, pluginConfig } = usePluginContext();
+  const { api, pluginConfig, t } = usePluginContext();
   const { joinTenant, createTenant } = api;
   const [isLoading, setIsLoading] = useState(false);
   const [isPendingApproval, setIsPendingApproval] = useState(false);
@@ -81,7 +81,15 @@ const TenantCardWrapper = () => {
   }, []);
 
   return isPendingApproval ? (
-    <AwaitingApprovalMessage />
+    <AwaitingApprovalMessage
+      headerText={t("PL_TB_CREATE_TENANT_AWAITING_APPROVAL_HEADER")}
+      messageContent={
+        <div>
+          {t("PL_TB_CREATE_TENANT_AWAITING_APPROVAL_MESSAGE")}{" "}
+          <b>{t("PL_TB_CREATE_TENANT_AWAITING_APPROVAL_MESSAGE_HIGHLIGHT")}</b>
+        </div>
+      }
+    />
   ) : (
     <TenantCard onJoin={handleOnJoin} onCreate={handleOnCreate} isLoading={isLoading} />
   );

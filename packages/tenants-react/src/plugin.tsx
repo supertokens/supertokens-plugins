@@ -16,6 +16,7 @@ import { getApi } from "./api";
 import { API_PATH, PLUGIN_ID } from "./constants";
 import "./styles/global.css";
 import { enableDebugLogs, logDebugMessage } from "./logger";
+import { AccessBlockedPage } from "./pages/access-blocked";
 import { InvitationAcceptWrapper } from "./pages/InvitationAcceptPage";
 import { SelectTenantPage } from "./pages/select-tenant";
 import { TenantCreationRequests } from "./pages/tenant-creation-requests";
@@ -52,10 +53,6 @@ export const init = createPluginInitFunction<
         return "/user/tenants/create";
       },
     });
-
-    // The progressive profiling completed claim ID to ensure
-    // the correct order of the claims
-    const PROGRESSIVE_PROFILING_COMPLETED_CLAIM_ID = "stpl-pp-c";
 
     const extractCodeAndTenantId = (url: string) => {
       const urlParams = new URL(url).searchParams;
@@ -225,6 +222,10 @@ export const init = createPluginInitFunction<
               path: "/user/invite/accept",
               handler: () => InvitationAcceptWrapper.call(null),
             },
+            {
+              path: "/user/tenants/blocked",
+              handler: () => AccessBlockedPage.call(null),
+            },
           ],
         };
       },
@@ -237,27 +238,29 @@ export const init = createPluginInitFunction<
                 // If the profile claim is present, make sure the tenant
                 // one is added after it.
                 const updatedValidators = originalImplementation.getGlobalClaimValidators(input);
-                logDebugMessage(`validators input: ${JSON.stringify(input)}`);
                 logDebugMessage(`validators input updated: ${JSON.stringify(updatedValidators)}`);
-                logDebugMessage(`All validators: ${input.claimValidatorsAddedByOtherRecipes}`);
-                const profileClaimValidators = updatedValidators.filter(
-                  (validator) => validator.id === PROGRESSIVE_PROFILING_COMPLETED_CLAIM_ID,
-                );
-                const otherClaimValidators = updatedValidators.filter(
-                  (validator) => validator.id !== PROGRESSIVE_PROFILING_COMPLETED_CLAIM_ID,
-                );
 
-                logDebugMessage(`profile validators: ${profileClaimValidators}`);
-                logDebugMessage(`others validators: ${otherClaimValidators}`);
+                // Add the claim to the end by just pushing it to the
+                // validators list.
+                if (pluginConfig.requireTenantCreation) {
+                  updatedValidators.push(MultipleTenantsPresentClaim.validators.isTrue());
+                }
 
-                const claimValidators = [
-                  ...otherClaimValidators,
-                  ...profileClaimValidators,
-                  ...(pluginConfig.requireTenantCreation ? [MultipleTenantsPresentClaim.validators.isTrue()] : []),
-                ];
+                // Add the permission check after the multiple tenants present claim
+                // is added.
+                updatedValidators.push({
+                  ...UserRoles.PermissionClaim.validators.includes(
+                    PERMISSIONS.TENANT_ACCESS,
+                    undefined,
+                    "stpl-tm-access",
+                  ),
+                  onFailureRedirection: () => {
+                    return "/user/tenants/blocked";
+                  },
+                });
 
-                logDebugMessage(`updated validators: ${JSON.stringify(input)}`);
-                return claimValidators;
+                logDebugMessage(`updated validators: ${JSON.stringify(updatedValidators)}`);
+                return updatedValidators;
               },
             };
           },

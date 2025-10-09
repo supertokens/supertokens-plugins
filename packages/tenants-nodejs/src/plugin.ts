@@ -67,16 +67,6 @@ export const init = createPluginInitFunction<
           return true;
         }
 
-        // Check if the user already has an existing request pending approval
-        const doesUserHaveExistingCreationRequest = await implementation.doesUserHaveTenantCreationRequest(
-          userId,
-          tenantCreationRequestMetadata,
-        );
-
-        if (doesUserHaveExistingCreationRequest) {
-          return true;
-        }
-
         return userDetails.tenantIds.some((tenantId) => tenantId !== "public");
       },
     });
@@ -1028,12 +1018,12 @@ export const init = createPluginInitFunction<
                   ...input.accessTokenPayload,
                   ...(pluginConfig.requireNonPublicTenantAssociation
                     ? await MultipleTenantsPresentClaim.build(
-                      input.userId,
-                      input.recipeUserId,
-                      tenantId,
-                      input.accessTokenPayload,
-                      input.userContext,
-                    )
+                        input.userId,
+                        input.recipeUserId,
+                        tenantId,
+                        input.accessTokenPayload,
+                        input.userContext,
+                      )
                     : {}),
                 };
 
