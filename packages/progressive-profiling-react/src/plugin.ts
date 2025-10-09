@@ -90,10 +90,10 @@ export const init = createPluginInitFunction<
               getGlobalClaimValidators(input) {
                 return pluginConfig.requireSetup
                   ? [
-                      ...input.claimValidatorsAddedByOtherRecipes,
+                      ...originalImplementation.getGlobalClaimValidators(input),
                       ProgressiveProfilingCompletedClaim.validators.isTrue(),
                     ]
-                  : input.claimValidatorsAddedByOtherRecipes;
+                  : originalImplementation.getGlobalClaimValidators(input);
               },
             };
           },
