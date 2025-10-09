@@ -1,5 +1,11 @@
 # @supertokens-plugins/progressive-profiling-react
 
+## 0.3.0
+
+### Minor Changes
+
+- 41d2351: Now properly calling the original impl in the getGlobalClaimValidators override
+
 ## 0.2.0
 
 ### Minor Changes
