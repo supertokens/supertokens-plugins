@@ -81,7 +81,7 @@ export const usePrettyAction = <T extends (...args: any[]) => any | Promise<any>
         }
 
         if (options.onSuccess) {
-          await options.onSuccess();
+          await options.onSuccess(res);
         }
 
         if (res?.status && res.status !== "OK") {

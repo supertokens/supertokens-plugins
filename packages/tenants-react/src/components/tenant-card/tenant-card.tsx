@@ -31,8 +31,9 @@ export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => 
   const handleCreateAndJoin = usePrettyAction(
     async () => {
       if (newTenantName.trim().length === 0) {
+        // Should never happen but still handle it
         console.warn("No tenant name provided");
-        return;
+        throw new Error("Tenant name is required");
       }
 
       const createResponse = await onCreate({ name: newTenantName });
@@ -43,18 +44,21 @@ export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => 
       // NOTE: We don't need to handle the pendingApproval
       // flow since that's handled in the parent component
       if (createResponse.pendingApproval) {
-        return;
+        return false;
       }
 
       // If creation is successful, join the tenant
       await onJoin({ tenantId: newTenantName });
+      return true;
     },
-    [onCreate, newTenantName],
+    [onCreate, newTenantName, onJoin],
     {
-      successMessage: "Tenant created, redirecting...",
+      successMessage: "Tenant creation request was successful!",
       errorMessage: "Failed to create tenant",
-      onSuccess: async () => {
-        pluginConfig.redirectOnJoiningTenantFn();
+      onSuccess: async (wasSuccessful) => {
+        if (wasSuccessful === true) {
+          pluginConfig.redirectOnJoiningTenantFn();
+        }
       },
     },
   );

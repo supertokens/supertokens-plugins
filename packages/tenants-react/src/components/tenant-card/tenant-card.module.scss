@@ -88,4 +88,10 @@
       color: var(--neutral-color-neutral-11);
     }
   }
+
+  .logoutBtnContainer {
+    padding-top: 14px;
+    display: flex;
+    justify-content: end;
+  }
 }

@@ -31,5 +31,9 @@ export const defaultTranslationsTenants = {
     PL_TB_INVITATIONS_DESCRIPTION_MESSAGE_POSTFIX: "tenant. Click the button below to accept the invitation.",
     PL_TB_INVITE_ACCEPT_AUTHENTICATION_HEADER_MESSAGE:
       "If you authenticate, invitation will be accepted automatically.",
+    PL_TB_ACCESS_BLOCKED_HEADER_MESSAGE: "You cannot access this tenant",
+    PL_TB_ACCESS_BLOCKED_DESCRIPTION_MESSAGE:
+      "You do not have enough permissions to access the tenant, please reach out to an admin if you think this is a mistake",
+    PL_TB_LOGOUT_TEXT: "Log Out",
   },
 } as const;

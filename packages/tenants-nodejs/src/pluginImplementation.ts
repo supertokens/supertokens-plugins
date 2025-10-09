@@ -442,6 +442,15 @@ export const getOverrideableTenantFunctionImplementation = (
         status: "OK",
       };
     },
+    doesUserHaveTenantCreationRequest: async (userId, metadata) => {
+      const tenantCreateRequestMetadata = await metadata.get(TENANT_CREATE_METADATA_REQUESTS_KEY);
+
+      if (!tenantCreateRequestMetadata) {
+        return false;
+      }
+
+      return tenantCreateRequestMetadata.requests.some((request) => request.userId === userId);
+    },
     sendTenantCreationRequestEmail: async (tenantId, creatorEmail, appUrl, userContext, sendEmail) => {
       /**
        * Send an email to all the admins of the app.

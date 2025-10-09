@@ -1,22 +1,33 @@
-import { Card } from "@shared/ui";
+import { Button, Card } from "@shared/ui";
 import classNames from "classnames/bind";
+import { signOut } from "supertokens-auth-react/recipe/session";
 
 import { usePluginContext } from "../../plugin";
 
 import style from "./tenant-card.module.scss";
 const cx = classNames.bind(style);
 
-export const AwaitingApprovalMessage = () => {
+type AwaitingApprovalMessageProps = {
+  headerText: string;
+  messageContent: React.ReactNode;
+};
+
+export const AwaitingApprovalMessage: React.FC<AwaitingApprovalMessageProps> = ({ headerText, messageContent }) => {
   const { t } = usePluginContext();
+
+  const onLogOutClick = async () => {
+    await signOut();
+    window.location.assign("/");
+  };
 
   return (
     <Card className={cx("awaitingApprovalMessageContainer")}>
-      <div className={cx("header")}>{t("PL_TB_CREATE_TENANT_AWAITING_APPROVAL_HEADER")}</div>
-      <div className={cx("messageContainer")}>
-        <div>
-          {t("PL_TB_CREATE_TENANT_AWAITING_APPROVAL_MESSAGE")}{" "}
-          <b>{t("PL_TB_CREATE_TENANT_AWAITING_APPROVAL_MESSAGE_HIGHLIGHT")}</b>
-        </div>
+      <div className={cx("header")}>{headerText}</div>
+      <div className={cx("messageContainer")}>{messageContent}</div>
+      <div className={cx("logoutBtnContainer")}>
+        <Button onClick={onLogOutClick} variant="brand" appearance="accent">
+          {t("PL_TB_LOGOUT_TEXT")}
+        </Button>
       </div>
     </Card>
   );

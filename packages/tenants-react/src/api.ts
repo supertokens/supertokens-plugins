@@ -168,6 +168,13 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     );
   };
 
+  const doesUserHaveExistingCreationRequest = async () => {
+    return querier.get<{ status: "OK"; exists: boolean } | { status: "ERROR"; message: string }>(
+      "/tenant-requests/exists",
+      { withSession: true },
+    );
+  };
+
   return {
     fetchTenants,
     joinTenant,
@@ -186,5 +193,6 @@ export const getApi = (querier: ReturnType<typeof getQuerier>) => {
     getCreationRequests,
     acceptCreationRequest,
     declineCreationRequest,
+    doesUserHaveExistingCreationRequest,
   };
 };
