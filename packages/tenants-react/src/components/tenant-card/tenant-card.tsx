@@ -53,7 +53,7 @@ export const TenantCard = ({ onJoin, onCreate, isLoading }: TenantCardProps) => 
     },
     [onCreate, newTenantName, onJoin],
     {
-      successMessage: "Tenant created, redirecting...",
+      successMessage: "Tenant creation request was successful!",
       errorMessage: "Failed to create tenant",
       onSuccess: async (wasSuccessful) => {
         if (wasSuccessful === true) {
