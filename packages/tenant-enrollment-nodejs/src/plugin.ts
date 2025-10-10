@@ -93,8 +93,10 @@ export const init = createPluginInitFunction<
                 logDebugMessage("Reason: " + reason);
                 if (!canJoin) {
                   return {
-                    status: "LINKING_TO_SESSION_USER_FAILED",
-                    reason: "EMAIL_VERIFICATION_REQUIRED",
+                    // Use the `EMAIL_ALREADY_EXISTS_ERROR` since that is returned
+                    // directly without modification from the `signUpPOST` method.
+                    status: "EMAIL_ALREADY_EXISTS_ERROR",
+                    reason,
                   };
                 }
 
@@ -107,17 +109,19 @@ export const init = createPluginInitFunction<
               ...originalImplementation,
               signUpPOST: async (input) => {
                 const response = await originalImplementation.signUpPOST!(input);
-                if (response.status === "SIGN_UP_NOT_ALLOWED" && response.reason.includes("ERR_CODE_013")) {
-                  // There is a possibility that the user is not allowed
-                  // to signup to the tenant so we will have to update the message
-                  // accordingly.
+
+                logDebugMessage(`Got response status for signup: ${response.status}`);
+
+                // If the status is `EMAIL_ALREADY_EXISTS_ERROR`, we will have to pick that
+                // up and return a GENERAL_ERROR instead to make the error passed along to
+                // the FE
+                if (response.status === "EMAIL_ALREADY_EXISTS_ERROR") {
                   return {
-                    ...response,
-                    reason: "Cannot sign in / sign up due to security reasons or tenant doesn't allow signup",
+                    status: "GENERAL_ERROR",
+                    message: (response as any).reason,
                   };
                 }
 
-                logDebugMessage(`Got response status for signup: ${response.status}`);
                 if (response.status !== "OK") {
                   return response;
                 }
@@ -135,12 +139,10 @@ export const init = createPluginInitFunction<
                 logDebugMessage(`wasAdded: ${wasAddedToTenant}`);
                 logDebugMessage(`reason: ${tenantJoiningReason}`);
                 return {
-                  status: "PENDING_APPROVAL",
+                  status: "PENDING_APPROVAL" as any,
                   wasAddedToTenant,
                   reason: tenantJoiningReason,
                 };
-
-                // return response;
               },
             };
           },

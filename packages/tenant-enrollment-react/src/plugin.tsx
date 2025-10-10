@@ -8,6 +8,8 @@ import {
   getTranslationFunction,
 } from "supertokens-auth-react";
 
+import { NOT_ALLOWED_TO_SIGNUP_REASONS } from "../../../shared/tenants/src";
+
 import { getApi } from "./api";
 import { PLUGIN_ID, API_PATH } from "./constants";
 import { enableDebugLogs, logDebugMessage } from "./logger";
@@ -76,8 +78,32 @@ export const init = createPluginInitFunction<
           functions: (originalImplementation) => ({
             ...originalImplementation,
             signUp: async (input) => {
-              const signUpResponse = await originalImplementation.signUp(input);
+              let signUpResponse;
+
+              try {
+                signUpResponse = await originalImplementation.signUp(input);
+              } catch (error: any) {
+                // Check if the error is a STGeneralError
+                logDebugMessage(`Caught error: ${error}`);
+                if (error.isSuperTokensGeneralError === true) {
+                  logDebugMessage(`Got general error with reason: ${error.message}`);
+
+                  // Check if the message is one of the not allowed defined errors.
+                  if (Object.values(NOT_ALLOWED_TO_SIGNUP_REASONS).includes(error.message)) {
+                    logDebugMessage("Found not-allowed to signup flow, redirecting");
+
+                    // Update the message before re-throwing the error
+                    error.message = "Not allowed to signup to tenant";
+
+                    // TODO: Redirect the user to not allowed to signup view
+                  }
+                }
+
+                throw error;
+              }
+
               logDebugMessage(`response: ${signUpResponse}`);
+
               if ((signUpResponse.status as any) !== "PENDING_APPROVAL") {
                 return signUpResponse;
               }

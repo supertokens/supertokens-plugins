@@ -5,7 +5,7 @@ import {
   AssociateAllLoginMethodsOfUserWithTenant,
   SendPluginEmail,
 } from "@supertokens-plugins/tenants-nodejs";
-import { ROLES } from "@shared/tenants";
+import { NOT_ALLOWED_TO_SIGNUP_REASONS, ROLES } from "@shared/tenants";
 import SuperTokens from "supertokens-node";
 import { UserContext } from "supertokens-node/lib/build/types";
 
@@ -35,7 +35,7 @@ export const getOverrideableTenantFunctionImplementation = (
       if (implementation.isTenantInviteOnly(tenantId)) {
         return {
           canJoin: false,
-          reason: "INVITE_ONLY",
+          reason: NOT_ALLOWED_TO_SIGNUP_REASONS.INVITE_ONLY,
         };
       }
 
@@ -44,12 +44,12 @@ export const getOverrideableTenantFunctionImplementation = (
       if (emailOrThirdPartyId.type === "email") {
         canJoin = implementation.isMatchingEmailDomain(tenantId, emailOrThirdPartyId.email);
         if (!canJoin) {
-          reason = "EMAIL_DOMAIN_NOT_ALLOWED";
+          reason = NOT_ALLOWED_TO_SIGNUP_REASONS.EMAIL_DOMAIN_NOT_ALLOWED;
         }
       } else if (emailOrThirdPartyId.type === "thirdParty") {
         canJoin = implementation.isApprovedIdPProvider(tenantId, emailOrThirdPartyId.thirdPartyId);
         if (!canJoin) {
-          reason = "IDP_NOT_ALLOWED";
+          reason = NOT_ALLOWED_TO_SIGNUP_REASONS.IDP_NOT_ALLOWED;
         }
       }
 
