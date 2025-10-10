@@ -1,10 +1,11 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import crypto from "crypto";
-import supertokens from "supertokens-node";
+import supertokens, { getUser } from "supertokens-node";
 import { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
 import {
   InviteeDetails,
+  PERMISSIONS,
   ROLES,
   TenantCreationRequest,
   TenantCreationRequestWithUser,
@@ -552,6 +553,45 @@ export const getOverrideableTenantFunctionImplementation = (
        * @param role - The role to assign to the user.
        */
       return defaultAssignRoleToUserInTenant(tenantId, userId, role);
+    },
+    shouldHaveTenantAccess: async (userId: string, tenantId: string, userContext: UserContext) => {
+      /**
+       * Check if the passed user can access the tenant.
+       *
+       * We will check this by checking if they have the tenant-access permission.
+       */
+      // Check if the user has the role of member or admin in the tenant.
+      const roles = (await UserRoles.getRolesForUser(tenantId, userId, userContext)).roles;
+      if (roles.length === 0) {
+        return {
+          canAccess: false,
+          reason: "Cannot switch to tenant, not enough roles",
+        };
+      }
+
+      const allPermissions: string[] = [];
+      for (const role of roles) {
+        const rolePermissions = await UserRoles.getPermissionsForRole(role, userContext);
+        if (rolePermissions.status === "OK") {
+          for (const perm of rolePermissions.permissions) {
+            allPermissions.push(perm);
+          }
+        }
+      }
+
+      // Check if the user is associated with the tenant or not.
+      const userDetails = await getUser(userId, userContext);
+      if (!userDetails?.tenantIds.some((id) => id.toLowerCase() === tenantId.toLowerCase())) {
+        return {
+          canAccess: false,
+          reason: "User is not associated with tenant",
+        };
+      }
+
+      // User needs to have the tenant access permission
+      return {
+        canAccess: allPermissions.includes(PERMISSIONS.TENANT_ACCESS),
+      };
     },
   };
 
