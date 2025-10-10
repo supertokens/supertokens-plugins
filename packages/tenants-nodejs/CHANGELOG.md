@@ -1,5 +1,11 @@
 # @supertokens-plugins/tenants-nodejs
 
+## 0.2.0
+
+### Minor Changes
+
+- 8ae75f1: Added support for allowPublicTenantAccess and added an overrideable shouldHaveTenantAccess fn
+
 ## 0.1.1
 
 ### Patch Changes
