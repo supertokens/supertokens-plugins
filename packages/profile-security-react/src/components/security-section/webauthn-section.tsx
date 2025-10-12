@@ -9,7 +9,7 @@ import {
 import { User } from "supertokens-web-js/types";
 
 import { usePluginContext } from "../../plugin";
-import { ListCard } from "../list-card";
+import { ListCard, ListCardFooter, ListCardItem, ListCardItemActions } from "../list-card";
 
 import style from "./security-section.module.css";
 
@@ -132,61 +132,58 @@ export const WebauthnSection = ({
 
   return (
     <div>
-      <ListCard
-        // title={t("PL_SEC_WEBAUTHN_TITLE")}
-        items={credentials.map((credential) => ({
-          Content: () => (
-            <>
-              <span className={cx("supertokens-plugin-profile-security-passkey-email")}>{webauthnEmail}</span>
-              <span className={cx("supertokens-plugin-profile-security-passkey-date")}>
-                {new Date(credential.createdAt).toLocaleString()}
-              </span>
-            </>
-          ),
-          Actions: () => (
-            <Button
-              variant="danger"
-              size="small"
-              appearance="plain"
-              className={cx("supertokens-plugin-profile-security-manage-passkey-remove")}
-              onClick={() => _removeCredential(credential.webauthnCredentialId)}
-              disabled={credentials.length <= 1}>
-              {t("PL_SEC_WEBAUTHN_REMOVE_BUTTON")}
-            </Button>
-          ),
-        }))}
-        FooterComponent={() => (
-          <>
-            <div className={cx("supertokens-plugin-profile-security-passkey-email-select-label")}>
-              {t("PL_SEC_WEBAUTHN_SELECT_EMAIL_LABEL")}
-            </div>
+      <ListCard>
+        {credentials.map((credential, index) => (
+          <ListCardItem key={index}>
+            <span className={cx("supertokens-plugin-profile-security-passkey-email")}>{webauthnEmail}</span>
+            <span className={cx("supertokens-plugin-profile-security-passkey-date")}>
+              {new Date(credential.createdAt).toLocaleString()}
+            </span>
 
-            <SelectInput
-              className={cx("supertokens-plugin-profile-security-passkey-email-select")}
-              id="change-email"
-              value={webauthnEmail}
-              onChange={(value) => {
-                if (!value) {
-                  return;
-                }
-                setWebauthnEmail(value as string);
-              }}
-              options={webAuthnEmails.map((email) => ({ label: email, value: email })) ?? []}
-              disabled={webAuthnEmails.length <= 1}
-            />
+            <ListCardItemActions>
+              <Button
+                variant="danger"
+                size="small"
+                appearance="plain"
+                className={cx("supertokens-plugin-profile-security-manage-passkey-remove")}
+                onClick={() => _removeCredential(credential.webauthnCredentialId)}
+                disabled={credentials.length <= 1}>
+                {t("PL_SEC_WEBAUTHN_REMOVE_BUTTON")}
+              </Button>
+            </ListCardItemActions>
+          </ListCardItem>
+        ))}
 
-            <Button
-              className={cx("supertokens-plugin-profile-security-add-passkey-button")}
-              onClick={addCredential}
-              disabled={isLoading}
-              size="small"
-              variant="brand"
-              appearance="accent">
-              {t("PL_SEC_WEBAUTHN_ADD_CREDENTIAL_BUTTON")}
-            </Button>
-          </>
-        )}
-      />
+        <ListCardFooter>
+          <div className={cx("supertokens-plugin-profile-security-passkey-email-select-label")}>
+            {t("PL_SEC_WEBAUTHN_SELECT_EMAIL_LABEL")}
+          </div>
+
+          <SelectInput
+            className={cx("supertokens-plugin-profile-security-passkey-email-select")}
+            id="change-email"
+            value={webauthnEmail}
+            onChange={(value) => {
+              if (!value) {
+                return;
+              }
+              setWebauthnEmail(value as string);
+            }}
+            options={webAuthnEmails.map((email) => ({ label: email, value: email })) ?? []}
+            disabled={webAuthnEmails.length <= 1}
+          />
+
+          <Button
+            className={cx("supertokens-plugin-profile-security-add-passkey-button")}
+            onClick={addCredential}
+            disabled={isLoading}
+            size="small"
+            variant="brand"
+            appearance="accent">
+            {t("PL_SEC_WEBAUTHN_ADD_CREDENTIAL_BUTTON")}
+          </Button>
+        </ListCardFooter>
+      </ListCard>
     </div>
   );
 };

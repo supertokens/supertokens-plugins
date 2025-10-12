@@ -49,48 +49,10 @@
   margin-top: 0;
 }
 
-.supertokens-plugin-profile-security-edit-form {
+.supertokens-plugin-profile-security-form {
   display: flex;
   flex-direction: column;
   gap: 24px;
-}
-
-.supertokens-plugin-profile-security-edit-form wa-input.st-input::part(label) {
-  display: none;
-}
-
-.supertokens-plugin-profile-security-item {
-  display: flex;
-  flex-direction: row;
-  gap: 0;
-  align-items: start;
-}
-
-.supertokens-plugin-profile-security-label {
-  font-weight: var(--wa-font-weight-semibold);
-  color: var(--wa-color-neutral-85);
-  font-size: var(--wa-font-size-m);
-  line-height: 1.5;
-  width: 260px;
-}
-
-.supertokens-plugin-profile-security-required {
-  color: var(--wa-color-danger-70);
-}
-
-.supertokens-plugin-profile-security-value {
-  flex: 1;
-  color: var(--wa-color-neutral-95);
-  font-size: var(--wa-font-size-m);
-  line-height: 1.5;
-  font-weight: var(--wa-font-weight-normal);
-}
-
-.supertokens-plugin-profile-security-form-actions {
-  display: flex;
-  flex-direction: row;
-  justify-content: flex-end;
-  gap: 10px;
 }
 
 .supertokens-plugin-profile-security-no-linked-accounts {
@@ -156,7 +118,7 @@
 }
 
 .supertokens-plugin-profile-security-passkey-email-select {
-  width: 100%;
+  flex: 1;
 }
 
 .supertokens-plugin-profile-security-passkey-email-select-label {
@@ -212,44 +174,41 @@
   margin-left: auto;
 }
 
-/* ------------------------------------------------------------ */
-
-.plugin-profile-security-link {
-  color: #07c;
-  text-decoration: none;
-
-  &:hover {
-    text-decoration: underline;
-  }
+.supertokens-plugin-profile-security-second-factor-manage {
+  margin-top: 14px;
 }
 
-.plugin-profile-security-second-factor-method-action {
-  margin-left: auto;
+/* TOTP */
+.supertokens-plugin-profile-security-totp-name-label {
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: 500;
+  word-break: keep-all;
+}
+.supertokens-plugin-profile-security-totp-name {
+  flex: 1;
 }
 
-.plugin-profile-security-second-factor-method-button {
-  margin-left: auto;
+.supertokens-plugin-profile-security-totp-verify-description {
+  flex: 1 1 100%;
+  order: -1;
+  margin-bottom: 10px;
 }
 
-.plugin-profile-security-manage {
-  margin-top: var(--plugin-spacing-xl);
-  padding-left: var(--plugin-spacing-xl);
-  border-left: 2px solid var(--plugin-color-primary);
-}
-
-.plugin-profile-security-item-description {
-  color: var(--plugin-text-secondary);
-  font-size: var(--plugin-font-size-sm);
-  line-height: var(--plugin-line-height-tight);
-}
-
-.plugin-profile-security-second-factor-manage-totp-verify-description,
-.plugin-profile-security-second-factor-manage-totp-verify-qr {
-  margin-bottom: var(--plugin-spacing-md);
-}
-
-.plugin-profile-security-second-factor-manage-totp-verify-qr {
+.supertokens-plugin-profile-security-totp-verify-qr {
   display: flex;
   align-items: center;
   flex-direction: column;
+}
+.supertokens-plugin-profile-security-totp-verify-qr svg {
+  width: 165px;
+  height: auto;
+}
+
+.supertokens-plugin-profile-security-totp-verify-code {
+  flex: 1;
+}
+
+.supertokens-plugin-profile-security-method-action {
+  margin-left: auto;
 }

@@ -5,6 +5,8 @@ import { registerCredentialWithSignUp } from "supertokens-auth-react/recipe/weba
 import { User } from "supertokens-web-js/types";
 
 import { usePluginContext } from "../../plugin";
+import { FormActions } from "../form-actions";
+import { FormRow } from "../form-item";
 
 import style from "./security-section.module.css";
 
@@ -55,33 +57,27 @@ export const SetWebAuthnSection = ({
   }
 
   return (
-    <form className={cx("supertokens-plugin-profile-security-edit-form")}>
-      <div className={cx("supertokens-plugin-profile-security-item")}>
-        <span className={cx("supertokens-plugin-profile-security-label")}>
-          {t("PL_SEC_SET_WEBAUTHN_SELECT_EMAIL_LABEL")}
-        </span>
+    <form className={cx("supertokens-plugin-profile-security-form")}>
+      <FormRow label={t("PL_SEC_SET_WEBAUTHN_SELECT_EMAIL_LABEL")}>
+        <SelectInput
+          id="change-email"
+          value={webauthnSetEmail}
+          onChange={(value) => {
+            if (!value) {
+              return;
+            }
+            setWebauthnSetEmail(value as string);
+          }}
+          options={user?.emails.map((email) => ({ label: email, value: email })) ?? []}
+          disabled={(user?.emails.length ?? 0) <= 1}
+        />
+      </FormRow>
 
-        <span className={cx("supertokens-plugin-profile-security-value")}>
-          <SelectInput
-            id="change-email"
-            value={webauthnSetEmail}
-            onChange={(value) => {
-              if (!value) {
-                return;
-              }
-              setWebauthnSetEmail(value as string);
-            }}
-            options={user?.emails.map((email) => ({ label: email, value: email })) ?? []}
-            disabled={(user?.emails.length ?? 0) <= 1}
-          />
-        </span>
-      </div>
-
-      <div className={cx("supertokens-plugin-profile-security-form-actions")}>
+      <FormActions>
         <Button onClick={setWebauthn} disabled={isLoading} size="small" variant="brand" appearance="accent">
           {t("PL_SEC_SET_WEBAUTHN_BUTTON")}
         </Button>
-      </div>
+      </FormActions>
     </form>
   );
 };

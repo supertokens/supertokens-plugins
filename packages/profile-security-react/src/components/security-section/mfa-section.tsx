@@ -161,7 +161,7 @@ export const MfaSection = ({
             <div className={cx("supertokens-plugin-profile-security-second-factor-method-header-actions")}>
               {factor.setup && (
                 <ToggleInput
-                  className={cx("plugin-profile-security-second-factor-method-action")}
+                  className={cx("supertokens-plugin-profile-security-method-action")}
                   value={factor.required}
                   id={`required-${factor.id}`}
                   label=""
@@ -177,7 +177,7 @@ export const MfaSection = ({
                   variant="brand"
                   size="small"
                   onClick={() => setFactorBeingSetup(factor.id as keyof typeof manageFactorComponents)}
-                  className={cx("plugin-profile-security-second-factor-method-action")}>
+                  className={cx("supertokens-plugin-profile-security-method-action")}>
                   {t("PL_SEC_MFA_SETUP_BUTTON")}
                 </Button>
               )}
@@ -187,7 +187,7 @@ export const MfaSection = ({
                   appearance="plain"
                   size="small"
                   onClick={() => setFactorBeingSetup(undefined)}
-                  className={cx("plugin-profile-security-second-factor-method-action")}>
+                  className={cx("supertokens-plugin-profile-security-method-action")}>
                   {t("PL_SEC_MFA_SETUP_CANCEL_BUTTON")}
                 </Button>
               )}

@@ -5,6 +5,8 @@ import { consumeCode, createCode } from "supertokens-auth-react/recipe/passwordl
 import { User } from "supertokens-web-js/types";
 
 import { usePluginContext } from "../../plugin";
+import { FormActions } from "../form-actions";
+import { FormRow } from "../form-item";
 
 import style from "./security-section.module.css";
 
@@ -109,41 +111,56 @@ export const MfaFactorPhoneOtpConfig = ({ user, onSuccess }: { user: User; onSuc
   }
 
   return (
-    <div className={cx("plugin-profile-security-second-factor-manage")}>
-      <TextInput
-        label={t("PL_SEC_MFA_CHANGE_PHONE_NUMBER_LABEL")}
-        id="change-phone-number"
-        value={selectedPhoneNumber}
-        type="tel"
-        onChange={(value) => {
-          if (!value) {
-            return;
-          }
-          setSelectedPhoneNumber(value as string);
-        }}
-      />
-      {!codeSent ? (
-        <Button
-          style={{ marginTop: "16px" }}
-          onClick={sendCode}
-          disabled={selectedPhoneNumber === currentPhoneNumber}
-          size="small"
-          variant="brand"
-          appearance="accent">
-          {t("PL_SEC_MFA_CHANGE_PHONE_NUMBER_SEND_CODE_BUTTON")}
-        </Button>
-      ) : (
+    <div className={cx("supertokens-plugin-profile-security-second-factor-manage")}>
+      {!codeSent && (
         <>
+          <FormRow label={t("PL_SEC_MFA_CHANGE_PHONE_NUMBER_LABEL")}>
+            <TextInput
+              id="change-phone-number"
+              value={selectedPhoneNumber}
+              type="tel"
+              onChange={(value) => {
+                if (!value) {
+                  return;
+                }
+                setSelectedPhoneNumber(value as string);
+              }}
+            />
+          </FormRow>
+
           <br />
-          <TextInput label="Code" id="code" value={code} onChange={(value) => setCode(value as string)} />
-          <Button
-            style={{ marginTop: "16px" }}
-            onClick={changePhoneNumber}
-            size="small"
-            variant="brand"
-            appearance="accent">
-            {t("PL_SEC_MFA_CHANGE_PHONE_NUMBER_CHANGE_BUTTON")}
-          </Button>
+
+          <FormActions>
+            <Button
+              onClick={sendCode}
+              disabled={selectedPhoneNumber === currentPhoneNumber}
+              size="small"
+              variant="brand"
+              appearance="accent">
+              {t("PL_SEC_MFA_CHANGE_PHONE_NUMBER_SEND_CODE_BUTTON")}
+            </Button>
+          </FormActions>
+        </>
+      )}
+
+      {codeSent && (
+        <>
+          <FormRow label={t("PL_SEC_MFA_CHANGE_PHONE_NUMBER_CODE_LABEL")}>
+            <TextInput
+              id="code"
+              placeholder={t("PL_SEC_MFA_CHANGE_PHONE_NUMBER_CODE_PLACEHOLDER")}
+              value={code}
+              onChange={(value) => setCode(value as string)}
+            />
+          </FormRow>
+
+          <br />
+
+          <FormActions>
+            <Button onClick={changePhoneNumber} size="small" variant="brand" appearance="accent">
+              {t("PL_SEC_MFA_CHANGE_PHONE_NUMBER_CHANGE_BUTTON")}
+            </Button>
+          </FormActions>
         </>
       )}
     </div>
@@ -212,47 +229,59 @@ export const MfaFactorPhoneOtpSetup = ({ user, onSuccess }: { user: User; onSucc
   );
 
   return (
-    <div className={cx("plugin-profile-security-second-factor-manage")}>
-      {!smsSent ? (
+    <div className={cx("supertokens-plugin-profile-security-second-factor-manage")}>
+      {!smsSent && (
         <>
-          <TextInput
-            label={t("PL_SEC_MFA_SETUP_PHONE_LABEL")}
-            placeholder={t("PL_SEC_MFA_SETUP_PHONE_PLACEHOLDER")}
-            type="tel"
-            id="change-phone"
-            value={phoneNumber}
-            disabled={Boolean(alreadySetupLoginMethod)}
-            onChange={(value) => {
-              if (!value) {
-                return;
-              }
-              setPhoneNumber(value);
-            }}
-          />
+          <FormRow label={t("PL_SEC_MFA_SETUP_PHONE_LABEL")}>
+            <TextInput
+              placeholder={t("PL_SEC_MFA_SETUP_PHONE_PLACEHOLDER")}
+              type="tel"
+              id="change-phone"
+              value={phoneNumber}
+              disabled={Boolean(alreadySetupLoginMethod)}
+              onChange={(value) => {
+                if (!value) {
+                  return;
+                }
+                setPhoneNumber(value);
+              }}
+            />
+          </FormRow>
 
-          <Button style={{ marginTop: "16px" }} onClick={sendSms}>
-            {t("PL_SEC_MFA_SETUP_PHONE_SEND_BUTTON")}
-          </Button>
+          <br />
+
+          <FormActions>
+            <Button onClick={sendSms} appearance="accent" variant="brand" size="small">
+              {t("PL_SEC_MFA_SETUP_PHONE_SEND_BUTTON")}
+            </Button>
+          </FormActions>
         </>
-      ) : (
-        <>
-          <TextInput
-            label={t("PL_SEC_MFA_SETUP_PHONE_CODE_LABEL")}
-            placeholder={t("PL_SEC_MFA_SETUP_PHONE_CODE_PLACEHOLDER")}
-            type="text"
-            id="code"
-            value={otp}
-            onChange={(value) => {
-              if (!value) {
-                return;
-              }
-              setOtp(value);
-            }}
-          />
+      )}
 
-          <Button style={{ marginTop: "16px" }} onClick={verifyOtp} size="small" variant="brand" appearance="accent">
-            {t("PL_SEC_MFA_SETUP_PHONE_VERIFY_BUTTON")}
-          </Button>
+      {smsSent && (
+        <>
+          <FormRow label={t("PL_SEC_MFA_SETUP_PHONE_CODE_LABEL")}>
+            <TextInput
+              placeholder={t("PL_SEC_MFA_SETUP_PHONE_CODE_PLACEHOLDER")}
+              type="text"
+              id="code"
+              value={otp}
+              onChange={(value) => {
+                if (!value) {
+                  return;
+                }
+                setOtp(value);
+              }}
+            />
+          </FormRow>
+
+          <br />
+
+          <FormActions>
+            <Button onClick={verifyOtp} size="small" variant="brand" appearance="accent">
+              {t("PL_SEC_MFA_SETUP_PHONE_VERIFY_BUTTON")}
+            </Button>
+          </FormActions>
         </>
       )}
     </div>

@@ -1,0 +1,26 @@
+.supertokens-plugin-profile-security-item {
+  display: flex;
+  flex-direction: row;
+  gap: 0;
+  align-items: center;
+}
+
+.supertokens-plugin-profile-security-label {
+  font-weight: var(--wa-font-weight-semibold);
+  color: var(--wa-color-neutral-85);
+  font-size: var(--wa-font-size-m);
+  line-height: 1.5;
+  width: 260px;
+}
+
+.supertokens-plugin-profile-security-required {
+  color: var(--wa-color-danger-70);
+}
+
+.supertokens-plugin-profile-security-value {
+  flex: 1;
+  color: var(--wa-color-neutral-95);
+  font-size: var(--wa-font-size-m);
+  line-height: 1.5;
+  font-weight: var(--wa-font-weight-normal);
+}

@@ -5,6 +5,8 @@ import { consumeCode, createCode } from "supertokens-auth-react/recipe/passwordl
 import { User } from "supertokens-web-js/types";
 
 import { usePluginContext } from "../../plugin";
+import { FormActions } from "../form-actions";
+import { FormRow } from "../form-item";
 
 import style from "./security-section.module.css";
 
@@ -55,26 +57,36 @@ export const MfaFactorEmailOtpConfig = ({ user, onSuccess }: { user: User; onSuc
   );
 
   if (!loginMethod) {
-    return <div>{t("PL_SEC_MFA_ERROR_WRONG_CONFIGURATION")}</div>;
+    return (
+      <div className={cx("supertokens-plugin-profile-security-second-factor-manage")}>
+        {t("PL_SEC_MFA_ERROR_WRONG_CONFIGURATION")}
+      </div>
+    );
   }
 
   return (
-    <div className={cx("plugin-profile-security-second-factor-manage")}>
-      <SelectInput
-        label={t("PL_SEC_MFA_CHANGE_EMAIL_LABEL")}
-        id="change-email"
-        value={selectedEmail}
-        onChange={(value) => {
-          if (!value) {
-            return;
-          }
-          setSelectedEmail(value as string);
-        }}
-        options={user.emails.map((email) => ({ label: email, value: email }))}
-      />
-      <Button style={{ marginTop: "16px" }} onClick={changeEmail} size="small" variant="brand" appearance="accent">
-        {t("PL_SEC_MFA_CHANGE_EMAIL_BUTTON")}
-      </Button>
+    <div className={cx("supertokens-plugin-profile-security-second-factor-manage")}>
+      <FormRow label={t("PL_SEC_MFA_CHANGE_EMAIL_LABEL")}>
+        <SelectInput
+          id="change-email"
+          value={selectedEmail}
+          onChange={(value) => {
+            if (!value) {
+              return;
+            }
+            setSelectedEmail(value as string);
+          }}
+          options={user.emails.map((email) => ({ label: email, value: email }))}
+        />
+      </FormRow>
+
+      <br />
+
+      <FormActions>
+        <Button onClick={changeEmail} size="small" variant="brand" appearance="accent">
+          {t("PL_SEC_MFA_CHANGE_EMAIL_BUTTON")}
+        </Button>
+      </FormActions>
     </div>
   );
 };
@@ -145,63 +157,74 @@ export const MfaFactorEmailOtpSetup = ({ user, onSuccess }: { user: User; onSucc
   );
 
   return (
-    <div className={cx("plugin-profile-security-second-factor-manage")}>
-      {!emailSent ? (
+    <div className={cx("supertokens-plugin-profile-security-second-factor-manage")}>
+      {!emailSent && (
         <>
-          {availableEmails.length > 0 ? (
-            <SelectInput
-              label={t("PL_SEC_MFA_SETUP_EMAIL_LABEL")}
-              placeholder={t("PL_SEC_MFA_SETUP_EMAIL_PLACEHOLDER")}
-              id="setup-email"
-              value={email}
-              disabled={Boolean(alreadySetupLoginMethod)}
-              onChange={(value) => {
-                if (!value) {
-                  return;
-                }
-                setEmail(value);
-              }}
-              options={availableEmails}
-            />
-          ) : (
-            <TextInput
-              label={t("PL_SEC_MFA_SETUP_EMAIL_LABEL")}
-              placeholder={t("PL_SEC_MFA_SETUP_EMAIL_PLACEHOLDER")}
-              type="email"
-              id="change-email"
-              value={email}
-              onChange={(value) => {
-                if (!value) {
-                  return;
-                }
-                setEmail(value);
-              }}
-            />
-          )}
+          <FormRow label={t("PL_SEC_MFA_SETUP_EMAIL_LABEL")}>
+            {availableEmails.length > 0 ? (
+              <SelectInput
+                placeholder={t("PL_SEC_MFA_SETUP_EMAIL_PLACEHOLDER")}
+                id="setup-email"
+                value={email}
+                disabled={Boolean(alreadySetupLoginMethod)}
+                onChange={(value) => {
+                  if (!value) {
+                    return;
+                  }
+                  setEmail(value);
+                }}
+                options={availableEmails}
+              />
+            ) : (
+              <TextInput
+                placeholder={t("PL_SEC_MFA_SETUP_EMAIL_PLACEHOLDER")}
+                type="email"
+                id="change-email"
+                value={email}
+                onChange={(value) => {
+                  if (!value) {
+                    return;
+                  }
+                  setEmail(value);
+                }}
+              />
+            )}
+          </FormRow>
 
-          <Button style={{ marginTop: "16px" }} onClick={sendEmail} size="small" variant="brand" appearance="accent">
-            {t("PL_SEC_MFA_SETUP_EMAIL_SEND_BUTTON")}
-          </Button>
+          <br />
+
+          <FormActions>
+            <Button onClick={sendEmail} size="small" variant="brand" appearance="accent">
+              {t("PL_SEC_MFA_SETUP_EMAIL_SEND_BUTTON")}
+            </Button>
+          </FormActions>
         </>
-      ) : (
-        <>
-          <TextInput
-            label={t("PL_SEC_MFA_SETUP_EMAIL_CODE_LABEL")}
-            placeholder={t("PL_SEC_MFA_SETUP_EMAIL_CODE_PLACEHOLDER")}
-            type="text"
-            id="code"
-            value={otp}
-            onChange={(value) => {
-              if (!value) {
-                return;
-              }
-              setOtp(value);
-            }}
-          />
+      )}
 
-          <Button style={{ marginTop: "16px" }} onClick={verifyOtp} size="small" variant="brand" appearance="accent">
-            {t("PL_SEC_MFA_SETUP_EMAIL_VERIFY_BUTTON")}
-          </Button>
+      {emailSent && (
+        <>
+          <FormRow label={t("PL_SEC_MFA_SETUP_EMAIL_CODE_LABEL")}>
+            <TextInput
+              placeholder={t("PL_SEC_MFA_SETUP_EMAIL_CODE_PLACEHOLDER")}
+              type="text"
+              id="code"
+              value={otp}
+              onChange={(value) => {
+                if (!value) {
+                  return;
+                }
+                setOtp(value);
+              }}
+            />
+          </FormRow>
+
+          <br />
+
+          <FormActions>
+            <Button onClick={verifyOtp} size="small" variant="brand" appearance="accent">
+              {t("PL_SEC_MFA_SETUP_EMAIL_VERIFY_BUTTON")}
+            </Button>
+          </FormActions>
         </>
       )}
     </div>

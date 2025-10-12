@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import { User } from "supertokens-web-js/types";
 
 import { usePluginContext } from "../../plugin";
+import { FormActions } from "../form-actions";
+import { FormRow } from "../form-item";
 
 import style from "./security-section.module.css";
 
@@ -89,70 +91,58 @@ export const SetPasswordSection = ({
   }
 
   return (
-    <form className={cx("supertokens-plugin-profile-security-edit-form")}>
-      <div className={cx("supertokens-plugin-profile-security-item")}>
-        <span className={cx("supertokens-plugin-profile-security-label")}>
-          {t("PL_SEC_SET_PASSWORD_SELECT_EMAIL_LABEL")}
-        </span>
+    <form className={cx("supertokens-plugin-profile-security-form")}>
+      <FormRow label={t("PL_SEC_SET_PASSWORD_SELECT_EMAIL_LABEL")}>
+        <SelectInput
+          id="change-email"
+          value={passwordSetEmail}
+          onChange={(value) => {
+            if (!value) {
+              return;
+            }
+            setPasswordSetEmail(value as string);
+          }}
+          options={user?.emails.map((email) => ({ label: email, value: email })) ?? []}
+          disabled={(user?.emails.length ?? 0) <= 1}
+        />
+      </FormRow>
 
-        <span className={cx("supertokens-plugin-profile-security-value")}>
-          <SelectInput
-            id="change-email"
-            value={passwordSetEmail}
-            onChange={(value) => {
-              if (!value) {
-                return;
-              }
-              setPasswordSetEmail(value as string);
-            }}
-            options={user?.emails.map((email) => ({ label: email, value: email })) ?? []}
-            disabled={(user?.emails.length ?? 0) <= 1}
-          />
-        </span>
-      </div>
-
-      <div className={cx("supertokens-plugin-profile-security-item")}>
-        <span className={cx("supertokens-plugin-profile-security-label")}>
-          {t("PL_SEC_SET_PASSWORD_PASSWORD_LABEL")}
-        </span>
-
-        <span className={cx("supertokens-plugin-profile-security-value")}>
-          {passwordInputVisible ? (
-            <>
-              <PasswordInput
-                id="newPassword"
-                label={t("PL_SEC_SET_PASSWORD_NEW_PASSWORD_LABEL")}
-                placeholder={t("PL_SEC_SET_PASSWORD_PASSWORD_PLACEHOLDER")}
-                value={newPassword}
-                onChange={setNewPassword}
-                required={true}
-              />
-              <br />
-              <PasswordInput
-                id="confirmPassword"
-                label={t("PL_SEC_SET_PASSWORD_CONFIRM_PASSWORD_LABEL")}
-                placeholder={t("PL_SEC_SET_PASSWORD_CONFIRM_PASSWORD_PLACEHOLDER")}
-                value={confirmPassword}
-                onChange={setConfirmPassword}
-                error={confirmPasswordError}
-                required={true}
-              />
-            </>
-          ) : (
-            <Button
-              onClick={handleShowPasswordInput}
-              disabled={isLoading}
-              size="small"
-              variant="brand"
-              appearance="filled">
-              {t("PL_SEC_SET_PASSWORD_SHOW_BUTTON")}
-            </Button>
-          )}
-        </span>
-      </div>
+      <FormRow label={t("PL_SEC_SET_PASSWORD_PASSWORD_LABEL")}>
+        {passwordInputVisible ? (
+          <>
+            <PasswordInput
+              id="newPassword"
+              label={t("PL_SEC_SET_PASSWORD_NEW_PASSWORD_LABEL")}
+              placeholder={t("PL_SEC_SET_PASSWORD_PASSWORD_PLACEHOLDER")}
+              value={newPassword}
+              onChange={setNewPassword}
+              required={true}
+            />
+            <br />
+            <PasswordInput
+              id="confirmPassword"
+              label={t("PL_SEC_SET_PASSWORD_CONFIRM_PASSWORD_LABEL")}
+              placeholder={t("PL_SEC_SET_PASSWORD_CONFIRM_PASSWORD_PLACEHOLDER")}
+              value={confirmPassword}
+              onChange={setConfirmPassword}
+              error={confirmPasswordError}
+              required={true}
+            />
+          </>
+        ) : (
+          <Button
+            onClick={handleShowPasswordInput}
+            disabled={isLoading}
+            size="small"
+            variant="brand"
+            appearance="filled">
+            {t("PL_SEC_SET_PASSWORD_SHOW_BUTTON")}
+          </Button>
+        )}
+      </FormRow>
 
       {passwordInputVisible && (
-        <div className={cx("supertokens-plugin-profile-security-form-actions")}>
+        <FormActions>
           <Button
             onClick={handleHidePasswordInput}
             disabled={isLoading}
@@ -164,7 +154,7 @@ export const SetPasswordSection = ({
           <Button onClick={setPassword} disabled={isLoading} size="small" variant="brand" appearance="accent">
             {t("PL_SEC_SET_PASSWORD_BUTTON")}
           </Button>
-        </div>
+        </FormActions>
       )}
     </form>
   );

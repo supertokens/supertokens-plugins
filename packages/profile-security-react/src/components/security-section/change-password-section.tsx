@@ -3,6 +3,8 @@ import classNames from "classnames/bind";
 import { useState, useCallback, useEffect } from "react";
 
 import { usePluginContext } from "../../plugin";
+import { FormActions } from "../form-actions";
+import { FormRow } from "../form-item";
 
 import style from "./security-section.module.css";
 
@@ -71,55 +73,52 @@ export const ChangePasswordSection = ({
   }, [newPassword, confirmPassword, t]);
 
   return (
-    <form className={cx("supertokens-plugin-profile-security-edit-form")}>
-      <div className={cx("supertokens-plugin-profile-security-item")}>
-        <span className={cx("supertokens-plugin-profile-security-label")}>{t("PL_SEC_CHANGE_PASSWORD_LABEL")}</span>
-        <span className={cx("supertokens-plugin-profile-security-value")}>
-          {passwordInputVisible ? (
-            <>
-              <PasswordInput
-                id="currentPassword"
-                required
-                label={t("PL_SEC_CURRENT_PASSWORD_LABEL")}
-                placeholder={t("PL_SEC_CURRENT_PASSWORD_PLACEHOLDER")}
-                value={currentPassword}
-                onChange={setCurrentPassword}
-              />
-              <br />
-              <PasswordInput
-                id="newPassword"
-                required
-                label={t("PL_SEC_NEW_PASSWORD_LABEL")}
-                placeholder={t("PL_SEC_NEW_PASSWORD_PLACEHOLDER")}
-                value={newPassword}
-                onChange={setNewPassword}
-              />
-              <br />
-              <PasswordInput
-                id="confirmPassword"
-                required
-                label={t("PL_SEC_CHANGE_PASSWORD_CONFIRM_PASSWORD_LABEL")}
-                placeholder={t("PL_SEC_CHANGE_PASSWORD_CONFIRM_PASSWORD_PLACEHOLDER")}
-                value={confirmPassword}
-                onChange={setConfirmPassword}
-                error={confirmPasswordError}
-              />
-            </>
-          ) : (
-            <Button
-              onClick={handleShowPasswordInput}
-              disabled={isLoading}
-              size="small"
-              variant="brand"
-              appearance="filled">
-              {t("PL_SEC_CHANGE_PASSWORD_SHOW_BUTTON")}
-            </Button>
-          )}
-        </span>
-      </div>
+    <form className={cx("supertokens-plugin-profile-security-form")}>
+      <FormRow label={t("PL_SEC_CHANGE_PASSWORD_LABEL")}>
+        {passwordInputVisible ? (
+          <>
+            <PasswordInput
+              id="currentPassword"
+              required
+              label={t("PL_SEC_CURRENT_PASSWORD_LABEL")}
+              placeholder={t("PL_SEC_CURRENT_PASSWORD_PLACEHOLDER")}
+              value={currentPassword}
+              onChange={setCurrentPassword}
+            />
+            <br />
+            <PasswordInput
+              id="newPassword"
+              required
+              label={t("PL_SEC_NEW_PASSWORD_LABEL")}
+              placeholder={t("PL_SEC_NEW_PASSWORD_PLACEHOLDER")}
+              value={newPassword}
+              onChange={setNewPassword}
+            />
+            <br />
+            <PasswordInput
+              id="confirmPassword"
+              required
+              label={t("PL_SEC_CHANGE_PASSWORD_CONFIRM_PASSWORD_LABEL")}
+              placeholder={t("PL_SEC_CHANGE_PASSWORD_CONFIRM_PASSWORD_PLACEHOLDER")}
+              value={confirmPassword}
+              onChange={setConfirmPassword}
+              error={confirmPasswordError}
+            />
+          </>
+        ) : (
+          <Button
+            onClick={handleShowPasswordInput}
+            disabled={isLoading}
+            size="small"
+            variant="brand"
+            appearance="filled">
+            {t("PL_SEC_CHANGE_PASSWORD_SHOW_BUTTON")}
+          </Button>
+        )}
+      </FormRow>
 
       {passwordInputVisible && (
-        <div className={cx("supertokens-plugin-profile-security-form-actions")}>
+        <FormActions>
           <Button
             onClick={handleHidePasswordInput}
             disabled={isLoading}
@@ -131,7 +130,7 @@ export const ChangePasswordSection = ({
           <Button onClick={changePassword} disabled={isLoading} size="small" variant="brand" appearance="accent">
             {t("PL_SEC_CHANGE_PASSWORD_BUTTON")}
           </Button>
-        </div>
+        </FormActions>
       )}
     </form>
   );
