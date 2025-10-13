@@ -3,3 +3,5 @@ export type SuperTokensPluginProfileSecurityConfig = {
   enableThirdPartyLinkning?: boolean;
   enableMfaConfiguration?: boolean;
 };
+
+export type SuperTokensPluginProfileSecurityNormalisedConfig = Required<SuperTokensPluginProfileSecurityConfig>;

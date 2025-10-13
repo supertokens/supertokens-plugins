@@ -86,6 +86,10 @@ export const MfaFactorPhoneOtpConfig = ({ user, onSuccess }: { user: User; onSuc
       if (selectedPhoneNumber === currentPhoneNumber) {
         return;
       }
+      if (!codeDetails) {
+        return;
+      }
+
       const res = await api.updateMfaOtpPhoneNumber({
         phoneNumber: selectedPhoneNumber,
         code,
@@ -98,7 +102,7 @@ export const MfaFactorPhoneOtpConfig = ({ user, onSuccess }: { user: User; onSuc
 
       resetCode();
     },
-    [currentPhoneNumber, api, selectedPhoneNumber],
+    [currentPhoneNumber, api, selectedPhoneNumber, codeDetails, code],
     {
       successMessage: t("PL_SEC_MFA_CHANGE_PHONE_NUMBER_SUCCESS_CHANGE"),
       errorMessage: t("PL_SEC_MFA_CHANGE_PHONE_NUMBER_ERROR_CHANGE"),
