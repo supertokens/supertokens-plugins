@@ -1,7 +1,7 @@
 import { NoAccess } from "../../components/no-access/NoAccess";
 import { usePluginContext } from "../../plugin";
 
-export const AwaitingApproval = () => {
+export const SignUpBlocked = () => {
   const { t } = usePluginContext();
 
   return (
@@ -9,10 +9,10 @@ export const AwaitingApproval = () => {
       headerText={t("PL_TE_JOIN_TENANT_AWAITING_APPROVAL_HEADER")}
       descriptionComponent={
         <div>
-          {t("PL_TE_JOIN_TENANT_AWAITING_APPROVAL_MESSAGE")}{" "}
-          <b>{t("PL_TE_JOIN_TENANT_AWAITING_APPROVAL_MESSAGE_HIGHLIGHT")}</b>
+          <b>{t("PL_TE_SIGN_UP_BLOCKED_MESSAGE_HIGHLIGHT")}</b> <b>{t("PL_TE_SIGN_UP_BLOCKED_MESSAGE_SUFFIX")}</b>
         </div>
       }
+      useDangerAccent
     />
   );
 };

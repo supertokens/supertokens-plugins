@@ -14,6 +14,7 @@ import { getApi } from "./api";
 import { PLUGIN_ID, API_PATH } from "./constants";
 import { enableDebugLogs, logDebugMessage } from "./logger";
 import { AwaitingApproval } from "./pages/awaiting-approval";
+import { SignUpBlocked } from "./pages/blocked";
 import { defaultTranslationsTenantEnrollment } from "./translations";
 import { SuperTokensPluginTenantEnrollmentPluginConfig, TranslationKeys } from "./types";
 
@@ -70,6 +71,10 @@ export const init = createPluginInitFunction<
               path: "/awaiting-approval",
               handler: () => AwaitingApproval.call(null),
             },
+            {
+              path: "/signup-blocked",
+              handler: () => SignUpBlocked.call(null),
+            },
           ],
         };
       },
@@ -95,7 +100,8 @@ export const init = createPluginInitFunction<
                     // Update the message before re-throwing the error
                     error.message = "Not allowed to signup to tenant";
 
-                    // TODO: Redirect the user to not allowed to signup view
+                    // Redirect the user to not allowed to signup view
+                    window.location.assign("/signup-blocked");
                   }
                 }
 
