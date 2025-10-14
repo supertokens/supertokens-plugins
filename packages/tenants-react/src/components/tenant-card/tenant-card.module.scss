@@ -87,6 +87,14 @@
       line-height: 20px;
       color: var(--neutral-color-neutral-11);
     }
+
+    &.danger {
+      border-color: var(--semantic-colors-error-6);
+
+      b {
+        color: var(--semantic-colors-error-9);
+      }
+    }
   }
 
   .logoutBtnContainer {

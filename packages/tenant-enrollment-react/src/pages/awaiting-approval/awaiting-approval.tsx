@@ -1,13 +1,14 @@
-import { NoAccess } from "../../components/no-access/NoAccess";
+import { AwaitingApprovalMessage } from "@supertokens-plugins/tenants-react";
+
 import { usePluginContext } from "../../plugin";
 
-export const AwaitingApproval = () => {
+export const AwaitingAdminApproval = () => {
   const { t } = usePluginContext();
 
   return (
-    <NoAccess
+    <AwaitingApprovalMessage
       headerText={t("PL_TE_JOIN_TENANT_AWAITING_APPROVAL_HEADER")}
-      descriptionComponent={
+      messageContent={
         <div>
           {t("PL_TE_JOIN_TENANT_AWAITING_APPROVAL_MESSAGE")}{" "}
           <b>{t("PL_TE_JOIN_TENANT_AWAITING_APPROVAL_MESSAGE_HIGHLIGHT")}</b>
