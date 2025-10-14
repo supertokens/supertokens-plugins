@@ -1,10 +1,10 @@
-import { User } from 'supertokens-node';
+import { User } from "supertokens-node";
 import {
   AssociateAllLoginMethodsOfUserWithTenant,
   GetUserIdsInTenantWithRole,
   SendPluginEmail,
-} from '@supertokens-plugins/tenants-nodejs';
-import { UserContext } from 'supertokens-node/lib/build/types';
+} from "@supertokens-plugins/tenants-nodejs";
+import { UserContext } from "supertokens-node/lib/build/types";
 
 export type SuperTokensPluginTenantEnrollmentPluginConfig = {
   emailDomainToTenantIdMap: Record<string, string>;
@@ -20,11 +20,11 @@ export type SuperTokensPluginTenantEnrollmentPluginNormalisedConfig = {
 
 export type EmailOrThirdPartyId =
   | {
-      type: 'email';
+      type: "email";
       email: string;
     }
   | {
-      type: 'thirdParty';
+      type: "thirdParty";
       thirdPartyId: string;
     };
 
@@ -59,4 +59,5 @@ export type OverrideableTenantFunctionImplementation = {
     userContext: UserContext,
   ) => Promise<void>;
   getUserIdsInTenantWithRole: GetUserIdsInTenantWithRole;
-};
+  isEmailOrPhonePresentInTenant: (tenantId: string, details: {email?: string, phoneNumber?: string}) => Promise<boolean>;
+}

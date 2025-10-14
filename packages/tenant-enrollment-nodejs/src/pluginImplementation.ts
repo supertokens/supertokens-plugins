@@ -1,4 +1,4 @@
-import { User } from "supertokens-node";
+import { User, listUsersByAccountInfo } from "supertokens-node";
 import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantEnrollmentPluginConfig } from "./types";
 import {
   assignRoleToUserInTenant,
@@ -164,6 +164,12 @@ export const getOverrideableTenantFunctionImplementation = (
     getUserIdsInTenantWithRole: async (tenantId, role) => {
       throw new Error("Not implemented");
     },
+    isEmailOrPhonePresentInTenant: async (tenantId, details) => {
+      const accountInfoResponse = await listUsersByAccountInfo(tenantId, {
+        email: "email" in details ? details.email : undefined,
+      });
+      return accountInfoResponse.length === 0;
+    }
   };
 
   return implementation;

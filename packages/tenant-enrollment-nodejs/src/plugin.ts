@@ -6,7 +6,7 @@ import {
   SuperTokensPluginTenantEnrollmentPluginConfig,
   SuperTokensPluginTenantEnrollmentPluginNormalisedConfig,
 } from "./types";
-import { getOverrideableTenantFunctionImplementation } from "./recipeImplementation";
+import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
 import { logDebugMessage } from "supertokens-node/lib/build/logger";
 import {
   AssociateAllLoginMethodsOfUserWithTenant,
@@ -153,10 +153,13 @@ export const init = createPluginInitFunction<
               ...originalImplementation,
               signInUpPOST: async (input) => {
                 const response = await originalImplementation.signInUpPOST!(input);
-                if (response.status === "SIGN_IN_UP_NOT_ALLOWED" && response.reason.includes("ERR_CODE_020")) {
+                // If the status is `SIGN_IN_UP_NOT_ALLOWED`, we will have to pick that
+                // up and return a GENERAL_ERROR instead to make the error passed along to
+                // the FE
+                if (response.status === "SIGN_IN_UP_NOT_ALLOWED") {
                   return {
-                    ...response,
-                    reason: "Cannot sign in / sign up due to security reasons or tenant doesn't allow signup",
+                    status: "GENERAL_ERROR",
+                    message: (response as any).reason,
                   };
                 }
 
@@ -189,9 +192,9 @@ export const init = createPluginInitFunction<
                 logDebugMessage("Reason: " + reason);
                 if (!canJoin) {
                   return {
-                    status: "LINKING_TO_SESSION_USER_FAILED",
-                    reason: "EMAIL_VERIFICATION_REQUIRED",
-                  };
+                    status: "SIGN_IN_UP_NOT_ALLOWED",
+                    reason,
+                  } as any;
                 }
 
                 const response = await originalImplementation.signInUp(input);
@@ -222,49 +225,19 @@ export const init = createPluginInitFunction<
             return {
               ...originalImplementation,
               createCodePOST: async (input) => {
-                const response = await originalImplementation.createCodePOST!(input);
-                if (response.status === "SIGN_IN_UP_NOT_ALLOWED" && response.reason.includes("ERR_CODE_002")) {
-                  return {
-                    ...response,
-                    reason: "Cannot sign in / sign up due to security reasons or tenant doesn't allow signup",
-                  } as any;
-                }
-
-                return response;
-              },
-              consumeCodePOST: async (input) => {
-                const response = await originalImplementation.consumeCodePOST!(input);
-                if (response.status === "SIGN_IN_UP_NOT_ALLOWED" && response.reason.includes("ERR_CODE_002")) {
-                  return {
-                    ...response,
-                    reason: "Cannot sign in / sign up due to security reasons or tenant doesn't allow signup",
-                  } as any;
-                }
-
-                return response;
-              },
-            };
-          },
-          functions: (originalImplementation) => {
-            return {
-              ...originalImplementation,
-              createCode: async (input) => {
                 // If this is a signup, we need to check if the user
                 // can signup to the tenant.
-                const accountInfoResponse = await listUsersByAccountInfo(input.tenantId, {
-                  email: "email" in input ? input.email : undefined,
-                  phoneNumber: "phoneNumber" in input ? input.phoneNumber : undefined,
-                });
-                const isSignUp = accountInfoResponse.length === 0;
-
-                if (!isSignUp) {
-                  return originalImplementation.createCode(input);
-                }
 
                 // If this is a signup but its through phone number, we cannot
                 // restrict it so we will let it go through.
                 if ("phoneNumber" in input) {
-                  return originalImplementation.createCode(input);
+                  return originalImplementation.createCodePOST!(input);
+                }
+
+                const isSignUp = implementation.isEmailOrPhonePresentInTenant(input.tenantId, input);
+
+                if (!isSignUp) {
+                  return originalImplementation.createCodePOST!(input);
                 }
 
                 const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, {
@@ -275,11 +248,76 @@ export const init = createPluginInitFunction<
 
                 if (!canJoin) {
                   return {
-                    status: "SIGN_IN_UP_NOT_ALLOWED",
+                    status: "GENERAL_ERROR",
+                    message: reason,
                   } as any;
                 }
 
-                return originalImplementation.createCode(input);
+                return await originalImplementation.createCodePOST!(input);
+              },
+              consumeCodePOST: async (input) => {
+                const response = await originalImplementation.consumeCodePOST!(input);
+                if (response.status === "RESTART_FLOW_ERROR") {
+                  // If reason is defined in response, return as GENERAL_ERROR
+                  // instead with the error.
+                  const reason = (response as any).reason;
+                  if (reason === undefined) {
+                    return response;
+                  } else {
+                    return {
+                      status: "GENERAL_ERROR",
+                      message: reason,
+                    };
+                  }
+                }
+
+                return response;
+              },
+            };
+          },
+          functions: (originalImplementation) => {
+            return {
+              ...originalImplementation,
+              createCode: async (input) => {
+                // NOTE: We are duplicating the code from createCodePOST
+                // here because we want to ensure that the same checks
+                // are applied to the API as well as the function.
+                //
+                // Ideally, we should check here and return a message to
+                // createCodePOST but that is not possible since `createCodePOST`
+                // modifies the response and adds a custom reason if it's a
+                // non OK status so we won't be able to pass the actual reason
+                // back to the FE.
+
+                // If this is a signup, we need to check if the user
+                // can signup to the tenant.
+
+                // If this is a signup but its through phone number, we cannot
+                // restrict it so we will let it go through.
+                if ("phoneNumber" in input) {
+                  return originalImplementation.createCode!(input);
+                }
+
+                const isSignUp = implementation.isEmailOrPhonePresentInTenant(input.tenantId, input);
+
+                if (!isSignUp) {
+                  return originalImplementation.createCode!(input);
+                }
+
+                const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, {
+                  type: "email",
+                  email: input.email,
+                });
+                logDebugMessage("Reason: " + reason);
+
+                if (!canJoin) {
+                  return {
+                    status: "GENERAL_ERROR",
+                    message: reason,
+                  } as any;
+                }
+
+                return await originalImplementation.createCode!(input);
               },
               consumeCode: async (input) => {
                 // If this is a signup, we need to check if the user
@@ -304,11 +342,11 @@ export const init = createPluginInitFunction<
                   input.tenantId,
                   deviceInfo.phoneNumber !== undefined
                     ? {
-                        phoneNumber: deviceInfo.phoneNumber!,
-                      }
+                      phoneNumber: deviceInfo.phoneNumber!,
+                    }
                     : {
-                        email: deviceInfo.email!,
-                      },
+                      email: deviceInfo.email!,
+                    },
                 );
                 const isSignUp = accountInfoResponse.length === 0;
 
@@ -328,7 +366,8 @@ export const init = createPluginInitFunction<
 
                 if (!canJoin) {
                   return {
-                    status: "SIGN_IN_UP_NOT_ALLOWED",
+                    status: "RESTART_FLOW_ERROR",
+                    reason,
                   } as any;
                 }
 
