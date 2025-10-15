@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { User, listUsersByAccountInfo } from "supertokens-node";
 import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantEnrollmentPluginConfig } from "./types";
 import {
@@ -13,7 +14,7 @@ export const getOverrideableTenantFunctionImplementation = (
   config: SuperTokensPluginTenantEnrollmentPluginConfig,
 ): OverrideableTenantFunctionImplementation => {
   const implementation: OverrideableTenantFunctionImplementation = {
-    canUserJoinTenant: async (tenantId, emailOrThirdPartyId) => {
+    canUserJoinTenant: async (tenantId, userIdentificationDetail) => {
       /**
        * Check if the user can join the tenant based on the email domain
        *
@@ -41,16 +42,22 @@ export const getOverrideableTenantFunctionImplementation = (
 
       let canJoin = false;
       let reason = undefined;
-      if (emailOrThirdPartyId.type === "email") {
-        canJoin = implementation.isMatchingEmailDomain(tenantId, emailOrThirdPartyId.email);
+      if (userIdentificationDetail.type === "email") {
+        canJoin = implementation.isMatchingEmailDomain(tenantId, userIdentificationDetail.email);
         if (!canJoin) {
           reason = NOT_ALLOWED_TO_SIGNUP_REASONS.EMAIL_DOMAIN_NOT_ALLOWED;
         }
-      } else if (emailOrThirdPartyId.type === "thirdParty") {
-        canJoin = implementation.isApprovedIdPProvider(tenantId, emailOrThirdPartyId.thirdPartyId);
+      } else if (userIdentificationDetail.type === "thirdParty") {
+        canJoin = implementation.isApprovedIdPProvider(tenantId, userIdentificationDetail.thirdPartyId);
         if (!canJoin) {
           reason = NOT_ALLOWED_TO_SIGNUP_REASONS.IDP_NOT_ALLOWED;
         }
+      } else if (userIdentificationDetail.type === "phoneNumber") {
+        // We don't really have a way to check anything for phones so we can
+        // allow signup.
+        return {
+          canJoin: true
+        };
       }
 
       return {
@@ -89,16 +96,15 @@ export const getOverrideableTenantFunctionImplementation = (
       // If the tenant doesn't require approval, add the user as a member
       // and return.
       if (!implementation.doesTenantRequireApproval(tenantId)) {
+        // TODO: Use fn from implementation of base-tenants
         await assignRoleToUserInTenant(tenantId, user.id, ROLES.MEMBER);
         return {
           wasAddedToTenant: true,
         };
       }
 
-      // If the tenant requires approval, add a request for the user
-      // and return.
-      await associateLoginMethodDef(tenantId, user.id);
-
+      // We don't need to do anything in particular except notifying
+      // the tenant admins about the new user request being added.
       // await implementation.sendTenantJoiningRequestEmail(tenantId, user, appUrl, sendEmail, userContext);
 
       return {
@@ -132,6 +138,7 @@ export const getOverrideableTenantFunctionImplementation = (
        * @param user - The user who is requesting to join the tenant
        * @param sendEmail - The function to send the email
        */
+      // TODO: Use fn from implementation from base tenants
       const adminUsers = await implementation.getUserIdsInTenantWithRole(tenantId, ROLES.ADMIN);
 
       // For each of the users, we will need to find their email address.
@@ -164,12 +171,14 @@ export const getOverrideableTenantFunctionImplementation = (
     getUserIdsInTenantWithRole: async (tenantId, role) => {
       throw new Error("Not implemented");
     },
-    isEmailOrPhonePresentInTenant: async (tenantId, details) => {
-      const accountInfoResponse = await listUsersByAccountInfo(tenantId, {
-        email: "email" in details ? details.email : undefined,
-      });
+    isUserSigningUpToTenant: async (tenantId, details) => {
+      /**
+       * List the users by account info and filter using the passed
+       * tenantId and email.
+       */
+      const accountInfoResponse = await listUsersByAccountInfo(tenantId, details);
       return accountInfoResponse.length === 0;
-    }
+    },
   };
 
   return implementation;

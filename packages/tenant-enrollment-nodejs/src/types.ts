@@ -18,7 +18,7 @@ export type SuperTokensPluginTenantEnrollmentPluginNormalisedConfig = {
   requiresApprovalTenants: string[];
 };
 
-export type EmailOrThirdPartyId =
+export type UserIdentificationDetail =
   | {
       type: "email";
       email: string;
@@ -26,12 +26,16 @@ export type EmailOrThirdPartyId =
   | {
       type: "thirdParty";
       thirdPartyId: string;
-    };
+    }
+  | {
+    type: "phoneNumber";
+    phoneNumber: string;
+  };
 
 export type OverrideableTenantFunctionImplementation = {
   canUserJoinTenant: (
     tenantId: string,
-    emailOrThirdPartyId: EmailOrThirdPartyId,
+    emailOrThirdPartyId: UserIdentificationDetail,
   ) => Promise<{
     canJoin: boolean;
     reason?: string;
@@ -59,5 +63,5 @@ export type OverrideableTenantFunctionImplementation = {
     userContext: UserContext,
   ) => Promise<void>;
   getUserIdsInTenantWithRole: GetUserIdsInTenantWithRole;
-  isEmailOrPhonePresentInTenant: (tenantId: string, details: {email?: string, phoneNumber?: string}) => Promise<boolean>;
-}
+  isUserSigningUpToTenant: (tenantId: string, details: { email?: string; phoneNumber?: string }) => Promise<boolean>;
+};

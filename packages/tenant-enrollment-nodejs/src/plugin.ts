@@ -227,23 +227,24 @@ export const init = createPluginInitFunction<
               createCodePOST: async (input) => {
                 // If this is a signup, we need to check if the user
                 // can signup to the tenant.
-
-                // If this is a signup but its through phone number, we cannot
-                // restrict it so we will let it go through.
-                if ("phoneNumber" in input) {
-                  return originalImplementation.createCodePOST!(input);
-                }
-
-                const isSignUp = implementation.isEmailOrPhonePresentInTenant(input.tenantId, input);
+                const isSignUp = implementation.isUserSigningUpToTenant(input.tenantId, {
+                  email: "email" in input ? input.email : undefined,
+                  phoneNumber: "phoneNumber" in input ? input.phoneNumber : undefined,
+                });
 
                 if (!isSignUp) {
                   return originalImplementation.createCodePOST!(input);
                 }
 
-                const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, {
-                  type: "email",
-                  email: input.email,
-                });
+                const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, (
+                  "email" in input ? {
+                    type: "email",
+                    email: input.email,
+                  } : {
+                    type: "phoneNumber",
+                    phoneNumber: input.phoneNumber,
+                  }
+                ));
                 logDebugMessage("Reason: " + reason);
 
                 if (!canJoin) {
@@ -289,25 +290,24 @@ export const init = createPluginInitFunction<
                 // non OK status so we won't be able to pass the actual reason
                 // back to the FE.
 
-                // If this is a signup, we need to check if the user
-                // can signup to the tenant.
-
-                // If this is a signup but its through phone number, we cannot
-                // restrict it so we will let it go through.
-                if ("phoneNumber" in input) {
-                  return originalImplementation.createCode!(input);
-                }
-
-                const isSignUp = implementation.isEmailOrPhonePresentInTenant(input.tenantId, input);
+                const isSignUp = implementation.isUserSigningUpToTenant(input.tenantId, {
+                  email: "email" in input ? input.email : undefined,
+                  phoneNumber: "phoneNumber" in input ? input.phoneNumber : undefined,
+                });
 
                 if (!isSignUp) {
                   return originalImplementation.createCode!(input);
                 }
 
-                const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, {
-                  type: "email",
-                  email: input.email,
-                });
+                const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, (
+                  "email" in input ? {
+                    type: "email",
+                    email: input.email,
+                  } : {
+                    type: "phoneNumber",
+                    phoneNumber: input.phoneNumber,
+                  }
+                ));
                 logDebugMessage("Reason: " + reason);
 
                 if (!canJoin) {
@@ -338,17 +338,13 @@ export const init = createPluginInitFunction<
                   };
                 }
 
-                const accountInfoResponse = await listUsersByAccountInfo(
-                  input.tenantId,
-                  deviceInfo.phoneNumber !== undefined
-                    ? {
-                      phoneNumber: deviceInfo.phoneNumber!,
-                    }
-                    : {
-                      email: deviceInfo.email!,
-                    },
-                );
-                const isSignUp = accountInfoResponse.length === 0;
+                const isSignUp = await implementation.isUserSigningUpToTenant(input.tenantId, deviceInfo.phoneNumber !== undefined
+                  ? {
+                    phoneNumber: deviceInfo.phoneNumber!,
+                  }
+                  : {
+                    email: deviceInfo.email!,
+                  },);
 
                 // If this is a signup or its through phone number, we cannot
                 // restrict it so we will let it go through.
@@ -358,10 +354,15 @@ export const init = createPluginInitFunction<
 
                 // Since this is a signup, we need to check if the user
                 // can signup to the tenant.
-                const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, {
-                  type: "email",
-                  email: deviceInfo.email!,
-                });
+                const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, (
+                  "email" in deviceInfo ? {
+                    type: "email",
+                    email: deviceInfo.email!,
+                  } : {
+                    type: "phoneNumber",
+                    phoneNumber: deviceInfo.phoneNumber!,
+                  }
+                ));
                 logDebugMessage("Reason: " + reason);
 
                 if (!canJoin) {
@@ -375,6 +376,100 @@ export const init = createPluginInitFunction<
               },
             };
           },
+        },
+        webauthn: {
+          functions: (originalImplementation) => ({
+            ...originalImplementation,
+            registerOptions: async (input) => {
+              let userEmail: string | undefined;
+              if ("email" in input) {
+                // User's email is provided so we can check
+                // if they are trying to signup in which case
+                // we will block this accordingly.
+                const isSignUp = await implementation.isUserSigningUpToTenant(input.tenantId, input.email);
+                if (!isSignUp) {
+                  // If the user is not signing up, we can continue the original
+                  // implementation
+                  return originalImplementation.registerOptions(input);
+                }
+
+                userEmail = input.email;
+              } else if ("recoverAccountToken" in input) {
+                // User is trying to register credential through recoverAccountToken
+                // where there is a possibility that the user doesn't exist.
+                const result = await originalImplementation.getUserFromRecoverAccountToken({
+                  token: input.recoverAccountToken,
+                  tenantId: input.tenantId,
+                  userContext: input.userContext,
+                });
+
+                if (result.status !== "OK") {
+                  return result;
+                }
+
+                // If the recipeId is undefined, that means the user is signing up.
+                if (result.recipeUserId !== undefined) {
+                  // Since the user is not signing up, we will continue with the original
+                  // flow here.
+                  return originalImplementation.registerOptions(input);
+                }
+
+                // userEmail = result.user.
+                // TODO: Change after confirmation from Victor/Mihaly
+              }
+
+              if (userEmail === undefined) {
+                // Since the email is undefined, we cannot do anything, return
+                // original implementation.
+                return originalImplementation.registerOptions(input);
+              }
+
+              // If execution reaches this point, it means the user is
+              // signing up so we will need to check if they are allowed to
+              // do that.
+              const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, {
+                type: "email",
+                email: userEmail,
+              });
+              logDebugMessage("Reason: " + reason);
+              if (!canJoin) {
+                return {
+                  status: "GENERAL_ERROR",
+                  message: reason,
+                } as any;
+              }
+
+              return originalImplementation.registerOptions(input);
+            },
+          }),
+          apis: (originalImplementation) => ({
+            ...originalImplementation,
+            signUpPOST: async (input) => {
+              const response = await originalImplementation.signUpPOST!(input);
+
+              if (response.status !== "OK") {
+                return response;
+              }
+
+              logDebugMessage("Going ahead with checking tenant joining approval");
+              const { wasAddedToTenant, reason: tenantJoiningReason } =
+                await implementation.handleTenantJoiningApproval(
+                  response.user,
+                  input.tenantId,
+                  associateLoginMethodDef,
+                  sendEmail,
+                  getAppUrlDef(appInfo, undefined, input.userContext),
+                  input.userContext,
+                );
+              logDebugMessage(`wasAdded: ${wasAddedToTenant}`);
+              logDebugMessage(`reason: ${tenantJoiningReason}`);
+              return {
+                status: "PENDING_APPROVAL" as any,
+                wasAddedToTenant,
+                reason: tenantJoiningReason,
+              };
+            },
+          }),
         },
       },
     };
