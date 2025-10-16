@@ -139,7 +139,7 @@ export const init = createPluginInitFunction<
 
                 const { recipeUserId } = await req.getJSONBody();
 
-                return implementation.unlinkThirdPartyUser({
+                return implementation.unlinkAndRemoveRecipeUser({
                   userId,
                   recipeUserId,
                   session: session!,
@@ -161,7 +161,7 @@ export const init = createPluginInitFunction<
 
                 const { factorId } = await req.getJSONBody();
 
-                return implementation.setOrRemoveSingleRequiredMfaFactorForUser({
+                return implementation.toggleSingleRequiredMfaFactorForUser({
                   userId,
                   factorId,
                   session: session!,

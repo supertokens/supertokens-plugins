@@ -78,14 +78,6 @@ export class Implementation {
       return { status: "ERROR", message: "User not found" };
     }
 
-    // todo decide if we should allow setting password for other emails
-    if (!user.emails.includes(email)) {
-      return {
-        status: "ERROR",
-        message: "The user does not have this email address",
-      };
-    }
-
     const passwordLoginMethods = user.loginMethods.filter((lm) => lm.recipeId === "emailpassword");
     if (passwordLoginMethods.length) {
       return {
@@ -94,14 +86,15 @@ export class Implementation {
       };
     }
 
-    // todo firgure out how to handle email verification
-    const signUpResult = await signUp(
-      session!.getTenantId(),
-      email,
-      password,
-      session!, // todo: ??? should we pass the session or try linking later?
-      userContext,
-    );
+    const verifiedLoginMethod = user.loginMethods.find((lm) => lm.email === email && lm.verified);
+    if (!verifiedLoginMethod) {
+      return {
+        status: "ERROR",
+        message: "The user does not have this email address or is not verified",
+      };
+    }
+
+    const signUpResult = await signUp(session!.getTenantId(), email, password, session!, userContext);
     if (signUpResult.status === "EMAIL_ALREADY_EXISTS_ERROR") {
       return {
         status: "ERROR",
@@ -118,17 +111,7 @@ export class Implementation {
     if (signUpResult.status !== "OK") {
       return {
         status: "ERROR",
-        message: "Password change failed",
-      };
-    }
-
-    const linkResp = await AccountLinking.linkAccounts(signUpResult.recipeUserId, session!.getUserId(), userContext);
-    if (linkResp.status !== "OK") {
-      logDebugMessage(`Could not link the new password to the user: ${linkResp.status}`);
-
-      return {
-        status: "ERROR",
-        message: "Could not link the new password to the user. Please contact support.",
+        message: "Password setting failed. Please contact support.",
       };
     }
 
@@ -215,7 +198,7 @@ export class Implementation {
     return { status: "OK" };
   };
 
-  unlinkThirdPartyUser = async function (
+  unlinkAndRemoveRecipeUser = async function (
     this: Implementation,
     {
       userId,
@@ -273,7 +256,7 @@ export class Implementation {
     return { status: "OK" };
   };
 
-  setOrRemoveSingleRequiredMfaFactorForUser = async function (
+  toggleSingleRequiredMfaFactorForUser = async function (
     this: Implementation,
     {
       userId,
