@@ -100,6 +100,27 @@ export const init = createPluginInitFunction<
             },
           }),
         },
+        passwordless: {
+          functions: (originalImplementation) => ({
+            ...originalImplementation,
+            createCode: async (input) => {
+              let createCodeResponse;
+              implementation.withSignUpBlockedRedirect(async () => {
+                createCodeResponse = await originalImplementation.createCode(input);
+              });
+
+              return createCodeResponse;
+            },
+            consumeCode: async (input) => {
+              let consumeCodeResponse;
+              implementation.withSignUpBlockedRedirect(async () => {
+                consumeCodeResponse = await originalImplementation.consumeCode(input);
+              });
+
+              return consumeCodeResponse;
+            },
+          }),
+        },
       },
     };
   },

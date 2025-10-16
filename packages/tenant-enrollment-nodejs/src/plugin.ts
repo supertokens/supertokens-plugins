@@ -10,6 +10,7 @@ import { getOverrideableTenantFunctionImplementation } from "./pluginImplementat
 import { logDebugMessage } from "supertokens-node/lib/build/logger";
 import {
   AssociateAllLoginMethodsOfUserWithTenant,
+  AssignRoleToUserInTenant,
   PLUGIN_ID as TENANTS_PLUGIN_ID,
   SendPluginEmail,
   GetAppUrl,
@@ -26,6 +27,7 @@ export const init = createPluginInitFunction<
 >(
   (pluginConfig, implementation) => {
     let associateLoginMethodDef: AssociateAllLoginMethodsOfUserWithTenant;
+    let assignRoleToUserInTenantDef: AssignRoleToUserInTenant;
     let sendEmail: SendPluginEmail;
     let appInfo: NormalisedAppinfo;
     let getAppUrlDef: GetAppUrl;
@@ -52,6 +54,11 @@ export const init = createPluginInitFunction<
           throw new Error("Tenants plugin does not export associateAllLoginMethodsOfUserWithTenant, cannot continue.");
         }
 
+        const assignRoleToUserInTenant = tenantsPlugin.exports?.assignRoleToUserInTenant;
+        if (!assignRoleToUserInTenant) {
+          throw new Error("Tenants plugin does not export assignRoleToUserInTenant, cannot continue.");
+        }
+
         const sendPluginEmail = tenantsPlugin.exports?.sendEmail;
         if (!sendPluginEmail) {
           throw new Error("Tenants plugin does not export sendEmail, cannot continue.");
@@ -63,6 +70,7 @@ export const init = createPluginInitFunction<
         }
 
         associateLoginMethodDef = associateAllLoginMethodsOfUserWithTenant;
+        assignRoleToUserInTenantDef = assignRoleToUserInTenant;
         sendEmail = sendPluginEmail;
         implementation.getUserIdsInTenantWithRole = getUserIdsInTenantWithRole;
 
@@ -135,6 +143,7 @@ export const init = createPluginInitFunction<
                     sendEmail,
                     getAppUrlDef(appInfo, undefined, input.userContext),
                     input.userContext,
+                    assignRoleToUserInTenantDef,
                   );
                 logDebugMessage(`wasAdded: ${wasAddedToTenant}`);
                 logDebugMessage(`reason: ${tenantJoiningReason}`);
@@ -210,6 +219,7 @@ export const init = createPluginInitFunction<
                     sendEmail,
                     getAppUrlDef(appInfo, undefined, input.userContext),
                     input.userContext,
+                    assignRoleToUserInTenantDef,
                   );
                 return {
                   ...response,
@@ -236,15 +246,18 @@ export const init = createPluginInitFunction<
                   return originalImplementation.createCodePOST!(input);
                 }
 
-                const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, (
-                  "email" in input ? {
-                    type: "email",
-                    email: input.email,
-                  } : {
-                    type: "phoneNumber",
-                    phoneNumber: input.phoneNumber,
-                  }
-                ));
+                const { canJoin, reason } = await implementation.canUserJoinTenant(
+                  input.tenantId,
+                  "email" in input
+                    ? {
+                        type: "email",
+                        email: input.email,
+                      }
+                    : {
+                        type: "phoneNumber",
+                        phoneNumber: input.phoneNumber,
+                      },
+                );
                 logDebugMessage("Reason: " + reason);
 
                 if (!canJoin) {
@@ -299,15 +312,18 @@ export const init = createPluginInitFunction<
                   return originalImplementation.createCode!(input);
                 }
 
-                const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, (
-                  "email" in input ? {
-                    type: "email",
-                    email: input.email,
-                  } : {
-                    type: "phoneNumber",
-                    phoneNumber: input.phoneNumber,
-                  }
-                ));
+                const { canJoin, reason } = await implementation.canUserJoinTenant(
+                  input.tenantId,
+                  "email" in input
+                    ? {
+                        type: "email",
+                        email: input.email,
+                      }
+                    : {
+                        type: "phoneNumber",
+                        phoneNumber: input.phoneNumber,
+                      },
+                );
                 logDebugMessage("Reason: " + reason);
 
                 if (!canJoin) {
@@ -338,13 +354,16 @@ export const init = createPluginInitFunction<
                   };
                 }
 
-                const isSignUp = await implementation.isUserSigningUpToTenant(input.tenantId, deviceInfo.phoneNumber !== undefined
-                  ? {
-                    phoneNumber: deviceInfo.phoneNumber!,
-                  }
-                  : {
-                    email: deviceInfo.email!,
-                  },);
+                const isSignUp = await implementation.isUserSigningUpToTenant(
+                  input.tenantId,
+                  deviceInfo.phoneNumber !== undefined
+                    ? {
+                        phoneNumber: deviceInfo.phoneNumber!,
+                      }
+                    : {
+                        email: deviceInfo.email!,
+                      },
+                );
 
                 // If this is a signup or its through phone number, we cannot
                 // restrict it so we will let it go through.
@@ -354,15 +373,18 @@ export const init = createPluginInitFunction<
 
                 // Since this is a signup, we need to check if the user
                 // can signup to the tenant.
-                const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, (
-                  "email" in deviceInfo ? {
-                    type: "email",
-                    email: deviceInfo.email!,
-                  } : {
-                    type: "phoneNumber",
-                    phoneNumber: deviceInfo.phoneNumber!,
-                  }
-                ));
+                const { canJoin, reason } = await implementation.canUserJoinTenant(
+                  input.tenantId,
+                  "email" in deviceInfo
+                    ? {
+                        type: "email",
+                        email: deviceInfo.email!,
+                      }
+                    : {
+                        type: "phoneNumber",
+                        phoneNumber: deviceInfo.phoneNumber!,
+                      },
+                );
                 logDebugMessage("Reason: " + reason);
 
                 if (!canJoin) {
@@ -372,7 +394,30 @@ export const init = createPluginInitFunction<
                   } as any;
                 }
 
-                return originalImplementation.consumeCode(input);
+                const response = await originalImplementation.consumeCode(input);
+
+                if (response.status !== "OK") {
+                  return response;
+                }
+
+                logDebugMessage("Going ahead with checking tenant joining approval");
+                const { wasAddedToTenant, reason: tenantJoiningReason } =
+                  await implementation.handleTenantJoiningApproval(
+                    response.user,
+                    input.tenantId,
+                    associateLoginMethodDef,
+                    sendEmail,
+                    getAppUrlDef(appInfo, undefined, input.userContext),
+                    input.userContext,
+                    assignRoleToUserInTenantDef,
+                  );
+                logDebugMessage(`wasAdded: ${wasAddedToTenant}`);
+                logDebugMessage(`reason: ${tenantJoiningReason}`);
+                return {
+                  status: "PENDING_APPROVAL" as any,
+                  wasAddedToTenant,
+                  reason: tenantJoiningReason,
+                };
               },
             };
           },
@@ -386,7 +431,9 @@ export const init = createPluginInitFunction<
                 // User's email is provided so we can check
                 // if they are trying to signup in which case
                 // we will block this accordingly.
-                const isSignUp = await implementation.isUserSigningUpToTenant(input.tenantId, input.email);
+                const isSignUp = await implementation.isUserSigningUpToTenant(input.tenantId, {
+                  email: input.email,
+                });
                 if (!isSignUp) {
                   // If the user is not signing up, we can continue the original
                   // implementation
@@ -394,28 +441,9 @@ export const init = createPluginInitFunction<
                 }
 
                 userEmail = input.email;
-              } else if ("recoverAccountToken" in input) {
-                // User is trying to register credential through recoverAccountToken
-                // where there is a possibility that the user doesn't exist.
-                const result = await originalImplementation.getUserFromRecoverAccountToken({
-                  token: input.recoverAccountToken,
-                  tenantId: input.tenantId,
-                  userContext: input.userContext,
-                });
-
-                if (result.status !== "OK") {
-                  return result;
-                }
-
-                // If the recipeId is undefined, that means the user is signing up.
-                if (result.recipeUserId !== undefined) {
-                  // Since the user is not signing up, we will continue with the original
-                  // flow here.
-                  return originalImplementation.registerOptions(input);
-                }
-
-                // userEmail = result.user.
-                // TODO: Change after confirmation from Victor/Mihaly
+              } else {
+                // For the recovery case, continue with normal flow
+                return originalImplementation.registerOptions(input);
               }
 
               if (userEmail === undefined) {
@@ -460,6 +488,7 @@ export const init = createPluginInitFunction<
                   sendEmail,
                   getAppUrlDef(appInfo, undefined, input.userContext),
                   input.userContext,
+                  assignRoleToUserInTenantDef,
                 );
               logDebugMessage(`wasAdded: ${wasAddedToTenant}`);
               logDebugMessage(`reason: ${tenantJoiningReason}`);

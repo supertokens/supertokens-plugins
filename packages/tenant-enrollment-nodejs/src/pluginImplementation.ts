@@ -2,8 +2,8 @@
 import { User, listUsersByAccountInfo } from "supertokens-node";
 import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantEnrollmentPluginConfig } from "./types";
 import {
-  assignRoleToUserInTenant,
   AssociateAllLoginMethodsOfUserWithTenant,
+  AssignRoleToUserInTenant,
   SendPluginEmail,
 } from "@supertokens-plugins/tenants-nodejs";
 import { NOT_ALLOWED_TO_SIGNUP_REASONS, ROLES } from "@shared/tenants";
@@ -56,7 +56,7 @@ export const getOverrideableTenantFunctionImplementation = (
         // We don't really have a way to check anything for phones so we can
         // allow signup.
         return {
-          canJoin: true
+          canJoin: true,
         };
       }
 
@@ -72,6 +72,7 @@ export const getOverrideableTenantFunctionImplementation = (
       sendEmail: SendPluginEmail,
       appUrl: string,
       userContext: UserContext,
+      assignRoleToUserInTenant: AssignRoleToUserInTenant,
     ) => {
       /**
        * Handle the tenant joining functionality for the user.
@@ -96,8 +97,7 @@ export const getOverrideableTenantFunctionImplementation = (
       // If the tenant doesn't require approval, add the user as a member
       // and return.
       if (!implementation.doesTenantRequireApproval(tenantId)) {
-        // TODO: Use fn from implementation of base-tenants
-        await assignRoleToUserInTenant(tenantId, user.id, ROLES.MEMBER);
+        await assignRoleToUserInTenant(tenantId, user.id, ROLES.TENANT_MEMBER);
         return {
           wasAddedToTenant: true,
         };
@@ -138,8 +138,7 @@ export const getOverrideableTenantFunctionImplementation = (
        * @param user - The user who is requesting to join the tenant
        * @param sendEmail - The function to send the email
        */
-      // TODO: Use fn from implementation from base tenants
-      const adminUsers = await implementation.getUserIdsInTenantWithRole(tenantId, ROLES.ADMIN);
+      const adminUsers = await implementation.getUserIdsInTenantWithRole(tenantId, ROLES.TENANT_ADMIN);
 
       // For each of the users, we will need to find their email address.
       const adminEmails = await Promise.all(

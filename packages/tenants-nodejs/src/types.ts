@@ -80,6 +80,8 @@ export type AssociateAllLoginMethodsOfUserWithTenant = (
   loginMethodFilter?: (loginMethod: LoginMethod) => boolean,
 ) => Promise<void>;
 
+export type AssignRoleToUserInTenant = (tenantId: string, userId: string, role: string) => Promise<void>;
+
 export type GetUserIdsInTenantWithRole = (tenantId: string, role: string) => Promise<string[]>;
 
 export type GetAppUrl = (
@@ -178,7 +180,7 @@ export type OverrideableTenantFunctionImplementation = {
   rejectRequestToJoinTenant: (tenantId: string, userId: string) => Promise<{ status: "OK" } | ErrorResponse>;
   doesUserHaveTenantCreationRequest: (userId: string, metadata: TenantCreationRequestMetadataType) => Promise<boolean>;
   getPreferredTenantId: (tenantIds: string[], inputTenantId: string) => string | undefined;
-  assignRoleToUserInTenant: (tenantId: string, userId: string, role: string) => Promise<void>;
+  assignRoleToUserInTenant: AssignRoleToUserInTenant;
   shouldHaveTenantAccess: (
     userId: string,
     tenantId: string,

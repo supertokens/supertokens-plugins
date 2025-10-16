@@ -3,6 +3,7 @@ import {
   AssociateAllLoginMethodsOfUserWithTenant,
   GetUserIdsInTenantWithRole,
   SendPluginEmail,
+  AssignRoleToUserInTenant,
 } from "@supertokens-plugins/tenants-nodejs";
 import { UserContext } from "supertokens-node/lib/build/types";
 
@@ -28,9 +29,9 @@ export type UserIdentificationDetail =
       thirdPartyId: string;
     }
   | {
-    type: "phoneNumber";
-    phoneNumber: string;
-  };
+      type: "phoneNumber";
+      phoneNumber: string;
+    };
 
 export type OverrideableTenantFunctionImplementation = {
   canUserJoinTenant: (
@@ -47,6 +48,7 @@ export type OverrideableTenantFunctionImplementation = {
     sendEmail: SendPluginEmail,
     appUrl: string,
     userContext: UserContext,
+    assignRoleToUserInTenant: AssignRoleToUserInTenant,
   ) => Promise<{
     wasAddedToTenant: boolean;
     reason?: string;
