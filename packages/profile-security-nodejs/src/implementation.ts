@@ -1,6 +1,5 @@
 import { getUser, deleteUser, getAvailableFirstFactors, User } from "supertokens-node";
 import { SessionContainerInterface } from "supertokens-node/recipe/session/types";
-import AccountLinking from "supertokens-node/recipe/accountlinking";
 import { FactorIds } from "supertokens-node/recipe/multifactorauth";
 import { signUp, updateEmailOrPassword, verifyCredentials } from "supertokens-node/recipe/emailpassword";
 import { BaseFormSection } from "@supertokens-plugins/profile-details-shared";
