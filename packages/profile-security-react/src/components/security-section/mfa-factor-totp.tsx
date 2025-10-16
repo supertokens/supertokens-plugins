@@ -151,8 +151,7 @@ export const MfaFactorTotpList = ({ user, onSuccess }: { user: User; onSuccess: 
     },
   );
 
-  const isRenaming = (totpName: string) =>
-    Boolean(activeTotpDevice) && activeTotpDevice?.action === "rename" && activeTotpDevice.name === totpName;
+  const isRenaming = (totpName: string) => activeTotpDevice?.action === "rename" && activeTotpDevice?.name === totpName;
 
   useEffect(() => {
     loadTotps();

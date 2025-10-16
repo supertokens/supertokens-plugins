@@ -4,6 +4,7 @@ import { useState, useMemo } from "react";
 import { consumeCode, createCode } from "supertokens-auth-react/recipe/passwordless/index.js";
 import { User } from "supertokens-web-js/types";
 
+import { logDebugMessage } from "../../logger";
 import { usePluginContext } from "../../plugin";
 import { FormActions } from "../form-actions";
 import { FormRow } from "../form-item";
@@ -18,11 +19,11 @@ export const MfaFactorEmailOtpConfig = ({ user, onSuccess }: { user: User; onSuc
   const loginMethod = useMemo(() => {
     const loginMethods = user.loginMethods.filter((lm) => lm.recipeId === "passwordless" && lm.email);
     if (loginMethods.length === 0) {
-      console.warn("User has no email OTP login method");
+      logDebugMessage("User has no email OTP login method");
       return null;
     }
     if (loginMethods.length > 1) {
-      console.warn("User has multiple email OTP login methods");
+      logDebugMessage("User has multiple email OTP login methods");
       return null;
     }
 

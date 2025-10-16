@@ -4,6 +4,7 @@ import { useState, useMemo, useCallback } from "react";
 import { consumeCode, createCode } from "supertokens-auth-react/recipe/passwordless/index.js";
 import { User } from "supertokens-web-js/types";
 
+import { logDebugMessage } from "../../logger";
 import { usePluginContext } from "../../plugin";
 import { FormActions } from "../form-actions";
 import { FormRow } from "../form-item";
@@ -25,11 +26,11 @@ export const MfaFactorPhoneOtpConfig = ({ user, onSuccess }: { user: User; onSuc
   const loginMethod = useMemo(() => {
     const loginMethods = user.loginMethods.filter((lm) => lm.recipeId === "passwordless" && lm.phoneNumber);
     if (loginMethods.length === 0) {
-      console.warn("User has no phone OTP login method");
+      logDebugMessage("User has no phone OTP login method");
       return null;
     }
     if (loginMethods.length > 1) {
-      console.warn("User has multiple phone OTP login methods");
+      logDebugMessage("User has multiple phone OTP login methods");
       return null;
     }
 

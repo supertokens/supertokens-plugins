@@ -46,16 +46,6 @@ export const MfaSection = ({
       description: string;
       setup: boolean;
       required: boolean;
-      ManageComponent: {
-        Config: React.ComponentType<{
-          user: User;
-          onSuccess: () => Promise<any>;
-        }>;
-        Setup: React.ComponentType<{
-          user: User;
-          onSuccess: () => Promise<any>;
-        }>;
-      } | null;
     }[]
   >([]);
 
@@ -90,7 +80,6 @@ export const MfaSection = ({
           // make sure that the factor is already setup and the claim is set so we don't trigger a redirect to the factor login screen
           setup: mfaInfo.factors.alreadySetup.includes(factor.id) && Boolean(mfaClaimValue?.c[factor.id]),
           required: res.requiredSecondaryFactors.includes(factor.id),
-          ManageComponent: manageFactorComponents[factor.id as keyof typeof manageFactorComponents] ?? null,
         }));
       setSecondaryFactors(secondaryFactors);
 
@@ -130,6 +119,31 @@ export const MfaSection = ({
     await onSuccess();
     await loadMfaInfo();
   }, [loadMfaInfo, onSuccess]);
+
+  const getManageFactorComponent = useCallback(
+    (factor: (typeof secondaryFactors)[number]) => {
+      const FactorManageComponent = manageFactorComponents[factor.id as keyof typeof manageFactorComponents] ?? null;
+      if (!FactorManageComponent) {
+        return null;
+      }
+
+      let type: "config" | "setup";
+      if (factorBeingSetup === factor.id) {
+        type = "setup";
+      } else if (!factorBeingSetup && factor.required && factor.setup) {
+        type = "config";
+      } else {
+        return null;
+      }
+
+      return type === "config" ? (
+        <FactorManageComponent.Config user={user!} onSuccess={_onSuccess} />
+      ) : (
+        <FactorManageComponent.Setup user={user!} onSuccess={_onSuccess} />
+      );
+    },
+    [user, _onSuccess, factorBeingSetup],
+  );
 
   useEffect(() => {
     if (isLoaded) {
@@ -194,12 +208,7 @@ export const MfaSection = ({
             </div>
           </div>
 
-          {factor.ManageComponent && factorBeingSetup === factor.id && (
-            <factor.ManageComponent.Setup user={user!} onSuccess={_onSuccess} />
-          )}
-          {factor.ManageComponent && !factorBeingSetup && factor.required && factor.setup && (
-            <factor.ManageComponent.Config user={user!} onSuccess={_onSuccess} />
-          )}
+          {getManageFactorComponent(factor)}
         </div>
       ))}
     </div>

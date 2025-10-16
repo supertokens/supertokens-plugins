@@ -31,6 +31,7 @@ export const SetWebAuthnSection = ({
       await registerCredentialWithSignUp({
         email: webauthnSetEmail,
         userContext: {},
+        shouldTryLinkingWithSessionUser: true,
       });
     },
     [webauthnSetEmail],

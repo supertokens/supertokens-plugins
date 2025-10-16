@@ -14,6 +14,7 @@ import { ListCard, ListCardFooter, ListCardItem, ListCardItemActions } from "../
 import style from "./security-section.module.css";
 
 const cx = classNames.bind(style);
+
 export const WebauthnSection = ({
   user,
   isLoading,
@@ -47,14 +48,14 @@ export const WebauthnSection = ({
       setWebauthnEmail(email);
     }
 
-    loadWebAuthn();
+    loadCredentialsAction();
   }, [user]);
 
   const webAuthnEmails = useMemo(() => {
     return user?.loginMethods.filter((lm: any) => lm.recipeId === "webauthn").map((lm: any) => lm.email) ?? [];
   }, [user]);
 
-  const loadWebAuthn = usePrettyAction(
+  const loadCredentialsAction = usePrettyAction(
     async () => {
       const result = await listCredentials({ userContext: {} });
       if (result.status === "OK") {
@@ -70,12 +71,12 @@ export const WebauthnSection = ({
     },
   );
 
-  const _onSuccess = useCallback(async () => {
-    await loadWebAuthn();
+  const onActionSuccess = useCallback(async () => {
+    await loadCredentialsAction();
     await onSuccess();
-  }, [onSuccess]);
+  }, [onSuccess, loadCredentialsAction]);
 
-  const _removeCredential = usePrettyAction(
+  const removeCredentialAction = usePrettyAction(
     async (webauthnCredentialId: string) => {
       const result = await removeCredential({
         webauthnCredentialId,
@@ -89,13 +90,13 @@ export const WebauthnSection = ({
     },
     [],
     {
-      onSuccess: _onSuccess,
+      onSuccess: onActionSuccess,
       errorMessage: t("PL_SEC_WEBAUTHN_ERROR_REMOVE_CREDENTIAL"),
       setLoading: setIsLoading,
     },
   );
 
-  const addCredential = usePrettyAction(
+  const addCredentialAction = usePrettyAction(
     async () => {
       // assume only one webauthn user
       const recipeUserId = user.loginMethods.find(
@@ -115,14 +116,14 @@ export const WebauthnSection = ({
         throw new Error("Failed to add Passkey");
       }
 
-      await loadWebAuthn();
+      await loadCredentialsAction();
     },
     [webauthnEmail, user],
     {
       errorMessage: t("PL_SEC_WEBAUTHN_ERROR_ADD_CREDENTIAL"),
       successMessage: t("PL_SEC_WEBAUTHN_SUCCESS_ADD_CREDENTIAL"),
       setLoading: setIsLoading,
-      onSuccess: _onSuccess,
+      onSuccess: onActionSuccess,
     },
   );
 
@@ -155,7 +156,7 @@ export const WebauthnSection = ({
 
             <Button
               className={cx("supertokens-plugin-profile-security-add-passkey-button")}
-              onClick={addCredential}
+              onClick={addCredentialAction}
               disabled={isLoading}
               size="small"
               variant="brand"
@@ -174,7 +175,7 @@ export const WebauthnSection = ({
                   size="small"
                   appearance="plain"
                   className={cx("supertokens-plugin-profile-security-manage-passkey-remove")}
-                  onClick={() => _removeCredential(credential.webauthnCredentialId)}
+                  onClick={() => removeCredentialAction(credential.webauthnCredentialId)}
                   disabled={credentials.length <= 1}>
                   {t("PL_SEC_WEBAUTHN_REMOVE_BUTTON")}
                 </Button>

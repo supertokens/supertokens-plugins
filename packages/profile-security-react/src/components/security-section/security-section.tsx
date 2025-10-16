@@ -75,11 +75,9 @@ export const SecurityDetailsSection = () => {
       return;
     }
 
-    loadConfig()
-      .then(() => loadUserInfo())
-      .then(() => {
-        setIsLoaded(true);
-      });
+    Promise.all([loadConfig(), loadUserInfo()]).then(() => {
+      setIsLoaded(true);
+    });
   }, [isLoaded, loadConfig, loadUserInfo]);
 
   return (
