@@ -160,9 +160,110 @@ export const MfaFactorTotpList = ({ user, onSuccess }: { user: User; onSuccess: 
 
   return (
     <div className={cx("supertokens-plugin-profile-security-second-factor-manage")}>
-      <ListCard title={t("PL_SEC_MFA_TOTP_LIST_TITLE")}>
+      <ListCard
+        title={t("PL_SEC_MFA_TOTP_LIST_TITLE")}
+        FooterComponent={
+          <ListCardFooter>
+            {!newTotpDevice && (
+              <>
+                <div className={cx("supertokens-plugin-profile-security-totp-name-label")}>
+                  {t("PL_SEC_MFA_TOTP_SETUP_ADD_DEVICE_NAME_LABEL")}
+                </div>
+
+                <TextInput
+                  className={cx("supertokens-plugin-profile-security-totp-name")}
+                  placeholder={t("PL_SEC_MFA_TOTP_SETUP_ADD_DEVICE_NAME_PLACEHOLDER")}
+                  id="name"
+                  value={addName}
+                  onChange={onAddNameChange}
+                />
+
+                <Button
+                  className={cx("supertokens-plugin-profile-security-add-totp-button")}
+                  onClick={addTotp}
+                  disabled={Boolean(newTotpDevice)}
+                  size="small"
+                  variant="brand"
+                  appearance="accent">
+                  {t("PL_SEC_MFA_TOTP_SETUP_ADD_DEVICE_BUTTON")}
+                </Button>
+              </>
+            )}
+
+            {newTotpDevice && (
+              <>
+                <p className={cx("supertokens-plugin-profile-security-totp-verify-description")}>
+                  {t("PL_SEC_MFA_TOTP_SETUP_VERIFY_DESCRIPTION")}
+                </p>
+
+                {newTotpDevice?.qrString && (
+                  <div className={cx("supertokens-plugin-profile-security-totp-verify-qr")}>
+                    <QRCode value={newTotpDevice.qrString} />
+                  </div>
+                )}
+
+                <TextInput
+                  className={cx("supertokens-plugin-profile-security-totp-verify-code")}
+                  id="verify-code"
+                  placeholder={t("PL_SEC_MFA_TOTP_SETUP_VERIFY_CODE_PLACEHOLDER")}
+                  value={totpVerificationCode}
+                  onChange={(value) => setTotpVerificationCode(value as string)}
+                />
+
+                <Button
+                  onClick={verifyTotp}
+                  disabled={!totpVerificationCode}
+                  size="small"
+                  variant="brand"
+                  appearance="accent">
+                  {t("PL_SEC_MFA_TOTP_SETUP_VERIFY_BUTTON")}
+                </Button>
+              </>
+            )}
+          </ListCardFooter>
+        }>
         {totpDevices.map((totp) => (
-          <ListCardItem key={totp.name}>
+          <ListCardItem
+            key={totp.name}
+            ActionsComponent={
+              <ListCardItemActions>
+                {isRenaming(totp.name) && (
+                  <>
+                    <Button onClick={cancelRename} size="small" variant="neutral" appearance="outlined">
+                      {t("PL_SEC_MFA_TOTP_CANCEL_RENAME_BUTTON")}
+                    </Button>
+
+                    <Button onClick={updateTotpName} size="small" variant="brand" appearance="accent">
+                      {t("PL_SEC_MFA_TOTP_RENAME_BUTTON")}
+                    </Button>
+                  </>
+                )}
+
+                {!isRenaming(totp.name) && (
+                  <>
+                    <Button
+                      appearance="plain"
+                      size="small"
+                      variant="brand"
+                      className={cx("plugin-profile-security-manage-item-remove")}
+                      onClick={() => renameTotp(totp.name)}
+                      disabled={Boolean(activeTotpDevice)}>
+                      {t("PL_SEC_MFA_TOTP_RENAME_BUTTON")}
+                    </Button>
+
+                    <Button
+                      appearance="plain"
+                      size="small"
+                      variant="danger"
+                      className={cx("plugin-profile-security-manage-item-remove")}
+                      onClick={() => removeTotp(totp.name)}
+                      disabled={totpDevices.length <= 1 || Boolean(activeTotpDevice)}>
+                      {t("PL_SEC_MFA_TOTP_REMOVE_BUTTON")}
+                    </Button>
+                  </>
+                )}
+              </ListCardItemActions>
+            }>
             {!isRenaming(totp.name) && <span>{totp.name}</span>}
 
             {isRenaming(totp.name) && (
@@ -181,105 +282,8 @@ export const MfaFactorTotpList = ({ user, onSuccess }: { user: User; onSuccess: 
                 />
               </>
             )}
-
-            <ListCardItemActions>
-              {isRenaming(totp.name) && (
-                <>
-                  <Button onClick={cancelRename} size="small" variant="neutral" appearance="outlined">
-                    {t("PL_SEC_MFA_TOTP_CANCEL_RENAME_BUTTON")}
-                  </Button>
-
-                  <Button onClick={updateTotpName} size="small" variant="brand" appearance="accent">
-                    {t("PL_SEC_MFA_TOTP_RENAME_BUTTON")}
-                  </Button>
-                </>
-              )}
-
-              {!isRenaming(totp.name) && (
-                <>
-                  <Button
-                    appearance="plain"
-                    size="small"
-                    variant="brand"
-                    className={cx("plugin-profile-security-manage-item-remove")}
-                    onClick={() => renameTotp(totp.name)}
-                    disabled={Boolean(activeTotpDevice)}>
-                    {t("PL_SEC_MFA_TOTP_RENAME_BUTTON")}
-                  </Button>
-
-                  <Button
-                    appearance="plain"
-                    size="small"
-                    variant="danger"
-                    className={cx("plugin-profile-security-manage-item-remove")}
-                    onClick={() => removeTotp(totp.name)}
-                    disabled={totpDevices.length <= 1 || Boolean(activeTotpDevice)}>
-                    {t("PL_SEC_MFA_TOTP_REMOVE_BUTTON")}
-                  </Button>
-                </>
-              )}
-            </ListCardItemActions>
           </ListCardItem>
         ))}
-
-        <ListCardFooter>
-          {!newTotpDevice && (
-            <>
-              <div className={cx("supertokens-plugin-profile-security-totp-name-label")}>
-                {t("PL_SEC_MFA_TOTP_SETUP_ADD_DEVICE_NAME_LABEL")}
-              </div>
-
-              <TextInput
-                className={cx("supertokens-plugin-profile-security-totp-name")}
-                placeholder={t("PL_SEC_MFA_TOTP_SETUP_ADD_DEVICE_NAME_PLACEHOLDER")}
-                id="name"
-                value={addName}
-                onChange={onAddNameChange}
-              />
-
-              <Button
-                className={cx("supertokens-plugin-profile-security-add-totp-button")}
-                onClick={addTotp}
-                disabled={Boolean(newTotpDevice)}
-                size="small"
-                variant="brand"
-                appearance="accent">
-                {t("PL_SEC_MFA_TOTP_SETUP_ADD_DEVICE_BUTTON")}
-              </Button>
-            </>
-          )}
-
-          {newTotpDevice && (
-            <>
-              <p className={cx("supertokens-plugin-profile-security-totp-verify-description")}>
-                {t("PL_SEC_MFA_TOTP_SETUP_VERIFY_DESCRIPTION")}
-              </p>
-
-              {newTotpDevice?.qrString && (
-                <div className={cx("supertokens-plugin-profile-security-totp-verify-qr")}>
-                  <QRCode value={newTotpDevice.qrString} />
-                </div>
-              )}
-
-              <TextInput
-                className={cx("supertokens-plugin-profile-security-totp-verify-code")}
-                id="verify-code"
-                placeholder={t("PL_SEC_MFA_TOTP_SETUP_VERIFY_CODE_PLACEHOLDER")}
-                value={totpVerificationCode}
-                onChange={(value) => setTotpVerificationCode(value as string)}
-              />
-
-              <Button
-                onClick={verifyTotp}
-                disabled={!totpVerificationCode}
-                size="small"
-                variant="brand"
-                appearance="accent">
-                {t("PL_SEC_MFA_TOTP_SETUP_VERIFY_BUTTON")}
-              </Button>
-            </>
-          )}
-        </ListCardFooter>
       </ListCard>
     </div>
   );
