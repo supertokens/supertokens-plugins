@@ -9,7 +9,7 @@ import {
 
 import { getApi } from "./api";
 import { PLUGIN_ID, API_PATH } from "./constants";
-import { enableDebugLogs } from "./logger";
+import { enableDebugLogs, logDebugMessage } from "./logger";
 import { SignUpBlocked } from "./pages/blocked";
 import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
 import { defaultTranslationsTenantEnrollment } from "./translations";
@@ -38,6 +38,7 @@ export const init = createPluginInitFunction<
   SuperTokensPluginTenantEnrollmentPluginConfig
 >(
   (pluginConfig, implementation) => {
+    let isInviteOnly = false;
     return {
       id: PLUGIN_ID,
       init: (config, plugins, sdkVersion) => {
@@ -120,6 +121,44 @@ export const init = createPluginInitFunction<
               return consumeCodeResponse;
             },
           }),
+        },
+        thirdparty: {
+          functions: (originalImplementation) => ({
+            ...originalImplementation,
+            signInAndUp: async (input) => {
+              let signInAndUpResponse;
+              implementation.withSignUpBlockedRedirect(async () => {
+                signInAndUpResponse = await originalImplementation.signInAndUp(input);
+              });
+              return signInAndUpResponse;
+            },
+          }),
+        },
+        multitenancy: {
+          functions: (originalImplementation) => ({
+            ...originalImplementation,
+            getLoginMethods: async (input) => {
+              const response = await originalImplementation.getLoginMethods(input);
+
+              const isTenantInviteOnly = await response.fetchResponse.json().then((data) => data.isTenantInviteOnly);
+              logDebugMessage(`Parsed isTenantInviteOnly to be ${isTenantInviteOnly} from response body`);
+
+              if (isTenantInviteOnly !== undefined && typeof isTenantInviteOnly === "boolean") {
+                isInviteOnly = isTenantInviteOnly;
+                logDebugMessage("Update isInviteOnly value!");
+              }
+
+              return response;
+            },
+          }),
+        },
+      },
+      generalAuthRecipeComponentOverrides: {
+        AuthPageHeader_Override: ({ DefaultComponent, ...props }) => {
+          logDebugMessage(`Got isInviteOnly value as ${isInviteOnly}`);
+          // If the tenant is invite only, disable the sign in switcher
+          // @ts-ignore
+          return <DefaultComponent {...props} hideSignInSwitcher={isInviteOnly} />;
         },
       },
     };

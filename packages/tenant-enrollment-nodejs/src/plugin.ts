@@ -500,6 +500,26 @@ export const init = createPluginInitFunction<
             },
           }),
         },
+        multitenancy: {
+          apis: (originalImplementation) => ({
+            ...originalImplementation,
+            loginMethodsGET: async (input) => {
+              const response = await originalImplementation.loginMethodsGET(input);
+
+              if (response.status !== "OK") {
+                return response;
+              }
+
+              const isTenantInviteOnly = implementation.isTenantInviteOnly(input.tenantId);
+
+              // Inject the key into the response.
+              return {
+                ...response,
+                isTenantInviteOnly,
+              } as any;
+            },
+          }),
+        },
       },
     };
   },
