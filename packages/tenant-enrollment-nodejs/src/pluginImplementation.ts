@@ -105,7 +105,7 @@ export const getOverrideableTenantFunctionImplementation = (
 
       // We don't need to do anything in particular except notifying
       // the tenant admins about the new user request being added.
-      // await this.sendTenantJoiningRequestEmail(tenantId, user, appUrl, sendEmail, userContext);
+      await this.sendTenantJoiningRequestEmail(tenantId, user, appUrl, sendEmail, userContext);
 
       return {
         wasAddedToTenant: false,
