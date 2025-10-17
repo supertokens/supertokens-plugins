@@ -7,7 +7,10 @@ import {
   getTranslationFunction,
 } from "supertokens-auth-react";
 
+import { NOT_ALLOWED_TO_SIGNUP_REASON_MESSAGE } from "../../../shared/tenants/src";
+
 import { getApi } from "./api";
+import { ErrorMessage } from "./components";
 import { PLUGIN_ID, API_PATH } from "./constants";
 import { enableDebugLogs, logDebugMessage } from "./logger";
 import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
@@ -38,6 +41,7 @@ export const init = createPluginInitFunction<
 >(
   (pluginConfig, implementation) => {
     let isInviteOnly = false;
+    let generalErrorMessage: string | undefined = undefined;
     return {
       id: PLUGIN_ID,
       init: (config, plugins, sdkVersion) => {
@@ -64,64 +68,42 @@ export const init = createPluginInitFunction<
         });
       },
       overrideMap: {
-        // emailpassword: {
-        //   functions: (originalImplementation) => ({
-        //     ...originalImplementation,
-        //     signUp: async (input) => {
-        //       let signUpResponse;
-        //       implementation.withSignUpBlockedRedirect(async () => {
-        //         signUpResponse = await originalImplementation.signUp(input);
-        //       });
+        webauthn: {
+          functions: (originalImplementation) => ({
+            ...originalImplementation,
+            getRegisterOptions: async (input) => {
+              let response;
+              try {
+                response = await originalImplementation.getRegisterOptions(input);
 
-        //       return signUpResponse;
-        //     },
-        //   }),
-        // },
-        // webauthn: {
-        //   functions: (originalImplementation) => ({
-        //     ...originalImplementation,
-        //     getRegisterOptions: async (input) => {
-        //       let response;
-        //       implementation.withSignUpBlockedRedirect(async () => {
-        //         response = await originalImplementation.getRegisterOptions(input);
-        //       });
-        //       return response;
-        //     },
-        //   }),
-        // },
-        // passwordless: {
-        //   functions: (originalImplementation) => ({
-        //     ...originalImplementation,
-        //     createCode: async (input) => {
-        //       let createCodeResponse;
-        //       implementation.withSignUpBlockedRedirect(async () => {
-        //         createCodeResponse = await originalImplementation.createCode(input);
-        //       });
-
-        //       return createCodeResponse;
-        //     },
-        //     consumeCode: async (input) => {
-        //       let consumeCodeResponse;
-        //       implementation.withSignUpBlockedRedirect(async () => {
-        //         consumeCodeResponse = await originalImplementation.consumeCode(input);
-        //       });
-
-        //       return consumeCodeResponse;
-        //     },
-        //   }),
-        // },
-        // thirdparty: {
-        //   functions: (originalImplementation) => ({
-        //     ...originalImplementation,
-        //     signInAndUp: async (input) => {
-        //       let signInAndUpResponse;
-        //       implementation.withSignUpBlockedRedirect(async () => {
-        //         signInAndUpResponse = await originalImplementation.signInAndUp(input);
-        //       });
-        //       return signInAndUpResponse;
-        //     },
-        //   }),
-        // },
+                // If the execution completes without getting a general error, clear
+                // the errorMessage in case it is there from before.
+                generalErrorMessage = undefined;
+              } catch (error: any) {
+                if (
+                  error.isSuperTokensGeneralError === true &&
+                  Object.values(NOT_ALLOWED_TO_SIGNUP_REASON_MESSAGE).includes(error.message)
+                ) {
+                  // This is an error for sign-up being blocked so we will
+                  // capture the message and use it later.
+                  generalErrorMessage = error.message;
+                }
+              }
+              return response;
+            },
+          }),
+          components: {
+            WebauthnPasskeySignUpSomethingWentWrong_Override: ({ DefaultComponent, ...props }) => {
+              return (
+                <div>
+                  {generalErrorMessage !== undefined && <ErrorMessage message={generalErrorMessage} />}
+                  {/* @ts-ignore */}
+                  <DefaultComponent {...props} />
+                </div>
+              );
+            },
+          },
+        },
         multitenancy: {
           functions: (originalImplementation) => ({
             ...originalImplementation,

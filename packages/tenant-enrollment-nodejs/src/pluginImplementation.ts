@@ -1,24 +1,20 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
-import { User, listUsersByAccountInfo } from 'supertokens-node';
-import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantEnrollmentPluginConfig } from './types';
+import { User, listUsersByAccountInfo } from "supertokens-node";
+import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantEnrollmentPluginConfig } from "./types";
 import {
   AssociateAllLoginMethodsOfUserWithTenant,
   AssignRoleToUserInTenant,
   SendPluginEmail,
-} from '@supertokens-plugins/tenants-nodejs';
-import { NOT_ALLOWED_TO_SIGNUP_REASON_MESSAGE, NotAllowedToSignUpReason, ROLES } from '@shared/tenants';
-import SuperTokens from 'supertokens-node';
-import { UserContext } from 'supertokens-node/lib/build/types';
+} from "@supertokens-plugins/tenants-nodejs";
+import { NOT_ALLOWED_TO_SIGNUP_REASON_MESSAGE, NotAllowedToSignUpReason, ROLES } from "@shared/tenants";
+import SuperTokens from "supertokens-node";
+import { UserContext } from "supertokens-node/lib/build/types";
 
 export const getOverrideableTenantFunctionImplementation = (
   config: SuperTokensPluginTenantEnrollmentPluginConfig,
 ): OverrideableTenantFunctionImplementation => {
   const implementation: OverrideableTenantFunctionImplementation = {
-    canUserJoinTenant: async function (
-      this: OverrideableTenantFunctionImplementation,
-      tenantId,
-      userIdentificationDetail,
-    ) {
+    canUserJoinTenant: async function (tenantId, userIdentificationDetail) {
       /**
        * Check if the user can join the tenant based on the email domain
        *
@@ -28,7 +24,7 @@ export const getOverrideableTenantFunctionImplementation = (
        */
 
       // Skip this for the public tenant
-      if (tenantId === 'public') {
+      if (tenantId === "public") {
         return {
           canJoin: true,
           reason: undefined,
@@ -46,17 +42,17 @@ export const getOverrideableTenantFunctionImplementation = (
 
       let canJoin = false;
       let reason = undefined;
-      if (userIdentificationDetail.type === 'email') {
+      if (userIdentificationDetail.type === "email") {
         canJoin = this.isMatchingEmailDomain(tenantId, userIdentificationDetail.email);
         if (!canJoin) {
           reason = this.getMessageForNoSignUpReason(NotAllowedToSignUpReason.EMAIL_DOMAIN_NOT_ALLOWED);
         }
-      } else if (userIdentificationDetail.type === 'thirdParty') {
+      } else if (userIdentificationDetail.type === "thirdParty") {
         canJoin = this.isApprovedIdPProvider(tenantId, userIdentificationDetail.thirdPartyId);
         if (!canJoin) {
           reason = this.getMessageForNoSignUpReason(NotAllowedToSignUpReason.IDP_NOT_ALLOWED);
         }
-      } else if (userIdentificationDetail.type === 'phoneNumber') {
+      } else if (userIdentificationDetail.type === "phoneNumber") {
         // We don't really have a way to check anything for phones so we can
         // allow signup.
         return {
@@ -70,7 +66,6 @@ export const getOverrideableTenantFunctionImplementation = (
       };
     },
     handleTenantJoiningApproval: async function (
-      this: OverrideableTenantFunctionImplementation,
       user: User,
       tenantId: string,
       associateLoginMethodDef: AssociateAllLoginMethodsOfUserWithTenant,
@@ -92,7 +87,7 @@ export const getOverrideableTenantFunctionImplementation = (
        * @param associateLoginMethodDef - The function to associate the login methods of the user with the tenant
        */
       // Skip this for the public tenant
-      if (tenantId === 'public') {
+      if (tenantId === "public") {
         return {
           wasAddedToTenant: true,
           reason: undefined,
@@ -110,24 +105,24 @@ export const getOverrideableTenantFunctionImplementation = (
 
       // We don't need to do anything in particular except notifying
       // the tenant admins about the new user request being added.
-      // await implementation.sendTenantJoiningRequestEmail(tenantId, user, appUrl, sendEmail, userContext);
+      // await this.sendTenantJoiningRequestEmail(tenantId, user, appUrl, sendEmail, userContext);
 
       return {
         wasAddedToTenant: false,
-        reason: 'REQUIRES_APPROVAL',
+        reason: "REQUIRES_APPROVAL",
       };
     },
-    isTenantInviteOnly: (tenantId) => {
+    isTenantInviteOnly: function (tenantId) {
       return config.inviteOnlyTenants?.includes(tenantId) ?? false;
     },
-    doesTenantRequireApproval: (tenantId) => {
+    doesTenantRequireApproval: function (tenantId) {
       return config.requiresApprovalTenants?.includes(tenantId) ?? false;
     },
-    isApprovedIdPProvider: (tenantId, thirdPartyId) => {
-      return thirdPartyId.startsWith('boxy-saml');
+    isApprovedIdPProvider: function (thirdPartyId) {
+      return thirdPartyId.startsWith("boxy-saml");
     },
-    isMatchingEmailDomain: (tenantId, email) => {
-      const emailDomain = email.split('@');
+    isMatchingEmailDomain: function (tenantId, email) {
+      const emailDomain = email.split("@");
       if (emailDomain.length !== 2) {
         return false;
       }
@@ -135,14 +130,7 @@ export const getOverrideableTenantFunctionImplementation = (
       const parsedTenantId = config.emailDomainToTenantIdMap[emailDomain[1]!.toLowerCase()];
       return parsedTenantId === tenantId;
     },
-    sendTenantJoiningRequestEmail: async function (
-      this: OverrideableTenantFunctionImplementation,
-      tenantId,
-      user,
-      appUrl,
-      sendEmail,
-      userContext,
-    ) {
+    sendTenantJoiningRequestEmail: async function (tenantId, user, appUrl, sendEmail, userContext) {
       /**
        * Send an email to all the admins of the tenant
        *
@@ -168,7 +156,7 @@ export const getOverrideableTenantFunctionImplementation = (
           .map(async (email) => {
             await sendEmail(
               {
-                type: 'TENANT_REQUEST_APPROVAL',
+                type: "TENANT_REQUEST_APPROVAL",
                 email,
                 tenantId,
                 senderEmail: user.emails[0]!,
@@ -179,10 +167,10 @@ export const getOverrideableTenantFunctionImplementation = (
           }),
       );
     },
-    getUserIdsInTenantWithRole: async (tenantId, role) => {
-      throw new Error('Not implemented');
+    getUserIdsInTenantWithRole: async function (tenantId, role) {
+      throw new Error("Not implemented");
     },
-    isUserSigningUpToTenant: async (tenantId, details) => {
+    isUserSigningUpToTenant: async function (tenantId, details) {
       /**
        * List the users by account info and filter using the passed
        * tenantId and email.
@@ -190,7 +178,7 @@ export const getOverrideableTenantFunctionImplementation = (
       const accountInfoResponse = await listUsersByAccountInfo(tenantId, details);
       return accountInfoResponse.length === 0;
     },
-    getMessageForNoSignUpReason: (reason) => {
+    getMessageForNoSignUpReason: function (reason) {
       /**
        * Return a proper message for the passed reason for not
        * allowing signup.
