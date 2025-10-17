@@ -1,7 +1,6 @@
 import classNames from "classnames/bind";
 import React from "react";
 
-import "./error.module.scss";
 import styles from "./error.module.scss";
 
 const cx = classNames.bind(styles);
