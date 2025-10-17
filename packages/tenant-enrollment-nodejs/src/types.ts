@@ -6,6 +6,7 @@ import {
   AssignRoleToUserInTenant,
 } from "@supertokens-plugins/tenants-nodejs";
 import { UserContext } from "supertokens-node/lib/build/types";
+import { NotAllowedToSignUpReason } from "../../../shared/tenants/src/types";
 
 export type SuperTokensPluginTenantEnrollmentPluginConfig = {
   emailDomainToTenantIdMap: Record<string, string>;
@@ -66,4 +67,5 @@ export type OverrideableTenantFunctionImplementation = {
   ) => Promise<void>;
   getUserIdsInTenantWithRole: GetUserIdsInTenantWithRole;
   isUserSigningUpToTenant: (tenantId: string, details: { email?: string; phoneNumber?: string }) => Promise<boolean>;
+  getMessageForNoSignUpReason: (reason: NotAllowedToSignUpReason) => string;
 };

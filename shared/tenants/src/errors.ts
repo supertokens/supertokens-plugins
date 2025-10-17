@@ -1,5 +1,7 @@
-export const NOT_ALLOWED_TO_SIGNUP_REASONS = {
-  INVITE_ONLY: "INVITE_ONLY",
-  EMAIL_DOMAIN_NOT_ALLOWED: "EMAIL_DOMAIN_NOT_ALLOWED",
-  IDP_NOT_ALLOWED: "IDP_NOT_ALLOWED",
+import { NotAllowedToSignUpReason } from './types';
+
+export const NOT_ALLOWED_TO_SIGNUP_REASON_MESSAGE: Record<NotAllowedToSignUpReason, string> = {
+  [NotAllowedToSignUpReason.INVITE_ONLY]: 'Tenant is invite only, cannot signup',
+  [NotAllowedToSignUpReason.EMAIL_DOMAIN_NOT_ALLOWED]: 'Email domain not allowed to signup to tenant',
+  [NotAllowedToSignUpReason.IDP_NOT_ALLOWED]: 'Identity Provider not allowed to signup to tenant',
 };

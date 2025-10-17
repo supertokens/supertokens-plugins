@@ -46,3 +46,9 @@ export type TenantCreationRequestMetadata = {
 export type FilterGlobalClaimValidators = (
   globalValidators: SessionClaimValidator[],
 ) => SessionClaimValidator[] | Promise<SessionClaimValidator[]>;
+
+export enum NotAllowedToSignUpReason {
+  INVITE_ONLY,
+  EMAIL_DOMAIN_NOT_ALLOWED,
+  IDP_NOT_ALLOWED,
+}

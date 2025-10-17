@@ -250,13 +250,13 @@ export const init = createPluginInitFunction<
                   input.tenantId,
                   "email" in input
                     ? {
-                        type: "email",
-                        email: input.email,
-                      }
+                      type: "email",
+                      email: input.email,
+                    }
                     : {
-                        type: "phoneNumber",
-                        phoneNumber: input.phoneNumber,
-                      },
+                      type: "phoneNumber",
+                      phoneNumber: input.phoneNumber,
+                    },
                 );
                 logDebugMessage("Reason: " + reason);
 
@@ -316,13 +316,13 @@ export const init = createPluginInitFunction<
                   input.tenantId,
                   "email" in input
                     ? {
-                        type: "email",
-                        email: input.email,
-                      }
+                      type: "email",
+                      email: input.email,
+                    }
                     : {
-                        type: "phoneNumber",
-                        phoneNumber: input.phoneNumber,
-                      },
+                      type: "phoneNumber",
+                      phoneNumber: input.phoneNumber,
+                    },
                 );
                 logDebugMessage("Reason: " + reason);
 
@@ -358,11 +358,11 @@ export const init = createPluginInitFunction<
                   input.tenantId,
                   deviceInfo.phoneNumber !== undefined
                     ? {
-                        phoneNumber: deviceInfo.phoneNumber!,
-                      }
+                      phoneNumber: deviceInfo.phoneNumber!,
+                    }
                     : {
-                        email: deviceInfo.email!,
-                      },
+                      email: deviceInfo.email!,
+                    },
                 );
 
                 // If this is a signup or its through phone number, we cannot
@@ -377,13 +377,13 @@ export const init = createPluginInitFunction<
                   input.tenantId,
                   "email" in deviceInfo
                     ? {
-                        type: "email",
-                        email: deviceInfo.email!,
-                      }
+                      type: "email",
+                      email: deviceInfo.email!,
+                    }
                     : {
-                        type: "phoneNumber",
-                        phoneNumber: deviceInfo.phoneNumber!,
-                      },
+                      type: "phoneNumber",
+                      phoneNumber: deviceInfo.phoneNumber!,
+                    },
                 );
                 logDebugMessage("Reason: " + reason);
 

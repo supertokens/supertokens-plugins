@@ -10,7 +10,6 @@ import {
 import { getApi } from "./api";
 import { PLUGIN_ID, API_PATH } from "./constants";
 import { enableDebugLogs, logDebugMessage } from "./logger";
-import { SignUpBlocked } from "./pages/blocked";
 import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
 import { defaultTranslationsTenantEnrollment } from "./translations";
 import {
@@ -64,76 +63,65 @@ export const init = createPluginInitFunction<
           functions: implementation,
         });
       },
-      routeHandlers: (appConfig: any, plugins: any, sdkVersion: any) => {
-        return {
-          status: "OK",
-          routeHandlers: [
-            {
-              path: "/signup-blocked",
-              handler: () => SignUpBlocked.call(null),
-            },
-          ],
-        };
-      },
       overrideMap: {
-        emailpassword: {
-          functions: (originalImplementation) => ({
-            ...originalImplementation,
-            signUp: async (input) => {
-              let signUpResponse;
-              implementation.withSignUpBlockedRedirect(async () => {
-                signUpResponse = await originalImplementation.signUp(input);
-              });
+        // emailpassword: {
+        //   functions: (originalImplementation) => ({
+        //     ...originalImplementation,
+        //     signUp: async (input) => {
+        //       let signUpResponse;
+        //       implementation.withSignUpBlockedRedirect(async () => {
+        //         signUpResponse = await originalImplementation.signUp(input);
+        //       });
 
-              return signUpResponse;
-            },
-          }),
-        },
-        webauthn: {
-          functions: (originalImplementation) => ({
-            ...originalImplementation,
-            getRegisterOptions: async (input) => {
-              let response;
-              implementation.withSignUpBlockedRedirect(async () => {
-                response = await originalImplementation.getRegisterOptions(input);
-              });
-              return response;
-            },
-          }),
-        },
-        passwordless: {
-          functions: (originalImplementation) => ({
-            ...originalImplementation,
-            createCode: async (input) => {
-              let createCodeResponse;
-              implementation.withSignUpBlockedRedirect(async () => {
-                createCodeResponse = await originalImplementation.createCode(input);
-              });
+        //       return signUpResponse;
+        //     },
+        //   }),
+        // },
+        // webauthn: {
+        //   functions: (originalImplementation) => ({
+        //     ...originalImplementation,
+        //     getRegisterOptions: async (input) => {
+        //       let response;
+        //       implementation.withSignUpBlockedRedirect(async () => {
+        //         response = await originalImplementation.getRegisterOptions(input);
+        //       });
+        //       return response;
+        //     },
+        //   }),
+        // },
+        // passwordless: {
+        //   functions: (originalImplementation) => ({
+        //     ...originalImplementation,
+        //     createCode: async (input) => {
+        //       let createCodeResponse;
+        //       implementation.withSignUpBlockedRedirect(async () => {
+        //         createCodeResponse = await originalImplementation.createCode(input);
+        //       });
 
-              return createCodeResponse;
-            },
-            consumeCode: async (input) => {
-              let consumeCodeResponse;
-              implementation.withSignUpBlockedRedirect(async () => {
-                consumeCodeResponse = await originalImplementation.consumeCode(input);
-              });
+        //       return createCodeResponse;
+        //     },
+        //     consumeCode: async (input) => {
+        //       let consumeCodeResponse;
+        //       implementation.withSignUpBlockedRedirect(async () => {
+        //         consumeCodeResponse = await originalImplementation.consumeCode(input);
+        //       });
 
-              return consumeCodeResponse;
-            },
-          }),
-        },
-        thirdparty: {
-          functions: (originalImplementation) => ({
-            ...originalImplementation,
-            signInAndUp: async (input) => {
-              let signInAndUpResponse;
-              implementation.withSignUpBlockedRedirect(async () => {
-                signInAndUpResponse = await originalImplementation.signInAndUp(input);
-              });
-              return signInAndUpResponse;
-            },
-          }),
-        },
+        //       return consumeCodeResponse;
+        //     },
+        //   }),
+        // },
+        // thirdparty: {
+        //   functions: (originalImplementation) => ({
+        //     ...originalImplementation,
+        //     signInAndUp: async (input) => {
+        //       let signInAndUpResponse;
+        //       implementation.withSignUpBlockedRedirect(async () => {
+        //         signInAndUpResponse = await originalImplementation.signInAndUp(input);
+        //       });
+        //       return signInAndUpResponse;
+        //     },
+        //   }),
+        // },
         multitenancy: {
           functions: (originalImplementation) => ({
             ...originalImplementation,

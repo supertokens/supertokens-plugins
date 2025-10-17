@@ -1,20 +1,24 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
-import { User, listUsersByAccountInfo } from "supertokens-node";
-import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantEnrollmentPluginConfig } from "./types";
+import { User, listUsersByAccountInfo } from 'supertokens-node';
+import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantEnrollmentPluginConfig } from './types';
 import {
   AssociateAllLoginMethodsOfUserWithTenant,
   AssignRoleToUserInTenant,
   SendPluginEmail,
-} from "@supertokens-plugins/tenants-nodejs";
-import { NOT_ALLOWED_TO_SIGNUP_REASONS, ROLES } from "@shared/tenants";
-import SuperTokens from "supertokens-node";
-import { UserContext } from "supertokens-node/lib/build/types";
+} from '@supertokens-plugins/tenants-nodejs';
+import { NOT_ALLOWED_TO_SIGNUP_REASON_MESSAGE, NotAllowedToSignUpReason, ROLES } from '@shared/tenants';
+import SuperTokens from 'supertokens-node';
+import { UserContext } from 'supertokens-node/lib/build/types';
 
 export const getOverrideableTenantFunctionImplementation = (
   config: SuperTokensPluginTenantEnrollmentPluginConfig,
 ): OverrideableTenantFunctionImplementation => {
   const implementation: OverrideableTenantFunctionImplementation = {
-    canUserJoinTenant: async (tenantId, userIdentificationDetail) => {
+    canUserJoinTenant: async function (
+      this: OverrideableTenantFunctionImplementation,
+      tenantId,
+      userIdentificationDetail,
+    ) {
       /**
        * Check if the user can join the tenant based on the email domain
        *
@@ -24,7 +28,7 @@ export const getOverrideableTenantFunctionImplementation = (
        */
 
       // Skip this for the public tenant
-      if (tenantId === "public") {
+      if (tenantId === 'public') {
         return {
           canJoin: true,
           reason: undefined,
@@ -33,26 +37,26 @@ export const getOverrideableTenantFunctionImplementation = (
 
       // Check if the tenant is invite only in which case we
       // can't allow the user to join
-      if (implementation.isTenantInviteOnly(tenantId)) {
+      if (this.isTenantInviteOnly(tenantId)) {
         return {
           canJoin: false,
-          reason: NOT_ALLOWED_TO_SIGNUP_REASONS.INVITE_ONLY,
+          reason: this.getMessageForNoSignUpReason(NotAllowedToSignUpReason.INVITE_ONLY),
         };
       }
 
       let canJoin = false;
       let reason = undefined;
-      if (userIdentificationDetail.type === "email") {
-        canJoin = implementation.isMatchingEmailDomain(tenantId, userIdentificationDetail.email);
+      if (userIdentificationDetail.type === 'email') {
+        canJoin = this.isMatchingEmailDomain(tenantId, userIdentificationDetail.email);
         if (!canJoin) {
-          reason = NOT_ALLOWED_TO_SIGNUP_REASONS.EMAIL_DOMAIN_NOT_ALLOWED;
+          reason = this.getMessageForNoSignUpReason(NotAllowedToSignUpReason.EMAIL_DOMAIN_NOT_ALLOWED);
         }
-      } else if (userIdentificationDetail.type === "thirdParty") {
-        canJoin = implementation.isApprovedIdPProvider(tenantId, userIdentificationDetail.thirdPartyId);
+      } else if (userIdentificationDetail.type === 'thirdParty') {
+        canJoin = this.isApprovedIdPProvider(tenantId, userIdentificationDetail.thirdPartyId);
         if (!canJoin) {
-          reason = NOT_ALLOWED_TO_SIGNUP_REASONS.IDP_NOT_ALLOWED;
+          reason = this.getMessageForNoSignUpReason(NotAllowedToSignUpReason.IDP_NOT_ALLOWED);
         }
-      } else if (userIdentificationDetail.type === "phoneNumber") {
+      } else if (userIdentificationDetail.type === 'phoneNumber') {
         // We don't really have a way to check anything for phones so we can
         // allow signup.
         return {
@@ -65,7 +69,8 @@ export const getOverrideableTenantFunctionImplementation = (
         reason,
       };
     },
-    handleTenantJoiningApproval: async (
+    handleTenantJoiningApproval: async function (
+      this: OverrideableTenantFunctionImplementation,
       user: User,
       tenantId: string,
       associateLoginMethodDef: AssociateAllLoginMethodsOfUserWithTenant,
@@ -73,7 +78,7 @@ export const getOverrideableTenantFunctionImplementation = (
       appUrl: string,
       userContext: UserContext,
       assignRoleToUserInTenant: AssignRoleToUserInTenant,
-    ) => {
+    ) {
       /**
        * Handle the tenant joining functionality for the user.
        *
@@ -87,7 +92,7 @@ export const getOverrideableTenantFunctionImplementation = (
        * @param associateLoginMethodDef - The function to associate the login methods of the user with the tenant
        */
       // Skip this for the public tenant
-      if (tenantId === "public") {
+      if (tenantId === 'public') {
         return {
           wasAddedToTenant: true,
           reason: undefined,
@@ -96,7 +101,7 @@ export const getOverrideableTenantFunctionImplementation = (
 
       // If the tenant doesn't require approval, add the user as a member
       // and return.
-      if (!implementation.doesTenantRequireApproval(tenantId)) {
+      if (!this.doesTenantRequireApproval(tenantId)) {
         await assignRoleToUserInTenant(tenantId, user.id, ROLES.TENANT_MEMBER);
         return {
           wasAddedToTenant: true,
@@ -109,7 +114,7 @@ export const getOverrideableTenantFunctionImplementation = (
 
       return {
         wasAddedToTenant: false,
-        reason: "REQUIRES_APPROVAL",
+        reason: 'REQUIRES_APPROVAL',
       };
     },
     isTenantInviteOnly: (tenantId) => {
@@ -118,11 +123,11 @@ export const getOverrideableTenantFunctionImplementation = (
     doesTenantRequireApproval: (tenantId) => {
       return config.requiresApprovalTenants?.includes(tenantId) ?? false;
     },
-    isApprovedIdPProvider: (thirdPartyId) => {
-      return thirdPartyId.startsWith("boxy-saml");
+    isApprovedIdPProvider: (tenantId, thirdPartyId) => {
+      return thirdPartyId.startsWith('boxy-saml');
     },
     isMatchingEmailDomain: (tenantId, email) => {
-      const emailDomain = email.split("@");
+      const emailDomain = email.split('@');
       if (emailDomain.length !== 2) {
         return false;
       }
@@ -130,7 +135,14 @@ export const getOverrideableTenantFunctionImplementation = (
       const parsedTenantId = config.emailDomainToTenantIdMap[emailDomain[1]!.toLowerCase()];
       return parsedTenantId === tenantId;
     },
-    sendTenantJoiningRequestEmail: async (tenantId, user, appUrl, sendEmail, userContext) => {
+    sendTenantJoiningRequestEmail: async function (
+      this: OverrideableTenantFunctionImplementation,
+      tenantId,
+      user,
+      appUrl,
+      sendEmail,
+      userContext,
+    ) {
       /**
        * Send an email to all the admins of the tenant
        *
@@ -138,7 +150,7 @@ export const getOverrideableTenantFunctionImplementation = (
        * @param user - The user who is requesting to join the tenant
        * @param sendEmail - The function to send the email
        */
-      const adminUsers = await implementation.getUserIdsInTenantWithRole(tenantId, ROLES.TENANT_ADMIN);
+      const adminUsers = await this.getUserIdsInTenantWithRole(tenantId, ROLES.TENANT_ADMIN);
 
       // For each of the users, we will need to find their email address.
       const adminEmails = await Promise.all(
@@ -156,7 +168,7 @@ export const getOverrideableTenantFunctionImplementation = (
           .map(async (email) => {
             await sendEmail(
               {
-                type: "TENANT_REQUEST_APPROVAL",
+                type: 'TENANT_REQUEST_APPROVAL',
                 email,
                 tenantId,
                 senderEmail: user.emails[0]!,
@@ -168,7 +180,7 @@ export const getOverrideableTenantFunctionImplementation = (
       );
     },
     getUserIdsInTenantWithRole: async (tenantId, role) => {
-      throw new Error("Not implemented");
+      throw new Error('Not implemented');
     },
     isUserSigningUpToTenant: async (tenantId, details) => {
       /**
@@ -177,6 +189,13 @@ export const getOverrideableTenantFunctionImplementation = (
        */
       const accountInfoResponse = await listUsersByAccountInfo(tenantId, details);
       return accountInfoResponse.length === 0;
+    },
+    getMessageForNoSignUpReason: (reason) => {
+      /**
+       * Return a proper message for the passed reason for not
+       * allowing signup.
+       */
+      return NOT_ALLOWED_TO_SIGNUP_REASON_MESSAGE[reason];
     },
   };
 
