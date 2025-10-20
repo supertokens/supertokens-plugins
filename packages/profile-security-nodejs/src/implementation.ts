@@ -40,9 +40,9 @@ export class Implementation {
 
   getConfigForClient = async function (
     this: Implementation,
-    // props needed for overriding
+    // input needed for overriding
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    props: { userContext: any; session: SessionContainerInterface },
+    input: { userContext: any; session: SessionContainerInterface },
   ): Promise<
     { status: "OK"; config: SuperTokensPluginProfileSecurityNormalisedConfig } | { status: "ERROR"; message: string }
   > {
@@ -107,11 +107,11 @@ export class Implementation {
         message: "Could not link the new password to the user. Please contact support.",
       };
     }
+    // handled all the error cases in the previous if statements, so this should not happen
+    // it is here just to make sure that if new error cases are added, they will be handled
     if (signUpResult.status !== "OK") {
-      return {
-        status: "ERROR",
-        message: "Password setting failed. Please contact support.",
-      };
+      logDebugMessage(`Should not have come here. Could not sign up because of: ${JSON.stringify(signUpResult)}`);
+      return { status: "ERROR", message: "Password setting failed. Please contact support." };
     }
 
     return { status: "OK" };
@@ -261,7 +261,7 @@ export class Implementation {
       userId,
       factorId,
       userContext,
-    }: { userId: string; factorId?: string; session: SessionContainerInterface; userContext: any },
+    }: { userId: string; factorId: string; session: SessionContainerInterface; userContext: any },
   ): Promise<{ status: "OK" } | { status: "ERROR"; message: string }> {
     const user = await getUser(userId, userContext);
     if (!user) {
@@ -269,11 +269,9 @@ export class Implementation {
     }
 
     const requiredFactorIds = await MultiFactorAuth.getRequiredSecondaryFactorsForUser(userId, userContext);
-    for await (const factorId of requiredFactorIds) {
+    if (requiredFactorIds.includes(factorId)) {
       await MultiFactorAuth.removeFromRequiredSecondaryFactorsForUser(userId, factorId, userContext);
-    }
-
-    if (factorId) {
+    } else {
       await MultiFactorAuth.addToRequiredSecondaryFactorsForUser(userId, factorId, userContext);
     }
 
@@ -302,7 +300,6 @@ export class Implementation {
     return { status: "OK", loginMethod: emailOtpLoginMethods[0]! };
   };
 
-  // todo email validation?
   changeOtpEmailForUser = async function (
     this: Implementation,
     {
@@ -317,19 +314,6 @@ export class Implementation {
       return { status: "ERROR", message: "User not found" };
     }
 
-    const emailOtpLoginMethods = user.loginMethods.filter((lm) => lm.recipeId === "passwordless" && lm.email);
-    if (emailOtpLoginMethods.length === 0) {
-      return {
-        status: "ERROR",
-        message: "User has no email OTP login method",
-      };
-    }
-    if (emailOtpLoginMethods.length > 1) {
-      return {
-        status: "ERROR",
-        message: "User has multiple email OTP login methods",
-      };
-    }
     const loginMethodSelectResult = await this.selectLoginMethodForOtpEmailChange({ user, session, userContext });
     if (loginMethodSelectResult.status !== "OK") {
       return loginMethodSelectResult;
@@ -528,7 +512,7 @@ export class Implementation {
     };
   };
 
-  renameOtpTotpDeviceForUser = async function (
+  renameTotpDeviceForUser = async function (
     this: Implementation,
     {
       userId,

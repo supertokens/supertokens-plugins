@@ -161,6 +161,10 @@ export const init = createPluginInitFunction<
 
                 const { factorId } = await req.getJSONBody();
 
+                if (!factorId) {
+                  return { status: "ERROR", message: "The factorId parameter is required" };
+                }
+
                 return implementation.toggleSingleRequiredMfaFactorForUser({
                   userId,
                   factorId,
@@ -271,7 +275,7 @@ export const init = createPluginInitFunction<
 
                 const { name, newName } = await req.getJSONBody();
 
-                return implementation.renameOtpTotpDeviceForUser({
+                return implementation.renameTotpDeviceForUser({
                   userId,
                   name,
                   newName,

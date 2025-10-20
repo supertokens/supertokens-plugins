@@ -1,4 +1,4 @@
-import { Button, Tag, ToggleInput, usePrettyAction, useToast } from "@shared/ui";
+import { Button, ToggleInput, usePrettyAction } from "@shared/ui";
 import classNames from "classnames/bind";
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -44,13 +44,12 @@ export const MfaSection = ({
       id: string;
       name: string;
       description: string;
-      setup: boolean;
-      required: boolean;
+      isSetup: boolean;
+      isRequired: boolean;
     }[]
   >([]);
 
   const { api, t } = usePluginContext();
-  const { addToast } = useToast();
 
   const loadMfaInfo = usePrettyAction(
     async () => {
@@ -68,19 +67,17 @@ export const MfaSection = ({
         claim: MultiFactorAuthClaim,
       });
 
-      const secondaryFactors = getSecondaryFactors({})
-        .filter(
-          (factor) =>
-            mfaInfo.factors.alreadySetup.includes(factor.id) || mfaInfo.factors.allowedToSetup.includes(factor.id),
-        )
-        .map((factor) => ({
-          id: factor.id,
-          name: factor.name,
-          description: factor.description,
-          // make sure that the factor is already setup and the claim is set so we don't trigger a redirect to the factor login screen
-          setup: mfaInfo.factors.alreadySetup.includes(factor.id) && Boolean(mfaClaimValue?.c[factor.id]),
-          required: res.requiredSecondaryFactors.includes(factor.id),
-        }));
+      const rawSecondaryFactors = getSecondaryFactors({}).filter(
+        (factor) =>
+          mfaInfo.factors.alreadySetup.includes(factor.id) || mfaInfo.factors.allowedToSetup.includes(factor.id),
+      );
+      const secondaryFactors = rawSecondaryFactors.map((factor) => ({
+        id: factor.id,
+        name: factor.name,
+        description: factor.description,
+        isSetup: mfaInfo.factors.alreadySetup.includes(factor.id) && Boolean(mfaClaimValue?.c[factor.id]),
+        isRequired: res.requiredSecondaryFactors.includes(factor.id),
+      }));
       setSecondaryFactors(secondaryFactors);
 
       return {
@@ -96,15 +93,13 @@ export const MfaSection = ({
 
   const toggleSecondaryFactor = usePrettyAction(
     async (factorId: string) => {
-      const required = secondaryFactors.find((f) => f.id === factorId)?.required;
-      const payload = required ? undefined : factorId;
-      const res = await api.setRequiredSecondaryFactor(payload);
+      const res = await api.setRequiredSecondaryFactor(factorId);
 
       if (res.status !== "OK") {
         throw new Error(res.message);
       }
     },
-    [secondaryFactors, addToast],
+    [],
     {
       errorMessage: t("PL_SEC_MFA_ERROR_TOGGLE_SECONDARY_FACTOR"),
       successMessage: t("PL_SEC_MFA_SUCCESS_TOGGLE_SECONDARY_FACTOR"),
@@ -130,7 +125,7 @@ export const MfaSection = ({
       let type: "config" | "setup";
       if (factorBeingSetup === factor.id) {
         type = "setup";
-      } else if (!factorBeingSetup && factor.required && factor.setup) {
+      } else if (!factorBeingSetup && factor.isRequired && factor.isSetup) {
         type = "config";
       } else {
         return null;
@@ -173,10 +168,10 @@ export const MfaSection = ({
             </div>
 
             <div className={cx("supertokens-plugin-profile-security-second-factor-method-header-actions")}>
-              {factor.setup && (
+              {factor.isSetup && (
                 <ToggleInput
                   className={cx("supertokens-plugin-profile-security-method-action")}
-                  value={factor.required}
+                  value={factor.isRequired}
                   id={`required-${factor.id}`}
                   label=""
                   placeholder=""
@@ -185,7 +180,7 @@ export const MfaSection = ({
                 />
               )}
 
-              {!factor.setup && factorBeingSetup !== factor.id && (
+              {!factor.isSetup && factorBeingSetup !== factor.id && (
                 <Button
                   appearance="filled"
                   variant="brand"
@@ -196,7 +191,7 @@ export const MfaSection = ({
                 </Button>
               )}
 
-              {!factor.setup && factorBeingSetup === factor.id && (
+              {!factor.isSetup && factorBeingSetup === factor.id && (
                 <Button
                   appearance="plain"
                   size="small"
