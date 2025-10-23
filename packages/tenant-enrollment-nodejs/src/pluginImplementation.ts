@@ -150,7 +150,8 @@ export const getOverrideableTenantFunctionImplementation = (
       );
 
       // Send emails to all tenant admins using Promise.all
-      await Promise.all(
+      // NOTE: No need to await for all the emails to be sent
+      Promise.all(
         adminEmails
           .filter((email) => email !== undefined)
           .map(async (email) => {
