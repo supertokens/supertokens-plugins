@@ -8,10 +8,10 @@ export class DefaultPluginEmailService implements EmailDeliveryInterface<PluginE
   // Public method to generate email content - can be used in overrides
   generateEmailContent(input: PluginEmailDeliveryInput) {
     switch (input.type) {
-      case "TENANT_REQUEST_APPROVAL":
-        return {
-          subject: `New request to join ${input.tenantId}!`,
-          html: `
+    case "TENANT_REQUEST_APPROVAL":
+      return {
+        subject: `New request to join ${input.tenantId}!`,
+        html: `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
               <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px; text-align: center;">
                 <h1 style="color: white; margin: 0;">Someone wants to join ${input.tenantId}.</h1>
@@ -23,30 +23,30 @@ export class DefaultPluginEmailService implements EmailDeliveryInterface<PluginE
                   Open Requests
                 </a>
                 ${
-                  input.customData?.customMessage
-                    ? `
+  input.customData?.customMessage
+    ? `
                 <div style="margin-top: 20px; padding: 15px; background: #e3f2fd; border-left: 4px solid #2196F3;">
                   <p style="margin: 0; font-style: italic;">"${input.customData.customMessage}"</p>
                 </div>
                 `
-                    : ""
-                }
+    : ""
+}
               </div>
             </div>
           `,
-          text: `
+        text: `
             ${input.senderEmail} has requested to join ${input.tenantId}
             
             Open Requests: ${input.appUrl}/user/tenants
             
             ${input.customData?.customMessage ? `Message: "${input.customData.customMessage}"` : ""}            
           `,
-        };
+      };
 
-      case "TENANT_CREATE_APPROVAL":
-        return {
-          subject: "New request to create tenant",
-          html: `
+    case "TENANT_CREATE_APPROVAL":
+      return {
+        subject: "New request to create tenant",
+        html: `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
               <div style="background: #2196F3; padding: 30px; text-align: center;">
                 <h1 style="color: white; margin: 0;">New Notification</h1>
@@ -60,15 +60,15 @@ export class DefaultPluginEmailService implements EmailDeliveryInterface<PluginE
               </div>
             </div>
           `,
-          text: `
+        text: `
             ${input.creatorEmail} has requested to create a new tenant ${input.tenantId}
             
             Open Requests: ${input.appUrl}/user/tenants
           `,
-        };
+      };
 
-      default:
-        throw new Error("Should never come here");
+    default:
+      throw new Error("Should never come here");
     }
   }
 
