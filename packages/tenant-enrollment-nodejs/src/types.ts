@@ -7,6 +7,7 @@ import {
 } from "@supertokens-plugins/tenants-nodejs";
 import { UserContext } from "supertokens-node/lib/build/types";
 import { NotAllowedToSignUpReason } from "../../../shared/tenants/src/types";
+import { AccountInfoInput } from "supertokens-node/recipe/accountlinking/types";
 
 export type SuperTokensPluginTenantEnrollmentPluginConfig = {
   emailDomainToTenantIdMap: Record<string, string>;
@@ -58,6 +59,7 @@ export type OverrideableTenantFunctionImplementation = {
   doesTenantRequireApproval: (tenantId: string) => boolean;
   isApprovedIdPProvider: (tenantId: string, thirdPartyId: string) => boolean;
   isMatchingEmailDomain: (tenantId: string, email: string) => boolean;
+  isPhoneNumberAllowed: (tenantId: string, phoneNumber: string) => boolean;
   sendTenantJoiningRequestEmail: (
     tenantId: string,
     user: User,
@@ -66,6 +68,6 @@ export type OverrideableTenantFunctionImplementation = {
     userContext: UserContext,
   ) => Promise<void>;
   getUserIdsInTenantWithRole: GetUserIdsInTenantWithRole;
-  isUserSigningUpToTenant: (tenantId: string, details: { email?: string; phoneNumber?: string }) => Promise<boolean>;
+  isUserSigningUpToTenant: (tenantId: string, details: AccountInfoInput) => Promise<boolean>;
   getMessageForNoSignUpReason: (reason: NotAllowedToSignUpReason) => string;
 };

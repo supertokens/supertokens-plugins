@@ -56,7 +56,7 @@ export const getOverrideableTenantFunctionImplementation = (
         // We don't really have a way to check anything for phones so we can
         // allow signup.
         return {
-          canJoin: true,
+          canJoin: this.isPhoneNumberAllowed(tenantId, userIdentificationDetail.phoneNumber),
         };
       }
 
@@ -127,7 +127,8 @@ export const getOverrideableTenantFunctionImplementation = (
         return false;
       }
 
-      const parsedTenantId = config.emailDomainToTenantIdMap[emailDomain[1]!.toLowerCase()];
+      const parsedTenantId =
+        config.emailDomainToTenantIdMap[emailDomain[1]!.toLowerCase()] ?? emailDomain[1]!.toLowerCase();
       return parsedTenantId === tenantId;
     },
     sendTenantJoiningRequestEmail: async function (tenantId, user, appUrl, sendEmail, userContext) {
@@ -169,6 +170,14 @@ export const getOverrideableTenantFunctionImplementation = (
       );
     },
     getUserIdsInTenantWithRole: async function (tenantId, role) {
+      /**
+       * The definition of this function comes from the tenants-nodejs plugin.
+       *
+       * This function is initiated on plugin init with that definition.
+       *
+       * However, if an user wants to not use that plugin and instead
+       * define this themselves, that is a possibility.
+       */
       throw new Error("Not implemented");
     },
     isUserSigningUpToTenant: async function (tenantId, details) {
@@ -185,6 +194,16 @@ export const getOverrideableTenantFunctionImplementation = (
        * allowing signup.
        */
       return NOT_ALLOWED_TO_SIGNUP_REASON_MESSAGE[reason];
+    },
+    isPhoneNumberAllowed: function (tenantId, phoneNumber) {
+      /**
+       * Check if the phone number is allowed to join the tenant
+       *
+       * @param tenantId - The id of the tenant to check if the phone number is allowed to join
+       * @param phoneNumber - The phone number to check if it is allowed to join the tenant
+       * @returns true if the phone number is allowed to join the tenant, false otherwise
+       */
+      return true;
     },
   };
 

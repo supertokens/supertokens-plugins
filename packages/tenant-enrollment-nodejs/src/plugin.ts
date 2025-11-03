@@ -182,13 +182,12 @@ export const init = createPluginInitFunction<
               signInUp: async (input) => {
                 // Check if the user is signing up (i.e doesn't exist already)
                 // and only then apply the checks. Otherwise, we can skip.
-                const accountInfoResponse = await listUsersByAccountInfo(input.tenantId, {
+                const isSignUp = await implementation.isUserSigningUpToTenant(input.tenantId, {
                   thirdParty: {
                     id: input.thirdPartyId,
                     userId: input.thirdPartyUserId,
                   },
                 });
-                const isSignUp = accountInfoResponse.length === 0;
 
                 if (!isSignUp) {
                   return originalImplementation.signInUp(input);
