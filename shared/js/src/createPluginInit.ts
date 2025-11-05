@@ -25,27 +25,39 @@ export const createPluginInitFunction = <
   PluginConfig extends Record<string, any> | undefined,
   PluginImplementation extends ImplType<PluginImplementation> = {},
   NormalisedPublicConfig = PluginConfig,
+  PluginContextType = {},
 >(
-  init: (config: NormalisedPublicConfig, implementation: PluginImplementation) => SupertokensPlugin,
-  getImplementation?: PluginImplementation | ((config: NormalisedPublicConfig) => PluginImplementation),
-  getNormalisedConfig: (config: PluginConfig) => NormalisedPublicConfig = (config) =>
-    config as unknown as NormalisedPublicConfig,
+  pluginBuilder: (
+    config: NormalisedPublicConfig,
+    implementation: PluginImplementation,
+    pluginContext: Partial<PluginContextType>,
+  ) => SupertokensPlugin,
+  getImplementation?:
+    | PluginImplementation
+    | ((config: NormalisedPublicConfig, pluginContext: Partial<PluginContextType>) => PluginImplementation),
+  getNormalisedConfig: (config: PluginConfig, pluginContext: Partial<PluginContextType>) => NormalisedPublicConfig = (
+    config,
+  ) => config as unknown as NormalisedPublicConfig,
 ): InitFunction<PluginConfig, OverridableFunctions<PluginImplementation>, SupertokensPlugin> => {
-  const getNormalizedImplementation: (config: NormalisedPublicConfig) => PluginImplementation =
+  const getNormalizedImplementation: (
+    config: NormalisedPublicConfig,
+    pluginContext: Partial<PluginContextType>,
+  ) => PluginImplementation =
     typeof getImplementation === "function"
       ? getImplementation
-      : (_config: NormalisedPublicConfig) => (getImplementation as PluginImplementation) || {};
+      : () => (getImplementation as PluginImplementation) || {};
 
   // @ts-ignore
   return (inputConfig: Parameters<InitFunction<PluginConfig, PluginImplementation, SupertokensPlugin>>[0]) => {
-    const config = getNormalisedConfig((inputConfig || {}) as PluginConfig);
-    const baseImplementation = getNormalizedImplementation(config);
+    const pluginContext: Partial<PluginContextType> = {};
+    const config = getNormalisedConfig((inputConfig || {}) as PluginConfig, pluginContext);
+    const baseImplementation = getNormalizedImplementation(config, pluginContext);
     const overrideBuilder = new OverrideableBuilder(baseImplementation);
     if (inputConfig?.override) {
       overrideBuilder.override(inputConfig.override);
     }
     const actualImplementation = overrideBuilder.build();
 
-    return init(config, actualImplementation);
+    return pluginBuilder(config, actualImplementation, pluginContext);
   };
 };
