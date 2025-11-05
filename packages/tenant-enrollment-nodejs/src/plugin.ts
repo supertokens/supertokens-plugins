@@ -15,10 +15,11 @@ import {
   SendPluginEmail,
   GetAppUrl,
   GetUserIdsInTenantWithRole,
-  init as baseTenantsPluginInit
+  init as baseTenantsPluginInit,
 } from "@supertokens-plugins/tenants-nodejs";
 import { NormalisedAppinfo } from "supertokens-node/types";
 import { enableDebugLogs } from "./logger";
+import { listCodesByPreAuthSessionId } from "supertokens-node/recipe/passwordless";
 
 export const init = createPluginInitFunction<
   SuperTokensPlugin,
@@ -108,45 +109,24 @@ export const init = createPluginInitFunction<
       },
       overrideMap: {
         emailpassword: {
-          functions: (originalImplementation) => {
-            return {
-              ...originalImplementation,
-              signUp: async (input) => {
-                const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, {
-                  type: "email",
-                  email: input.email,
-                });
-                logDebugMessage("Reason: " + reason);
-                if (!canJoin) {
-                  return {
-                    // Use the `EMAIL_ALREADY_EXISTS_ERROR` since that is returned
-                    // directly without modification from the `signUpPOST` method.
-                    status: "EMAIL_ALREADY_EXISTS_ERROR",
-                    reason,
-                  };
-                }
-
-                return originalImplementation.signUp(input);
-              },
-            };
-          },
           apis: (originalImplementation) => {
             return {
               ...originalImplementation,
               signUpPOST: async (input) => {
-                const response = await originalImplementation.signUpPOST!(input);
-
-                logDebugMessage(`Got response status for signup: ${response.status}`);
-
-                // If the status is `EMAIL_ALREADY_EXISTS_ERROR`, we will have to pick that
-                // up and return a GENERAL_ERROR instead to make the error passed along to
-                // the FE
-                if (response.status === "EMAIL_ALREADY_EXISTS_ERROR") {
+                const emailAsUnknown = input.formFields.filter((f) => f.id === "email")[0]?.value as string;
+                const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, {
+                  type: "email",
+                  email: emailAsUnknown,
+                });
+                logDebugMessage("Reason: " + reason);
+                if (!canJoin) {
                   return {
                     status: "GENERAL_ERROR",
-                    message: (response as any).reason,
+                    message: reason ?? "No reason provided",
                   };
                 }
+
+                const response = await originalImplementation.signUpPOST!(input);
 
                 if (response.status !== "OK") {
                   return response;
@@ -180,51 +160,51 @@ export const init = createPluginInitFunction<
             return {
               ...originalImplementation,
               signInUpPOST: async (input) => {
-                const response = await originalImplementation.signInUpPOST!(input);
-                // If the status is `SIGN_IN_UP_NOT_ALLOWED`, we will have to pick that
-                // up and return a GENERAL_ERROR instead to make the error passed along to
-                // the FE
-                if (response.status === "SIGN_IN_UP_NOT_ALLOWED") {
-                  return {
-                    status: "GENERAL_ERROR",
-                    message: (response as any).reason,
-                  };
+                const { provider, userContext } = input;
+                let oAuthTokensToUse = {};
+                if ("redirectURIInfo" in input && input.redirectURIInfo !== undefined) {
+                  oAuthTokensToUse = await provider.exchangeAuthCodeForOAuthTokens({
+                    redirectURIInfo: input.redirectURIInfo,
+                    userContext,
+                  });
+                } else if ("oAuthTokens" in input && input.oAuthTokens !== undefined) {
+                  oAuthTokensToUse = input.oAuthTokens;
+                } else {
+                  throw Error("should never come here");
                 }
+                const userInfo = await provider.getUserInfo({ oAuthTokens: oAuthTokensToUse, userContext });
 
-                return response;
-              },
-            };
-          },
-          functions: (originalImplementation) => {
-            return {
-              ...originalImplementation,
-              signInUp: async (input) => {
                 // Check if the user is signing up (i.e doesn't exist already)
                 // and only then apply the checks. Otherwise, we can skip.
-                const isSignUp = await implementation.isUserSigningUpToTenant(input.tenantId, {
-                  thirdParty: {
-                    id: input.thirdPartyId,
-                    userId: input.thirdPartyUserId,
+                const isSignUp = await implementation.isUserSigningUpToTenant(
+                  input.tenantId,
+                  {
+                    thirdParty: {
+                      id: provider.id,
+                      userId: userInfo.thirdPartyUserId,
+                    },
                   },
-                }, "thirdparty");
+                  "thirdparty",
+                );
 
                 if (!isSignUp) {
-                  return originalImplementation.signInUp(input);
+                  return originalImplementation.signInUpPOST!(input);
                 }
 
                 const { canJoin, reason } = await implementation.canUserJoinTenant(input.tenantId, {
                   type: "thirdParty",
-                  thirdPartyId: input.thirdPartyId,
+                  thirdPartyId: userInfo.thirdPartyUserId,
                 });
                 logDebugMessage("Reason: " + reason);
                 if (!canJoin) {
                   return {
-                    status: "SIGN_IN_UP_NOT_ALLOWED",
-                    reason,
-                  } as any;
+                    status: "GENERAL_ERROR",
+                    message: reason ?? "No reason provided",
+                  };
                 }
 
-                const response = await originalImplementation.signInUp(input);
+                const response = await originalImplementation.signInUpPOST!(input);
+
                 if (response.status !== "OK") {
                   return response;
                 }
@@ -238,12 +218,15 @@ export const init = createPluginInitFunction<
                     getAppUrlDef(appInfo, undefined, input.userContext),
                     input.userContext,
                     assignRoleToUserInTenantDef,
-                    getUserIdsInTenantWithRoleDef
+                    getUserIdsInTenantWithRoleDef,
                   );
+                logDebugMessage(`wasAddedToTenant: ${wasAddedToTenant}`);
+                logDebugMessage(`tenantJoiningReason: ${tenantJoiningReason}`);
+
                 return {
                   ...response,
                   wasAddedToTenant,
-                  reason: tenantJoiningReason,
+                  tenantJoiningReason,
                 };
               },
             };
@@ -256,10 +239,14 @@ export const init = createPluginInitFunction<
               createCodePOST: async (input) => {
                 // If this is a signup, we need to check if the user
                 // can signup to the tenant.
-                const isSignUp = implementation.isUserSigningUpToTenant(input.tenantId, {
-                  email: "email" in input ? input.email : undefined,
-                  phoneNumber: "phoneNumber" in input ? input.phoneNumber : undefined,
-                }, "passwordless");
+                const isSignUp = implementation.isUserSigningUpToTenant(
+                  input.tenantId,
+                  {
+                    email: "email" in input ? input.email : undefined,
+                    phoneNumber: "phoneNumber" in input ? input.phoneNumber : undefined,
+                  },
+                  "passwordless",
+                );
 
                 if (!isSignUp) {
                   return originalImplementation.createCodePOST!(input);
@@ -277,89 +264,22 @@ export const init = createPluginInitFunction<
                       phoneNumber: input.phoneNumber,
                     },
                 );
-                logDebugMessage("Reason: " + reason);
 
                 if (!canJoin) {
                   return {
                     status: "GENERAL_ERROR",
-                    message: reason,
+                    message: reason ?? "No reason provided",
                   } as any;
                 }
 
                 return await originalImplementation.createCodePOST!(input);
               },
               consumeCodePOST: async (input) => {
-                const response = await originalImplementation.consumeCodePOST!(input);
-                if (response.status === "RESTART_FLOW_ERROR") {
-                  // If reason is defined in response, return as GENERAL_ERROR
-                  // instead with the error.
-                  const reason = (response as any).reason;
-                  if (reason === undefined) {
-                    return response;
-                  } else {
-                    return {
-                      status: "GENERAL_ERROR",
-                      message: reason,
-                    };
-                  }
-                }
-
-                return response;
-              },
-            };
-          },
-          functions: (originalImplementation) => {
-            return {
-              ...originalImplementation,
-              createCode: async (input) => {
-                // NOTE: We are duplicating the code from createCodePOST
-                // here because we want to ensure that the same checks
-                // are applied to the API as well as the function.
-                //
-                // Ideally, we should check here and return a message to
-                // createCodePOST but that is not possible since `createCodePOST`
-                // modifies the response and adds a custom reason if it's a
-                // non OK status so we won't be able to pass the actual reason
-                // back to the FE.
-
-                const isSignUp = implementation.isUserSigningUpToTenant(input.tenantId, {
-                  email: "email" in input ? input.email : undefined,
-                  phoneNumber: "phoneNumber" in input ? input.phoneNumber : undefined,
-                }, "passwordless");
-
-                if (!isSignUp) {
-                  return originalImplementation.createCode!(input);
-                }
-
-                const { canJoin, reason } = await implementation.canUserJoinTenant(
-                  input.tenantId,
-                  "email" in input
-                    ? {
-                      type: "email",
-                      email: input.email,
-                    }
-                    : {
-                      type: "phoneNumber",
-                      phoneNumber: input.phoneNumber,
-                    },
-                );
-                logDebugMessage("Reason: " + reason);
-
-                if (!canJoin) {
-                  return {
-                    status: "GENERAL_ERROR",
-                    message: reason,
-                  } as any;
-                }
-
-                return await originalImplementation.createCode!(input);
-              },
-              consumeCode: async (input) => {
                 // If this is a signup, we need to check if the user
                 // can signup to the tenant.
                 // We will need to fetch the details of the user from the
                 // deviceId.
-                const deviceInfo = await originalImplementation.listCodesByPreAuthSessionId({
+                const deviceInfo = await listCodesByPreAuthSessionId({
                   tenantId: input.tenantId,
                   preAuthSessionId: input.preAuthSessionId,
                   userContext: input.userContext,
@@ -385,10 +305,10 @@ export const init = createPluginInitFunction<
                   "passwordless",
                 );
 
-                // If this is a signup or its through phone number, we cannot
-                // restrict it so we will let it go through.
-                if (!isSignUp || deviceInfo.phoneNumber !== undefined) {
-                  return originalImplementation.consumeCode(input);
+                // TODO: Handle case for phone number
+
+                if (!isSignUp) {
+                  return originalImplementation.consumeCodePOST!(input);
                 }
 
                 // Since this is a signup, we need to check if the user
@@ -409,13 +329,13 @@ export const init = createPluginInitFunction<
 
                 if (!canJoin) {
                   return {
-                    status: "RESTART_FLOW_ERROR",
-                    reason,
-                  } as any;
+                    status: "GENERAL_ERROR",
+                    message: reason ?? "No reason provided",
+                  };
                 }
 
-                const response = await originalImplementation.consumeCode(input);
-
+                // If they can join, call original implementation with it.
+                const response = await originalImplementation.consumeCodePOST!(input);
                 if (response.status !== "OK") {
                   return response;
                 }
@@ -444,33 +364,24 @@ export const init = createPluginInitFunction<
           },
         },
         webauthn: {
-          functions: (originalImplementation) => ({
+          apis: (originalImplementation) => ({
             ...originalImplementation,
-            registerOptions: async (input) => {
+            registerOptionsPOST: async (input) => {
               let userEmail: string | undefined;
               if ("email" in input) {
-                // User's email is provided so we can check
-                // if they are trying to signup in which case
-                // we will block this accordingly.
-                const isSignUp = await implementation.isUserSigningUpToTenant(input.tenantId, {
-                  email: input.email,
-                }, "webauthn");
-                if (!isSignUp) {
-                  // If the user is not signing up, we can continue the original
-                  // implementation
-                  return originalImplementation.registerOptions(input);
-                }
-
+                // If `email` is in the input, this means the user is
+                // signing-up
                 userEmail = input.email;
               } else {
                 // For the recovery case, continue with normal flow
-                return originalImplementation.registerOptions(input);
+                return originalImplementation.registerOptionsPOST!(input);
               }
 
               if (userEmail === undefined) {
                 // Since the email is undefined, we cannot do anything, return
                 // original implementation.
-                return originalImplementation.registerOptions(input);
+                // This will happen in the case of recovery.
+                return originalImplementation.registerOptionsPOST!(input);
               }
 
               // If execution reaches this point, it means the user is
@@ -484,15 +395,12 @@ export const init = createPluginInitFunction<
               if (!canJoin) {
                 return {
                   status: "GENERAL_ERROR",
-                  message: reason,
-                } as any;
+                  message: reason ?? "No reason provided",
+                };
               }
 
-              return originalImplementation.registerOptions(input);
+              return originalImplementation.registerOptionsPOST!(input);
             },
-          }),
-          apis: (originalImplementation) => ({
-            ...originalImplementation,
             signUpPOST: async (input) => {
               const response = await originalImplementation.signUpPOST!(input);
 
