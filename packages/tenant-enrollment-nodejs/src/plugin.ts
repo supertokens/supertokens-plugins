@@ -14,8 +14,9 @@ import {
   PLUGIN_ID as TENANTS_PLUGIN_ID,
   SendPluginEmail,
   GetAppUrl,
+  GetUserIdsInTenantWithRole,
+  init as baseTenantsPluginInit
 } from "@supertokens-plugins/tenants-nodejs";
-import { listUsersByAccountInfo } from "supertokens-node";
 import { NormalisedAppinfo } from "supertokens-node/types";
 import { enableDebugLogs } from "./logger";
 
@@ -28,12 +29,29 @@ export const init = createPluginInitFunction<
   (pluginConfig, implementation) => {
     let associateLoginMethodDef: AssociateAllLoginMethodsOfUserWithTenant;
     let assignRoleToUserInTenantDef: AssignRoleToUserInTenant;
+    let getUserIdsInTenantWithRoleDef: GetUserIdsInTenantWithRole;
+
     let sendEmail: SendPluginEmail;
     let appInfo: NormalisedAppinfo;
     let getAppUrlDef: GetAppUrl;
     return {
       id: PLUGIN_ID,
       compatibleSDKVersions: PLUGIN_SDK_VERSION,
+      dependencies: (config, pluginsAbove) => {
+        const baseTenantsPlugin: SuperTokensPlugin | undefined = pluginsAbove.find(
+          (plugin: any) => plugin.id === TENANTS_PLUGIN_ID,
+        );
+
+        if (baseTenantsPlugin) {
+          return { status: "OK", pluginsToAdd: [] };
+        }
+
+        logDebugMessage("Base tenants plugin not found. Registering it.");
+        return {
+          status: "OK",
+          pluginsToAdd: [baseTenantsPluginInit()],
+        };
+      },
       init: (appConfig, plugins) => {
         if (appConfig.debug) {
           enableDebugLogs();
@@ -41,7 +59,7 @@ export const init = createPluginInitFunction<
 
         const tenantsPlugin = plugins.find((plugin: any) => plugin.id === TENANTS_PLUGIN_ID);
         if (!tenantsPlugin) {
-          throw new Error("Base Tenants plugin not initialized, cannot continue.");
+          throw new Error("Should never come here since we are initializing base tenants if not found.");
         }
 
         if (!tenantsPlugin.exports) {
@@ -72,7 +90,7 @@ export const init = createPluginInitFunction<
         associateLoginMethodDef = associateAllLoginMethodsOfUserWithTenant;
         assignRoleToUserInTenantDef = assignRoleToUserInTenant;
         sendEmail = sendPluginEmail;
-        implementation.getUserIdsInTenantWithRole = getUserIdsInTenantWithRole;
+        getUserIdsInTenantWithRoleDef = getUserIdsInTenantWithRole;
 
         const getAppUrl = tenantsPlugin.exports?.getAppUrl;
         if (!getAppUrl) {
@@ -144,6 +162,7 @@ export const init = createPluginInitFunction<
                     getAppUrlDef(appInfo, undefined, input.userContext),
                     input.userContext,
                     assignRoleToUserInTenantDef,
+                    getUserIdsInTenantWithRoleDef,
                   );
                 logDebugMessage(`wasAdded: ${wasAddedToTenant}`);
                 logDebugMessage(`reason: ${tenantJoiningReason}`);
@@ -187,7 +206,7 @@ export const init = createPluginInitFunction<
                     id: input.thirdPartyId,
                     userId: input.thirdPartyUserId,
                   },
-                });
+                }, "thirdparty");
 
                 if (!isSignUp) {
                   return originalImplementation.signInUp(input);
@@ -219,6 +238,7 @@ export const init = createPluginInitFunction<
                     getAppUrlDef(appInfo, undefined, input.userContext),
                     input.userContext,
                     assignRoleToUserInTenantDef,
+                    getUserIdsInTenantWithRoleDef
                   );
                 return {
                   ...response,
@@ -239,7 +259,7 @@ export const init = createPluginInitFunction<
                 const isSignUp = implementation.isUserSigningUpToTenant(input.tenantId, {
                   email: "email" in input ? input.email : undefined,
                   phoneNumber: "phoneNumber" in input ? input.phoneNumber : undefined,
-                });
+                }, "passwordless");
 
                 if (!isSignUp) {
                   return originalImplementation.createCodePOST!(input);
@@ -249,13 +269,13 @@ export const init = createPluginInitFunction<
                   input.tenantId,
                   "email" in input
                     ? {
-                        type: "email",
-                        email: input.email,
-                      }
+                      type: "email",
+                      email: input.email,
+                    }
                     : {
-                        type: "phoneNumber",
-                        phoneNumber: input.phoneNumber,
-                      },
+                      type: "phoneNumber",
+                      phoneNumber: input.phoneNumber,
+                    },
                 );
                 logDebugMessage("Reason: " + reason);
 
@@ -305,7 +325,7 @@ export const init = createPluginInitFunction<
                 const isSignUp = implementation.isUserSigningUpToTenant(input.tenantId, {
                   email: "email" in input ? input.email : undefined,
                   phoneNumber: "phoneNumber" in input ? input.phoneNumber : undefined,
-                });
+                }, "passwordless");
 
                 if (!isSignUp) {
                   return originalImplementation.createCode!(input);
@@ -315,13 +335,13 @@ export const init = createPluginInitFunction<
                   input.tenantId,
                   "email" in input
                     ? {
-                        type: "email",
-                        email: input.email,
-                      }
+                      type: "email",
+                      email: input.email,
+                    }
                     : {
-                        type: "phoneNumber",
-                        phoneNumber: input.phoneNumber,
-                      },
+                      type: "phoneNumber",
+                      phoneNumber: input.phoneNumber,
+                    },
                 );
                 logDebugMessage("Reason: " + reason);
 
@@ -357,11 +377,12 @@ export const init = createPluginInitFunction<
                   input.tenantId,
                   deviceInfo.phoneNumber !== undefined
                     ? {
-                        phoneNumber: deviceInfo.phoneNumber!,
-                      }
+                      phoneNumber: deviceInfo.phoneNumber!,
+                    }
                     : {
-                        email: deviceInfo.email!,
-                      },
+                      email: deviceInfo.email!,
+                    },
+                  "passwordless",
                 );
 
                 // If this is a signup or its through phone number, we cannot
@@ -376,13 +397,13 @@ export const init = createPluginInitFunction<
                   input.tenantId,
                   "email" in deviceInfo
                     ? {
-                        type: "email",
-                        email: deviceInfo.email!,
-                      }
+                      type: "email",
+                      email: deviceInfo.email!,
+                    }
                     : {
-                        type: "phoneNumber",
-                        phoneNumber: deviceInfo.phoneNumber!,
-                      },
+                      type: "phoneNumber",
+                      phoneNumber: deviceInfo.phoneNumber!,
+                    },
                 );
                 logDebugMessage("Reason: " + reason);
 
@@ -409,6 +430,7 @@ export const init = createPluginInitFunction<
                     getAppUrlDef(appInfo, undefined, input.userContext),
                     input.userContext,
                     assignRoleToUserInTenantDef,
+                    getUserIdsInTenantWithRoleDef,
                   );
                 logDebugMessage(`wasAdded: ${wasAddedToTenant}`);
                 logDebugMessage(`reason: ${tenantJoiningReason}`);
@@ -432,7 +454,7 @@ export const init = createPluginInitFunction<
                 // we will block this accordingly.
                 const isSignUp = await implementation.isUserSigningUpToTenant(input.tenantId, {
                   email: input.email,
-                });
+                }, "webauthn");
                 if (!isSignUp) {
                   // If the user is not signing up, we can continue the original
                   // implementation
@@ -488,6 +510,7 @@ export const init = createPluginInitFunction<
                   getAppUrlDef(appInfo, undefined, input.userContext),
                   input.userContext,
                   assignRoleToUserInTenantDef,
+                  getUserIdsInTenantWithRoleDef,
                 );
               logDebugMessage(`wasAdded: ${wasAddedToTenant}`);
               logDebugMessage(`reason: ${tenantJoiningReason}`);
@@ -527,5 +550,6 @@ export const init = createPluginInitFunction<
     emailDomainToTenantIdMap: config.emailDomainToTenantIdMap,
     inviteOnlyTenants: config.inviteOnlyTenants ?? [],
     requiresApprovalTenants: config.requiresApprovalTenants ?? [],
+    allowSignUpToPublicTenant: config.allowSignUpToPublicTenant ?? true,
   }),
 );

@@ -56,6 +56,7 @@ SuperTokens.init({
         },
         inviteOnlyTenants: ['tenant-1'], // Optional
         requiresApprovalTenants: ['tenant-2'], // Optional
+        allowSignUpToPublicTenant: false, // Optional
       }),
     ],
   },
@@ -67,11 +68,12 @@ SuperTokens.init({
 
 ## Configuration Options
 
-| Option                     | Type                     | Required | Description                                                                  |
-| -------------------------- | ------------------------ | -------- | ---------------------------------------------------------------------------- |
-| `emailDomainToTenantIdMap` | `Record<string, string>` | Yes      | Maps email domains to tenant IDs for domain-based enrollment                 |
-| `inviteOnlyTenants`        | `string[]`               | No       | List of tenant IDs that only accept invited users or approved SAML providers |
-| `requiresApprovalTenants`  | `string[]`               | No       | List of tenant IDs where new signups require admin approval                  |
+| Option                      | Type                     | Required | Description                                                                  |
+| --------------------------- | ------------------------ | -------- | ---------------------------------------------------------------------------- |
+| `emailDomainToTenantIdMap`  | `Record<string, string>` | Yes      | Maps email domains to tenant IDs for domain-based enrollment                 |
+| `inviteOnlyTenants`         | `string[]`               | No       | List of tenant IDs that only accept invited users or approved SAML providers |
+| `requiresApprovalTenants`   | `string[]`               | No       | List of tenant IDs where new signups require admin approval                  |
+| `allowSignUpToPublicTenant` | `boolean`                | No       | Whether sign-up to `public` tenant is allowed or not. Defaults to allowed.   |
 
 ### Configuration Examples
 

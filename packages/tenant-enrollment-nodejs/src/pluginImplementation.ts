@@ -1,17 +1,21 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import { User, listUsersByAccountInfo } from "supertokens-node";
-import { OverrideableTenantFunctionImplementation, SuperTokensPluginTenantEnrollmentPluginConfig } from "./types";
+import {
+  OverrideableTenantFunctionImplementation,
+  SuperTokensPluginTenantEnrollmentPluginNormalisedConfig,
+} from "./types";
 import {
   AssociateAllLoginMethodsOfUserWithTenant,
   AssignRoleToUserInTenant,
   SendPluginEmail,
+  GetUserIdsInTenantWithRole,
 } from "@supertokens-plugins/tenants-nodejs";
 import { NOT_ALLOWED_TO_SIGNUP_REASON_MESSAGE, NotAllowedToSignUpReason, ROLES } from "@shared/tenants";
 import SuperTokens from "supertokens-node";
 import { UserContext } from "supertokens-node/lib/build/types";
 
 export const getOverrideableTenantFunctionImplementation = (
-  config: SuperTokensPluginTenantEnrollmentPluginConfig,
+  config: SuperTokensPluginTenantEnrollmentPluginNormalisedConfig,
 ): OverrideableTenantFunctionImplementation => {
   const implementation: OverrideableTenantFunctionImplementation = {
     canUserJoinTenant: async function (tenantId, userIdentificationDetail) {
@@ -24,7 +28,7 @@ export const getOverrideableTenantFunctionImplementation = (
        */
 
       // Skip this for the public tenant
-      if (tenantId === "public") {
+      if (config.allowSignUpToPublicTenant === true && tenantId === "public") {
         return {
           canJoin: true,
           reason: undefined,
@@ -73,6 +77,7 @@ export const getOverrideableTenantFunctionImplementation = (
       appUrl: string,
       userContext: UserContext,
       assignRoleToUserInTenant: AssignRoleToUserInTenant,
+      getUserIdsInTenantWithRole,
     ) {
       /**
        * Handle the tenant joining functionality for the user.
@@ -87,7 +92,7 @@ export const getOverrideableTenantFunctionImplementation = (
        * @param associateLoginMethodDef - The function to associate the login methods of the user with the tenant
        */
       // Skip this for the public tenant
-      if (tenantId === "public") {
+      if (config.allowSignUpToPublicTenant === true && tenantId === "public") {
         return {
           wasAddedToTenant: true,
           reason: undefined,
@@ -105,7 +110,7 @@ export const getOverrideableTenantFunctionImplementation = (
 
       // We don't need to do anything in particular except notifying
       // the tenant admins about the new user request being added.
-      await this.sendTenantJoiningRequestEmail(tenantId, user, appUrl, sendEmail, userContext);
+      await this.sendTenantJoiningRequestEmail(tenantId, user, appUrl, sendEmail, userContext, getUserIdsInTenantWithRole);
 
       return {
         wasAddedToTenant: false,
@@ -131,7 +136,14 @@ export const getOverrideableTenantFunctionImplementation = (
         config.emailDomainToTenantIdMap[emailDomain[1]!.toLowerCase()] ?? emailDomain[1]!.toLowerCase();
       return parsedTenantId === tenantId;
     },
-    sendTenantJoiningRequestEmail: async function (tenantId, user, appUrl, sendEmail, userContext) {
+    sendTenantJoiningRequestEmail: async function (
+      tenantId,
+      user,
+      appUrl,
+      sendEmail,
+      userContext,
+      getUserIdsInTenantWithRole,
+    ) {
       /**
        * Send an email to all the admins of the tenant
        *
@@ -139,7 +151,7 @@ export const getOverrideableTenantFunctionImplementation = (
        * @param user - The user who is requesting to join the tenant
        * @param sendEmail - The function to send the email
        */
-      const adminUsers = await this.getUserIdsInTenantWithRole(tenantId, ROLES.TENANT_ADMIN);
+      const adminUsers = await getUserIdsInTenantWithRole(tenantId, ROLES.TENANT_ADMIN);
 
       // For each of the users, we will need to find their email address.
       const adminEmails = await Promise.all(
@@ -169,24 +181,30 @@ export const getOverrideableTenantFunctionImplementation = (
           }),
       );
     },
-    getUserIdsInTenantWithRole: async function (tenantId, role) {
-      /**
-       * The definition of this function comes from the tenants-nodejs plugin.
-       *
-       * This function is initiated on plugin init with that definition.
-       *
-       * However, if an user wants to not use that plugin and instead
-       * define this themselves, that is a possibility.
-       */
-      throw new Error("Not implemented");
-    },
-    isUserSigningUpToTenant: async function (tenantId, details) {
+    isUserSigningUpToTenant: async function (tenantId, details, recipeId) {
       /**
        * List the users by account info and filter using the passed
        * tenantId and email.
        */
       const accountInfoResponse = await listUsersByAccountInfo(tenantId, details);
-      return accountInfoResponse.length === 0;
+
+      // Check if the user with the same details exist in the recipe.
+      const isAccountPresent = accountInfoResponse.find((user) => {
+        user.loginMethods.find(lm => {
+          // Check if recipe ID matches.
+          if (lm.recipeId !== recipeId) return false;
+
+          // Check email/phoneNumber/third-party match based on the passed details
+          if ("email" in details) return lm.hasSameEmailAs(details.email);
+          else if ("phoneNumber" in details) return lm.hasSamePhoneNumberAs(details.phoneNumber);
+          else if ("thirdParty" in details) return lm.hasSameThirdPartyInfoAs(details.thirdParty);
+
+          // If nothing matches, return `false`.
+          return false;
+        });
+      });
+
+      return isAccountPresent ? false : true;
     },
     getMessageForNoSignUpReason: function (reason) {
       /**

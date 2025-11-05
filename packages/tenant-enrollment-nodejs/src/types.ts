@@ -13,12 +13,14 @@ export type SuperTokensPluginTenantEnrollmentPluginConfig = {
   emailDomainToTenantIdMap: Record<string, string>;
   inviteOnlyTenants?: string[];
   requiresApprovalTenants?: string[];
+  allowSignUpToPublicTenant?: boolean;
 };
 
 export type SuperTokensPluginTenantEnrollmentPluginNormalisedConfig = {
   emailDomainToTenantIdMap: Record<string, string>;
   inviteOnlyTenants: string[];
   requiresApprovalTenants: string[];
+  allowSignUpToPublicTenant: boolean;
 };
 
 export type UserIdentificationDetail =
@@ -51,6 +53,7 @@ export type OverrideableTenantFunctionImplementation = {
     appUrl: string,
     userContext: UserContext,
     assignRoleToUserInTenant: AssignRoleToUserInTenant,
+    getUserIdsInTenantWithRole: GetUserIdsInTenantWithRole,
   ) => Promise<{
     wasAddedToTenant: boolean;
     reason?: string;
@@ -66,8 +69,8 @@ export type OverrideableTenantFunctionImplementation = {
     appUrl: string,
     sendEmail: SendPluginEmail,
     userContext: UserContext,
+    getUserIdsInTenantWithRole: GetUserIdsInTenantWithRole,
   ) => Promise<void>;
-  getUserIdsInTenantWithRole: GetUserIdsInTenantWithRole;
-  isUserSigningUpToTenant: (tenantId: string, details: AccountInfoInput) => Promise<boolean>;
+  isUserSigningUpToTenant: (tenantId: string, details: AccountInfoInput, recipeId: string) => Promise<boolean>;
   getMessageForNoSignUpReason: (reason: NotAllowedToSignUpReason) => string;
 };
