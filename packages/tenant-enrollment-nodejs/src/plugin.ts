@@ -4,17 +4,14 @@ import { PLUGIN_ID, PLUGIN_SDK_VERSION } from "./constants";
 import {
   OverrideableTenantFunctionImplementation,
   SuperTokensPluginTenantEnrollmentPluginConfig,
+  SuperTokensPluginTenantEnrollmentPluginContext,
   SuperTokensPluginTenantEnrollmentPluginNormalisedConfig,
 } from "./types";
 import { getOverrideableTenantFunctionImplementation } from "./pluginImplementation";
 import { logDebugMessage } from "supertokens-node/lib/build/logger";
 import {
-  AssociateAllLoginMethodsOfUserWithTenant,
-  AssignRoleToUserInTenant,
   PLUGIN_ID as TENANTS_PLUGIN_ID,
-  SendPluginEmail,
   GetAppUrl,
-  GetUserIdsInTenantWithRole,
   init as baseTenantsPluginInit,
 } from "@supertokens-plugins/tenants-nodejs";
 import { NormalisedAppinfo } from "supertokens-node/types";
@@ -25,14 +22,11 @@ export const init = createPluginInitFunction<
   SuperTokensPlugin,
   SuperTokensPluginTenantEnrollmentPluginConfig,
   OverrideableTenantFunctionImplementation,
-  SuperTokensPluginTenantEnrollmentPluginNormalisedConfig
+  SuperTokensPluginTenantEnrollmentPluginNormalisedConfig,
+  SuperTokensPluginTenantEnrollmentPluginContext
 >(
-  (pluginConfig, implementation) => {
-    let associateLoginMethodDef: AssociateAllLoginMethodsOfUserWithTenant;
-    let assignRoleToUserInTenantDef: AssignRoleToUserInTenant;
-    let getUserIdsInTenantWithRoleDef: GetUserIdsInTenantWithRole;
-
-    let sendEmail: SendPluginEmail;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  (pluginConfig, implementation, pluginContext) => {
     let appInfo: NormalisedAppinfo;
     let getAppUrlDef: GetAppUrl;
     return {
@@ -88,10 +82,10 @@ export const init = createPluginInitFunction<
           throw new Error("Tenants plugin does not export getUserIdsInTenantWithRole, cannot continue.");
         }
 
-        associateLoginMethodDef = associateAllLoginMethodsOfUserWithTenant;
-        assignRoleToUserInTenantDef = assignRoleToUserInTenant;
-        sendEmail = sendPluginEmail;
-        getUserIdsInTenantWithRoleDef = getUserIdsInTenantWithRole;
+        // Override the pluginContext to inject the functions
+        pluginContext.assignRoleToUserInTenant = assignRoleToUserInTenant;
+        pluginContext.getUserIdsInTenantWithRole = getUserIdsInTenantWithRole;
+        pluginContext.associateLoginMethod = associateAllLoginMethodsOfUserWithTenant;
 
         const getAppUrl = tenantsPlugin.exports?.getAppUrl;
         if (!getAppUrl) {
@@ -121,8 +115,8 @@ export const init = createPluginInitFunction<
                 logDebugMessage("Reason: " + reason);
                 if (!canJoin) {
                   return {
-                    status: "GENERAL_ERROR",
-                    message: reason ?? "No reason provided",
+                    status: "SIGN_UP_NOT_ALLOWED",
+                    reason: reason ?? "Sign up not allowed",
                   };
                 }
 
@@ -137,12 +131,8 @@ export const init = createPluginInitFunction<
                   await implementation.handleTenantJoiningApproval(
                     response.user,
                     input.tenantId,
-                    associateLoginMethodDef,
-                    sendEmail,
                     getAppUrlDef(appInfo, undefined, input.userContext),
                     input.userContext,
-                    assignRoleToUserInTenantDef,
-                    getUserIdsInTenantWithRoleDef,
                   );
                 logDebugMessage(`wasAdded: ${wasAddedToTenant}`);
                 logDebugMessage(`reason: ${tenantJoiningReason}`);
@@ -198,8 +188,8 @@ export const init = createPluginInitFunction<
                 logDebugMessage("Reason: " + reason);
                 if (!canJoin) {
                   return {
-                    status: "GENERAL_ERROR",
-                    message: reason ?? "No reason provided",
+                    status: "SIGN_IN_UP_NOT_ALLOWED",
+                    reason: reason ?? "Sign up not allowed",
                   };
                 }
 
@@ -213,12 +203,8 @@ export const init = createPluginInitFunction<
                   await implementation.handleTenantJoiningApproval(
                     response.user,
                     input.tenantId,
-                    associateLoginMethodDef,
-                    sendEmail,
                     getAppUrlDef(appInfo, undefined, input.userContext),
                     input.userContext,
-                    assignRoleToUserInTenantDef,
-                    getUserIdsInTenantWithRoleDef,
                   );
                 logDebugMessage(`wasAddedToTenant: ${wasAddedToTenant}`);
                 logDebugMessage(`tenantJoiningReason: ${tenantJoiningReason}`);
@@ -267,9 +253,9 @@ export const init = createPluginInitFunction<
 
                 if (!canJoin) {
                   return {
-                    status: "GENERAL_ERROR",
-                    message: reason ?? "No reason provided",
-                  } as any;
+                    status: "SIGN_IN_UP_NOT_ALLOWED",
+                    reason: reason ?? "Sign up not allowed",
+                  };
                 }
 
                 return await originalImplementation.createCodePOST!(input);
@@ -305,8 +291,6 @@ export const init = createPluginInitFunction<
                   "passwordless",
                 );
 
-                // TODO: Handle case for phone number
-
                 if (!isSignUp) {
                   return originalImplementation.consumeCodePOST!(input);
                 }
@@ -329,8 +313,8 @@ export const init = createPluginInitFunction<
 
                 if (!canJoin) {
                   return {
-                    status: "GENERAL_ERROR",
-                    message: reason ?? "No reason provided",
+                    status: "SIGN_IN_UP_NOT_ALLOWED",
+                    reason: reason ?? "Sign up not allowed",
                   };
                 }
 
@@ -345,12 +329,8 @@ export const init = createPluginInitFunction<
                   await implementation.handleTenantJoiningApproval(
                     response.user,
                     input.tenantId,
-                    associateLoginMethodDef,
-                    sendEmail,
                     getAppUrlDef(appInfo, undefined, input.userContext),
                     input.userContext,
-                    assignRoleToUserInTenantDef,
-                    getUserIdsInTenantWithRoleDef,
                   );
                 logDebugMessage(`wasAdded: ${wasAddedToTenant}`);
                 logDebugMessage(`reason: ${tenantJoiningReason}`);
@@ -395,7 +375,7 @@ export const init = createPluginInitFunction<
               if (!canJoin) {
                 return {
                   status: "GENERAL_ERROR",
-                  message: reason ?? "No reason provided",
+                  message: reason ?? "Sign up not allowed",
                 };
               }
 
@@ -413,12 +393,8 @@ export const init = createPluginInitFunction<
                 await implementation.handleTenantJoiningApproval(
                   response.user,
                   input.tenantId,
-                  associateLoginMethodDef,
-                  sendEmail,
                   getAppUrlDef(appInfo, undefined, input.userContext),
                   input.userContext,
-                  assignRoleToUserInTenantDef,
-                  getUserIdsInTenantWithRoleDef,
                 );
               logDebugMessage(`wasAdded: ${wasAddedToTenant}`);
               logDebugMessage(`reason: ${tenantJoiningReason}`);

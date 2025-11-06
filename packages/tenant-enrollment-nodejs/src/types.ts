@@ -23,6 +23,13 @@ export type SuperTokensPluginTenantEnrollmentPluginNormalisedConfig = {
   allowSignUpToPublicTenant: boolean;
 };
 
+export type SuperTokensPluginTenantEnrollmentPluginContext = {
+  associateLoginMethod: AssociateAllLoginMethodsOfUserWithTenant,
+  assignRoleToUserInTenant: AssignRoleToUserInTenant,
+  getUserIdsInTenantWithRole: GetUserIdsInTenantWithRole
+  sendPluginEmail: SendPluginEmail;
+}
+
 export type UserIdentificationDetail =
   | {
       type: "email";
@@ -48,12 +55,8 @@ export type OverrideableTenantFunctionImplementation = {
   handleTenantJoiningApproval: (
     user: User,
     tenantId: string,
-    associateLoginMethodDef: AssociateAllLoginMethodsOfUserWithTenant,
-    sendEmail: SendPluginEmail,
     appUrl: string,
     userContext: UserContext,
-    assignRoleToUserInTenant: AssignRoleToUserInTenant,
-    getUserIdsInTenantWithRole: GetUserIdsInTenantWithRole,
   ) => Promise<{
     wasAddedToTenant: boolean;
     reason?: string;
@@ -67,10 +70,9 @@ export type OverrideableTenantFunctionImplementation = {
     tenantId: string,
     user: User,
     appUrl: string,
-    sendEmail: SendPluginEmail,
     userContext: UserContext,
-    getUserIdsInTenantWithRole: GetUserIdsInTenantWithRole,
   ) => Promise<void>;
   isUserSigningUpToTenant: (tenantId: string, details: AccountInfoInput, recipeId: string) => Promise<boolean>;
   getMessageForNoSignUpReason: (reason: NotAllowedToSignUpReason) => string;
+  filterAdminEmailsToNotify: (adminUserIds: string[]) => Promise<string[]>;
 };
