@@ -24,7 +24,7 @@ export class TelemetryService {
         version: PLUGIN_SDK_VERSION,
         timestamp: new Date().toISOString(),
       });
-    } catch (e) {
+    } catch {
       // Silently fail telemetry
     }
   }
