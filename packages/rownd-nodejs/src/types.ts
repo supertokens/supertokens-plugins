@@ -1,10 +1,7 @@
 export interface RowndPluginConfig {
   rowndAppKey: string;
   rowndAppSecret: string;
-  telemetry?: {
-    token: string;
-    dataset: string;
-  };
+  enableDebugLogs?: boolean;
 }
 
 export interface RowndUser {
@@ -41,10 +38,7 @@ export interface MigrationResponse {
 export interface RowndPluginNormalisedConfig {
   rowndAppKey: string;
   rowndAppSecret: string;
-  telemetry?: {
-    token: string;
-    dataset: string;
-  };
+  enableDebugLogs?: boolean;
 }
 
 export interface SuperTokensUserImport {

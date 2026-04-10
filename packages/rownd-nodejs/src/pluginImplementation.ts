@@ -43,7 +43,9 @@ export async function parseRequest(req: BaseRequest): Promise<{
     if (body?.tenantId) {
       tenantId = body.tenantId;
     }
-  } catch (error) {}
+  } catch {
+    // ignore parse errors
+  }
 
   return {
     token,

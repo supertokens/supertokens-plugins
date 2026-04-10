@@ -5,7 +5,7 @@ import { createInstance } from "@rownd/node";
 import supertokens from "supertokens-node";
 import { PLUGIN_ID, PLUGIN_SDK_VERSION, HANDLE_BASE_PATH } from "./constants";
 import { RowndPluginConfig, RowndPluginNormalisedConfig } from "./types";
-import { TelemetryService } from "./telemetry";
+import { enableDebugLogs, logDebugMessage } from "./logger";
 import Session from "supertokens-node/recipe/session";
 import {
   parseRequest,
@@ -31,7 +31,11 @@ export const init = createPluginInitFunction<
 
     setRowndClient(rowndClient);
 
-    const telemetry = new TelemetryService(config.telemetry);
+    if (config.enableDebugLogs) {
+      enableDebugLogs();
+    }
+
+    logDebugMessage("Rownd plugin init complete");
 
     return {
       id: PLUGIN_ID,
@@ -61,14 +65,15 @@ export const init = createPluginInitFunction<
                   const stUserImport = mapRowndUserToSuperTokens(rowndUser);
                   await importUser(stUserImport, config.supertokens);
 
-                  await telemetry.logSuccess("migrate-user", {
-                    tenantId: parsed.tenantId,
-                    rowndUserId: rowndUser.app_user_id,
-                  });
+                  logDebugMessage(
+                    `User migrated successfully. tenantId: ${parsed.tenantId}, rowndUserId: ${rowndUser.app_user_id}`,
+                  );
 
                   return { status: "OK" };
                 } catch (error: unknown) {
-                  await telemetry.logError("migrate-user", error);
+                  logDebugMessage(
+                    `User migration failed. Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+                  );
                   return {
                     status: "ERROR",
                     message:
@@ -125,14 +130,15 @@ export const init = createPluginInitFunction<
                       userContext,
                     );
 
-                    await telemetry.logSuccess("migrate-session", {
-                      tenantId: parsed.tenantId,
-                      userId: user.id,
-                    });
+                    logDebugMessage(
+                      `Session migrated successfully. tenantId: ${parsed.tenantId}, userId: ${user.id}`,
+                    );
 
                     return { status: "OK" };
                   } catch (error: unknown) {
-                    await telemetry.logError("migrate-session", error);
+                    logDebugMessage(
+                      `Session migration failed. Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+                    );
                     return {
                       status: "ERROR",
                       message:
@@ -157,7 +163,6 @@ export const init = createPluginInitFunction<
     return {
       rowndAppKey: config.rowndAppKey,
       rowndAppSecret: config.rowndAppSecret,
-      telemetry: config.telemetry,
     };
   },
 );
