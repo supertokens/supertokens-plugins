@@ -12,10 +12,15 @@ npm install @supertokens-plugins/rownd-nodejs
 
 ### Backend Configuration
 
-Initialize the plugin in your SuperTokens backend configuration:
+Initialize the plugin in your SuperTokens backend configuration.
+
+> [!IMPORTANT]
+> This plugin requires the `Session` and `UserMetadata` recipes to be initialized in your SuperTokens configuration.
 
 ```typescript
 import SuperTokens from "supertokens-node";
+import Session from "supertokens-node/recipe/session";
+import UserMetadata from "supertokens-node/recipe/usermetadata";
 import RowndMigrationPlugin from "@supertokens-plugins/rownd-nodejs";
 
 SuperTokens.init({
@@ -23,6 +28,8 @@ SuperTokens.init({
     // your app info
   },
   recipeList: [
+    Session.init(),
+    UserMetadata.init(),
     // your other recipes
   ],
   experimental: {
@@ -51,10 +58,12 @@ The plugin exposes the following endpoints:
 - **Body**:
   ```json
   {
-    "tenantId": "public" // optional, defaults to public
+    "tenantId": "public", // optional, defaults to public
+    "userMetadata": { "key": "value" }, // optional, additional metadata to sync
+    "roles": ["admin"] // optional, roles to assign to the user
   }
   ```
-- **Description**: Validates the Rownd JWT, fetches user info from Rownd, and imports the user into SuperTokens. It also syncs Rownd user data to SuperTokens UserMetadata.
+- **Description**: Validates the Rownd JWT, fetches user info from Rownd, and imports the user into SuperTokens. It also syncs Rownd user data and provided `userMetadata` to SuperTokens UserMetadata, and assigns the provided `roles`.
 
 ### Migrate Session
 

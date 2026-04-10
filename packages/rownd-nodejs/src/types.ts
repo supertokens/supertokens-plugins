@@ -9,8 +9,28 @@ export interface RowndPluginConfig {
 
 export interface RowndUser {
   app_user_id: string;
-  data: Record<string, unknown>;
-  verified_data: Record<string, unknown>;
+  data: {
+    user_id: string;
+    email?: string;
+    phone_number?: string;
+    google_id?: string;
+    apple_id?: string;
+    first_name?: string;
+    last_name?: string;
+  };
+  verified_data: {
+    email?: string;
+    phone_number?: string;
+    google_id?: string;
+    apple_id?: string;
+  };
+  groups?: string[];
+  meta?: {
+    created?: string;
+    modified?: string;
+    first_sign_in?: string;
+    last_sign_in?: string;
+  };
 }
 
 export interface MigrationResponse {
@@ -27,16 +47,42 @@ export interface RowndPluginNormalisedConfig {
   };
 }
 
+export interface SuperTokensUserImport {
+  externalUserId?: string;
+  timeJoined?: number;
+  userMetadata?: Record<string, unknown>;
+  roles?: string[];
+  loginMethods: (
+    | {
+        recipeId: "emailpassword";
+        email: string;
+        passwordHash: string;
+        isVerified?: boolean;
+      }
+    | {
+        recipeId: "thirdparty";
+        thirdParty: {
+          id: string;
+          userId: string;
+        };
+        email: string;
+        isVerified?: boolean;
+      }
+    | {
+        recipeId: "passwordless";
+        email?: string;
+        phoneNumber?: string;
+        isVerified?: boolean;
+      }
+  )[];
+}
+
 export interface IRowndClient {
-  validateToken: (
-    token: string,
-  ) => Promise<{
-    decoded_token: unknown;
+  validateToken: (token: string) => Promise<{
     user_id: string;
-    access_token: string;
   }>;
   fetchUserInfo: (opts: {
     user_id: string;
     app_id?: string;
-  }) => Promise<RowndUser>;
+  }) => Promise<RowndUser | undefined>;
 }
