@@ -61,10 +61,8 @@ export interface SuperTokensUserImport {
       }
     | {
         recipeId: "thirdparty";
-        thirdParty: {
-          id: string;
-          userId: string;
-        };
+        thirdPartyId: string;
+        thirdPartyUserId: string;
         email: string;
         isVerified?: boolean;
       }

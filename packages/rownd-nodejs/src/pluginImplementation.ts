@@ -58,10 +58,8 @@ export function mapRowndUserToSuperTokens(
   if (rowndUser.data.google_id) {
     loginMethods.push({
       recipeId: "thirdparty",
-      thirdParty: {
-        id: "google",
-        userId: rowndUser.data.google_id,
-      },
+      thirdPartyId: "google",
+      thirdPartyUserId: rowndUser.data.google_id,
       email: rowndUser.data.email || "",
       isVerified: !!rowndUser.verified_data.google_id,
     });
@@ -70,10 +68,8 @@ export function mapRowndUserToSuperTokens(
   if (rowndUser.data.apple_id) {
     loginMethods.push({
       recipeId: "thirdparty",
-      thirdParty: {
-        id: "apple",
-        userId: rowndUser.data.apple_id,
-      },
+      thirdPartyId: "apple",
+      thirdPartyUserId: rowndUser.data.apple_id,
       email: rowndUser.data.email || "",
       isVerified: !!rowndUser.verified_data.apple_id,
     });
