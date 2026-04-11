@@ -61,6 +61,14 @@ export const init = createPluginInitFunction<
                   }
                   const parsed = await parseRequest(req);
                   const rowndUserId = await validateRowndToken(parsed.token);
+                  const existingUserId =
+                    await findSuperTokensUserIdByRowndUserId(rowndUserId);
+                  if (existingUserId) {
+                    logDebugMessage(
+                      `User already migrated. tenantId: ${parsed.tenantId}, rowndUserId: ${rowndUserId}`,
+                    );
+                    return { status: "OK" };
+                  }
                   const rowndUser = await fetchRowndUserInfo(rowndUserId);
                   const stUserImport = mapRowndUserToSuperTokens(rowndUser);
                   await importUser(stUserImport, config.supertokens);
@@ -163,6 +171,7 @@ export const init = createPluginInitFunction<
     return {
       rowndAppKey: config.rowndAppKey,
       rowndAppSecret: config.rowndAppSecret,
+      enableDebugLogs: config.enableDebugLogs,
     };
   },
 );

@@ -114,7 +114,7 @@ export async function importUser(
   stUser: SuperTokensUserImport,
   config: NonNullable<SuperTokensPublicConfig["supertokens"]>,
 ) {
-  const coreUrl = `${config.connectionURI}/bulk-import/users`;
+  const coreUrl = getBulkImportUrl(config.connectionURI);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "cdi-version": "2.21",
@@ -127,7 +127,7 @@ export async function importUser(
   const response = await fetch(coreUrl, {
     method: "POST",
     headers,
-    body: JSON.stringify({ users: [stUser] }),
+    body: JSON.stringify(stUser),
   });
 
   if (!response.ok) {
@@ -147,6 +147,15 @@ export async function importUser(
       `Bulk import failed: ${importResponse.message || "Unknown error"}`,
     );
   }
+}
+
+function getBulkImportUrl(connectionURI: string) {
+  const trimmedConnectionURI = connectionURI.replace(/\/$/, "");
+  if (/\/appid-[^/]+$/.test(trimmedConnectionURI)) {
+    return `${trimmedConnectionURI}/bulk-import/import`;
+  }
+
+  return `${trimmedConnectionURI}/appid-public/bulk-import/import`;
 }
 
 export async function findSuperTokensUserIdByRowndUserId(

@@ -17,6 +17,7 @@ import UserMetadata, {
 import Passwordless from "supertokens-node/recipe/passwordless";
 import EmailPassword from "supertokens-node/recipe/emailpassword";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
+import AccountLinking from "supertokens-node/recipe/accountlinking";
 import { middleware, errorHandler } from "supertokens-node/framework/express";
 import { ProcessState } from "supertokens-node/lib/build/processState";
 import SuperTokensRaw from "supertokens-node/lib/build/supertokens";
@@ -86,17 +87,11 @@ describe("rownd-nodejs plugin", () => {
 
     const mappedPort = container.getMappedPort(3567);
     coreConnectionURI = `http://${container.getHost()}:${mappedPort}`;
+    console.log(coreConnectionURI);
   }, 120000);
 
   afterAll(async () => {
     if (container) {
-      const logs = await container.logs();
-      let logString = "";
-      logs.on("data", (chunk) => {
-        logString += chunk;
-      });
-      await new Promise((resolve) => logs.on("end", resolve));
-      console.log("SUPERTOKENS LOGS:\n", logString);
       await container.stop();
     }
     if (postgresContainer) {
@@ -125,6 +120,9 @@ describe("rownd-nodejs plugin", () => {
       const { server: s, port } = await setup(coreConnectionURI);
       server = s;
       testPORT = port;
+      expect(process.env.DEBUG).toContain(
+        "com.supertokens.plugin.supertokens-plugin-rownd",
+      );
 
       mockRowndClient.validateToken.mockResolvedValue({
         user_id: "rownd-user-1",
@@ -148,6 +146,7 @@ describe("rownd-nodejs plugin", () => {
           },
         },
       );
+      console.log("RES:", res);
 
       const body = await res.json();
       expect(res.status).toBe(200);
@@ -281,14 +280,14 @@ describe("rownd-nodejs plugin", () => {
       console.log("MIGRATE GOOGLE RES:", res.status, resBody);
 
       const mapping = await SuperTokens.getUserIdMapping({
-        userId: "rownd-user-apple",
+        userId: "rownd-user-google",
         userIdType: "EXTERNAL",
       });
       const user = await SuperTokens.getUser(
         mapping.status === "OK" ? mapping.superTokensUserId : "not-found",
       );
       expect(user?.loginMethods[0].recipeId).toBe("thirdparty");
-      expect(user?.loginMethods[0].thirdParty?.id).toBe("apple");
+      expect(user?.loginMethods[0].thirdParty?.id).toBe("google");
     });
 
     it("migrate a user with multiple auth methods", async () => {
@@ -320,7 +319,9 @@ describe("rownd-nodejs plugin", () => {
       const user = await SuperTokens.getUser(
         mapping.status === "OK" ? mapping.superTokensUserId : "not-found",
       );
-      expect(user?.loginMethods.length).toBe(2);
+      expect(user?.loginMethods.length).toBe(1);
+      expect(user?.loginMethods[0].recipeId).toBe("thirdparty");
+      expect(user?.loginMethods[0].thirdParty?.id).toBe("google");
     });
 
     it("error if the auth header is missing", async () => {
@@ -476,8 +477,8 @@ describe("rownd-nodejs plugin", () => {
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(body).toEqual({ status: "OK" });
-      expect(res.headers.get("set-cookie")).toBeDefined();
-      expect(res.headers.get("set-cookie")).toContain("sAccessToken");
+      expect(res.headers.getSetCookie()).not.toHaveLength(0);
+      expect(res.headers.getSetCookie().join("; ")).toContain("sAccessToken");
     });
 
     it("create user and then migrate their session", async () => {
@@ -588,7 +589,6 @@ async function setup(
       SuperTokens.init({
         supertokens: {
           connectionURI: coreConnectionURI,
-          apiKey: process.env.CORE_API_KEY,
         },
         appInfo: {
           appName: "Test App",
@@ -597,6 +597,7 @@ async function setup(
         },
         recipeList: [
           Session.init(),
+          AccountLinking.init(),
           UserMetadata.init(),
           Passwordless.init({
             contactMethod: "EMAIL",
@@ -626,6 +627,7 @@ async function setup(
             init({
               rowndAppKey: "test-key",
               rowndAppSecret: "test-secret",
+              enableDebugLogs: true,
               ...config,
             } as RowndPluginConfig),
           ],
