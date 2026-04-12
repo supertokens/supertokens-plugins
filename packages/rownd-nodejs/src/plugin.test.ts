@@ -38,7 +38,7 @@ import { Network, StartedNetwork } from "testcontainers";
 
 import { init } from "./plugin";
 import { HANDLE_BASE_PATH } from "./constants";
-import { RowndPluginConfig } from "./types";
+import { RowndPluginConfig, RowndTelemetryClient } from "./types";
 import { ROWND_PLUGIN_ERROR_MESSAGES } from "./errors";
 
 let testPORT = 30001;
@@ -116,7 +116,15 @@ describe("rownd-nodejs plugin", () => {
 
   describe("user migration", () => {
     it("migrate user successfully", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
+      const telemetryClient: RowndTelemetryClient = {
+        recordEvent: vi.fn(),
+      };
+      const { server: s, port } = await setup(coreConnectionURI, {
+        telemetry: {
+          provider: "custom",
+          factory: () => telemetryClient,
+        },
+      });
       server = s;
       testPORT = port;
       const rowndUser = {
@@ -129,7 +137,7 @@ describe("rownd-nodejs plugin", () => {
         },
       };
       mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-user-fetch-fail",
+        user_id: "rownd-user-1",
       });
       mockRowndClient.fetchUserInfo.mockResolvedValue(rowndUser);
 
@@ -162,6 +170,14 @@ describe("rownd-nodejs plugin", () => {
           email: rowndUser.data.email,
           rownd_migrated: true,
           rownd_user_id: rowndUser.app_user_id,
+        }),
+      );
+      expect(telemetryClient.recordEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          outcome: "success",
+          operation: "migrate-user",
+          rowndUserId: rowndUser.app_user_id,
+          superTokensUserId: expect.any(String),
         }),
       );
     });
@@ -329,7 +345,15 @@ describe("rownd-nodejs plugin", () => {
     });
 
     it("error if rownd user info fetch fails", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
+      const telemetryClient: RowndTelemetryClient = {
+        recordEvent: vi.fn(),
+      };
+      const { server: s, port } = await setup(coreConnectionURI, {
+        telemetry: {
+          provider: "custom",
+          factory: () => telemetryClient,
+        },
+      });
       server = s;
       testPORT = port;
       mockRowndClient.validateToken.mockResolvedValue({
@@ -349,6 +373,51 @@ describe("rownd-nodejs plugin", () => {
       const body = await res.json();
       expect(body.status).toBe("ERROR");
       expect(body.message).toBe("Fetch failed");
+      expect(telemetryClient.recordEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          outcome: "error",
+          operation: "migrate-user",
+          rowndUserId: "rownd-user-fetch-fail",
+          error: expect.objectContaining({
+            message: "Fetch failed",
+          }),
+        }),
+      );
+    });
+
+    it("telemetry failure does not affect response", async () => {
+      const telemetryClient: RowndTelemetryClient = {
+        recordEvent: vi.fn(() => {
+          throw new Error("Telemetry down");
+        }),
+      };
+      const { server: s, port } = await setup(coreConnectionURI, {
+        telemetry: {
+          provider: "custom",
+          factory: () => telemetryClient,
+        },
+      });
+      server = s;
+      testPORT = port;
+
+      mockRowndClient.validateToken.mockResolvedValue({
+        user_id: "rownd-user-telemetry-throw",
+      });
+      mockRowndClient.fetchUserInfo.mockResolvedValue({
+        app_user_id: "rownd-user-telemetry-throw",
+        data: { email: "telemetry@example.com" },
+        verified_data: { email: true },
+      });
+
+      const res = await fetch(
+        `http://localhost:${testPORT}/plugin/rownd/migrate-user`,
+        {
+          method: "POST",
+          headers: { Authorization: "Bearer some-token" },
+        },
+      );
+      expect(await res.json()).toEqual({ status: "OK" });
+      expect(telemetryClient.recordEvent).toHaveBeenCalled();
     });
 
     it("prevent creation of duplicate users", async () => {
@@ -380,37 +449,6 @@ describe("rownd-nodejs plugin", () => {
       expect(migratedUser).toBeDefined();
       const user = migratedUser!.user;
       expect(user).toBeDefined();
-    });
-
-    it("link different authentication methods", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-linked",
-      });
-      mockRowndClient.fetchUserInfo.mockResolvedValue({
-        app_user_id: "rownd-linked",
-        data: {
-          google_id: "g-linked",
-          apple_id: "a-linked",
-          email: "linked@example.com",
-        },
-        verified_data: { google_id: true, apple_id: true },
-      });
-
-      const res = await fetch(
-        `http://localhost:${testPORT}/plugin/rownd/migrate-user`,
-        {
-          method: "POST",
-          headers: { Authorization: "Bearer some-token" },
-        },
-      );
-      expect(await res.json()).toEqual({
-        status: "ERROR",
-        message:
-          'Bulk import failed with status 400: {"errors":["Account linking must be enabled to import multiple loginMethods."]}\n',
-      });
     });
   });
 

@@ -4,7 +4,51 @@ export interface RowndPluginConfig {
   rowndAppKey: string;
   rowndAppSecret: string;
   enableDebugLogs?: boolean;
+  telemetry?: RowndTelemetryConfig;
 }
+
+export type RowndTelemetryOperation = "migrate-user" | "migrate-session";
+
+export type RowndTelemetryEvent =
+  | {
+      outcome: "success";
+      operation: RowndTelemetryOperation;
+      durationMs: number;
+      tenantId?: string;
+      rowndUserId?: string;
+      superTokensUserId?: string;
+    }
+  | {
+      outcome: "error";
+      operation: RowndTelemetryOperation;
+      durationMs: number;
+      tenantId?: string;
+      rowndUserId?: string;
+      superTokensUserId?: string;
+      error: {
+        message: string;
+        name?: string;
+      };
+    };
+
+export interface RowndTelemetryClient {
+  recordEvent: (event: RowndTelemetryEvent) => Promise<void> | void;
+}
+
+export type RowndTelemetryConfig =
+  | {
+      provider: "opentelemetry";
+    }
+  | {
+      provider: "axiom";
+      token: string;
+      dataset: string;
+      url?: string;
+    }
+  | {
+      provider: "custom";
+      factory: () => RowndTelemetryClient;
+    };
 
 export interface RowndUser {
   app_user_id: string;
@@ -41,6 +85,7 @@ export interface RowndPluginNormalisedConfig {
   rowndAppKey: string;
   rowndAppSecret: string;
   enableDebugLogs?: boolean;
+  telemetry?: RowndTelemetryConfig;
 }
 
 export interface SuperTokensUserImport {

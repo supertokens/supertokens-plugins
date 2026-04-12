@@ -78,6 +78,79 @@ The plugin exposes the following endpoints:
 
 Set `enableDebugLogs: true` in the plugin config to enable debug logging.
 
+## Telemetry
+
+Telemetry is optional. If `telemetry` is omitted from the plugin config, no telemetry is emitted.
+
+The plugin emits exactly one telemetry event per endpoint call result:
+
+- `migrate-user` -> success or error event
+- `migrate-session` -> success or error event
+
+### Event shape
+
+Each event includes endpoint outcome data only (not step-by-step events), including:
+
+- `operation`: `migrate-user` or `migrate-session`
+- `outcome`: `success` or `error`
+- `durationMs`
+- `tenantId` (when available)
+- `rowndUserId` (when available)
+- `superTokensUserId` (when available)
+- `migrationState`: `already-migrated` or `imported-during-request` (when available)
+- for errors: `error.message` and `error.name`
+
+> [!NOTE]
+> Telemetry failures never fail migration endpoints. Errors in telemetry reporting are swallowed.
+
+### Provider: OpenTelemetry
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  telemetry: {
+    provider: "opentelemetry",
+  },
+});
+```
+
+> [!IMPORTANT]
+> This plugin uses `@opentelemetry/api` only. You still need to initialize OpenTelemetry SDK/exporters in your app for spans to be exported.
+
+### Provider: Axiom
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  telemetry: {
+    provider: "axiom",
+    token: process.env.AXIOM_TOKEN!,
+    dataset: process.env.AXIOM_DATASET!,
+    // optional, defaults to https://api.axiom.co/v1/datasets
+    // url: "https://api.axiom.co/v1/datasets",
+  },
+});
+```
+
+### Provider: Custom
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  telemetry: {
+    provider: "custom",
+    factory: () => ({
+      recordEvent: async (event) => {
+        // send to your telemetry backend
+      },
+    }),
+  },
+});
+```
+
 ## Requirements
 
 - SuperTokens Node.js SDK >= 23.0.0
