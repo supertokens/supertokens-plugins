@@ -39,6 +39,7 @@ import { Network, StartedNetwork } from "testcontainers";
 import { init } from "./plugin";
 import { HANDLE_BASE_PATH } from "./constants";
 import { RowndPluginConfig } from "./types";
+import { ROWND_PLUGIN_ERROR_MESSAGES } from "./errors";
 
 let testPORT = 30001;
 
@@ -118,10 +119,7 @@ describe("rownd-nodejs plugin", () => {
       const { server: s, port } = await setup(coreConnectionURI);
       server = s;
       testPORT = port;
-      mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-user-fetch-fail",
-      });
-      mockRowndClient.fetchUserInfo.mockResolvedValue({
+      const rowndUser = {
         app_user_id: "rownd-user-1",
         data: {
           email: "test@example.com",
@@ -129,7 +127,11 @@ describe("rownd-nodejs plugin", () => {
         verified_data: {
           email: true,
         },
+      };
+      mockRowndClient.validateToken.mockResolvedValue({
+        user_id: "rownd-user-fetch-fail",
       });
+      mockRowndClient.fetchUserInfo.mockResolvedValue(rowndUser);
 
       const res = await fetch(
         `http://localhost:${testPORT}/plugin/rownd/migrate-user`,
@@ -144,33 +146,22 @@ describe("rownd-nodejs plugin", () => {
       expect(res.status).toBe(200);
       expect(body).toEqual({ status: "OK" });
 
-      // TODO: Do we need this?
-      await SuperTokens.getUsersOldestFirst({
-        tenantId: "public",
-      });
-      // TODO: Add a utility function that fetches the user by rownd user id and also includes the user metadata call
-      const mapping = await SuperTokens.getUserIdMapping({
-        userId: "rownd-user-1",
-        userIdType: "EXTERNAL",
-      });
-      const user = await SuperTokens.getUser(
-        mapping.status === "OK" ? mapping.superTokensUserId : "not-found",
+      const migratedUser = await getMigratedUserByRowndUserId(
+        rowndUser.app_user_id,
       );
+      expect(migratedUser).toBeDefined();
+      const user = migratedUser!.user;
       expect(user).toBeDefined();
       expect(user?.loginMethods.length).toBe(1);
-      // TODO: Do not match plain strings. Create rowndUser variable and reference it
       expect(user?.loginMethods[0].recipeId).toBe("passwordless");
-      expect(user?.loginMethods[0].email).toBe("test@example.com");
+      expect(user?.loginMethods[0].email).toBe(rowndUser.data.email);
 
-      const metadata = await UserMetadata.getUserMetadata(
-        mapping.status === "OK" ? mapping.superTokensUserId : "not-found",
-      );
-      // TODO: Do not match plain strings. Create rowndUser variable and reference it
+      const metadata = migratedUser!.metadata;
       expect(metadata.metadata).toEqual(
         expect.objectContaining({
-          email: "test@example.com",
+          email: rowndUser.data.email,
           rownd_migrated: true,
-          rownd_user_id: "rownd-user-1",
+          rownd_user_id: rowndUser.app_user_id,
         }),
       );
     });
@@ -197,13 +188,9 @@ describe("rownd-nodejs plugin", () => {
         headers: { Authorization: "Bearer some-token" },
       });
 
-      const mapping = await SuperTokens.getUserIdMapping({
-        userId: "rownd-user-2",
-        userIdType: "EXTERNAL",
-      });
-      const metadata = await UserMetadata.getUserMetadata(
-        mapping.status === "OK" ? mapping.superTokensUserId : "not-found",
-      );
+      const migratedUser = await getMigratedUserByRowndUserId("rownd-user-2");
+      expect(migratedUser).toBeDefined();
+      const metadata = migratedUser!.metadata;
       expect(metadata.metadata).toEqual(
         expect.objectContaining({
           first_name: "John",
@@ -235,13 +222,10 @@ describe("rownd-nodejs plugin", () => {
       );
       expect(await res.json()).toEqual({ status: "OK" });
 
-      const mapping = await SuperTokens.getUserIdMapping({
-        userId: "rownd-user-phone",
-        userIdType: "EXTERNAL",
-      });
-      const user = await SuperTokens.getUser(
-        mapping.status === "OK" ? mapping.superTokensUserId : "not-found",
-      );
+      const migratedUser =
+        await getMigratedUserByRowndUserId("rownd-user-phone");
+      expect(migratedUser).toBeDefined();
+      const user = migratedUser!.user;
       expect(user?.loginMethods[0].phoneNumber).toBe("+1234567890");
     });
 
@@ -262,13 +246,10 @@ describe("rownd-nodejs plugin", () => {
         method: "POST",
         headers: { Authorization: "Bearer some-token" },
       });
-      const mapping = await SuperTokens.getUserIdMapping({
-        userId: "rownd-user-google",
-        userIdType: "EXTERNAL",
-      });
-      const user = await SuperTokens.getUser(
-        mapping.status === "OK" ? mapping.superTokensUserId : "not-found",
-      );
+      const migratedUser =
+        await getMigratedUserByRowndUserId("rownd-user-google");
+      expect(migratedUser).toBeDefined();
+      const user = migratedUser!.user;
       expect(user?.loginMethods[0].recipeId).toBe("thirdparty");
       expect(user?.loginMethods[0].thirdParty?.id).toBe("google");
     });
@@ -295,17 +276,19 @@ describe("rownd-nodejs plugin", () => {
         headers: { Authorization: "Bearer some-token" },
       });
 
-      const mapping = await SuperTokens.getUserIdMapping({
-        userId: "rownd-user-multi",
-        userIdType: "EXTERNAL",
-      });
-      const user = await SuperTokens.getUser(
-        mapping.status === "OK" ? mapping.superTokensUserId : "not-found",
-      );
-      // TODO: Should check for all the auth methods
+      const migratedUser =
+        await getMigratedUserByRowndUserId("rownd-user-multi");
+      expect(migratedUser).toBeDefined();
+      const user = migratedUser!.user;
       expect(user?.loginMethods.length).toBe(1);
-      expect(user?.loginMethods[0].recipeId).toBe("thirdparty");
-      expect(user?.loginMethods[0].thirdParty?.id).toBe("google");
+      expect(user?.loginMethods).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            recipeId: "thirdparty",
+            thirdParty: expect.objectContaining({ id: "google" }),
+          }),
+        ]),
+      );
     });
 
     it("error if the auth header is missing", async () => {
@@ -319,9 +302,10 @@ describe("rownd-nodejs plugin", () => {
         },
       );
       const body = await res.json();
-      // TODO: Define a common errors file like in(/Users/bogdan/src/supertokens/supertokens-plugins/packages/captcha-nodejs/src/errors.ts) use them in the implementation and the reference those error names here
       expect(body.status).toBe("ERROR");
-      expect(body.message).toBe("Missing authorization header");
+      expect(body.message).toBe(
+        ROWND_PLUGIN_ERROR_MESSAGES.MISSING_AUTHORIZATION_HEADER,
+      );
     });
 
     it("error if rownd token validation fails", async () => {
@@ -392,13 +376,9 @@ describe("rownd-nodejs plugin", () => {
       );
       expect(await res.json()).toEqual({ status: "OK" });
 
-      const mapping = await SuperTokens.getUserIdMapping({
-        userId: "rownd-dup",
-        userIdType: "EXTERNAL",
-      });
-      const user = await SuperTokens.getUser(
-        mapping.status === "OK" ? mapping.superTokensUserId : "not-found",
-      );
+      const migratedUser = await getMigratedUserByRowndUserId("rownd-dup");
+      expect(migratedUser).toBeDefined();
+      const user = migratedUser!.user;
       expect(user).toBeDefined();
     });
 
@@ -459,10 +439,13 @@ describe("rownd-nodejs plugin", () => {
           },
         },
       );
-      // TODO: We should check for token headers
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(body).toEqual({ status: "OK" });
+      expect(res.headers.get("front-token")).toBeTruthy();
+      expect(
+        res.headers.get("st-access-token") || res.headers.get("set-cookie"),
+      ).toBeTruthy();
     });
 
     it("create user and then migrate their session", async () => {
@@ -476,16 +459,6 @@ describe("rownd-nodejs plugin", () => {
         app_user_id: "rownd-session-2",
         data: { email: "session2@example.com" },
         verified_data: { email: true },
-      });
-
-      // TODO: This call should not exist. the migrate-session endpoint should automatically create the user internally
-      await fetch(`http://localhost:${testPORT}/plugin/rownd/migrate-user`, {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer some-token",
-          rid: "session",
-          "fdi-version": "1.18",
-        },
       });
 
       const res = await fetch(
@@ -565,6 +538,25 @@ function resetST() {
   MultitenancyRaw.reset();
   SuperTokensRaw.reset();
   Querier.reset();
+}
+
+async function getMigratedUserByRowndUserId(rowndUserId: string) {
+  const mapping = await SuperTokens.getUserIdMapping({
+    userId: rowndUserId,
+    userIdType: "EXTERNAL",
+  });
+
+  if (mapping.status !== "OK") {
+    return undefined;
+  }
+
+  const user = await SuperTokens.getUser(mapping.superTokensUserId);
+  const metadata = await getUserMetadata(mapping.superTokensUserId);
+
+  return {
+    user,
+    metadata,
+  };
 }
 
 async function setup(

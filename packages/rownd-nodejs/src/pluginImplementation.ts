@@ -2,6 +2,7 @@ import { BaseRequest } from "supertokens-node/lib/build/framework/request";
 import supertokens from "supertokens-node";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import { RowndUser, SuperTokensUserImport, IRowndClient } from "./types";
+import { RowndPluginError } from "./errors";
 import type {
   JSONObject,
   SuperTokensPublicConfig,
@@ -26,12 +27,12 @@ export async function parseRequest(req: BaseRequest): Promise<{
 }> {
   const authHeader = req.getHeaderValue("authorization");
   if (!authHeader) {
-    throw new Error("Missing authorization header");
+    throw new RowndPluginError("MISSING_AUTHORIZATION_HEADER");
   }
 
   const token = authHeader.replace(/^Bearer /i, "");
   if (!token) {
-    throw new Error("Invalid token");
+    throw new RowndPluginError("INVALID_TOKEN");
   }
 
   let tenantId = "public";
