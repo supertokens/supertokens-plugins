@@ -37,10 +37,7 @@ SuperTokens.init({
       RowndMigrationPlugin.init({
         rowndAppKey: process.env.ROWND_APP_KEY,
         rowndAppSecret: process.env.ROWND_APP_SECRET,
-        telemetry: {
-          token: process.env.AXIOM_TOKEN,
-          dataset: process.env.AXIOM_DATASET,
-        },
+        enableDebugLogs: process.env.ENABLE_DEBUG_LOGS === "true",
       }),
     ],
   },
@@ -77,12 +74,11 @@ The plugin exposes the following endpoints:
   ```
 - **Description**: Validates the Rownd JWT, ensures the user is migrated to SuperTokens, and creates a new SuperTokens session, attaching the necessary cookies to the response.
 
-## Telemetry
+## Debug Logging
 
-If the `telemetry` configuration is provided, the plugin will send logs and error traces to your Axiom dataset.
+Set `enableDebugLogs: true` in the plugin config to enable debug logging.
 
 ## Requirements
 
 - SuperTokens Node.js SDK >= 23.0.0
 - `@rownd/node` >= 3.0.0
-- `@axiomhq/js` >= 1.6.0 (for telemetry)

@@ -1,7 +1,11 @@
 import { BaseRequest } from "supertokens-node/lib/build/framework/request";
 import supertokens from "supertokens-node";
+import UserMetadata from "supertokens-node/recipe/usermetadata";
 import { RowndUser, SuperTokensUserImport, IRowndClient } from "./types";
-import { SuperTokensPublicConfig } from "supertokens-node/types";
+import type {
+  JSONObject,
+  SuperTokensPublicConfig,
+} from "supertokens-node/types";
 
 let rowndClient: IRowndClient | undefined;
 
@@ -36,8 +40,6 @@ export async function parseRequest(req: BaseRequest): Promise<{
     const body = (await req.getJSONBody()) as
       | {
           tenantId?: string;
-          userMetadata?: Record<string, unknown>;
-          roles?: string[];
         }
       | undefined;
     if (body?.tenantId) {
@@ -97,7 +99,7 @@ export function mapRowndUserToSuperTokens(
     throw new Error("No valid login methods found in Rownd user data");
   }
 
-  const userMetadata = {
+  const userMetadata: JSONObject = {
     ...rowndUser.data,
     rownd_migrated: true,
     rownd_user_id: rowndUser.app_user_id,
@@ -113,7 +115,7 @@ export function mapRowndUserToSuperTokens(
 export async function importUser(
   stUser: SuperTokensUserImport,
   config: NonNullable<SuperTokensPublicConfig["supertokens"]>,
-) {
+): Promise<string> {
   const coreUrl = getBulkImportUrl(config.connectionURI);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -147,6 +149,22 @@ export async function importUser(
       `Bulk import failed: ${importResponse.message || "Unknown error"}`,
     );
   }
+
+  if (!stUser.externalUserId) {
+    throw new Error("Imported user is missing externalUserId");
+  }
+
+  const importedUserId = await findSuperTokensUserIdByRowndUserId(
+    stUser.externalUserId,
+  );
+
+  if (!importedUserId) {
+    throw new Error("Imported user not found after import");
+  }
+
+  await UserMetadata.updateUserMetadata(importedUserId, stUser.userMetadata);
+
+  return importedUserId;
 }
 
 function getBulkImportUrl(connectionURI: string) {

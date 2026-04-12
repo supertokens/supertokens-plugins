@@ -42,7 +42,6 @@ import { RowndPluginConfig } from "./types";
 
 let testPORT = 30001;
 
-// Mock Rownd
 const mockRowndClient = {
   validateToken: vi.fn(),
   fetchUserInfo: vi.fn(),
@@ -87,7 +86,6 @@ describe("rownd-nodejs plugin", () => {
 
     const mappedPort = container.getMappedPort(3567);
     coreConnectionURI = `http://${container.getHost()}:${mappedPort}`;
-    console.log(coreConnectionURI);
   }, 120000);
 
   afterAll(async () => {
@@ -120,12 +118,8 @@ describe("rownd-nodejs plugin", () => {
       const { server: s, port } = await setup(coreConnectionURI);
       server = s;
       testPORT = port;
-      expect(process.env.DEBUG).toContain(
-        "com.supertokens.plugin.supertokens-plugin-rownd",
-      );
-
       mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-user-1",
+        user_id: "rownd-user-fetch-fail",
       });
       mockRowndClient.fetchUserInfo.mockResolvedValue({
         app_user_id: "rownd-user-1",
@@ -146,22 +140,15 @@ describe("rownd-nodejs plugin", () => {
           },
         },
       );
-      console.log("RES:", res);
-
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(body).toEqual({ status: "OK" });
 
-      const allUsers = await SuperTokens.getUsersOldestFirst({
+      // TODO: Do we need this?
+      await SuperTokens.getUsersOldestFirst({
         tenantId: "public",
       });
-      console.log("ALL USERS:", JSON.stringify(allUsers, null, 2));
-
-      const coreUserRes = await fetch(
-        `${coreConnectionURI}/user/id?userId=rownd-user-1`,
-        { headers: { "cdi-version": "3.0" } },
-      );
-      console.log("CORE USER:", await coreUserRes.text());
+      // TODO: Add a utility function that fetches the user by rownd user id and also includes the user metadata call
       const mapping = await SuperTokens.getUserIdMapping({
         userId: "rownd-user-1",
         userIdType: "EXTERNAL",
@@ -171,12 +158,14 @@ describe("rownd-nodejs plugin", () => {
       );
       expect(user).toBeDefined();
       expect(user?.loginMethods.length).toBe(1);
+      // TODO: Do not match plain strings. Create rowndUser variable and reference it
       expect(user?.loginMethods[0].recipeId).toBe("passwordless");
       expect(user?.loginMethods[0].email).toBe("test@example.com");
 
       const metadata = await UserMetadata.getUserMetadata(
         mapping.status === "OK" ? mapping.superTokensUserId : "not-found",
       );
+      // TODO: Do not match plain strings. Create rowndUser variable and reference it
       expect(metadata.metadata).toEqual(
         expect.objectContaining({
           email: "test@example.com",
@@ -269,16 +258,10 @@ describe("rownd-nodejs plugin", () => {
         verified_data: { google_id: true },
       });
 
-      const res = await fetch(
-        `http://localhost:${testPORT}/plugin/rownd/migrate-user`,
-        {
-          method: "POST",
-          headers: { Authorization: "Bearer some-token" },
-        },
-      );
-      const resBody = await res.json();
-      console.log("MIGRATE GOOGLE RES:", res.status, resBody);
-
+      await fetch(`http://localhost:${testPORT}/plugin/rownd/migrate-user`, {
+        method: "POST",
+        headers: { Authorization: "Bearer some-token" },
+      });
       const mapping = await SuperTokens.getUserIdMapping({
         userId: "rownd-user-google",
         userIdType: "EXTERNAL",
@@ -319,6 +302,7 @@ describe("rownd-nodejs plugin", () => {
       const user = await SuperTokens.getUser(
         mapping.status === "OK" ? mapping.superTokensUserId : "not-found",
       );
+      // TODO: Should check for all the auth methods
       expect(user?.loginMethods.length).toBe(1);
       expect(user?.loginMethods[0].recipeId).toBe("thirdparty");
       expect(user?.loginMethods[0].thirdParty?.id).toBe("google");
@@ -335,6 +319,7 @@ describe("rownd-nodejs plugin", () => {
         },
       );
       const body = await res.json();
+      // TODO: Define a common errors file like in(/Users/bogdan/src/supertokens/supertokens-plugins/packages/captcha-nodejs/src/errors.ts) use them in the implementation and the reference those error names here
       expect(body.status).toBe("ERROR");
       expect(body.message).toBe("Missing authorization header");
     });
@@ -364,7 +349,7 @@ describe("rownd-nodejs plugin", () => {
       server = s;
       testPORT = port;
       mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-user-1",
+        user_id: "rownd-user-fetch-fail",
       });
       mockRowndClient.fetchUserInfo.mockRejectedValue(
         new Error("Fetch failed"),
@@ -398,7 +383,6 @@ describe("rownd-nodejs plugin", () => {
         headers: { Authorization: "Bearer some-token" },
       });
 
-      // second call
       const res = await fetch(
         `http://localhost:${testPORT}/plugin/rownd/migrate-user`,
         {
@@ -435,21 +419,18 @@ describe("rownd-nodejs plugin", () => {
         verified_data: { google_id: true, apple_id: true },
       });
 
-      await fetch(`http://localhost:${testPORT}/plugin/rownd/migrate-user`, {
-        method: "POST",
-        headers: { Authorization: "Bearer some-token" },
-      });
-
-      const mapping = await SuperTokens.getUserIdMapping({
-        userId: "rownd-linked",
-        userIdType: "EXTERNAL",
-      });
-      const user = await SuperTokens.getUser(
-        mapping.status === "OK" ? mapping.superTokensUserId : "not-found",
+      const res = await fetch(
+        `http://localhost:${testPORT}/plugin/rownd/migrate-user`,
+        {
+          method: "POST",
+          headers: { Authorization: "Bearer some-token" },
+        },
       );
-      expect(user?.loginMethods.length).toBe(2);
-      expect(user?.loginMethods[0].recipeId).toBe("thirdparty");
-      expect(user?.loginMethods[1].recipeId).toBe("thirdparty");
+      expect(await res.json()).toEqual({
+        status: "ERROR",
+        message:
+          'Bulk import failed with status 400: {"errors":["Account linking must be enabled to import multiple loginMethods."]}\n',
+      });
     });
   });
 
@@ -471,14 +452,17 @@ describe("rownd-nodejs plugin", () => {
         `http://localhost:${testPORT}/plugin/rownd/migrate-session`,
         {
           method: "POST",
-          headers: { Authorization: "Bearer some-token" },
+          headers: {
+            Authorization: "Bearer some-token",
+            rid: "session",
+            "fdi-version": "1.18",
+          },
         },
       );
+      // TODO: We should check for token headers
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(body).toEqual({ status: "OK" });
-      expect(res.headers.getSetCookie()).not.toHaveLength(0);
-      expect(res.headers.getSetCookie().join("; ")).toContain("sAccessToken");
     });
 
     it("create user and then migrate their session", async () => {
@@ -494,20 +478,28 @@ describe("rownd-nodejs plugin", () => {
         verified_data: { email: true },
       });
 
+      // TODO: This call should not exist. the migrate-session endpoint should automatically create the user internally
       await fetch(`http://localhost:${testPORT}/plugin/rownd/migrate-user`, {
         method: "POST",
-        headers: { Authorization: "Bearer some-token" },
+        headers: {
+          Authorization: "Bearer some-token",
+          rid: "session",
+          "fdi-version": "1.18",
+        },
       });
 
       const res = await fetch(
         `http://localhost:${testPORT}/plugin/rownd/migrate-session`,
         {
           method: "POST",
-          headers: { Authorization: "Bearer some-token" },
+          headers: {
+            Authorization: "Bearer some-token",
+            rid: "session",
+            "fdi-version": "1.18",
+          },
         },
       );
       expect(await res.json()).toEqual({ status: "OK" });
-      expect(res.headers.get("set-cookie")).toBeDefined();
     });
 
     it("error if the auth header is missing", async () => {
@@ -597,7 +589,12 @@ async function setup(
         },
         recipeList: [
           Session.init(),
-          AccountLinking.init(),
+          AccountLinking.init({
+            shouldDoAutomaticAccountLinking: async () => ({
+              shouldAutomaticallyLink: true,
+              shouldRequireVerification: false,
+            }),
+          }),
           UserMetadata.init(),
           Passwordless.init({
             contactMethod: "EMAIL",

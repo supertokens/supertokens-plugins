@@ -107,9 +107,10 @@ export const init = createPluginInitFunction<
                     if (!superTokensUserId) {
                       const rowndUser = await fetchRowndUserInfo(rowndUserId);
                       const stUserImport = mapRowndUserToSuperTokens(rowndUser);
-                      await importUser(stUserImport, config.supertokens);
-                      superTokensUserId =
-                        await findSuperTokensUserIdByRowndUserId(rowndUserId);
+                      superTokensUserId = await importUser(
+                        stUserImport,
+                        config.supertokens,
+                      );
                     }
 
                     if (!superTokensUserId) {

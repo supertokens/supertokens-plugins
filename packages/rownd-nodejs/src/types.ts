@@ -1,3 +1,5 @@
+import type { JSONObject } from "supertokens-node/types";
+
 export interface RowndPluginConfig {
   rowndAppKey: string;
   rowndAppSecret: string;
@@ -42,29 +44,29 @@ export interface RowndPluginNormalisedConfig {
 }
 
 export interface SuperTokensUserImport {
-  externalUserId?: string;
+  externalUserId: string;
   timeJoined?: number;
-  userMetadata?: Record<string, unknown>;
-  roles?: string[];
+  userMetadata: JSONObject;
+  roles: string[];
   loginMethods: (
     | {
         recipeId: "emailpassword";
         email: string;
         passwordHash: string;
-        isVerified?: boolean;
+        isVerified: boolean;
       }
     | {
         recipeId: "thirdparty";
         thirdPartyId: string;
         thirdPartyUserId: string;
         email: string;
-        isVerified?: boolean;
+        isVerified: boolean;
       }
     | {
         recipeId: "passwordless";
         email?: string;
         phoneNumber?: string;
-        isVerified?: boolean;
+        isVerified: boolean;
       }
   )[];
 }
