@@ -110,6 +110,7 @@ export function mapRowndUserToSuperTokens(
     externalUserId: rowndUser.app_user_id,
     loginMethods,
     userMetadata,
+    roles: [],
   };
 }
 
@@ -199,5 +200,8 @@ export async function validateRowndToken(token: string): Promise<string> {
 export async function fetchRowndUserInfo(userId: string): Promise<RowndUser> {
   const client = getRowndClient();
   const rowndUser = await client.fetchUserInfo({ user_id: userId });
-  return rowndUser as RowndUser;
+  if (!rowndUser) {
+    throw new RowndPluginError("ROWND_USER_NOT_FOUND");
+  }
+  return rowndUser;
 }

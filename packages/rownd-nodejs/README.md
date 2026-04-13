@@ -55,12 +55,10 @@ The plugin exposes the following endpoints:
 - **Body**:
   ```json
   {
-    "tenantId": "public", // optional, defaults to public
-    "userMetadata": { "key": "value" }, // optional, additional metadata to sync
-    "roles": ["admin"] // optional, roles to assign to the user
+    "tenantId": "public" // optional, defaults to public
   }
   ```
-- **Description**: Validates the Rownd JWT, fetches user info from Rownd, and imports the user into SuperTokens. It also syncs Rownd user data and provided `userMetadata` to SuperTokens UserMetadata, and assigns the provided `roles`.
+- **Description**: Validates the Rownd JWT, fetches user info from Rownd, and imports the user into SuperTokens. It also syncs Rownd user data to SuperTokens UserMetadata.
 
 ### Migrate Session
 

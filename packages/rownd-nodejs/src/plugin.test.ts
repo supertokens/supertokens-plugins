@@ -450,6 +450,29 @@ describe("rownd-nodejs plugin", () => {
       const user = migratedUser!.user;
       expect(user).toBeDefined();
     });
+
+    it("error if user not found in rownd", async () => {
+      const { server: s, port } = await setup(coreConnectionURI);
+      server = s;
+      testPORT = port;
+      mockRowndClient.validateToken.mockResolvedValue({
+        user_id: "rownd-missing",
+      });
+      mockRowndClient.fetchUserInfo.mockResolvedValue(undefined);
+
+      const res = await fetch(
+        `http://localhost:${testPORT}/plugin/rownd/migrate-user`,
+        {
+          method: "POST",
+          headers: { Authorization: "Bearer some-token" },
+        },
+      );
+      const body = await res.json();
+      expect(body.status).toBe("ERROR");
+      expect(body.message).toBe(
+        ROWND_PLUGIN_ERROR_MESSAGES.ROWND_USER_NOT_FOUND,
+      );
+    });
   });
 
   describe("session migration", () => {

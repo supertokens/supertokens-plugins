@@ -12,7 +12,6 @@ export class OpenTelemetryClient implements RowndTelemetryClient {
       "rownd.tenant_id": event.tenantId ?? "",
       "rownd.rownd_user_id": event.rowndUserId ?? "",
       "rownd.supertokens_user_id": event.superTokensUserId ?? "",
-      "rownd.migration_state": event.migrationState ?? "",
     });
 
     if (event.outcome === "error") {

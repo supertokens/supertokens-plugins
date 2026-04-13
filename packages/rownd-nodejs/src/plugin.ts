@@ -48,6 +48,11 @@ export const init = createPluginInitFunction<
             "RowndMigrationPlugin: Session recipe is not initialized. Session migration will fail.",
           );
         }
+        if (!supertokens.isRecipeInitialized("usermetadata")) {
+          console.warn(
+            "RowndMigrationPlugin: UserMetadata recipe is not initialized. User migration will fail.",
+          );
+        }
       },
       routeHandlers(config) {
         return {

@@ -2,7 +2,6 @@ import {
   RowndTelemetryClient,
   RowndTelemetryConfig,
   RowndTelemetryEvent,
-  RowndTelemetryMigrationState,
   RowndTelemetryOperation,
 } from "../types";
 import { logDebugMessage } from "../logger";
@@ -43,7 +42,6 @@ export function createClient(
       tenantId?: string;
       rowndUserId?: string;
       superTokensUserId?: string;
-      migrationState?: RowndTelemetryMigrationState;
     }) => {
       if (!client) {
         return;
@@ -56,7 +54,6 @@ export function createClient(
         tenantId: input.tenantId,
         rowndUserId: input.rowndUserId,
         superTokensUserId: input.superTokensUserId,
-        migrationState: input.migrationState,
         error: {
           message:
             input.error instanceof Error
