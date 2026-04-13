@@ -92,7 +92,6 @@ export interface SuperTokensUserImport {
   externalUserId: string;
   timeJoined?: number;
   userMetadata: JSONObject;
-  roles: string[];
   loginMethods: (
     | {
         recipeId: "emailpassword";

@@ -110,7 +110,6 @@ export function mapRowndUserToSuperTokens(
     externalUserId: rowndUser.app_user_id,
     loginMethods,
     userMetadata,
-    roles: [],
   };
 }
 
@@ -118,17 +117,14 @@ export async function importUser(
   stUser: SuperTokensUserImport,
   config: NonNullable<SuperTokensPublicConfig["supertokens"]>,
 ): Promise<string> {
-  const coreUrl = getBulkImportUrl(config.connectionURI);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    "cdi-version": "2.21",
   };
-
   if (config.apiKey) {
     headers["api-key"] = config.apiKey;
   }
 
-  const response = await fetch(coreUrl, {
+  const response = await fetch(`${config.connectionURI}/bulk-import/import`, {
     method: "POST",
     headers,
     body: JSON.stringify(stUser),
@@ -163,19 +159,10 @@ export async function importUser(
   if (!importedUserId) {
     throw new Error("Imported user not found after import");
   }
-
-  await UserMetadata.updateUserMetadata(importedUserId, stUser.userMetadata);
+  //
+  // await UserMetadata.updateUserMetadata(importedUserId, stUser.userMetadata);
 
   return importedUserId;
-}
-
-function getBulkImportUrl(connectionURI: string) {
-  const trimmedConnectionURI = connectionURI.replace(/\/$/, "");
-  if (/\/appid-[^/]+$/.test(trimmedConnectionURI)) {
-    return `${trimmedConnectionURI}/bulk-import/import`;
-  }
-
-  return `${trimmedConnectionURI}/appid-public/bulk-import/import`;
 }
 
 export async function findSuperTokensUserIdByRowndUserId(

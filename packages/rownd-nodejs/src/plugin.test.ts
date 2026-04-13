@@ -80,10 +80,16 @@ describe("rownd-nodejs plugin", () => {
       .withEnvironment({
         POSTGRESQL_CONNECTION_URI:
           "postgresql://supertokens:somepassword@postgres:5432/supertokens",
+        LOG_LEVEL: "DEBUG",
+        INFO_LOG_PATH: "null",
+        ERROR_LOG_PATH: "null",
       })
       .withExposedPorts(3567)
       .withWaitStrategy(Wait.forHttp("/hello", 3567))
       .start();
+
+    const stream = await container.logs();
+    stream.on("data", (line) => console.log(line));
 
     const mappedPort = container.getMappedPort(3567);
     coreConnectionURI = `http://${container.getHost()}:${mappedPort}`;
