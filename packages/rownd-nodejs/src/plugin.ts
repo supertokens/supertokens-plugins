@@ -55,11 +55,12 @@ export const init = createPluginInitFunction<
         }
       },
       routeHandlers(config) {
+        const apiBasePath = config.appInfo.apiBasePath.getAsStringDangerous();
         return {
           status: "OK",
           routeHandlers: [
             {
-              path: `${HANDLE_BASE_PATH}/migrate-user`,
+              path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate-user`,
               method: "post",
               handler: withRequestHandler(async (req) => {
                 const startedAt = Date.now();
@@ -132,7 +133,7 @@ export const init = createPluginInitFunction<
               }),
             },
             {
-              path: `${HANDLE_BASE_PATH}/migrate-session`,
+              path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate-session`,
               method: "post",
               handler: withRequestHandler(
                 async (req, res, _session, userContext) => {
