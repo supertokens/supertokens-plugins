@@ -80,16 +80,16 @@ describe("rownd-nodejs plugin", () => {
       .withEnvironment({
         POSTGRESQL_CONNECTION_URI:
           "postgresql://supertokens:somepassword@postgres:5432/supertokens",
-        LOG_LEVEL: "DEBUG",
-        INFO_LOG_PATH: "null",
-        ERROR_LOG_PATH: "null",
+        // LOG_LEVEL: "DEBUG",
+        // INFO_LOG_PATH: "null",
+        // ERROR_LOG_PATH: "null",
       })
       .withExposedPorts(3567)
       .withWaitStrategy(Wait.forHttp("/hello", 3567))
       .start();
 
-    const stream = await container.logs();
-    stream.on("data", (line) => console.log(line));
+    // const stream = await container.logs();
+    // stream.on("data", (line) => console.log(line));
 
     const mappedPort = container.getMappedPort(3567);
     coreConnectionURI = `http://${container.getHost()}:${mappedPort}`;
@@ -205,10 +205,13 @@ describe("rownd-nodejs plugin", () => {
         verified_data: { email: true },
       });
 
-      await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`, {
-        method: "POST",
-        headers: { Authorization: "Bearer some-token" },
-      });
+      await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
+        {
+          method: "POST",
+          headers: { Authorization: "Bearer some-token" },
+        },
+      );
 
       const migratedUser = await getMigratedUserByRowndUserId("rownd-user-2");
       expect(migratedUser).toBeDefined();
@@ -264,10 +267,13 @@ describe("rownd-nodejs plugin", () => {
         verified_data: { google_id: true },
       });
 
-      await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`, {
-        method: "POST",
-        headers: { Authorization: "Bearer some-token" },
-      });
+      await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
+        {
+          method: "POST",
+          headers: { Authorization: "Bearer some-token" },
+        },
+      );
       const migratedUser =
         await getMigratedUserByRowndUserId("rownd-user-google");
       expect(migratedUser).toBeDefined();
@@ -293,10 +299,13 @@ describe("rownd-nodejs plugin", () => {
         verified_data: { google_id: true, email: true, phone_number: true },
       });
 
-      await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`, {
-        method: "POST",
-        headers: { Authorization: "Bearer some-token" },
-      });
+      await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
+        {
+          method: "POST",
+          headers: { Authorization: "Bearer some-token" },
+        },
+      );
 
       const migratedUser =
         await getMigratedUserByRowndUserId("rownd-user-multi");
@@ -437,10 +446,13 @@ describe("rownd-nodejs plugin", () => {
         verified_data: { email: true },
       });
 
-      await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`, {
-        method: "POST",
-        headers: { Authorization: "Bearer some-token" },
-      });
+      await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
+        {
+          method: "POST",
+          headers: { Authorization: "Bearer some-token" },
+        },
+      );
 
       const res = await fetch(
         `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
@@ -617,8 +629,8 @@ async function getMigratedUserByRowndUserId(rowndUserId: string) {
     return undefined;
   }
 
-  const user = await SuperTokens.getUser(mapping.superTokensUserId);
-  const metadata = await getUserMetadata(mapping.superTokensUserId);
+  const user = await SuperTokens.getUser(mapping.externalUserId);
+  const metadata = await getUserMetadata(mapping.externalUserId);
 
   return {
     user,

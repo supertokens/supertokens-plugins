@@ -1,6 +1,5 @@
 import { BaseRequest } from "supertokens-node/lib/build/framework/request";
 import supertokens from "supertokens-node";
-import UserMetadata from "supertokens-node/recipe/usermetadata";
 import { RowndUser, SuperTokensUserImport, IRowndClient } from "./types";
 import { RowndPluginError } from "./errors";
 import type {
@@ -159,8 +158,6 @@ export async function importUser(
   if (!importedUserId) {
     throw new Error("Imported user not found after import");
   }
-  //
-  // await UserMetadata.updateUserMetadata(importedUserId, stUser.userMetadata);
 
   return importedUserId;
 }

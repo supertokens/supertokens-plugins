@@ -41,16 +41,11 @@ export const init = createPluginInitFunction<
 
     return {
       id: PLUGIN_ID,
-      compatibleSDKVersions: [PLUGIN_SDK_VERSION, "23.0.0", "23.0.1"],
+      compatibleSDKVersions: PLUGIN_SDK_VERSION,
       init: async () => {
         if (!supertokens.isRecipeInitialized("session")) {
           console.warn(
             "RowndMigrationPlugin: Session recipe is not initialized. Session migration will fail.",
-          );
-        }
-        if (!supertokens.isRecipeInitialized("usermetadata")) {
-          console.warn(
-            "RowndMigrationPlugin: UserMetadata recipe is not initialized. User migration will fail.",
           );
         }
       },
