@@ -3,7 +3,12 @@ import { createPluginInitFunction } from "@shared/js";
 import { withRequestHandler } from "@shared/nodejs";
 import { createInstance } from "@rownd/node";
 import supertokens from "supertokens-node";
-import { PLUGIN_ID, PLUGIN_SDK_VERSION, HANDLE_BASE_PATH } from "./constants";
+import {
+  PLUGIN_ID,
+  PLUGIN_SDK_VERSION,
+  HANDLE_BASE_PATH,
+  PUBLIC_TENANT_ID,
+} from "./constants";
 import { RowndPluginConfig, RowndPluginNormalisedConfig } from "./types";
 import { enableDebugLogs, logDebugMessage } from "./logger";
 import Session from "supertokens-node/recipe/session";
@@ -59,7 +64,7 @@ export const init = createPluginInitFunction<
               method: "post",
               handler: withRequestHandler(async (req) => {
                 const startedAt = Date.now();
-                let tenantId: string | undefined;
+                let tenantId: string | undefined = PUBLIC_TENANT_ID;
                 let rowndUserId: string | undefined;
                 let superTokensUserId: string | undefined;
                 try {
@@ -67,13 +72,12 @@ export const init = createPluginInitFunction<
                     throw new Error("Supertokens config not found");
                   }
                   const parsed = await parseRequest(req);
-                  tenantId = parsed.tenantId;
                   rowndUserId = await validateRowndToken(parsed.token);
                   const existingUserId =
                     await findSuperTokensUserIdByRowndUserId(rowndUserId);
                   if (existingUserId) {
                     logDebugMessage(
-                      `User already migrated. tenantId: ${parsed.tenantId}, rowndUserId: ${rowndUserId}`,
+                      `User already migrated. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
                     );
                     telemetryClient.recordSuccess({
                       outcome: "success",
@@ -92,7 +96,7 @@ export const init = createPluginInitFunction<
                     config.supertokens,
                   );
                   logDebugMessage(
-                    `User migrated successfully. tenantId: ${parsed.tenantId}, rowndUserId: ${rowndUser.app_user_id}`,
+                    `User migrated successfully. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUser.data?.user_id}`,
                   );
 
                   telemetryClient.recordSuccess({
@@ -133,7 +137,7 @@ export const init = createPluginInitFunction<
               handler: withRequestHandler(
                 async (req, res, _session, userContext) => {
                   const startedAt = Date.now();
-                  let tenantId: string | undefined;
+                  let tenantId: string | undefined = PUBLIC_TENANT_ID;
                   let rowndUserId: string | undefined;
                   let superTokensUserId: string | undefined;
                   try {
@@ -141,7 +145,6 @@ export const init = createPluginInitFunction<
                       throw new Error("Supertokens config not found");
                     }
                     const parsed = await parseRequest(req);
-                    tenantId = parsed.tenantId;
                     rowndUserId = await validateRowndToken(parsed.token);
                     superTokensUserId =
                       await findSuperTokensUserIdByRowndUserId(rowndUserId);
@@ -174,7 +177,7 @@ export const init = createPluginInitFunction<
                     await Session.createNewSession(
                       req,
                       res,
-                      parsed.tenantId,
+                      PUBLIC_TENANT_ID,
                       recipeUserId,
                       {},
                       {},
@@ -182,7 +185,7 @@ export const init = createPluginInitFunction<
                     );
 
                     logDebugMessage(
-                      `Session migrated successfully. tenantId: ${parsed.tenantId}, userId: ${user.id}`,
+                      `Session migrated successfully. tenantId: ${PUBLIC_TENANT_ID}, userId: ${user.id}`,
                     );
 
                     telemetryClient.recordSuccess({

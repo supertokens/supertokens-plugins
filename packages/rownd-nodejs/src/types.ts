@@ -51,7 +51,8 @@ export type RowndTelemetryConfig =
     };
 
 export interface RowndUser {
-  app_user_id: string;
+  state: string;
+  auth_level: string;
   data: {
     user_id: string;
     email?: string;
@@ -61,6 +62,7 @@ export interface RowndUser {
     first_name?: string;
     last_name?: string;
   };
+  attributes?: Record<string, string>;
   verified_data: {
     email?: string;
     phone_number?: string;

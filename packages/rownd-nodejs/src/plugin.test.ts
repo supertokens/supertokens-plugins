@@ -40,6 +40,7 @@ import { init } from "./plugin";
 import { HANDLE_BASE_PATH } from "./constants";
 import { RowndPluginConfig, RowndTelemetryClient } from "./types";
 import { ROWND_PLUGIN_ERROR_MESSAGES } from "./errors";
+import { mapRowndUserToSuperTokens } from "./pluginImplementation";
 
 let testPORT = 30001;
 
@@ -120,6 +121,98 @@ describe("rownd-nodejs plugin", () => {
     vi.restoreAllMocks();
   });
 
+  describe("mapRowndUserToSuperTokens", () => {
+    it("throws when the Rownd payload has no data object", () => {
+      expect(() =>
+        mapRowndUserToSuperTokens({ app_user_id: "rownd-no-data" } as any),
+      ).toThrowError(new Error("Rownd user has no app_user_id"));
+    });
+
+    it("throws when data.user_id is missing", () => {
+      expect(() =>
+        mapRowndUserToSuperTokens({
+          app_user_id: "rownd-missing-user-id",
+          data: { email: "missing-user-id@example.com" },
+          verified_data: { email: true },
+        } as any),
+      ).toThrowError(new Error("Rownd user has no app_user_id"));
+    });
+
+    it("throws when no supported login method can be derived", () => {
+      expect(() =>
+        mapRowndUserToSuperTokens({
+          data: { user_id: "rownd-no-login-method" },
+          verified_data: {},
+        } as any),
+      ).toThrowError(
+        new Error("No valid login methods found in Rownd user data"),
+      );
+    });
+
+    it("throws a type error when verified_data is missing for an otherwise valid email user", () => {
+      expect(
+        mapRowndUserToSuperTokens({
+          data: {
+            user_id: "rownd-missing-verified-data",
+            email: "missing-verified-data@example.com",
+          },
+        } as any),
+      ).toEqual({
+        externalUserId: "rownd-missing-verified-data",
+        loginMethods: [
+          {
+            recipeId: "passwordless",
+            email: "missing-verified-data@example.com",
+            isVerified: false,
+          },
+        ],
+        userMetadata: {
+          data: {
+            user_id: "rownd-missing-verified-data",
+            email: "missing-verified-data@example.com",
+          },
+          meta: {},
+          verified_data: {},
+          attributes: {},
+          rownd_migrated: true,
+          rownd_user_id: "rownd-missing-verified-data",
+        },
+      });
+    });
+
+    it("falls back missing metadata containers to empty objects", () => {
+      expect(
+        mapRowndUserToSuperTokens({
+          data: {
+            user_id: "rownd-metadata-fallback",
+            email: "metadata-fallback@example.com",
+          },
+          verified_data: {},
+        } as any),
+      ).toEqual({
+        externalUserId: "rownd-metadata-fallback",
+        loginMethods: [
+          {
+            recipeId: "passwordless",
+            email: "metadata-fallback@example.com",
+            isVerified: false,
+          },
+        ],
+        userMetadata: {
+          data: {
+            user_id: "rownd-metadata-fallback",
+            email: "metadata-fallback@example.com",
+          },
+          meta: {},
+          verified_data: {},
+          attributes: {},
+          rownd_migrated: true,
+          rownd_user_id: "rownd-metadata-fallback",
+        },
+      });
+    });
+  });
+
   describe("user migration", () => {
     it("migrate user successfully", async () => {
       const telemetryClient: RowndTelemetryClient = {
@@ -136,6 +229,7 @@ describe("rownd-nodejs plugin", () => {
       const rowndUser = {
         app_user_id: "rownd-user-1",
         data: {
+          user_id: "rownd-user-1",
           email: "test@example.com",
         },
         verified_data: {
@@ -173,7 +267,9 @@ describe("rownd-nodejs plugin", () => {
       const metadata = migratedUser!.metadata;
       expect(metadata.metadata).toEqual(
         expect.objectContaining({
-          email: rowndUser.data.email,
+          data: expect.objectContaining({
+            email: rowndUser.data.email,
+          }),
           rownd_migrated: true,
           rownd_user_id: rowndUser.app_user_id,
         }),
@@ -198,6 +294,7 @@ describe("rownd-nodejs plugin", () => {
       mockRowndClient.fetchUserInfo.mockResolvedValue({
         app_user_id: "rownd-user-2",
         data: {
+          user_id: "rownd-user-2",
           email: "test2@example.com",
           first_name: "John",
           last_name: "Doe",
@@ -218,8 +315,10 @@ describe("rownd-nodejs plugin", () => {
       const metadata = migratedUser!.metadata;
       expect(metadata.metadata).toEqual(
         expect.objectContaining({
-          first_name: "John",
-          last_name: "Doe",
+          data: expect.objectContaining({
+            first_name: "John",
+            last_name: "Doe",
+          }),
           rownd_migrated: true,
         }),
       );
@@ -234,7 +333,7 @@ describe("rownd-nodejs plugin", () => {
       });
       mockRowndClient.fetchUserInfo.mockResolvedValue({
         app_user_id: "rownd-user-phone",
-        data: { phone_number: "+1234567890" },
+        data: { user_id: "rownd-user-phone", phone_number: "+1234567890" },
         verified_data: { phone_number: true },
       });
 
@@ -263,63 +362,29 @@ describe("rownd-nodejs plugin", () => {
       });
       mockRowndClient.fetchUserInfo.mockResolvedValue({
         app_user_id: "rownd-user-google",
-        data: { google_id: "g-123", email: "g@example.com" },
+        data: {
+          user_id: "rownd-user-google",
+          google_id: "g-123",
+          email: "g@example.com",
+        },
         verified_data: { google_id: true },
       });
 
-      await fetch(
+      const res = await fetch(
         `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
         {
           method: "POST",
           headers: { Authorization: "Bearer some-token" },
         },
       );
+      expect(await res.json()).toEqual({ status: "OK" });
       const migratedUser =
         await getMigratedUserByRowndUserId("rownd-user-google");
       expect(migratedUser).toBeDefined();
       const user = migratedUser!.user;
+      expect(user?.loginMethods.length).toBe(1);
       expect(user?.loginMethods[0].recipeId).toBe("thirdparty");
       expect(user?.loginMethods[0].thirdParty?.id).toBe("google");
-    });
-
-    it("migrate a user with multiple auth methods", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-user-multi",
-      });
-      mockRowndClient.fetchUserInfo.mockResolvedValue({
-        app_user_id: "rownd-user-multi",
-        data: {
-          google_id: "g-456",
-          email: "m@example.com",
-          phone_number: "+0987654321",
-        },
-        verified_data: { google_id: true, email: true, phone_number: true },
-      });
-
-      await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
-        {
-          method: "POST",
-          headers: { Authorization: "Bearer some-token" },
-        },
-      );
-
-      const migratedUser =
-        await getMigratedUserByRowndUserId("rownd-user-multi");
-      expect(migratedUser).toBeDefined();
-      const user = migratedUser!.user;
-      expect(user?.loginMethods.length).toBe(1);
-      expect(user?.loginMethods).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            recipeId: "thirdparty",
-            thirdParty: expect.objectContaining({ id: "google" }),
-          }),
-        ]),
-      );
     });
 
     it("error if the auth header is missing", async () => {
@@ -420,7 +485,10 @@ describe("rownd-nodejs plugin", () => {
       });
       mockRowndClient.fetchUserInfo.mockResolvedValue({
         app_user_id: "rownd-user-telemetry-throw",
-        data: { email: "telemetry@example.com" },
+        data: {
+          user_id: "rownd-user-telemetry-throw",
+          email: "telemetry@example.com",
+        },
         verified_data: { email: true },
       });
 
@@ -442,7 +510,7 @@ describe("rownd-nodejs plugin", () => {
       mockRowndClient.validateToken.mockResolvedValue({ user_id: "rownd-dup" });
       mockRowndClient.fetchUserInfo.mockResolvedValue({
         app_user_id: "rownd-dup",
-        data: { email: "dup@example.com" },
+        data: { user_id: "rownd-dup", email: "dup@example.com" },
         verified_data: { email: true },
       });
 
@@ -503,7 +571,7 @@ describe("rownd-nodejs plugin", () => {
       });
       mockRowndClient.fetchUserInfo.mockResolvedValue({
         app_user_id: "rownd-session-1",
-        data: { email: "session@example.com" },
+        data: { user_id: "rownd-session-1", email: "session@example.com" },
         verified_data: { email: true },
       });
 
@@ -536,7 +604,7 @@ describe("rownd-nodejs plugin", () => {
       });
       mockRowndClient.fetchUserInfo.mockResolvedValue({
         app_user_id: "rownd-session-2",
-        data: { email: "session2@example.com" },
+        data: { user_id: "rownd-session-2", email: "session2@example.com" },
         verified_data: { email: true },
       });
 

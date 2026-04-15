@@ -22,7 +22,6 @@ export function getRowndClient() {
 
 export async function parseRequest(req: BaseRequest): Promise<{
   token: string;
-  tenantId: string;
 }> {
   const authHeader = req.getHeaderValue("authorization");
   if (!authHeader) {
@@ -34,24 +33,8 @@ export async function parseRequest(req: BaseRequest): Promise<{
     throw new RowndPluginError("INVALID_TOKEN");
   }
 
-  let tenantId = "public";
-
-  try {
-    const body = (await req.getJSONBody()) as
-      | {
-          tenantId?: string;
-        }
-      | undefined;
-    if (body?.tenantId) {
-      tenantId = body.tenantId;
-    }
-  } catch {
-    // ignore parse errors
-  }
-
   return {
     token,
-    tenantId,
   };
 }
 
@@ -59,39 +42,45 @@ export function mapRowndUserToSuperTokens(
   rowndUser: RowndUser,
 ): SuperTokensUserImport {
   const loginMethods: SuperTokensUserImport["loginMethods"] = [];
-  if (rowndUser.data.google_id) {
+  const rowndUserData = rowndUser.data || {};
+  const rowndUserVerifiedData = rowndUser.verified_data || {};
+  if (!rowndUserData.user_id) {
+    throw new Error("Rownd user has no app_user_id");
+  }
+
+  if (rowndUserData.google_id) {
     loginMethods.push({
       recipeId: "thirdparty",
       thirdPartyId: "google",
-      thirdPartyUserId: rowndUser.data.google_id,
+      thirdPartyUserId: rowndUser.data.google_id as string,
       email: rowndUser.data.email || "",
-      isVerified: !!rowndUser.verified_data.google_id,
+      isVerified: !!rowndUserVerifiedData.google_id,
     });
   }
 
-  if (rowndUser.data.apple_id) {
+  if (rowndUserData.apple_id) {
     loginMethods.push({
       recipeId: "thirdparty",
       thirdPartyId: "apple",
-      thirdPartyUserId: rowndUser.data.apple_id,
+      thirdPartyUserId: rowndUser.data.apple_id as string,
       email: rowndUser.data.email || "",
-      isVerified: !!rowndUser.verified_data.apple_id,
+      isVerified: !!rowndUserVerifiedData.apple_id,
     });
   }
 
-  if (rowndUser.data.phone_number && loginMethods.length === 0) {
+  if (rowndUserData.phone_number) {
     loginMethods.push({
       recipeId: "passwordless",
       phoneNumber: rowndUser.data.phone_number,
-      isVerified: !!rowndUser.verified_data.phone_number,
+      isVerified: !!rowndUserVerifiedData.phone_number,
     });
   }
 
-  if (loginMethods.length === 0 && rowndUser.data.email) {
+  if (rowndUserData.email && loginMethods.length === 0) {
     loginMethods.push({
       recipeId: "passwordless",
       email: rowndUser.data.email,
-      isVerified: !!rowndUser.verified_data.email,
+      isVerified: !!rowndUserVerifiedData.email,
     });
   }
 
@@ -99,14 +88,28 @@ export function mapRowndUserToSuperTokens(
     throw new Error("No valid login methods found in Rownd user data");
   }
 
+  const rowndUserMeta = rowndUser.meta || {};
+  const rowndUserAttributes = rowndUser.attributes || {};
+
   const userMetadata: JSONObject = {
-    ...rowndUser.data,
+    data: {
+      ...rowndUserData,
+    },
+    meta: {
+      ...rowndUserMeta,
+    },
+    verified_data: {
+      ...rowndUserVerifiedData,
+    },
+    attributes: {
+      ...rowndUserAttributes,
+    },
     rownd_migrated: true,
-    rownd_user_id: rowndUser.app_user_id,
+    rownd_user_id: rowndUserData.user_id,
   };
 
   return {
-    externalUserId: rowndUser.app_user_id,
+    externalUserId: rowndUserData.user_id,
     loginMethods,
     userMetadata,
   };
@@ -145,10 +148,6 @@ export async function importUser(
     throw new Error(
       `Bulk import failed: ${importResponse.message || "Unknown error"}`,
     );
-  }
-
-  if (!stUser.externalUserId) {
-    throw new Error("Imported user is missing externalUserId");
   }
 
   const importedUserId = await findSuperTokensUserIdByRowndUserId(
