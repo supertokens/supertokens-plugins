@@ -60,79 +60,7 @@ export const init = createPluginInitFunction<
           status: "OK",
           routeHandlers: [
             {
-              path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate-user`,
-              method: "post",
-              handler: withRequestHandler(async (req) => {
-                const startedAt = Date.now();
-                let tenantId: string | undefined = PUBLIC_TENANT_ID;
-                let rowndUserId: string | undefined;
-                let superTokensUserId: string | undefined;
-                try {
-                  if (!config.supertokens) {
-                    throw new Error("Supertokens config not found");
-                  }
-                  const parsed = await parseRequest(req);
-                  rowndUserId = await validateRowndToken(parsed.token);
-                  const existingUserId =
-                    await findSuperTokensUserIdByRowndUserId(rowndUserId);
-                  if (existingUserId) {
-                    logDebugMessage(
-                      `User already migrated. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
-                    );
-                    telemetryClient.recordSuccess({
-                      outcome: "success",
-                      operation: "migrate-user",
-                      durationMs: Date.now() - startedAt,
-                      tenantId,
-                      rowndUserId,
-                      superTokensUserId: existingUserId,
-                    });
-                    return { status: "OK" };
-                  }
-                  const rowndUser = await fetchRowndUserInfo(rowndUserId);
-                  const stUserImport = mapRowndUserToSuperTokens(rowndUser);
-                  superTokensUserId = await importUser(
-                    stUserImport,
-                    config.supertokens,
-                  );
-                  logDebugMessage(
-                    `User migrated successfully. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUser.data?.user_id}`,
-                  );
-
-                  telemetryClient.recordSuccess({
-                    outcome: "success",
-                    operation: "migrate-user",
-                    durationMs: Date.now() - startedAt,
-                    tenantId,
-                    rowndUserId,
-                    superTokensUserId,
-                  });
-
-                  return { status: "OK" };
-                } catch (error) {
-                  logDebugMessage(
-                    `User migration failed. Error: ${
-                      error instanceof Error ? error.message : "Unknown error"
-                    }`,
-                  );
-                  telemetryClient.recordError({
-                    operation: "migrate-user",
-                    error,
-                    startedAt,
-                    tenantId,
-                    rowndUserId,
-                    superTokensUserId,
-                  });
-                  return {
-                    status: "ERROR",
-                    message:
-                      error instanceof Error ? error.message : "Unknown error",
-                  };
-                }
-              }),
-            },
-            {
-              path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate-session`,
+              path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate`,
               method: "post",
               handler: withRequestHandler(
                 async (req, res, _session, userContext) => {
@@ -155,6 +83,13 @@ export const init = createPluginInitFunction<
                       superTokensUserId = await importUser(
                         stUserImport,
                         config.supertokens,
+                      );
+                      logDebugMessage(
+                        `User migrated successfully. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
+                      );
+                    } else {
+                      logDebugMessage(
+                        `User already migrated. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
                       );
                     }
 
@@ -190,7 +125,6 @@ export const init = createPluginInitFunction<
 
                     telemetryClient.recordSuccess({
                       outcome: "success",
-                      operation: "migrate-session",
                       durationMs: Date.now() - startedAt,
                       tenantId,
                       rowndUserId,
@@ -200,12 +134,11 @@ export const init = createPluginInitFunction<
                     return { status: "OK" };
                   } catch (error) {
                     logDebugMessage(
-                      `Session migration failed. Error: ${
+                      `Migration failed. Error: ${
                         error instanceof Error ? error.message : "Unknown error"
                       }`,
                     );
                     telemetryClient.recordError({
-                      operation: "migrate-session",
                       error,
                       startedAt,
                       tenantId,

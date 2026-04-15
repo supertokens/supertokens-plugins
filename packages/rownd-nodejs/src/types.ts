@@ -7,12 +7,9 @@ export interface RowndPluginConfig {
   telemetry?: RowndTelemetryConfig;
 }
 
-export type RowndTelemetryOperation = "migrate-user" | "migrate-session";
-
 export type RowndTelemetryEvent =
   | {
       outcome: "success";
-      operation: RowndTelemetryOperation;
       durationMs: number;
       tenantId?: string;
       rowndUserId?: string;
@@ -20,7 +17,6 @@ export type RowndTelemetryEvent =
     }
   | {
       outcome: "error";
-      operation: RowndTelemetryOperation;
       durationMs: number;
       tenantId?: string;
       rowndUserId?: string;

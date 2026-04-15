@@ -242,7 +242,7 @@ describe("rownd-nodejs plugin", () => {
       mockRowndClient.fetchUserInfo.mockResolvedValue(rowndUser);
 
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
           headers: {
@@ -277,7 +277,7 @@ describe("rownd-nodejs plugin", () => {
       expect(telemetryClient.recordEvent).toHaveBeenCalledWith(
         expect.objectContaining({
           outcome: "success",
-          operation: "migrate-user",
+          operation: "migrate",
           rowndUserId: rowndUser.app_user_id,
           superTokensUserId: expect.any(String),
         }),
@@ -302,13 +302,10 @@ describe("rownd-nodejs plugin", () => {
         verified_data: { email: true },
       });
 
-      await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
-        {
-          method: "POST",
-          headers: { Authorization: "Bearer some-token" },
-        },
-      );
+      await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate`, {
+        method: "POST",
+        headers: { Authorization: "Bearer some-token" },
+      });
 
       const migratedUser = await getMigratedUserByRowndUserId("rownd-user-2");
       expect(migratedUser).toBeDefined();
@@ -338,7 +335,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
           headers: { Authorization: "Bearer some-token" },
@@ -371,7 +368,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
           headers: { Authorization: "Bearer some-token" },
@@ -392,7 +389,7 @@ describe("rownd-nodejs plugin", () => {
       server = s;
       testPORT = port;
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
         },
@@ -413,7 +410,7 @@ describe("rownd-nodejs plugin", () => {
       );
 
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
           headers: { Authorization: "Bearer some-token" },
@@ -444,7 +441,7 @@ describe("rownd-nodejs plugin", () => {
       );
 
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
           headers: { Authorization: "Bearer some-token" },
@@ -456,7 +453,6 @@ describe("rownd-nodejs plugin", () => {
       expect(telemetryClient.recordEvent).toHaveBeenCalledWith(
         expect.objectContaining({
           outcome: "error",
-          operation: "migrate-user",
           rowndUserId: "rownd-user-fetch-fail",
           error: expect.objectContaining({
             message: "Fetch failed",
@@ -493,7 +489,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
           headers: { Authorization: "Bearer some-token" },
@@ -514,16 +510,13 @@ describe("rownd-nodejs plugin", () => {
         verified_data: { email: true },
       });
 
-      await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
-        {
-          method: "POST",
-          headers: { Authorization: "Bearer some-token" },
-        },
-      );
+      await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate`, {
+        method: "POST",
+        headers: { Authorization: "Bearer some-token" },
+      });
 
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
           headers: { Authorization: "Bearer some-token" },
@@ -547,7 +540,7 @@ describe("rownd-nodejs plugin", () => {
       mockRowndClient.fetchUserInfo.mockResolvedValue(undefined);
 
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-user`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
           headers: { Authorization: "Bearer some-token" },
@@ -576,7 +569,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-session`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
           headers: {
@@ -609,7 +602,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-session`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
           headers: {
@@ -627,7 +620,7 @@ describe("rownd-nodejs plugin", () => {
       server = s;
       testPORT = port;
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-session`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
         },
@@ -644,7 +637,7 @@ describe("rownd-nodejs plugin", () => {
         new Error("Invalid token"),
       );
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-session`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
           headers: { Authorization: "Bearer some-token" },
@@ -662,7 +655,7 @@ describe("rownd-nodejs plugin", () => {
       });
       mockRowndClient.fetchUserInfo.mockRejectedValue(new Error("Failed"));
       const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate-session`,
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
         {
           method: "POST",
           headers: { Authorization: "Bearer some-token" },

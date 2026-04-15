@@ -44,33 +44,19 @@ SuperTokens.init({
 });
 ```
 
-## API Endpoints
+## API Endpoint
 
-The plugin exposes the following endpoints:
+The plugin exposes a single endpoint:
 
-### Migrate User
+> [!IMPORTANT]
+> The plugin always migrates users and sessions into the `public` tenant.
+> Rownd users with multiple supported login methods are rejected unless SuperTokens account linking is enabled in the target environment.
 
-- **POST** `/plugin/rownd/migrate-user`
+### Migrate
+
+- **POST** `/plugin/rownd/migrate`
 - **Headers**: `Authorization: Bearer <Rownd_JWT>`
-- **Body**:
-  ```json
-  {
-    "tenantId": "public" // optional, defaults to public
-  }
-  ```
-- **Description**: Validates the Rownd JWT, fetches user info from Rownd, and imports the user into SuperTokens. It also syncs Rownd user data to SuperTokens UserMetadata.
-
-### Migrate Session
-
-- **POST** `/plugin/rownd/migrate-session`
-- **Headers**: `Authorization: Bearer <Rownd_JWT>`
-- **Body**:
-  ```json
-  {
-    "tenantId": "public" // optional, defaults to public
-  }
-  ```
-- **Description**: Validates the Rownd JWT, ensures the user is migrated to SuperTokens, and creates a new SuperTokens session, attaching the necessary cookies to the response.
+- **Description**: Validates the Rownd JWT, ensures the user is migrated to SuperTokens in the `public` tenant, syncs Rownd user data to SuperTokens UserMetadata, and then creates a new SuperTokens session for that user.
 
 ## Debug Logging
 
@@ -80,16 +66,13 @@ Set `enableDebugLogs: true` in the plugin config to enable debug logging.
 
 Telemetry is optional. If `telemetry` is omitted from the plugin config, no telemetry is emitted.
 
-The plugin emits exactly one telemetry event per endpoint call result:
-
-- `migrate-user` -> success or error event
-- `migrate-session` -> success or error event
+The plugin emits exactly one telemetry event per `/migrate` call result.
 
 ### Event shape
 
 Each event includes endpoint outcome data only (not step-by-step events), including:
 
-- `operation`: `migrate-user` or `migrate-session`
+- `operation`: `migrate`
 - `outcome`: `success` or `error`
 - `durationMs`
 - `tenantId` (when available)

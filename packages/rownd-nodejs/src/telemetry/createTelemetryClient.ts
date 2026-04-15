@@ -2,7 +2,6 @@ import {
   RowndTelemetryClient,
   RowndTelemetryConfig,
   RowndTelemetryEvent,
-  RowndTelemetryOperation,
 } from "../types";
 import { logDebugMessage } from "../logger";
 import { AxiomTelemetryClient } from "./axiomTelemetryClient";
@@ -36,7 +35,6 @@ export function createClient(
       safeRecordEvent(client, event, "success");
     },
     recordError: (input: {
-      operation: RowndTelemetryOperation;
       error: unknown;
       startedAt: number;
       tenantId?: string;
@@ -49,7 +47,6 @@ export function createClient(
 
       const event: ErrorEvent = {
         outcome: "error",
-        operation: input.operation,
         durationMs: Date.now() - input.startedAt,
         tenantId: input.tenantId,
         rowndUserId: input.rowndUserId,
