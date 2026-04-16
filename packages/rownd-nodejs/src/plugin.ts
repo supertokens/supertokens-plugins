@@ -13,6 +13,7 @@ import { RowndPluginConfig, RowndPluginNormalisedConfig } from "./types";
 import { enableDebugLogs, logDebugMessage } from "./logger";
 import Session from "supertokens-node/recipe/session";
 import { createClient } from "./telemetry/createTelemetryClient";
+import { RowndPluginError } from "./errors";
 import {
   parseRequest,
   mapRowndUserToSuperTokens,
@@ -20,7 +21,6 @@ import {
   setRowndClient,
   validateRowndToken,
   fetchRowndUserInfo,
-  findSuperTokensUserIdByRowndUserId,
 } from "./pluginImplementation";
 
 export const init = createPluginInitFunction<
@@ -68,46 +68,45 @@ export const init = createPluginInitFunction<
                   let tenantId: string | undefined = PUBLIC_TENANT_ID;
                   let rowndUserId: string | undefined;
                   let superTokensUserId: string | undefined;
+                  let user: Awaited<ReturnType<typeof supertokens.getUser>>;
+                  let recipeUserId:
+                    | Parameters<typeof Session.createNewSession>[3]
+                    | undefined;
                   try {
                     if (!config.supertokens) {
                       throw new Error("Supertokens config not found");
                     }
                     const parsed = await parseRequest(req);
                     rowndUserId = await validateRowndToken(parsed.token);
-                    superTokensUserId =
-                      await findSuperTokensUserIdByRowndUserId(rowndUserId);
+                    user = await supertokens.getUser(rowndUserId, userContext);
 
-                    if (!superTokensUserId) {
+                    if (!user) {
                       const rowndUser = await fetchRowndUserInfo(rowndUserId);
                       const stUserImport = mapRowndUserToSuperTokens(rowndUser);
-                      superTokensUserId = await importUser(
+                      const importedUser = await importUser(
                         stUserImport,
                         config.supertokens,
                       );
+                      superTokensUserId = importedUser.id;
+                      if (importedUser.loginMethods[0]?.recipeUserId) {
+                        recipeUserId = supertokens.convertToRecipeUserId(
+                          importedUser.loginMethods[0].recipeUserId,
+                        );
+                      }
                       logDebugMessage(
                         `User migrated successfully. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
                       );
                     } else {
+                      superTokensUserId = user.id;
+                      recipeUserId = user.loginMethods[0]?.recipeUserId;
                       logDebugMessage(
                         `User already migrated. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
                       );
                     }
 
-                    if (!superTokensUserId) {
-                      throw new Error(
-                        "User migration failed or user not found after migration",
-                      );
-                    }
-
-                    const user = await supertokens.getUser(
-                      superTokensUserId,
-                      userContext,
-                    );
-                    if (!user || user.loginMethods.length === 0) {
+                    if (!recipeUserId) {
                       throw new Error("User not found or has no login methods");
                     }
-
-                    const recipeUserId = user.loginMethods[0]!.recipeUserId;
 
                     await Session.createNewSession(
                       req,
@@ -120,7 +119,7 @@ export const init = createPluginInitFunction<
                     );
 
                     logDebugMessage(
-                      `Session migrated successfully. tenantId: ${PUBLIC_TENANT_ID}, userId: ${user.id}`,
+                      `Session migrated successfully. tenantId: ${PUBLIC_TENANT_ID}, userId: ${superTokensUserId}`,
                     );
 
                     telemetryClient.recordSuccess({
@@ -148,9 +147,9 @@ export const init = createPluginInitFunction<
                     return {
                       status: "ERROR",
                       message:
-                        error instanceof Error
+                        error instanceof RowndPluginError
                           ? error.message
-                          : "Unknown error",
+                          : "Migration failed",
                     };
                   }
                 },

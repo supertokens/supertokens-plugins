@@ -125,7 +125,7 @@ describe("rownd-nodejs plugin", () => {
     it("throws when the Rownd payload has no data object", () => {
       expect(() =>
         mapRowndUserToSuperTokens({ app_user_id: "rownd-no-data" } as any),
-      ).toThrowError(new Error("Rownd user has no app_user_id"));
+      ).toThrowError(new Error("Rownd user has no user_id"));
     });
 
     it("throws when data.user_id is missing", () => {
@@ -135,7 +135,31 @@ describe("rownd-nodejs plugin", () => {
           data: { email: "missing-user-id@example.com" },
           verified_data: { email: true },
         } as any),
-      ).toThrowError(new Error("Rownd user has no app_user_id"));
+      ).toThrowError(new Error("Rownd user has no user_id"));
+    });
+
+    it("throws when a google user is missing email", () => {
+      expect(() =>
+        mapRowndUserToSuperTokens({
+          data: {
+            user_id: "rownd-google-missing-email",
+            google_id: "google-user-id",
+          },
+          verified_data: { google_id: true },
+        } as any),
+      ).toThrowError(new Error("Rownd Google user is missing email"));
+    });
+
+    it("throws when an apple user is missing email", () => {
+      expect(() =>
+        mapRowndUserToSuperTokens({
+          data: {
+            user_id: "rownd-apple-missing-email",
+            apple_id: "apple-user-id",
+          },
+          verified_data: { apple_id: true },
+        } as any),
+      ).toThrowError(new Error("Rownd Apple user is missing email"));
     });
 
     it("throws when no supported login method can be derived", () => {
@@ -277,7 +301,6 @@ describe("rownd-nodejs plugin", () => {
       expect(telemetryClient.recordEvent).toHaveBeenCalledWith(
         expect.objectContaining({
           outcome: "success",
-          operation: "migrate",
           rowndUserId: rowndUser.app_user_id,
           superTokensUserId: expect.any(String),
         }),
@@ -418,7 +441,7 @@ describe("rownd-nodejs plugin", () => {
       );
       const body = await res.json();
       expect(body.status).toBe("ERROR");
-      expect(body.message).toBe("Invalid token API");
+      expect(body.message).toBe("Migration failed");
     });
 
     it("error if rownd user info fetch fails", async () => {
@@ -449,7 +472,7 @@ describe("rownd-nodejs plugin", () => {
       );
       const body = await res.json();
       expect(body.status).toBe("ERROR");
-      expect(body.message).toBe("Fetch failed");
+      expect(body.message).toBe("Migration failed");
       expect(telemetryClient.recordEvent).toHaveBeenCalledWith(
         expect.objectContaining({
           outcome: "error",
@@ -463,7 +486,7 @@ describe("rownd-nodejs plugin", () => {
 
     it("telemetry failure does not affect response", async () => {
       const telemetryClient: RowndTelemetryClient = {
-        recordEvent: vi.fn(() => {
+        recordEvent: vi.fn(async () => {
           throw new Error("Telemetry down");
         }),
       };
@@ -681,17 +704,12 @@ function resetST() {
 }
 
 async function getMigratedUserByRowndUserId(rowndUserId: string) {
-  const mapping = await SuperTokens.getUserIdMapping({
-    userId: rowndUserId,
-    userIdType: "EXTERNAL",
-  });
-
-  if (mapping.status !== "OK") {
+  const user = await SuperTokens.getUser(rowndUserId);
+  if (!user) {
     return undefined;
   }
 
-  const user = await SuperTokens.getUser(mapping.externalUserId);
-  const metadata = await getUserMetadata(mapping.externalUserId);
+  const metadata = await getUserMetadata(rowndUserId);
 
   return {
     user,

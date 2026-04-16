@@ -4,9 +4,8 @@ import { RowndTelemetryClient, RowndTelemetryEvent } from "../types";
 export class OpenTelemetryClient implements RowndTelemetryClient {
   recordEvent(event: RowndTelemetryEvent): void {
     const tracer = trace.getTracer("supertokens-plugin-rownd", "0.1.0");
-    const span = tracer.startSpan(`rownd.${event.operation}`);
+    const span = tracer.startSpan("rownd.migrate");
     span.setAttributes({
-      "rownd.operation": event.operation,
       "rownd.outcome": event.outcome,
       "rownd.duration_ms": event.durationMs,
       "rownd.tenant_id": event.tenantId ?? "",

@@ -1,5 +1,4 @@
 import { BaseRequest } from "supertokens-node/lib/build/framework/request";
-import supertokens from "supertokens-node";
 import { RowndUser, SuperTokensUserImport, IRowndClient } from "./types";
 import { RowndPluginError } from "./errors";
 import type {
@@ -45,25 +44,33 @@ export function mapRowndUserToSuperTokens(
   const rowndUserData = rowndUser.data || {};
   const rowndUserVerifiedData = rowndUser.verified_data || {};
   if (!rowndUserData.user_id) {
-    throw new Error("Rownd user has no app_user_id");
+    throw new Error("Rownd user has no user_id");
   }
 
   if (rowndUserData.google_id) {
+    if (!rowndUserData.email) {
+      throw new Error("Rownd Google user is missing email");
+    }
+
     loginMethods.push({
       recipeId: "thirdparty",
       thirdPartyId: "google",
-      thirdPartyUserId: rowndUser.data.google_id as string,
-      email: rowndUser.data.email || "",
+      thirdPartyUserId: rowndUserData.google_id,
+      email: rowndUserData.email,
       isVerified: !!rowndUserVerifiedData.google_id,
     });
   }
 
   if (rowndUserData.apple_id) {
+    if (!rowndUserData.email) {
+      throw new Error("Rownd Apple user is missing email");
+    }
+
     loginMethods.push({
       recipeId: "thirdparty",
       thirdPartyId: "apple",
-      thirdPartyUserId: rowndUser.data.apple_id as string,
-      email: rowndUser.data.email || "",
+      thirdPartyUserId: rowndUserData.apple_id,
+      email: rowndUserData.email,
       isVerified: !!rowndUserVerifiedData.apple_id,
     });
   }
@@ -71,7 +78,7 @@ export function mapRowndUserToSuperTokens(
   if (rowndUserData.phone_number) {
     loginMethods.push({
       recipeId: "passwordless",
-      phoneNumber: rowndUser.data.phone_number,
+      phoneNumber: rowndUserData.phone_number,
       isVerified: !!rowndUserVerifiedData.phone_number,
     });
   }
@@ -79,7 +86,7 @@ export function mapRowndUserToSuperTokens(
   if (rowndUserData.email && loginMethods.length === 0) {
     loginMethods.push({
       recipeId: "passwordless",
-      email: rowndUser.data.email,
+      email: rowndUserData.email,
       isVerified: !!rowndUserVerifiedData.email,
     });
   }
@@ -118,7 +125,12 @@ export function mapRowndUserToSuperTokens(
 export async function importUser(
   stUser: SuperTokensUserImport,
   config: NonNullable<SuperTokensPublicConfig["supertokens"]>,
-): Promise<string> {
+): Promise<{
+  id: string;
+  loginMethods: Array<{
+    recipeUserId: string;
+  }>;
+}> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
@@ -142,36 +154,21 @@ export async function importUser(
   const importResponse = (await response.json()) as {
     status: string;
     message?: string;
+    user?: {
+      id: string;
+      loginMethods: Array<{
+        recipeUserId: string;
+      }>;
+    };
   };
 
-  if (importResponse.status !== "OK") {
+  if (importResponse.status !== "OK" || !importResponse.user) {
     throw new Error(
-      `Bulk import failed: ${importResponse.message || "Unknown error"}`,
+      `Bulk import failed: ${importResponse.message || "Missing user in response"}`,
     );
   }
 
-  const importedUserId = await findSuperTokensUserIdByRowndUserId(
-    stUser.externalUserId,
-  );
-
-  if (!importedUserId) {
-    throw new Error("Imported user not found after import");
-  }
-
-  return importedUserId;
-}
-
-export async function findSuperTokensUserIdByRowndUserId(
-  rowndUserId: string,
-): Promise<string | undefined> {
-  const mapping = await supertokens.getUserIdMapping({
-    userId: rowndUserId,
-    userIdType: "EXTERNAL",
-  });
-  if (mapping.status === "OK") {
-    return mapping.superTokensUserId;
-  }
-  return undefined;
+  return importResponse.user;
 }
 
 export async function validateRowndToken(token: string): Promise<string> {
