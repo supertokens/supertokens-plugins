@@ -132,7 +132,33 @@ RowndMigrationPlugin.init({
 });
 ```
 
-## Requirements
+## Bulk Import Script
 
-- SuperTokens Node.js SDK >= 23.0.0
-- `@rownd/node` >= 3.0.0
+The package includes a bulk migration script for importing Rownd users into SuperTokens.
+
+The script now runs directly from a YAML config file that lives beside the script:
+
+- config file: `packages/rownd-nodejs/scripts/config.yaml`
+- script: `packages/rownd-nodejs/scripts/bulkMigrate.ts`
+
+### Usage
+
+1. Edit `scripts/config.yaml` with your Rownd and SuperTokens credentials.
+2. Run the script from `packages/rownd-nodejs`.
+
+```bash
+npm run bulk-import
+```
+
+The script:
+
+- fetches users from Rownd page by page
+- validates the Rownd payload shape with `zod`
+- maps users with `mapRowndUserToSuperTokens`
+- imports them into SuperTokens in bounded batches
+- writes a checkpoint file so the run can resume later
+
+### Config File
+
+All runtime config is read from `scripts/config.yaml`.
+There is no environment variable parsing.

@@ -1,0 +1,27 @@
+# Maximum number of users to process. Remove this field to process everything.
+limit: 100
+
+checkpoint:
+  # File used to persist migration progress so a later run can resume.
+  file: ./rownd-migration-checkpoint.json
+  # When true, continue from the saved checkpoint instead of starting over.
+  resume: false
+
+retry:
+  # Number of attempts for retryable HTTP failures such as 429 and 5xx.
+  maxAttempts: 5
+  # Base backoff delay in milliseconds before exponential retry waits.
+  initialDelayMs: 500
+
+rownd:
+  appId: <APP_ID>
+  appKey: <APP_KEY>
+  appSecret: <APP_SECRET>
+  # Number of Rownd users to request per page.
+  pageSize: 100
+
+supertokens:
+  connectionURI: <CONNECTION_URI>
+  apiKey: <API_KEY>
+  # Number of users to send to SuperTokens per bulk import request.
+  batchSize: 500

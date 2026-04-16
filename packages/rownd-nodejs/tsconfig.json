@@ -8,6 +8,6 @@
     "types": ["node"],
     "skipLibCheck": true
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "scripts/**/*"],
   "exclude": ["src/**/*.test.ts", "src/**/*.spec.ts"]
 }
