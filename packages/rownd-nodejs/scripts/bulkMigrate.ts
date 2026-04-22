@@ -171,24 +171,24 @@ function isRetryableStatus(status: number) {
 
 async function fetchWithRetry({
   url,
-  init,
-  retry,
+  requestInit,
+  retryConfig,
   operation,
 }: {
   url: string;
-  init?: RequestInit;
-  retry: RetryConfig;
+  requestInit?: RequestInit;
+  retryConfig: RetryConfig;
   operation: string;
 }) {
   let lastError: Error | undefined;
 
-  for (let attempt = 1; attempt <= retry.maxAttempts; attempt += 1) {
+  for (let attempt = 1; attempt <= retryConfig.maxAttempts; attempt += 1) {
     try {
-      const response = await fetch(url, init);
+      const response = await fetch(url, requestInit);
       if (
         response.ok ||
         !isRetryableStatus(response.status) ||
-        attempt === retry.maxAttempts
+        attempt === retryConfig.maxAttempts
       ) {
         return response;
       }
@@ -198,7 +198,7 @@ async function fetchWithRetry({
         `${operation} failed with ${response.status}${responseText ? ` ${responseText}` : ""}`,
       );
     } catch (error) {
-      if (attempt === retry.maxAttempts) {
+      if (attempt === retryConfig.maxAttempts) {
         throw error;
       }
 
@@ -207,7 +207,7 @@ async function fetchWithRetry({
     }
 
     const delayMs = Math.round(
-      retry.initialDelayMs * 2 ** (attempt - 1) * (1 + Math.random() * 0.2),
+      retryConfig.initialDelayMs * 2 ** (attempt - 1) * (1 + Math.random() * 0.2),
     );
     console.log(
       `${operation} attempt ${attempt} failed. Retrying in ${delayMs}ms.`,
@@ -263,13 +263,13 @@ async function fetchRowndUsersPage(
 
   const response = await fetchWithRetry({
     url: url.toString(),
-    init: {
+    requestInit: {
       headers: {
         "x-rownd-app-key": config.rownd.appKey,
         "x-rownd-app-secret": config.rownd.appSecret,
       },
     },
-    retry: config.retry,
+    retryConfig: config.retry,
     operation: "Fetching Rownd users",
   });
 
@@ -320,12 +320,12 @@ export async function stageUsersForImport(config: {
       "/bulk-import/users",
       config.supertokens.connectionURI,
     ).toString(),
-    init: {
+    requestInit: {
       method: "POST",
       headers,
       body: JSON.stringify({ users: config.users }),
     },
-    retry: config.retry,
+    retryConfig: config.retry,
     operation: "Importing users into SuperTokens",
   });
 
