@@ -1,0 +1,50 @@
+{
+  "name": "@supertokens-plugins/rownd-nodejs",
+  "version": "0.1.0",
+  "description": "Rownd User Migration Plugin for SuperTokens",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "scripts"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "bulk-import": "tsx scripts/bulkMigrate.ts",
+    "lint": "eslint ./src --ext .ts",
+    "test": "TEST_MODE=testing vitest run --pool=forks"
+  },
+  "keywords": [
+    "supertokens",
+    "rownd",
+    "migration",
+    "plugin"
+  ],
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@rownd/node": "^3.0.4"
+  },
+  "peerDependencies": {
+    "supertokens-node": ">=23.0.0"
+  },
+  "devDependencies": {
+    "@shared/eslint": "*",
+    "@shared/nodejs": "*",
+    "@shared/tsconfig": "*",
+    "@types/node": "^20.0.0",
+    "eslint": "^8.57.0",
+    "testcontainers": "^10.7.1",
+    "tsup": "^8.0.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.3",
+    "vitest": "^1.3.1",
+    "yaml": "^2.8.3",
+    "zod": "^4.3.6"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
