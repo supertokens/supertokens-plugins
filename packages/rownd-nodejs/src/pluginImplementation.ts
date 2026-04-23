@@ -1,4 +1,6 @@
 import { BaseRequest } from "supertokens-node/lib/build/framework/request";
+import SuperTokens from "supertokens-node";
+import UserMetadata from "supertokens-node/recipe/usermetadata";
 import { RowndUser, SuperTokensUserImport, IRowndClient } from "./types";
 import { RowndPluginError } from "./errors";
 import type {
@@ -184,4 +186,131 @@ export async function fetchRowndUserInfo(userId: string): Promise<RowndUser> {
     throw new RowndPluginError("ROWND_USER_NOT_FOUND");
   }
   return rowndUser;
+}
+
+type RowndMetadata = {
+  data: Record<string, any>;
+  meta: Record<string, any>;
+  verified_data: Record<string, any>;
+  attributes: Record<string, any>;
+  rownd_migrated?: boolean;
+  rownd_user_id?: string;
+};
+
+export type RowndCompatUserResponse = {
+  data: Record<string, any>;
+  meta: Record<string, any>;
+  verified_data: Record<string, any>;
+  redacted: string[];
+  groups: any[];
+  attributes?: Record<string, any>;
+};
+
+export async function getRowndStyleMetadata(userId: string): Promise<RowndMetadata> {
+  const metadata = await UserMetadata.getUserMetadata(userId);
+  const rowndMetadata = (metadata.metadata || {}) as Partial<RowndMetadata>;
+
+  return {
+    data: rowndMetadata.data || {},
+    meta: rowndMetadata.meta || {},
+    verified_data: rowndMetadata.verified_data || {},
+    attributes: rowndMetadata.attributes || {},
+    rownd_migrated: rowndMetadata.rownd_migrated,
+    rownd_user_id: rowndMetadata.rownd_user_id,
+  };
+}
+
+export async function buildRowndStyleUserResponse(
+  userId: string,
+): Promise<RowndCompatUserResponse> {
+  const metadata = await getRowndStyleMetadata(userId);
+  const stUser = await SuperTokens.getUser(userId);
+  const loginMethod = stUser?.loginMethods[0];
+
+  const data = {
+    user_id: userId,
+    ...metadata.data,
+  };
+
+  if (data.email === undefined && loginMethod && "email" in loginMethod && loginMethod.email) {
+    data.email = loginMethod.email;
+  }
+
+  if (data.phone_number === undefined && loginMethod && "phoneNumber" in loginMethod && loginMethod.phoneNumber) {
+    data.phone_number = loginMethod.phoneNumber;
+  }
+
+  const verifiedData = {
+    ...metadata.verified_data,
+  };
+
+  if (verifiedData.email === true && typeof data.email === "string") {
+    verifiedData.email = data.email;
+  }
+
+  if (verifiedData.phone_number === true && typeof data.phone_number === "string") {
+    verifiedData.phone_number = data.phone_number;
+  }
+
+  if (loginMethod && "email" in loginMethod && loginMethod.email && loginMethod.verified === true && verifiedData.email === undefined) {
+    verifiedData.email = loginMethod.email;
+  }
+
+  if (
+    loginMethod &&
+    "phoneNumber" in loginMethod &&
+    loginMethod.phoneNumber &&
+    loginMethod.verified === true &&
+    verifiedData.phone_number === undefined
+  ) {
+    verifiedData.phone_number = loginMethod.phoneNumber;
+  }
+
+  return {
+    data,
+    meta: metadata.meta,
+    verified_data: verifiedData,
+    redacted: [],
+    groups: [],
+    attributes: metadata.attributes,
+  };
+}
+
+export async function updateRowndUserData(
+  userId: string,
+  inputData: Record<string, any>,
+) {
+  const metadata = await getRowndStyleMetadata(userId);
+  const updatedMetadata: JSONObject = {
+    ...metadata,
+    data: {
+      ...metadata.data,
+      ...inputData,
+      user_id: userId,
+    },
+  };
+
+  await UserMetadata.updateUserMetadata(userId, updatedMetadata);
+  return buildRowndStyleUserResponse(userId);
+}
+
+export async function updateRowndUserMetadata(
+  userId: string,
+  inputMeta: Record<string, any>,
+) {
+  const metadata = await getRowndStyleMetadata(userId);
+  const updatedMetadata: JSONObject = {
+    ...metadata,
+    meta: {
+      ...metadata.meta,
+      ...inputMeta,
+    },
+  };
+
+  await UserMetadata.updateUserMetadata(userId, updatedMetadata);
+
+  return {
+    id: userId,
+    meta: (updatedMetadata.meta || {}) as Record<string, any>,
+  };
 }

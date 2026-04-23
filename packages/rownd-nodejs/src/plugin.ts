@@ -21,6 +21,10 @@ import {
   setRowndClient,
   validateRowndToken,
   fetchRowndUserInfo,
+  buildRowndStyleUserResponse,
+  getRowndStyleMetadata,
+  updateRowndUserData,
+  updateRowndUserMetadata,
 } from "./pluginImplementation";
 
 export const init = createPluginInitFunction<
@@ -155,6 +159,167 @@ export const init = createPluginInitFunction<
                 },
               ),
             },
+            {
+              path: `${apiBasePath}${HANDLE_BASE_PATH}/user`,
+              method: "get",
+              verifySessionOptions: {
+                sessionRequired: true,
+              },
+              handler: withRequestHandler(async (_req, _res, session) => {
+                if (!session) {
+                  throw new Error("Session not found");
+                }
+
+                const userId = session.getUserId();
+                return {
+                  status: "OK" as const,
+                  ...(await buildRowndStyleUserResponse(userId)),
+                };
+              }),
+            },
+            {
+              path: `${apiBasePath}${HANDLE_BASE_PATH}/user`,
+              method: "put",
+              verifySessionOptions: {
+                sessionRequired: true,
+              },
+              handler: withRequestHandler(async (req, _res, session) => {
+                if (!session) {
+                  throw new Error("Session not found");
+                }
+
+                const payload = (await req.getJSONBody()) as
+                  | { data?: Record<string, any> }
+                  | undefined;
+                return {
+                  status: "OK" as const,
+                  ...(await updateRowndUserData(
+                    session.getUserId(),
+                    payload?.data || {},
+                  )),
+                };
+              }),
+            },
+            {
+              path: `${apiBasePath}${HANDLE_BASE_PATH}/user`,
+              method: "delete",
+              verifySessionOptions: {
+                sessionRequired: true,
+              },
+              handler: withRequestHandler(async (_req, _res, session) => {
+                if (!session) {
+                  throw new Error("Session not found");
+                }
+
+                await supertokens.deleteUser(session.getUserId(), true);
+                return { status: "OK" as const };
+              }),
+            },
+            {
+              path: `${apiBasePath}${HANDLE_BASE_PATH}/user/meta`,
+              method: "get",
+              verifySessionOptions: {
+                sessionRequired: true,
+              },
+              handler: withRequestHandler(async (_req, _res, session) => {
+                if (!session) {
+                  throw new Error("Session not found");
+                }
+
+                const metadata = await getRowndStyleMetadata(
+                  session.getUserId(),
+                );
+                return {
+                  status: "OK" as const,
+                  id: session.getUserId(),
+                  meta: metadata.meta,
+                };
+              }),
+            },
+            {
+              path: `${apiBasePath}${HANDLE_BASE_PATH}/user/meta`,
+              method: "put",
+              verifySessionOptions: {
+                sessionRequired: true,
+              },
+              handler: withRequestHandler(async (req, _res, session) => {
+                if (!session) {
+                  throw new Error("Session not found");
+                }
+
+                const payload = (await req.getJSONBody()) as
+                  | { meta?: Record<string, any> }
+                  | undefined;
+                return {
+                  status: "OK" as const,
+                  ...(await updateRowndUserMetadata(
+                    session.getUserId(),
+                    payload?.meta || {},
+                  )),
+                };
+              }),
+            },
+            {
+              path: `${apiBasePath}${HANDLE_BASE_PATH}/user/field`,
+              method: "get",
+              verifySessionOptions: {
+                sessionRequired: true,
+              },
+              handler: withRequestHandler(async (req, _res, session) => {
+                if (!session) {
+                  throw new Error("Session not found");
+                }
+
+                const field = req.getKeyValueFromQuery("field");
+                if (!field) {
+                  return {
+                    status: "ERROR" as const,
+                    code: 400,
+                    message: "field is required",
+                  };
+                }
+                const metadata = await getRowndStyleMetadata(
+                  session.getUserId(),
+                );
+                return {
+                  status: "OK" as const,
+                  value: metadata.data[field],
+                };
+              }),
+            },
+            {
+              path: `${apiBasePath}${HANDLE_BASE_PATH}/user/field`,
+              method: "put",
+              verifySessionOptions: {
+                sessionRequired: true,
+              },
+              handler: withRequestHandler(async (req, _res, session) => {
+                if (!session) {
+                  throw new Error("Session not found");
+                }
+
+                const field = req.getKeyValueFromQuery("field");
+                if (!field) {
+                  return {
+                    status: "ERROR" as const,
+                    code: 400,
+                    message: "field is required",
+                  };
+                }
+                const payload = (await req.getJSONBody()) as
+                  | { value?: any }
+                  | undefined;
+                return {
+                  status: "OK" as const,
+                  ...(await updateRowndUserData(session.getUserId(), {
+                    [field]: payload?.value,
+                  })),
+                };
+              }),
+            },
+            // Merge/group/passkey compatibility APIs are intentionally unsupported here.
+            // Those flows should be handled administratively or by dedicated backend features,
+            // not via the migrated Rownd compatibility surface.
           ],
         };
       },
