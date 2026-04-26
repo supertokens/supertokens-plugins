@@ -1,10 +1,14 @@
 import type { JSONObject } from "supertokens-node/types";
+import type { RowndSchema } from "./schema";
 
 export interface RowndPluginConfig {
   rowndAppKey: string;
   rowndAppSecret: string;
   enableDebugLogs?: boolean;
   telemetry?: RowndTelemetryConfig;
+  // Optional frontend/profile schema override used by Rownd compatibility surfaces.
+  // If omitted, the plugin can fall back to DEFAULT_ROWND_SCHEMA.
+  schema?: RowndSchema;
 }
 
 export type RowndTelemetryEvent =
@@ -84,6 +88,7 @@ export interface RowndPluginNormalisedConfig {
   rowndAppSecret: string;
   enableDebugLogs?: boolean;
   telemetry?: RowndTelemetryConfig;
+  schema?: RowndSchema;
 }
 
 export interface SuperTokensUserImport {

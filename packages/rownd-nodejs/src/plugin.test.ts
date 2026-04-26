@@ -687,6 +687,170 @@ describe("rownd-nodejs plugin", () => {
       expect((await res.json()).status).toBe("ERROR");
     });
   });
+
+  describe("compatibility user routes", () => {
+    async function createSessionForUser(userId: string, email = `${userId}@example.com`) {
+      mockRowndClient.validateToken.mockResolvedValue({ user_id: userId });
+      mockRowndClient.fetchUserInfo.mockResolvedValue({
+        app_user_id: userId,
+        data: { user_id: userId, email },
+        verified_data: { email: true },
+        meta: { created: "2026-01-01T00:00:00.000Z" },
+      });
+
+      const res = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate`, {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer some-token",
+          rid: "session",
+          "fdi-version": "1.18",
+        },
+      });
+
+      const accessToken = res.headers.get("st-access-token");
+      expect(accessToken).toBeTruthy();
+      return accessToken!;
+    }
+
+    function getAuthedHeaders(accessToken: string) {
+      return {
+        Authorization: `Bearer ${accessToken}`,
+        rid: "session",
+        "fdi-version": "1.18",
+        "st-auth-mode": "header",
+      };
+    }
+
+    it("gets compatibility user payload", async () => {
+      const { server: s, port } = await setup(coreConnectionURI);
+      server = s;
+      testPORT = port;
+      const accessToken = await createSessionForUser("compat-user-1");
+
+      const res = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
+        headers: getAuthedHeaders(accessToken),
+      });
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({
+        status: "OK",
+        data: {
+          user_id: "compat-user-1",
+          email: "compat-user-1@example.com",
+        },
+        meta: {
+          created: "2026-01-01T00:00:00.000Z",
+        },
+        verified_data: {
+          email: "compat-user-1@example.com",
+        },
+        redacted: [],
+        groups: [],
+        attributes: {},
+      });
+    });
+
+    it("updates compatibility user data", async () => {
+      const { server: s, port } = await setup(coreConnectionURI);
+      server = s;
+      testPORT = port;
+      const accessToken = await createSessionForUser("compat-user-2");
+
+      const res = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
+        method: "PUT",
+        headers: {
+          ...getAuthedHeaders(accessToken),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ data: { first_name: "Ada" } }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("OK");
+      expect(body.data).toEqual({
+        user_id: "compat-user-2",
+        email: "compat-user-2@example.com",
+        first_name: "Ada",
+      });
+      expect(body.meta.created).toBe("2026-01-01T00:00:00.000Z");
+      expect(body.verified_data.email).toBe("compat-user-2@example.com");
+    });
+
+    it("gets and updates compatibility user meta", async () => {
+      const { server: s, port } = await setup(coreConnectionURI);
+      server = s;
+      testPORT = port;
+      const accessToken = await createSessionForUser("compat-user-3");
+
+      const initialRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user/meta`, {
+        headers: getAuthedHeaders(accessToken),
+      });
+      await expect(initialRes.json()).resolves.toEqual({
+        status: "OK",
+        id: "compat-user-3",
+        meta: { created: "2026-01-01T00:00:00.000Z" },
+      });
+
+      const updateRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user/meta`, {
+        method: "PUT",
+        headers: {
+          ...getAuthedHeaders(accessToken),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ meta: { last_passkey_registration_prompt: "2026-04-23T00:00:00.000Z" } }),
+      });
+
+      expect(updateRes.status).toBe(200);
+      await expect(updateRes.json()).resolves.toEqual({
+        status: "OK",
+        id: "compat-user-3",
+        meta: {
+          created: "2026-01-01T00:00:00.000Z",
+          last_passkey_registration_prompt: "2026-04-23T00:00:00.000Z",
+        },
+      });
+    });
+
+    it("gets and updates compatibility user fields", async () => {
+      const { server: s, port } = await setup(coreConnectionURI);
+      server = s;
+      testPORT = port;
+      const accessToken = await createSessionForUser("compat-user-4");
+
+      const updateRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=last_name`, {
+        method: "PUT",
+        headers: {
+          ...getAuthedHeaders(accessToken),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ value: "Lovelace" }),
+      });
+      expect(updateRes.status).toBe(200);
+
+      const getRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=last_name`, {
+        headers: getAuthedHeaders(accessToken),
+      });
+      expect(getRes.status).toBe(200);
+      await expect(getRes.json()).resolves.toEqual({ status: "OK", value: "Lovelace" });
+    });
+
+    it("deletes the compatibility user", async () => {
+      const { server: s, port } = await setup(coreConnectionURI);
+      server = s;
+      testPORT = port;
+      const accessToken = await createSessionForUser("compat-user-5");
+
+      const deleteRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
+        method: "DELETE",
+        headers: getAuthedHeaders(accessToken),
+      });
+
+      expect(deleteRes.status).toBe(200);
+      const deletedUser = await SuperTokens.getUser("compat-user-5");
+      expect(deletedUser).toBeUndefined();
+    });
+  });
 });
 
 function resetST() {
