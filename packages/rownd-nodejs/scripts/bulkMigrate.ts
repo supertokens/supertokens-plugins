@@ -47,6 +47,11 @@ type Checkpoint = {
   updatedAt: string;
 };
 
+type FailedMapping = {
+  user: RowndUser;
+  error: string;
+};
+
 const ConfigSchema = z.object({
   limit: z.preprocess(
     (value) => (value === undefined ? Number.POSITIVE_INFINITY : value),
@@ -207,7 +212,9 @@ async function fetchWithRetry({
     }
 
     const delayMs = Math.round(
-      retryConfig.initialDelayMs * 2 ** (attempt - 1) * (1 + Math.random() * 0.2),
+      retryConfig.initialDelayMs *
+        2 ** (attempt - 1) *
+        (1 + Math.random() * 0.2),
     );
     console.log(
       `${operation} attempt ${attempt} failed. Retrying in ${delayMs}ms.`,
@@ -220,12 +227,18 @@ async function fetchWithRetry({
 }
 
 function parseRowndUser(rawUser: unknown) {
-  const parsed = RowndUserSchema.parse(rawUser);
+  const parseResult = RowndUserSchema.safeParse(rawUser);
+  if (!parseResult.success) {
+    console.error(parseResult.error);
+    throw new Error(`Schema parse error - ${parseResult.error.message}`);
+  }
+  const parsed = parseResult.data;
   const rowndUserId = (parsed.data.user_id ||
     parsed.user_id ||
     parsed.app_user_id) as string | undefined;
 
   if (!rowndUserId) {
+    console.error(parsed);
     throw new Error(
       "Rownd user is missing a stable user id. Cannot continue pagination safely.",
     );
@@ -302,6 +315,47 @@ async function saveCheckpoint(checkpointFile: string, checkpoint: Checkpoint) {
   await fs.rename(tempFile, checkpointFile);
 }
 
+function getFailedMappingsFilePath(checkpointFile: string) {
+  return `${checkpointFile}.failed-mappings.json`;
+}
+
+async function loadFailedMappings(filePath: string): Promise<FailedMapping[]> {
+  try {
+    const contents = await fs.readFile(filePath, "utf8");
+    const parsed = JSON.parse(contents) as unknown;
+
+    if (!Array.isArray(parsed)) {
+      throw new Error("Failed mappings file must contain a JSON array.");
+    }
+
+    return parsed as FailedMapping[];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+
+    throw error;
+  }
+}
+
+async function appendFailedMappings(
+  filePath: string,
+  failedMappings: FailedMapping[],
+) {
+  if (failedMappings.length === 0) {
+    return;
+  }
+
+  const existingMappings = await loadFailedMappings(filePath);
+  const tempFile = `${filePath}.tmp`;
+  await fs.writeFile(
+    tempFile,
+    JSON.stringify([...existingMappings, ...failedMappings], null, 2),
+    "utf8",
+  );
+  await fs.rename(tempFile, filePath);
+}
+
 export async function stageUsersForImport(config: {
   users: SuperTokensUserImport[];
   supertokens: Pick<SuperTokensTargetConfig, "connectionURI" | "apiKey">;
@@ -312,7 +366,7 @@ export async function stageUsersForImport(config: {
   };
 
   if (config.supertokens.apiKey) {
-    headers["api-key"] = config.supertokens.apiKey;
+    // headers["api-key"] = config.supertokens.apiKey;
   }
 
   const response = await fetchWithRetry({
@@ -364,9 +418,11 @@ export async function migrateRowndUsersToSuperTokens(
   const checkpoint = config.checkpoint.resume
     ? await loadCheckpoint(config.checkpoint.file)
     : null;
+  const failedMappingsFile = getFailedMappingsFilePath(config.checkpoint.file);
   let cursor = checkpoint?.cursor;
   let totalProcessed = 0;
   let totalImported = checkpoint?.importedCount ?? 0;
+  let totalSkipped = 0;
 
   if (config.checkpoint.resume) {
     console.log(
@@ -401,10 +457,33 @@ export async function migrateRowndUsersToSuperTokens(
       break;
     }
 
-    const mappedUsers = pageUsers.map(({ rowndUser, rowndUserId }) => ({
-      rowndUserId,
-      user: mapRowndUserToSuperTokens(rowndUser),
-    }));
+    const mappedUsers: Array<{
+      rowndUserId: string;
+      user: SuperTokensUserImport;
+    }> = [];
+    const failedMappings: FailedMapping[] = [];
+
+    for (const { rowndUser, rowndUserId } of pageUsers) {
+      try {
+        mappedUsers.push({
+          rowndUserId,
+          user: mapRowndUserToSuperTokens(rowndUser),
+        });
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : "Unknown mapping error";
+        failedMappings.push({
+          user: rowndUser,
+          error: errorMessage,
+        });
+        console.warn(
+          `Skipping Rownd user ${rowndUserId}: ${errorMessage}. Saved to ${failedMappingsFile}`,
+        );
+      }
+    }
+
+    await appendFailedMappings(failedMappingsFile, failedMappings);
+    totalSkipped += failedMappings.length;
 
     await importUsersBatch(config, mappedUsers, totalImported);
 
@@ -429,13 +508,20 @@ export async function migrateRowndUsersToSuperTokens(
   return {
     totalProcessed,
     totalImported,
+    totalSkipped,
     cursor,
   };
 }
 
 export async function runCli() {
-  const result = await migrateRowndUsersToSuperTokens(await loadConfig());
+  const config = await loadConfig();
+  const result = await migrateRowndUsersToSuperTokens(config);
   console.log(`Migrated ${result.totalImported} users`);
+  if (result.totalSkipped > 0) {
+    console.warn(
+      `Skipped ${result.totalSkipped} users. Details saved to ${getFailedMappingsFilePath(config.checkpoint.file)}`,
+    );
+  }
 }
 
 runCli().catch((error: unknown) => {
