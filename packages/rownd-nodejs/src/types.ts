@@ -101,6 +101,7 @@ export interface SuperTokensUserImport {
         email: string;
         passwordHash: string;
         isVerified: boolean;
+        tenantIds?: string[];
       }
     | {
         recipeId: "thirdparty";
@@ -108,12 +109,14 @@ export interface SuperTokensUserImport {
         thirdPartyUserId: string;
         email: string;
         isVerified: boolean;
+        tenantIds?: string[];
       }
     | {
         recipeId: "passwordless";
         email?: string;
         phoneNumber?: string;
         isVerified: boolean;
+        tenantIds?: string[];
       }
   )[];
 }

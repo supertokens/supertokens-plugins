@@ -1,4 +1,4 @@
-import fs from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -33,12 +33,24 @@ export type SuperTokensTargetConfig = {
   batchSize: number;
 };
 
+export type ThirdPartyProviderConfig = {
+  thirdPartyId: string;
+  name?: string;
+  clients: {
+    clientType?: string;
+    clientId: string;
+    clientSecret?: string;
+    scope?: string[];
+  }[];
+};
+
 export type BulkMigrateConfig = {
   limit: number;
   checkpoint: CheckpointConfig;
   retry: RetryConfig;
   rownd: RowndSourceConfig;
   supertokens: SuperTokensTargetConfig;
+  thirdPartyProviders?: ThirdPartyProviderConfig[];
 };
 
 type Checkpoint = {
@@ -76,6 +88,22 @@ const ConfigSchema = z.object({
     apiKey: z.string().optional(),
     batchSize: z.number().int().positive(),
   }),
+  thirdPartyProviders: z
+    .array(
+      z.object({
+        thirdPartyId: z.string(),
+        name: z.string().optional(),
+        clients: z.array(
+          z.object({
+            clientType: z.string().optional(),
+            clientId: z.string(),
+            clientSecret: z.string().optional(),
+            scope: z.array(z.string()).optional(),
+          }),
+        ),
+      }),
+    )
+    .optional(),
 });
 
 const RowndUserSchema = z.looseObject({
@@ -159,6 +187,7 @@ export function parseConfig(
     retry: parsed.retry,
     rownd: parsed.rownd,
     supertokens: parsed.supertokens,
+    thirdPartyProviders: parsed.thirdPartyProviders,
   };
 }
 
@@ -174,7 +203,7 @@ function isRetryableStatus(status: number) {
   return status === 429 || status >= 500;
 }
 
-async function fetchWithRetry({
+export async function fetchWithRetry({
   url,
   requestInit,
   retryConfig,
@@ -366,7 +395,7 @@ export async function stageUsersForImport(config: {
   };
 
   if (config.supertokens.apiKey) {
-    // headers["api-key"] = config.supertokens.apiKey;
+    headers["api-key"] = config.supertokens.apiKey;
   }
 
   const response = await fetchWithRetry({

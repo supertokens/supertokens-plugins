@@ -41,10 +41,14 @@ export async function parseRequest(req: BaseRequest): Promise<{
 
 export function mapRowndUserToSuperTokens(
   rowndUser: RowndUser,
+  tenantIds?: string[],
 ): SuperTokensUserImport {
   const loginMethods: SuperTokensUserImport["loginMethods"] = [];
-  const rowndUserData = rowndUser.data || {};
-  const rowndUserVerifiedData = rowndUser.verified_data || {};
+  const rowndUserData = (rowndUser.data || {}) as Record<string, string>;
+  const rowndUserVerifiedData = (rowndUser.verified_data || {}) as Record<
+    string,
+    any
+  >;
   if (!rowndUserData.user_id) {
     throw new Error("Rownd user has no user_id");
   }
@@ -60,6 +64,7 @@ export function mapRowndUserToSuperTokens(
       thirdPartyUserId: rowndUserData.google_id,
       email: rowndUserData.email,
       isVerified: !!rowndUserVerifiedData.google_id,
+      tenantIds,
     });
   }
 
@@ -74,6 +79,7 @@ export function mapRowndUserToSuperTokens(
       thirdPartyUserId: rowndUserData.apple_id,
       email: rowndUserData.email,
       isVerified: !!rowndUserVerifiedData.apple_id,
+      tenantIds,
     });
   }
 
@@ -82,6 +88,7 @@ export function mapRowndUserToSuperTokens(
       recipeId: "passwordless",
       phoneNumber: rowndUserData.phone_number,
       isVerified: !!rowndUserVerifiedData.phone_number,
+      tenantIds,
     });
   }
 
@@ -90,6 +97,7 @@ export function mapRowndUserToSuperTokens(
       recipeId: "passwordless",
       email: rowndUserData.email,
       isVerified: !!rowndUserVerifiedData.email,
+      tenantIds,
     });
   }
 
@@ -206,7 +214,9 @@ export type RowndCompatUserResponse = {
   attributes?: Record<string, any>;
 };
 
-export async function getRowndStyleMetadata(userId: string): Promise<RowndMetadata> {
+export async function getRowndStyleMetadata(
+  userId: string,
+): Promise<RowndMetadata> {
   const metadata = await UserMetadata.getUserMetadata(userId);
   const rowndMetadata = (metadata.metadata || {}) as Partial<RowndMetadata>;
 
@@ -227,16 +237,26 @@ export async function buildRowndStyleUserResponse(
   const stUser = await SuperTokens.getUser(userId);
   const loginMethod = stUser?.loginMethods[0];
 
-  const data = {
+  const data: Record<string, any> = {
     user_id: userId,
     ...metadata.data,
   };
 
-  if (data.email === undefined && loginMethod && "email" in loginMethod && loginMethod.email) {
+  if (
+    data.email === undefined &&
+    loginMethod &&
+    "email" in loginMethod &&
+    loginMethod.email
+  ) {
     data.email = loginMethod.email;
   }
 
-  if (data.phone_number === undefined && loginMethod && "phoneNumber" in loginMethod && loginMethod.phoneNumber) {
+  if (
+    data.phone_number === undefined &&
+    loginMethod &&
+    "phoneNumber" in loginMethod &&
+    loginMethod.phoneNumber
+  ) {
     data.phone_number = loginMethod.phoneNumber;
   }
 
@@ -248,11 +268,20 @@ export async function buildRowndStyleUserResponse(
     verifiedData.email = data.email;
   }
 
-  if (verifiedData.phone_number === true && typeof data.phone_number === "string") {
+  if (
+    verifiedData.phone_number === true &&
+    typeof data.phone_number === "string"
+  ) {
     verifiedData.phone_number = data.phone_number;
   }
 
-  if (loginMethod && "email" in loginMethod && loginMethod.email && loginMethod.verified === true && verifiedData.email === undefined) {
+  if (
+    loginMethod &&
+    "email" in loginMethod &&
+    loginMethod.email &&
+    loginMethod.verified === true &&
+    verifiedData.email === undefined
+  ) {
     verifiedData.email = loginMethod.email;
   }
 
