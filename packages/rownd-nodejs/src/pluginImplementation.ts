@@ -64,7 +64,6 @@ export function mapRowndUserToSuperTokens(
       thirdPartyUserId: rowndUserData.google_id,
       email: rowndUserData.email,
       isVerified: !!rowndUserVerifiedData.google_id,
-      tenantIds,
     });
   }
 
@@ -79,7 +78,6 @@ export function mapRowndUserToSuperTokens(
       thirdPartyUserId: rowndUserData.apple_id,
       email: rowndUserData.email,
       isVerified: !!rowndUserVerifiedData.apple_id,
-      tenantIds,
     });
   }
 
@@ -88,7 +86,6 @@ export function mapRowndUserToSuperTokens(
       recipeId: "passwordless",
       phoneNumber: rowndUserData.phone_number,
       isVerified: !!rowndUserVerifiedData.phone_number,
-      tenantIds,
     });
   }
 
@@ -97,7 +94,6 @@ export function mapRowndUserToSuperTokens(
       recipeId: "passwordless",
       email: rowndUserData.email,
       isVerified: !!rowndUserVerifiedData.email,
-      tenantIds,
     });
   }
 
