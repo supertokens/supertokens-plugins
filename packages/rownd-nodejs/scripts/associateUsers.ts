@@ -1,18 +1,60 @@
 import { z } from "zod";
-import { loadConfig, formatZodError, fetchWithRetry } from "./bulkMigrate";
+import {
+  loadConfig,
+  formatZodError,
+  fetchRowndUsersPage,
+} from "./scriptUtils";
+import { getTenantIdsForRowndUser, PUBLIC_TENANT_ID } from "./rowndTenantMapping";
+
+const SuperTokensUserSchema = z.object({
+  id: z.string(),
+  loginMethods: z.array(
+    z.object({
+      recipeUserId: z.string(),
+    }),
+  ),
+});
+
+async function getSuperTokensUser(
+  connectionURI: string,
+  apiKey: string | undefined,
+  rowndUserId: string,
+) {
+  const headers: Record<string, string> = {};
+  if (apiKey) {
+    headers["api-key"] = apiKey;
+  }
+
+  const url = new URL("/user/id", connectionURI);
+  url.searchParams.set("userId", rowndUserId);
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch SuperTokens user ${rowndUserId}: ${response.status} ${await response.text()}`,
+    );
+  }
+
+  const parsed = z
+    .object({
+      status: z.string(),
+      user: SuperTokensUserSchema.optional(),
+    })
+    .parse(await response.json());
+
+  if (parsed.status === "UNKNOWN_USER_ID_ERROR" || !parsed.user) {
+    return undefined;
+  }
+
+  return parsed.user;
+}
 
 async function associateUsers() {
   const config = await loadConfig();
-
-  console.log("Fetching Rownd OIDC clients...");
-  const oidcClients = await fetchRowndOidcClients(config);
-
-  const targetTenants = oidcClients.map((client) => client.id);
-
-  if (targetTenants.length === 0) {
-    console.log("No non-public tenants to associate users with.");
-    return;
-  }
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -21,98 +63,88 @@ async function associateUsers() {
     headers["api-key"] = config.supertokens.apiKey;
   }
 
-  let paginationToken: string | undefined = undefined;
+  let cursor: string | undefined = undefined;
   let totalProcessed = 0;
   let totalAssociated = 0;
+  let totalSkipped = 0;
 
-  console.log(
-    `Starting retroactive association to tenants: ${targetTenants.join(", ")}`,
-  );
+  console.log("Starting retroactive tenant association from Rownd user memberships.");
 
   while (true) {
-    const url = new URL("/users", config.supertokens.connectionURI);
-    url.searchParams.set("limit", String(config.supertokens.batchSize));
-    if (paginationToken) {
-      url.searchParams.set("paginationToken", paginationToken);
-    }
+    const pageUsers = await fetchRowndUsersPage(config, cursor, config.rownd.pageSize);
 
-    const response = await fetchWithRetry({
-      url: url.toString(),
-      requestInit: {
-        method: "GET",
-        headers,
-      },
-      retryConfig: config.retry,
-      operation: "Fetch users for association",
-    });
-
-    if (!response) {
-      throw new Error("Failed to fetch SuperTokens users");
-    }
-
-    const data = (await response.json()) as {
-      status: string;
-      users: Array<{
-        user: { id: string; loginMethods: Array<{ recipeUserId: string }> };
-      }>;
-      nextPaginationToken?: string;
-    };
-
-    if (data.status !== "OK" || !data.users || data.users.length === 0) {
+    if (pageUsers.length === 0) {
       break;
     }
 
-    const users = data.users.map((u) => u.user);
+    for (const { rowndUser, rowndUserId } of pageUsers) {
+      const tenantIds = getTenantIdsForRowndUser(rowndUser).filter(
+        (tenantId) => tenantId !== PUBLIC_TENANT_ID,
+      );
 
-    for (const user of users) {
-      // we must use the recipe user ID to associate. In imported users, they usually have exactly one
-      // login method, so we will try to associate each login method's recipe user id to the tenant.
-      for (const loginMethod of user.loginMethods) {
-        for (const tenantId of targetTenants) {
+      totalProcessed++;
+
+      if (tenantIds.length === 0) {
+        continue;
+      }
+
+      const superTokensUser = await getSuperTokensUser(
+        config.supertokens.connectionURI,
+        config.supertokens.apiKey,
+        rowndUserId,
+      );
+
+      if (!superTokensUser) {
+        totalSkipped++;
+        console.warn(
+          `Skipping Rownd user ${rowndUserId}: user not found in SuperTokens.`,
+        );
+        continue;
+      }
+
+      for (const loginMethod of superTokensUser.loginMethods) {
+        for (const tenantId of tenantIds) {
           const associateUrl = new URL(
             `/${tenantId}/recipe/multitenancy/tenant/user`,
             config.supertokens.connectionURI,
           );
 
-          const associateRes = await fetchWithRetry({
-            url: associateUrl.toString(),
-            requestInit: {
-              method: "POST",
-              headers,
-              body: JSON.stringify({
-                recipeUserId: loginMethod.recipeUserId,
-              }),
-            },
-            retryConfig: config.retry,
-            operation: `Associate user ${user.id} to tenant ${tenantId}`,
+          const associateRes = await fetch(associateUrl.toString(), {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              recipeUserId: loginMethod.recipeUserId,
+            }),
           });
 
-          const resData = (await associateRes.json()) as any;
+          const resData = (await associateRes.json()) as { status?: string };
           if (
             resData.status === "OK" ||
             resData.status === "ASSOCIATION_ALREADY_EXISTS_ERROR"
           ) {
-            if (resData.status === "OK") totalAssociated++;
+            if (resData.status === "OK") {
+              totalAssociated++;
+            }
           } else {
             console.warn(
-              `Failed to associate user ${user.id} (${loginMethod.recipeUserId}) to tenant ${tenantId}: ${resData.status || associateRes.status}`,
+              `Failed to associate user ${rowndUserId} (${loginMethod.recipeUserId}) to tenant ${tenantId}: ${resData.status || associateRes.status}`,
             );
           }
         }
       }
-      totalProcessed++;
     }
 
-    console.log(`Processed ${totalProcessed} users...`);
+    console.log(`Processed ${totalProcessed} Rownd users...`);
 
-    if (!data.nextPaginationToken) {
+    if (pageUsers.length < config.rownd.pageSize) {
       break;
     }
-    paginationToken = data.nextPaginationToken;
+
+    cursor = pageUsers[pageUsers.length - 1]?.rowndUserId;
   }
 
   console.log(
-    `Finished retroactive association. Processed ${totalProcessed} users, created ${totalAssociated} tenant associations.`,
+    `Finished retroactive association. Processed ${totalProcessed} users, created ${totalAssociated} tenant associations, skipped ${totalSkipped} users missing in SuperTokens.`,
   );
 }
 

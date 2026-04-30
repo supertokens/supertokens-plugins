@@ -235,6 +235,42 @@ describe("rownd-nodejs plugin", () => {
         },
       });
     });
+
+    it("adds tenant ids to imported login methods when provided", () => {
+      expect(
+        mapRowndUserToSuperTokens(
+          {
+            data: {
+              user_id: "rownd-tenant-aware",
+              email: "tenant-aware@example.com",
+            },
+            verified_data: {},
+          } as any,
+          ["public", "variant_123"],
+        ),
+      ).toEqual({
+        externalUserId: "rownd-tenant-aware",
+        loginMethods: [
+          {
+            recipeId: "passwordless",
+            email: "tenant-aware@example.com",
+            isVerified: false,
+            tenantIds: ["public", "variant_123"],
+          },
+        ],
+        userMetadata: {
+          data: {
+            user_id: "rownd-tenant-aware",
+            email: "tenant-aware@example.com",
+          },
+          meta: {},
+          verified_data: {},
+          attributes: {},
+          rownd_migrated: true,
+          rownd_user_id: "rownd-tenant-aware",
+        },
+      });
+    });
   });
 
   describe("user migration", () => {

@@ -62,7 +62,7 @@ export interface RowndUser {
     first_name?: string;
     last_name?: string;
   };
-  attributes?: Record<string, string>;
+  attributes?: Record<string, string | string[]>;
   verified_data: {
     email?: string;
     phone_number?: string;

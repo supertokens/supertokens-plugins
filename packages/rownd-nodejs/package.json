@@ -14,7 +14,7 @@
     "build": "tsup src/index.ts --format cjs,esm --dts",
     "bulk-import": "tsx scripts/bulkMigrate.ts",
     "associate-users": "tsx scripts/associateUsers.ts",
-    "create-tenants": "tsx scripts/createTenants.ts",
+    "setup-core-instance": "tsx scripts/setupCoreInstance.ts",
     "diff-users": "tsx scripts/diffUsers.ts",
     "lint": "eslint ./src --ext .ts",
     "test": "TEST_MODE=testing vitest run --pool=forks"
