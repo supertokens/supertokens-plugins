@@ -16,6 +16,7 @@ import UserMetadata, {
 } from "supertokens-node/recipe/usermetadata";
 import Passwordless from "supertokens-node/recipe/passwordless";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
+import AccountLinking from "supertokens-node/recipe/accountlinking";
 import { middleware, errorHandler } from "supertokens-node/framework/express";
 import { ProcessState } from "supertokens-node/lib/build/processState";
 import SuperTokensRaw from "supertokens-node/lib/build/supertokens";
@@ -80,16 +81,10 @@ describe("rownd-nodejs plugin", () => {
       .withEnvironment({
         POSTGRESQL_CONNECTION_URI:
           "postgresql://supertokens:somepassword@postgres:5432/supertokens",
-        // LOG_LEVEL: "DEBUG",
-        // INFO_LOG_PATH: "null",
-        // ERROR_LOG_PATH: "null",
       })
       .withExposedPorts(3567)
       .withWaitStrategy(Wait.forHttp("/hello", 3567))
       .start();
-
-    // const stream = await container.logs();
-    // stream.on("data", (line) => console.log(line));
 
     const mappedPort = container.getMappedPort(3567);
     coreConnectionURI = `http://${container.getHost()}:${mappedPort}`;
@@ -1077,6 +1072,56 @@ describe("rownd-nodejs plugin", () => {
       });
     });
 
+    describe("POST /guest", () => {
+      it("should create a guest user and a session with correct claims", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/guest`, {
+          method: "POST",
+          headers: {
+            rid: "session",
+            "fdi-version": "1.18",
+          },
+        });
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.status).toBe("OK");
+
+        // Extract access token from headers (FDI 1.18 style)
+        const accessToken = res.headers.get("st-access-token");
+        expect(accessToken).toBeTruthy();
+
+        // Verify session claims by calling the /user endpoint
+        const userRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
+          headers: getAuthedHeaders(accessToken!),
+        });
+        expect(userRes.status).toBe(200);
+        const userData = await userRes.json();
+        expect(userData.status).toBe("OK");
+        expect(userData.auth_level).toBe("guest");
+
+        // Verify user record in SuperTokens
+        const stUser = await SuperTokens.getUser(userData.data.user_id);
+        expect(stUser).toBeDefined();
+
+        // Verify session claims in the access token payload
+        const session = await Session.getSessionWithoutRequestResponse(accessToken!);
+        const accessTokenPayload = session!.getAccessTokenPayload();
+        expect(accessTokenPayload["auth_level"]).toBe("guest");
+        expect(accessTokenPayload["is_anonymous"]).toBe(true);
+        expect(accessTokenPayload["app_user_id"]).toBe(stUser?.id);
+
+        const guestLogin = stUser?.loginMethods.find(
+          (m) => m.recipeId === "thirdparty" && m.thirdParty?.id === "guest",
+        );
+        expect(guestLogin).toBeDefined();
+        expect(guestLogin?.thirdParty?.userId).toMatch(/^guest_[a-f0-9-]{36}$/);
+      });
+    });
+
     describe("GET /user", () => {
       it("gets compatibility user payload", async () => {
         const { server: s, port } = await setup(coreConnectionURI);
@@ -1612,6 +1657,12 @@ async function setup(
           websiteDomain: `http://localhost:${port + 1}`,
         },
         recipeList: [
+          AccountLinking.init({
+            shouldDoAutomaticAccountLinking: async () => ({
+              shouldAutomaticallyLink: false,
+              shouldRequireVerification: false,
+            }),
+          }),
           Session.init(),
           UserMetadata.init(),
           Passwordless.init({

@@ -3,6 +3,7 @@ import { createPluginInitFunction } from "@shared/js";
 import { withRequestHandler } from "@shared/nodejs";
 import { createInstance } from "@rownd/node";
 import supertokens from "supertokens-node";
+import { randomUUID } from "crypto";
 import {
   PLUGIN_ID,
   PLUGIN_SDK_VERSION,
@@ -12,6 +13,8 @@ import {
 import { RowndPluginConfig, RowndPluginNormalisedConfig } from "./types";
 import { enableDebugLogs, logDebugMessage } from "./logger";
 import Session from "supertokens-node/recipe/session";
+import ThirdParty from "supertokens-node/recipe/thirdparty";
+import UserMetadata from "supertokens-node/recipe/usermetadata";
 import { createClient } from "./telemetry/createTelemetryClient";
 import { RowndPluginError } from "./errors";
 import {
@@ -61,6 +64,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               "RowndMigrationPlugin: Session recipe is not initialized. Session migration will fail.",
             );
           }
+          if (!supertokens.isRecipeInitialized("thirdparty")) {
+            console.warn(
+              "RowndMigrationPlugin: ThirdParty recipe is not initialized. Guest login will fail.",
+            );
+          }
         },
         routeHandlers(stConfig) {
           const apiBasePath =
@@ -77,6 +85,79 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     ...buildAppConfig(pluginConfig, stConfig),
                   };
                 }),
+              },
+              {
+                path: `${apiBasePath}${HANDLE_BASE_PATH}/guest`,
+                method: "post",
+                handler: withRequestHandler(
+                  async (req, res, _session, userContext) => {
+                    const startedAt = Date.now();
+                    const guestId = `guest_${randomUUID()}`;
+
+                    try {
+                      const response =
+                        await ThirdParty.manuallyCreateOrUpdateUser(
+                          PUBLIC_TENANT_ID,
+                          "guest",
+                          guestId,
+                          `${guestId}@anonymous.local`,
+                          false,
+                          undefined,
+                          userContext,
+                        );
+                      const recipeUserId = response.recipeUserId;
+
+                      await UserMetadata.updateUserMetadata(response.user.id, {
+                        auth_level: "guest",
+                        is_anonymous: true,
+                      });
+
+                      await Session.createNewSession(
+                        req,
+                        res,
+                        PUBLIC_TENANT_ID,
+                        recipeUserId,
+                        {
+                          auth_level: "guest",
+                          is_anonymous: true,
+                          app_user_id: response.user.id,
+                        },
+                        {},
+                        userContext,
+                      );
+
+                      logDebugMessage(
+                        `Guest session created for user: ${response.user.id}`,
+                      );
+
+                      telemetryClient.recordSuccess({
+                        outcome: "success",
+                        durationMs: Date.now() - startedAt,
+                        tenantId: PUBLIC_TENANT_ID,
+                        superTokensUserId: response.user.id,
+                      });
+
+                      return { status: "OK" };
+                    } catch (error) {
+                      logDebugMessage(
+                        `Guest login failed. Error: ${
+                          error instanceof Error
+                            ? error.message
+                            : "Unknown error"
+                        }`,
+                      );
+                      telemetryClient.recordError({
+                        error,
+                        startedAt,
+                        tenantId: PUBLIC_TENANT_ID,
+                      });
+                      return {
+                        status: "ERROR",
+                        message: "Guest login failed",
+                      };
+                    }
+                  },
+                ),
               },
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate`,
