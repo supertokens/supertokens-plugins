@@ -16,6 +16,7 @@ import type {
 } from "supertokens-node/types";
 
 let rowndClient: IRowndClient | undefined;
+let pluginConfig: RowndPluginNormalisedConfig | undefined;
 
 export function setRowndClient(client: IRowndClient) {
   rowndClient = client;
@@ -26,6 +27,14 @@ export function getRowndClient() {
     throw new Error("Rownd client not initialized");
   }
   return rowndClient;
+}
+
+export function setPluginConfig(config: RowndPluginNormalisedConfig) {
+  pluginConfig = config;
+}
+
+export function getPluginConfig() {
+  return pluginConfig;
 }
 
 export async function parseRequest(req: any): Promise<{
@@ -136,6 +145,8 @@ export function mapRowndUserToSuperTokens(
     },
     rownd_migrated: true,
     rownd_user_id: rowndUserData.user_id,
+    state: rowndUser.state,
+    auth_level: rowndUser.auth_level,
   };
 
   return {
@@ -216,12 +227,17 @@ type RowndMetadata = {
   attributes: Record<string, any>;
   rownd_migrated?: boolean;
   rownd_user_id?: string;
+  state?: string;
+  auth_level?: string;
 };
 
 export type RowndCompatUserResponse = {
+  rownd_user: string;
   data: Record<string, any>;
   meta: Record<string, any>;
   verified_data: Record<string, any>;
+  state: string;
+  auth_level: string;
   redacted: string[];
   groups: any[];
   attributes?: Record<string, any>;
@@ -238,6 +254,8 @@ export async function getUserMetadata(userId: string): Promise<RowndMetadata> {
     attributes: rowndMetadata.attributes || {},
     rownd_migrated: rowndMetadata.rownd_migrated,
     rownd_user_id: rowndMetadata.rownd_user_id,
+    state: rowndMetadata.state,
+    auth_level: rowndMetadata.auth_level,
   };
 }
 
@@ -246,70 +264,115 @@ export async function getUserById(
 ): Promise<RowndCompatUserResponse> {
   const metadata = await getUserMetadata(userId);
   const stUser = await SuperTokens.getUser(userId);
-  const loginMethod = stUser?.loginMethods[0];
+
+  if (!stUser) {
+    throw new RowndPluginError("USER_NOT_FOUND");
+  }
+
+  const rownd_user = metadata.rownd_user_id || userId;
+  const state = metadata.state || "enabled";
 
   const data: Record<string, any> = {
     user_id: userId,
     ...metadata.data,
   };
 
-  if (
-    data.email === undefined &&
-    loginMethod &&
-    "email" in loginMethod &&
-    loginMethod.email
-  ) {
-    data.email = loginMethod.email;
-  }
-
-  if (
-    data.phone_number === undefined &&
-    loginMethod &&
-    "phoneNumber" in loginMethod &&
-    loginMethod.phoneNumber
-  ) {
-    data.phone_number = loginMethod.phoneNumber;
-  }
-
-  const verifiedData = {
+  const verified_data: Record<string, any> = {
     ...metadata.verified_data,
   };
 
-  if (verifiedData.email === true && typeof data.email === "string") {
-    verifiedData.email = data.email;
+  let lastUsedAt = stUser.timeJoined;
+
+  for (const method of stUser.loginMethods) {
+    if (method.lastUsed > lastUsedAt) {
+      lastUsedAt = method.lastUsed;
+    }
+
+    if (method.recipeId === "passwordless") {
+      if (method.email) {
+        verified_data.email = method.email;
+        if (data.email === undefined) data.email = method.email;
+      }
+      if (method.phoneNumber) {
+        verified_data.phone_number = method.phoneNumber;
+        if (data.phone_number === undefined)
+          data.phone_number = method.phoneNumber;
+      }
+    } else if (method.recipeId === "thirdparty") {
+      if (method.verified && method.email) {
+        verified_data.email = method.email;
+      }
+      if (method.email && data.email === undefined) {
+        data.email = method.email;
+      }
+    } else if (method.recipeId === "emailpassword") {
+      if (method.email && data.email === undefined) {
+        data.email = method.email;
+      }
+    }
   }
 
+  if (verified_data.email === true && typeof data.email === "string") {
+    verified_data.email = data.email;
+  }
   if (
-    verifiedData.phone_number === true &&
+    verified_data.phone_number === true &&
     typeof data.phone_number === "string"
   ) {
-    verifiedData.phone_number = data.phone_number;
+    verified_data.phone_number = data.phone_number;
   }
 
-  if (
-    loginMethod &&
-    "email" in loginMethod &&
-    loginMethod.email &&
-    loginMethod.verified === true &&
-    verifiedData.email === undefined
-  ) {
-    verifiedData.email = loginMethod.email;
+  const auth_level =
+    metadata.auth_level ||
+    (Object.keys(verified_data).length > 0 ? "verified" : "unverified");
+
+  const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;
+  for (const [key, field] of Object.entries(schema)) {
+    if (data[key] === undefined && field.type === "string") {
+      data[key] = "";
+    }
   }
 
-  if (
-    loginMethod &&
-    "phoneNumber" in loginMethod &&
-    loginMethod.phoneNumber &&
-    loginMethod.verified === true &&
-    verifiedData.phone_number === undefined
-  ) {
-    verifiedData.phone_number = loginMethod.phoneNumber;
-  }
+  const mapMethod = (method: any) => {
+    if (method.recipeId === "thirdparty") {
+      if (method.thirdPartyId === "google") return "google";
+      if (method.thirdPartyId === "apple") return "apple";
+    } else if (method.recipeId === "passwordless") {
+      if (method.email) return "email";
+      if (method.phoneNumber) return "phone";
+    } else if (method.recipeId === "emailpassword") {
+      return "email";
+    }
+    return "email";
+  };
+
+  const sortedByJoined = [...stUser.loginMethods].sort(
+    (a, b) => a.timeJoined - b.timeJoined,
+  );
+  const sortedByLastUsed = [...stUser.loginMethods].sort(
+    (a, b) => b.lastUsed - a.lastUsed,
+  );
+
+  const firstMethod = sortedByJoined[0];
+  const lastMethod = sortedByLastUsed[0];
+
+  const meta = {
+    ...metadata.meta,
+    created: new Date(stUser.timeJoined).toISOString(),
+    first_sign_in: new Date(stUser.timeJoined).toISOString(),
+    last_sign_in: new Date(lastUsedAt).toISOString(),
+    last_active: new Date(lastUsedAt).toISOString(),
+    first_sign_in_method: firstMethod ? mapMethod(firstMethod) : "email",
+    last_sign_in_method: lastMethod ? mapMethod(lastMethod) : "email",
+  };
 
   return {
+    rownd_user,
     data,
-    meta: metadata.meta,
-    verified_data: verifiedData,
+    meta,
+    verified_data,
+    state,
+    auth_level,
     redacted: [],
     groups: [],
     attributes: metadata.attributes,
@@ -328,6 +391,15 @@ export async function updateUserData(
       ...inputData,
       user_id: userId,
     },
+    meta: {
+      ...metadata.meta,
+    },
+    verified_data: {
+      ...metadata.verified_data,
+    },
+    attributes: {
+      ...metadata.attributes,
+    },
   };
 
   await UserMetadata.updateUserMetadata(userId, updatedMetadata);
@@ -341,9 +413,18 @@ export async function updateUserMetadata(
   const metadata = await getUserMetadata(userId);
   const updatedMetadata: JSONObject = {
     ...metadata,
+    data: {
+      ...metadata.data,
+    },
     meta: {
       ...metadata.meta,
       ...inputMeta,
+    },
+    verified_data: {
+      ...metadata.verified_data,
+    },
+    attributes: {
+      ...metadata.attributes,
     },
   };
 

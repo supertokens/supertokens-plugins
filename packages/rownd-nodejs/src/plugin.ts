@@ -19,6 +19,7 @@ import {
   mapRowndUserToSuperTokens,
   importUser,
   setRowndClient,
+  setPluginConfig,
   validateRowndToken,
   fetchRowndUserInfo,
   getUserById,
@@ -43,6 +44,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
       const telemetryClient = createClient(pluginConfig.telemetry);
 
       setRowndClient(rowndClient);
+      setPluginConfig(pluginConfig);
 
       if (pluginConfig.enableDebugLogs) {
         enableDebugLogs();

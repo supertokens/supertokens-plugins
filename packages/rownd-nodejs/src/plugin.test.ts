@@ -15,9 +15,7 @@ import UserMetadata, {
   getUserMetadata,
 } from "supertokens-node/recipe/usermetadata";
 import Passwordless from "supertokens-node/recipe/passwordless";
-import EmailPassword from "supertokens-node/recipe/emailpassword";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
-import AccountLinking from "supertokens-node/recipe/accountlinking";
 import { middleware, errorHandler } from "supertokens-node/framework/express";
 import { ProcessState } from "supertokens-node/lib/build/processState";
 import SuperTokensRaw from "supertokens-node/lib/build/supertokens";
@@ -32,12 +30,10 @@ import MultitenancyRaw from "supertokens-node/lib/build/recipe/multitenancy/reci
 import { NormalisedURLDomain } from "supertokens-node/lib/build/normalisedURLDomain";
 import { Querier } from "supertokens-node/lib/build/querier";
 import { Server } from "http";
-import crypto from "crypto";
 import { GenericContainer, StartedTestContainer, Wait } from "testcontainers";
 import { Network, StartedNetwork } from "testcontainers";
 
 import { init } from "./plugin";
-import { HANDLE_BASE_PATH } from "./constants";
 import { RowndPluginConfig, RowndTelemetryClient } from "./types";
 import { ROWND_PLUGIN_ERROR_MESSAGES, DEFAULT_ROWND_SCHEMA } from "./errors";
 import {
@@ -1045,7 +1041,6 @@ describe("rownd-nodejs plugin", () => {
         );
         const body = await res.json();
 
-        // All default schema fields should be present
         expect(body.schema.email).toBeDefined();
         expect(body.schema.first_name).toBeDefined();
         expect(body.schema.last_name).toBeDefined();
@@ -1099,20 +1094,55 @@ describe("rownd-nodejs plugin", () => {
         expect(res.status).toBe(200);
         await expect(res.json()).resolves.toEqual({
           status: "OK",
+          rownd_user: "compat-user-1",
           data: {
             user_id: "compat-user-1",
             email: "compat-user-1@example.com",
+            first_name: "",
+            last_name: "",
+            nick_name: "",
+            phone_number: "",
+            zip_code: "",
+            google_id: "",
           },
           meta: {
-            created: "2026-01-01T00:00:00.000Z",
+            created: expect.any(String),
+            first_sign_in: expect.any(String),
+            last_sign_in: expect.any(String),
+            last_active: expect.any(String),
+            first_sign_in_method: "email",
+            last_sign_in_method: "email",
           },
           verified_data: {
             email: "compat-user-1@example.com",
           },
+          state: "enabled",
+          auth_level: "verified",
           redacted: [],
           groups: [],
           attributes: {},
         });
+      });
+
+      it("returns empty strings for missing schema fields", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser("empty-schema-user");
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            headers: getAuthedHeaders(accessToken),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.status).toBe("OK");
+        expect(body.data.first_name).toBe("");
+        expect(body.data.last_name).toBe("");
+        expect(body.data.zip_code).toBe("");
       });
 
       it("rejects without session", async () => {
@@ -1127,6 +1157,79 @@ describe("rownd-nodejs plugin", () => {
         // depending on the client. For fetch without cookies/headers, it often returns TRY_REFRESH_TOKEN if sessionRequired is true
         const body = await res.json();
         expect(body.status).not.toBe("OK");
+      });
+
+      it("gets compatibility user payload for a non-migrated user", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+
+        const signInRes = await Passwordless.signInUp({
+          email: "non-migrated@example.com",
+          tenantId: "public",
+        });
+        const userId = signInRes.user.id;
+
+        mockRowndClient.validateToken.mockResolvedValue({ user_id: userId });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: userId,
+          data: { user_id: userId, email: "non-migrated@example.com" },
+          verified_data: { email: true },
+        });
+
+        const migrateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer some-token",
+              rid: "session",
+              "fdi-version": "1.18",
+            },
+          },
+        );
+        const accessToken = migrateRes.headers.get("st-access-token");
+        expect(accessToken).toBeTruthy();
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            headers: getAuthedHeaders(accessToken!),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body).toEqual({
+          status: "OK",
+          rownd_user: userId,
+          data: {
+            user_id: userId,
+            email: "non-migrated@example.com",
+            first_name: "",
+            last_name: "",
+            nick_name: "",
+            phone_number: "",
+            zip_code: "",
+            google_id: "",
+          },
+          meta: {
+            created: expect.any(String),
+            first_sign_in: expect.any(String),
+            last_sign_in: expect.any(String),
+            last_active: expect.any(String),
+            first_sign_in_method: "email",
+            last_sign_in_method: "email",
+          },
+          verified_data: {
+            email: "non-migrated@example.com",
+          },
+          state: "enabled",
+          auth_level: "verified",
+          redacted: [],
+          groups: [],
+          attributes: {},
+        });
       });
     });
 
@@ -1152,13 +1255,69 @@ describe("rownd-nodejs plugin", () => {
         expect(res.status).toBe(200);
         const body = await res.json();
         expect(body.status).toBe("OK");
+        expect(body.rownd_user).toBe("compat-user-2");
         expect(body.data).toEqual({
           user_id: "compat-user-2",
           email: "compat-user-2@example.com",
           first_name: "Ada",
+          last_name: "",
+          nick_name: "",
+          phone_number: "",
+          zip_code: "",
+          google_id: "",
         });
-        expect(body.meta.created).toBe("2026-01-01T00:00:00.000Z");
+        expect(body.meta.created).toEqual(expect.any(String));
+        expect(body.meta.first_sign_in).toEqual(expect.any(String));
         expect(body.verified_data.email).toBe("compat-user-2@example.com");
+        expect(body.state).toBe("enabled");
+        expect(body.auth_level).toBe("verified");
+      });
+
+      it("preserves metadata structure after update", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser(
+          "metadata-structure-user",
+        );
+
+        await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
+          method: "PUT",
+          headers: {
+            ...getAuthedHeaders(accessToken),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ data: { first_name: "John" } }),
+        });
+
+        await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/meta`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ meta: { custom_field: "custom_value" } }),
+          },
+        );
+
+        const metadata = await UserMetadata.getUserMetadata(
+          "metadata-structure-user",
+        );
+        expect(metadata.metadata).toEqual(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              first_name: "John",
+              user_id: "metadata-structure-user",
+            }),
+            meta: expect.objectContaining({
+              custom_field: "custom_value",
+            }),
+            verified_data: expect.any(Object),
+            attributes: expect.any(Object),
+          }),
+        );
       });
     });
 
@@ -1329,6 +1488,12 @@ describe("rownd-nodejs plugin", () => {
           },
         );
         expect(updateRes.status).toBe(200);
+        const body = await updateRes.json();
+        expect(body.status).toBe("OK");
+        expect(body.rownd_user).toBe("compat-user-4");
+        expect(body.data.last_name).toBe("Lovelace");
+        expect(body.state).toBe("enabled");
+        expect(body.auth_level).toBe("verified");
       });
 
       it("returns 400 when field is missing", async () => {
@@ -1448,12 +1613,6 @@ async function setup(
         },
         recipeList: [
           Session.init(),
-          AccountLinking.init({
-            shouldDoAutomaticAccountLinking: async () => ({
-              shouldAutomaticallyLink: true,
-              shouldRequireVerification: false,
-            }),
-          }),
           UserMetadata.init(),
           Passwordless.init({
             contactMethod: "EMAIL",
