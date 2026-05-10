@@ -1,9 +1,17 @@
 import type { JSONObject } from "supertokens-node/types";
-import type { RowndSchema } from "./schema";
 
 export type RowndSignInMethods = {
+  email?: { enabled: boolean };
+  phone?: { enabled: boolean };
+  apple?: {
+    enabled?: boolean;
+    clientId?: string;
+  };
   google?: {
+    enabled?: boolean;
+    clientId?: string;
     iosClientId?: string;
+    scopes?: string[];
     oneTap?: {
       browser?: {
         autoPrompt?: boolean;
@@ -18,7 +26,7 @@ export type RowndSignInMethods = {
     iconDarkUrl?: string;
   };
   // Custom OAuth2 providers: key = provider ID (hub prefixes with oauth2_ automatically)
-  [customProvider: string]: Record<string, any> | undefined;
+  [customProvider: string]: any;
 };
 
 export type RowndBranding = {
@@ -186,7 +194,7 @@ export interface RowndPluginNormalisedConfig {
 }
 
 export interface SuperTokensUserImport {
-  externalUserId: string;
+  externalUserId?: string;
   timeJoined?: number;
   userMetadata: JSONObject;
   loginMethods: (
@@ -224,3 +232,21 @@ export interface IRowndClient {
     app_id?: string;
   }) => Promise<RowndUser | undefined>;
 }
+
+export type RowndSchemaField = {
+  display_name: string;
+  type: string;
+  data_category: string;
+  owned_by: string;
+  required: boolean;
+  unique: boolean;
+  user_visible: boolean;
+  read_only?: boolean;
+  show_empty?: boolean;
+  revoke_after?: string;
+  required_retention?: string;
+  collection_justification?: string;
+  opt_out_warning?: string;
+};
+
+export type RowndSchema = Record<string, RowndSchemaField>;

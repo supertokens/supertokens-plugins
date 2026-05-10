@@ -1,15 +1,15 @@
 import SuperTokens from "supertokens-node";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
-import SuperTokensCore from "supertokens-node/lib/build/supertokens";
 import {
   RowndUser,
   SuperTokensUserImport,
   IRowndClient,
   RowndPluginNormalisedConfig,
   RowndSignInMethods,
+  RowndSchemaField,
 } from "./types";
 import { RowndPluginError } from "./errors";
-import { DEFAULT_ROWND_SCHEMA, RowndSchemaField } from "./schema";
+import { DEFAULT_ROWND_SCHEMA } from "./constants";
 import type {
   JSONObject,
   SuperTokensPublicConfig,
@@ -99,7 +99,13 @@ export function mapRowndUserToSuperTokens(
     });
   }
 
-  if (rowndUserData.email && loginMethods.length === 0) {
+  // Only add passwordless email if no thirdparty methods exist,
+  // as thirdparty methods already include the email.
+  if (
+    rowndUserData.email &&
+    !rowndUserData.google_id &&
+    !rowndUserData.apple_id
+  ) {
     loginMethods.push({
       recipeId: "passwordless",
       email: rowndUserData.email,
@@ -221,9 +227,7 @@ export type RowndCompatUserResponse = {
   attributes?: Record<string, any>;
 };
 
-export async function getRowndStyleMetadata(
-  userId: string,
-): Promise<RowndMetadata> {
+export async function getUserMetadata(userId: string): Promise<RowndMetadata> {
   const metadata = await UserMetadata.getUserMetadata(userId);
   const rowndMetadata = (metadata.metadata || {}) as Partial<RowndMetadata>;
 
@@ -237,10 +241,10 @@ export async function getRowndStyleMetadata(
   };
 }
 
-export async function buildRowndStyleUserResponse(
+export async function getUserById(
   userId: string,
 ): Promise<RowndCompatUserResponse> {
-  const metadata = await getRowndStyleMetadata(userId);
+  const metadata = await getUserMetadata(userId);
   const stUser = await SuperTokens.getUser(userId);
   const loginMethod = stUser?.loginMethods[0];
 
@@ -312,11 +316,11 @@ export async function buildRowndStyleUserResponse(
   };
 }
 
-export async function updateRowndUserData(
+export async function updateUserData(
   userId: string,
   inputData: Record<string, any>,
 ) {
-  const metadata = await getRowndStyleMetadata(userId);
+  const metadata = await getUserMetadata(userId);
   const updatedMetadata: JSONObject = {
     ...metadata,
     data: {
@@ -327,14 +331,14 @@ export async function updateRowndUserData(
   };
 
   await UserMetadata.updateUserMetadata(userId, updatedMetadata);
-  return buildRowndStyleUserResponse(userId);
+  return getUserById(userId);
 }
 
-export async function updateRowndUserMetadata(
+export async function updateUserMetadata(
   userId: string,
   inputMeta: Record<string, any>,
 ) {
-  const metadata = await getRowndStyleMetadata(userId);
+  const metadata = await getUserMetadata(userId);
   const updatedMetadata: JSONObject = {
     ...metadata,
     meta: {
@@ -350,10 +354,6 @@ export async function updateRowndUserMetadata(
     meta: (updatedMetadata.meta || {}) as Record<string, any>,
   };
 }
-
-// ---------------------------------------------------------------------------
-// App config response builder (used by GET /plugin/rownd/app-config)
-// ---------------------------------------------------------------------------
 
 const BUILTIN_SIGN_IN_METHOD_KEYS = [
   "email",
@@ -381,76 +381,9 @@ function normalizeSchemaField(field: RowndSchemaField) {
   };
 }
 
+export const DEFAULT_PRIMARY_COLOR = "#5b5bd6";
+
 function buildSignInMethodsConfig(methods: RowndSignInMethods | undefined) {
-  let tpInstance: any;
-  let plInstance: any;
-  let epInstance: any;
-
-  try {
-    const stInstance = SuperTokensCore.getInstanceOrThrowError();
-    tpInstance = stInstance.getRecipeInstance("thirdparty");
-    plInstance = stInstance.getRecipeInstance("passwordless");
-    epInstance = stInstance.getRecipeInstance("emailpassword");
-  } catch (err) {
-    // Ignore if SuperTokens is not fully initialized yet
-  }
-
-  let emailEnabled = !!epInstance;
-  let phoneEnabled = false;
-
-  if (plInstance?.config?.contactMethod) {
-    const contactMethod = plInstance.config.contactMethod;
-    if (contactMethod === "EMAIL" || contactMethod === "EMAIL_OR_PHONE") {
-      emailEnabled = true;
-    }
-    if (contactMethod === "PHONE" || contactMethod === "EMAIL_OR_PHONE") {
-      phoneEnabled = true;
-    }
-  }
-
-  let googleEnabled = false;
-  let googleClientId = "";
-  let googleIosClientId = methods?.google?.iosClientId ?? "";
-  let googleScopes: string[] = [];
-
-  let appleEnabled = false;
-  let appleClientId = "";
-
-  if (tpInstance?.config?.signInAndUpFeature?.providers) {
-    for (const providerInput of tpInstance.config.signInAndUpFeature.providers) {
-      const config = providerInput.config;
-      if (config.thirdPartyId === "google") {
-        googleEnabled = true;
-        if (config.scope) {
-          googleScopes = config.scope;
-        }
-        if (config.clients && config.clients.length > 0) {
-          for (const client of config.clients) {
-            if (client.clientType === "ios") {
-              if (!googleIosClientId) {
-                googleIosClientId = client.clientId;
-              }
-            } else if (!client.clientType || client.clientType === "web") {
-              googleClientId = client.clientId;
-            }
-          }
-          if (!googleClientId && config.clientId) {
-            googleClientId = config.clientId;
-          }
-        } else {
-          googleClientId = config.clientId;
-        }
-      } else if (config.thirdPartyId === "apple") {
-        appleEnabled = true;
-        if (config.clients && config.clients.length > 0) {
-          appleClientId = config.clients[0].clientId;
-        } else {
-          appleClientId = config.clientId;
-        }
-      }
-    }
-  }
-
   const customProviders = Object.fromEntries(
     Object.entries(methods ?? {})
       .filter(([key]) => !BUILTIN_SIGN_IN_METHOD_KEYS.includes(key))
@@ -467,17 +400,18 @@ function buildSignInMethodsConfig(methods: RowndSignInMethods | undefined) {
               },
             ]
           : [key, undefined];
-      }),
+      })
+      .filter(([_, v]) => v !== undefined),
   );
 
   return {
-    email: { enabled: emailEnabled },
-    phone: { enabled: phoneEnabled },
+    email: { enabled: methods?.email?.enabled ?? false },
+    phone: { enabled: methods?.phone?.enabled ?? false },
     google: {
-      enabled: googleEnabled,
-      client_id: googleClientId,
-      ios_client_id: googleIosClientId,
-      scopes: googleScopes,
+      enabled: methods?.google?.enabled ?? false,
+      client_id: methods?.google?.clientId ?? "",
+      ios_client_id: methods?.google?.iosClientId ?? "",
+      scopes: methods?.google?.scopes ?? [],
       one_tap: {
         browser: {
           auto_prompt: methods?.google?.oneTap?.browser?.autoPrompt ?? false,
@@ -486,8 +420,8 @@ function buildSignInMethodsConfig(methods: RowndSignInMethods | undefined) {
       },
     },
     apple: {
-      enabled: appleEnabled,
-      client_id: appleClientId,
+      enabled: methods?.apple?.enabled ?? false,
+      client_id: methods?.apple?.clientId ?? "",
     },
     anonymous: {
       enabled: methods?.anonymous?.enabled ?? false,
@@ -505,7 +439,10 @@ function buildSignInMethodsConfig(methods: RowndSignInMethods | undefined) {
   };
 }
 
-export function buildAppConfigResponse(config: RowndPluginNormalisedConfig) {
+export function buildAppConfig(
+  config: RowndPluginNormalisedConfig,
+  stConfig: SuperTokensPublicConfig,
+) {
   const schema = config.schema ?? DEFAULT_ROWND_SCHEMA;
   const app = config.appConfig ?? {};
   const branding = app.branding ?? {};
@@ -513,7 +450,7 @@ export function buildAppConfigResponse(config: RowndPluginNormalisedConfig) {
 
   return {
     id: app.id ?? "",
-    name: app.name ?? "",
+    name: app.name ?? stConfig.appInfo.appName,
     icon: app.icon ?? "",
     schema: Object.fromEntries(
       Object.entries(schema).map(([key, field]) => [
@@ -523,9 +460,11 @@ export function buildAppConfigResponse(config: RowndPluginNormalisedConfig) {
     ),
     config: {
       customizations: {
-        primary_color: branding.primaryColor ?? "#5b5bd6",
+        primary_color: branding.primaryColor ?? DEFAULT_PRIMARY_COLOR,
         ...(branding.logo ? { logo: branding.logo } : {}),
-        ...(branding.logoDarkMode ? { logo_dark_mode: branding.logoDarkMode } : {}),
+        ...(branding.logoDarkMode
+          ? { logo_dark_mode: branding.logoDarkMode }
+          : {}),
       },
       hub: {
         customizations: {
@@ -578,16 +517,28 @@ export function buildAppConfigResponse(config: RowndPluginNormalisedConfig) {
                     ? { subtitle: app.customContent.signInModal.subtitle }
                     : {}),
                   ...(app.customContent.signInModal.signInTitle
-                    ? { sign_in_title: app.customContent.signInModal.signInTitle }
+                    ? {
+                        sign_in_title:
+                          app.customContent.signInModal.signInTitle,
+                      }
                     : {}),
                   ...(app.customContent.signInModal.signUpTitle
-                    ? { sign_up_title: app.customContent.signInModal.signUpTitle }
+                    ? {
+                        sign_up_title:
+                          app.customContent.signInModal.signUpTitle,
+                      }
                     : {}),
                   ...(app.customContent.signInModal.signInSubtitle
-                    ? { sign_in_subtitle: app.customContent.signInModal.signInSubtitle }
+                    ? {
+                        sign_in_subtitle:
+                          app.customContent.signInModal.signInSubtitle,
+                      }
                     : {}),
                   ...(app.customContent.signInModal.signUpSubtitle
-                    ? { sign_up_subtitle: app.customContent.signInModal.signUpSubtitle }
+                    ? {
+                        sign_up_subtitle:
+                          app.customContent.signInModal.signUpSubtitle,
+                      }
                     : {}),
                 },
               }

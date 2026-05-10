@@ -39,12 +39,11 @@ import { Network, StartedNetwork } from "testcontainers";
 import { init } from "./plugin";
 import { HANDLE_BASE_PATH } from "./constants";
 import { RowndPluginConfig, RowndTelemetryClient } from "./types";
-import { ROWND_PLUGIN_ERROR_MESSAGES } from "./errors";
+import { ROWND_PLUGIN_ERROR_MESSAGES, DEFAULT_ROWND_SCHEMA } from "./errors";
 import {
   mapRowndUserToSuperTokens,
-  buildAppConfigResponse,
+  DEFAULT_PRIMARY_COLOR,
 } from "./pluginImplementation";
-import { DEFAULT_ROWND_SCHEMA } from "./schema";
 
 let testPORT = 30001;
 
@@ -117,6 +116,7 @@ describe("rownd-nodejs plugin", () => {
       await new Promise((resolve) => server!.close(resolve));
     }
     resetST();
+    vi.unstubAllGlobals();
   });
 
   beforeEach(() => {
@@ -275,721 +275,1089 @@ describe("rownd-nodejs plugin", () => {
         },
       });
     });
-  });
 
-  describe("user migration", () => {
-    it("migrate user successfully", async () => {
-      const telemetryClient: RowndTelemetryClient = {
-        recordEvent: vi.fn(),
-      };
-      const { server: s, port } = await setup(coreConnectionURI, {
-        telemetry: {
-          provider: "custom",
-          factory: () => telemetryClient,
-        },
-      });
-      server = s;
-      testPORT = port;
+    it("handles a Rownd user with both email and phone", () => {
       const rowndUser = {
-        app_user_id: "rownd-user-1",
         data: {
-          user_id: "rownd-user-1",
-          email: "test@example.com",
+          user_id: "rownd-dual",
+          email: "dual@example.com",
+          phone_number: "+1234567890",
         },
         verified_data: {
           email: true,
+          phone_number: true,
         },
       };
-      mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-user-1",
-      });
-      mockRowndClient.fetchUserInfo.mockResolvedValue(rowndUser);
 
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: "Bearer some-token",
-          },
-        },
-      );
-      const body = await res.json();
-      expect(res.status).toBe(200);
-      expect(body).toEqual({ status: "OK" });
-
-      const migratedUser = await getMigratedUserByRowndUserId(
-        rowndUser.app_user_id,
-      );
-      expect(migratedUser).toBeDefined();
-      const user = migratedUser!.user;
-      expect(user).toBeDefined();
-      expect(user?.loginMethods.length).toBe(1);
-      expect(user?.loginMethods[0].recipeId).toBe("passwordless");
-      expect(user?.loginMethods[0].email).toBe(rowndUser.data.email);
-
-      const metadata = migratedUser!.metadata;
-      expect(metadata.metadata).toEqual(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            email: rowndUser.data.email,
+      const result = mapRowndUserToSuperTokens(rowndUser as any);
+      expect(result.loginMethods).toHaveLength(2);
+      expect(result.loginMethods).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            recipeId: "passwordless",
+            email: "dual@example.com",
+            isVerified: true,
           }),
-          rownd_migrated: true,
-          rownd_user_id: rowndUser.app_user_id,
-        }),
-      );
-      expect(telemetryClient.recordEvent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          outcome: "success",
-          rowndUserId: rowndUser.app_user_id,
-          superTokensUserId: expect.any(String),
-        }),
+          expect.objectContaining({
+            recipeId: "passwordless",
+            phoneNumber: "+1234567890",
+            isVerified: true,
+          }),
+        ]),
       );
     });
+  });
 
-    it("migrate user with custom metadata successfully", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-user-2",
+  describe("endpoints", () => {
+    describe("POST /migrate", () => {
+      it("migrate user successfully", async () => {
+        const telemetryClient: RowndTelemetryClient = {
+          recordEvent: vi.fn(),
+        };
+        const { server: s, port } = await setup(coreConnectionURI, {
+          telemetry: {
+            provider: "custom",
+            factory: () => telemetryClient,
+          },
+        });
+        server = s;
+        testPORT = port;
+        const rowndUser = {
+          app_user_id: "rownd-user-1",
+          data: {
+            user_id: "rownd-user-1",
+            email: "test@example.com",
+          },
+          verified_data: {
+            email: true,
+          },
+        };
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-user-1",
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue(rowndUser);
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer some-token",
+            },
+          },
+        );
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body).toEqual({ status: "OK" });
+
+        const migratedUser = await getMigratedUserByRowndUserId(
+          rowndUser.app_user_id,
+        );
+        expect(migratedUser).toBeDefined();
+        const user = migratedUser!.user;
+        expect(user).toBeDefined();
+        expect(user?.loginMethods.length).toBe(1);
+        expect(user?.loginMethods[0].recipeId).toBe("passwordless");
+        expect(user?.loginMethods[0].email).toBe(rowndUser.data.email);
+
+        const metadata = migratedUser!.metadata;
+        expect(metadata.metadata).toEqual(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              email: rowndUser.data.email,
+            }),
+            rownd_migrated: true,
+            rownd_user_id: rowndUser.app_user_id,
+          }),
+        );
+        expect(telemetryClient.recordEvent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outcome: "success",
+            rowndUserId: rowndUser.app_user_id,
+            superTokensUserId: expect.any(String),
+          }),
+        );
       });
-      mockRowndClient.fetchUserInfo.mockResolvedValue({
-        app_user_id: "rownd-user-2",
-        data: {
+
+      it("migrate user with custom metadata successfully", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
           user_id: "rownd-user-2",
-          email: "test2@example.com",
-          first_name: "John",
-          last_name: "Doe",
-        },
-        verified_data: { email: true },
-      });
-
-      await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate`, {
-        method: "POST",
-        headers: { Authorization: "Bearer some-token" },
-      });
-
-      const migratedUser = await getMigratedUserByRowndUserId("rownd-user-2");
-      expect(migratedUser).toBeDefined();
-      const metadata = migratedUser!.metadata;
-      expect(metadata.metadata).toEqual(
-        expect.objectContaining({
-          data: expect.objectContaining({
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-user-2",
+          data: {
+            user_id: "rownd-user-2",
+            email: "test2@example.com",
             first_name: "John",
             last_name: "Doe",
-          }),
-          rownd_migrated: true,
-        }),
-      );
-    });
+          },
+          verified_data: { email: true },
+        });
 
-    it("migrate a passwordles auth user", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-user-phone",
-      });
-      mockRowndClient.fetchUserInfo.mockResolvedValue({
-        app_user_id: "rownd-user-phone",
-        data: { user_id: "rownd-user-phone", phone_number: "+1234567890" },
-        verified_data: { phone_number: true },
-      });
-
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
+        await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate`, {
           method: "POST",
           headers: { Authorization: "Bearer some-token" },
-        },
-      );
-      expect(await res.json()).toEqual({ status: "OK" });
+        });
 
-      const migratedUser =
-        await getMigratedUserByRowndUserId("rownd-user-phone");
-      expect(migratedUser).toBeDefined();
-      const user = migratedUser!.user;
-      expect(user?.loginMethods[0].phoneNumber).toBe("+1234567890");
-    });
-
-    it("migrate a google auth user", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-user-google",
+        const migratedUser = await getMigratedUserByRowndUserId("rownd-user-2");
+        expect(migratedUser).toBeDefined();
+        const metadata = migratedUser!.metadata;
+        expect(metadata.metadata).toEqual(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              first_name: "John",
+              last_name: "Doe",
+            }),
+            rownd_migrated: true,
+          }),
+        );
       });
-      mockRowndClient.fetchUserInfo.mockResolvedValue({
-        app_user_id: "rownd-user-google",
-        data: {
+
+      it("migrate a passwordles auth user", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-user-phone",
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-user-phone",
+          data: { user_id: "rownd-user-phone", phone_number: "+1234567890" },
+          verified_data: { phone_number: true },
+        });
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+        expect(await res.json()).toEqual({ status: "OK" });
+
+        const migratedUser =
+          await getMigratedUserByRowndUserId("rownd-user-phone");
+        expect(migratedUser).toBeDefined();
+        const user = migratedUser!.user;
+        expect(user?.loginMethods[0].phoneNumber).toBe("+1234567890");
+      });
+
+      it("migrate a google auth user", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
           user_id: "rownd-user-google",
-          google_id: "g-123",
-          email: "g@example.com",
-        },
-        verified_data: { google_id: true },
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-user-google",
+          data: {
+            user_id: "rownd-user-google",
+            google_id: "g-123",
+            email: "g@example.com",
+          },
+          verified_data: { google_id: true },
+        });
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+        expect(await res.json()).toEqual({ status: "OK" });
+        const migratedUser =
+          await getMigratedUserByRowndUserId("rownd-user-google");
+        expect(migratedUser).toBeDefined();
+        const user = migratedUser!.user;
+        expect(user?.loginMethods.length).toBe(1);
+        expect(user?.loginMethods[0].recipeId).toBe("thirdparty");
+        expect(user?.loginMethods[0].thirdParty?.id).toBe("google");
       });
 
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
-          method: "POST",
-          headers: { Authorization: "Bearer some-token" },
-        },
-      );
-      expect(await res.json()).toEqual({ status: "OK" });
-      const migratedUser =
-        await getMigratedUserByRowndUserId("rownd-user-google");
-      expect(migratedUser).toBeDefined();
-      const user = migratedUser!.user;
-      expect(user?.loginMethods.length).toBe(1);
-      expect(user?.loginMethods[0].recipeId).toBe("thirdparty");
-      expect(user?.loginMethods[0].thirdParty?.id).toBe("google");
-    });
-
-    it("error if the auth header is missing", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
-          method: "POST",
-        },
-      );
-      const body = await res.json();
-      expect(body.status).toBe("ERROR");
-      expect(body.message).toBe(
-        ROWND_PLUGIN_ERROR_MESSAGES.MISSING_AUTHORIZATION_HEADER,
-      );
-    });
-
-    it("error if rownd token validation fails", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      mockRowndClient.validateToken.mockRejectedValue(
-        new Error("Invalid token API"),
-      );
-
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
-          method: "POST",
-          headers: { Authorization: "Bearer some-token" },
-        },
-      );
-      const body = await res.json();
-      expect(body.status).toBe("ERROR");
-      expect(body.message).toBe("Migration failed");
-    });
-
-    it("error if rownd user info fetch fails", async () => {
-      const telemetryClient: RowndTelemetryClient = {
-        recordEvent: vi.fn(),
-      };
-      const { server: s, port } = await setup(coreConnectionURI, {
-        telemetry: {
-          provider: "custom",
-          factory: () => telemetryClient,
-        },
+      it("error if the auth header is missing", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+          },
+        );
+        const body = await res.json();
+        expect(body.status).toBe("ERROR");
+        expect(body.message).toBe(
+          ROWND_PLUGIN_ERROR_MESSAGES.MISSING_AUTHORIZATION_HEADER,
+        );
       });
-      server = s;
-      testPORT = port;
-      mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-user-fetch-fail",
-      });
-      mockRowndClient.fetchUserInfo.mockRejectedValue(
-        new Error("Fetch failed"),
-      );
 
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
-          method: "POST",
-          headers: { Authorization: "Bearer some-token" },
-        },
-      );
-      const body = await res.json();
-      expect(body.status).toBe("ERROR");
-      expect(body.message).toBe("Migration failed");
-      expect(telemetryClient.recordEvent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          outcome: "error",
-          rowndUserId: "rownd-user-fetch-fail",
-          error: expect.objectContaining({
-            message: "Fetch failed",
+      it("error if rownd token validation fails", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockRejectedValue(
+          new Error("Invalid token API"),
+        );
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+        const body = await res.json();
+        expect(body.status).toBe("ERROR");
+        expect(body.message).toBe("Migration failed");
+      });
+
+      it("error if rownd user info fetch fails", async () => {
+        const telemetryClient: RowndTelemetryClient = {
+          recordEvent: vi.fn(),
+        };
+        const { server: s, port } = await setup(coreConnectionURI, {
+          telemetry: {
+            provider: "custom",
+            factory: () => telemetryClient,
+          },
+        });
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-user-fetch-fail",
+        });
+        mockRowndClient.fetchUserInfo.mockRejectedValue(
+          new Error("Fetch failed"),
+        );
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+        const body = await res.json();
+        expect(body.status).toBe("ERROR");
+        expect(body.message).toBe("Migration failed");
+        expect(telemetryClient.recordEvent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outcome: "error",
+            rowndUserId: "rownd-user-fetch-fail",
+            error: expect.objectContaining({
+              message: "Fetch failed",
+            }),
           }),
-        }),
-      );
-    });
-
-    it("telemetry failure does not affect response", async () => {
-      const telemetryClient: RowndTelemetryClient = {
-        recordEvent: vi.fn(async () => {
-          throw new Error("Telemetry down");
-        }),
-      };
-      const { server: s, port } = await setup(coreConnectionURI, {
-        telemetry: {
-          provider: "custom",
-          factory: () => telemetryClient,
-        },
+        );
       });
-      server = s;
-      testPORT = port;
 
-      mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-user-telemetry-throw",
-      });
-      mockRowndClient.fetchUserInfo.mockResolvedValue({
-        app_user_id: "rownd-user-telemetry-throw",
-        data: {
+      it("telemetry failure does not affect response", async () => {
+        const telemetryClient: RowndTelemetryClient = {
+          recordEvent: vi.fn(async () => {
+            throw new Error("Telemetry down");
+          }),
+        };
+        const { server: s, port } = await setup(coreConnectionURI, {
+          telemetry: {
+            provider: "custom",
+            factory: () => telemetryClient,
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        mockRowndClient.validateToken.mockResolvedValue({
           user_id: "rownd-user-telemetry-throw",
-          email: "telemetry@example.com",
-        },
-        verified_data: { email: true },
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-user-telemetry-throw",
+          data: {
+            user_id: "rownd-user-telemetry-throw",
+            email: "telemetry@example.com",
+          },
+          verified_data: { email: true },
+        });
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+        expect(await res.json()).toEqual({ status: "OK" });
+        expect(telemetryClient.recordEvent).toHaveBeenCalled();
       });
 
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
+      it("prevent creation of duplicate users", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-dup",
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-dup",
+          data: { user_id: "rownd-dup", email: "dup@example.com" },
+          verified_data: { email: true },
+        });
+
+        await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate`, {
           method: "POST",
           headers: { Authorization: "Bearer some-token" },
-        },
-      );
-      expect(await res.json()).toEqual({ status: "OK" });
-      expect(telemetryClient.recordEvent).toHaveBeenCalled();
-    });
+        });
 
-    it("prevent creation of duplicate users", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      mockRowndClient.validateToken.mockResolvedValue({ user_id: "rownd-dup" });
-      mockRowndClient.fetchUserInfo.mockResolvedValue({
-        app_user_id: "rownd-dup",
-        data: { user_id: "rownd-dup", email: "dup@example.com" },
-        verified_data: { email: true },
-      });
-
-      await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate`, {
-        method: "POST",
-        headers: { Authorization: "Bearer some-token" },
-      });
-
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
-          method: "POST",
-          headers: { Authorization: "Bearer some-token" },
-        },
-      );
-      expect(await res.json()).toEqual({ status: "OK" });
-
-      const migratedUser = await getMigratedUserByRowndUserId("rownd-dup");
-      expect(migratedUser).toBeDefined();
-      const user = migratedUser!.user;
-      expect(user).toBeDefined();
-    });
-
-    it("error if user not found in rownd", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-missing",
-      });
-      mockRowndClient.fetchUserInfo.mockResolvedValue(undefined);
-
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
-          method: "POST",
-          headers: { Authorization: "Bearer some-token" },
-        },
-      );
-      const body = await res.json();
-      expect(body.status).toBe("ERROR");
-      expect(body.message).toBe(
-        ROWND_PLUGIN_ERROR_MESSAGES.ROWND_USER_NOT_FOUND,
-      );
-    });
-  });
-
-  // TODO: Move all integration tests that validate endpoints in this descibe block
-  describe("endpoints", () => {});
-
-  describe("session migration", () => {
-    it("migrate session successfully", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-session-1",
-      });
-      mockRowndClient.fetchUserInfo.mockResolvedValue({
-        app_user_id: "rownd-session-1",
-        data: { user_id: "rownd-session-1", email: "session@example.com" },
-        verified_data: { email: true },
-      });
-
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: "Bearer some-token",
-            rid: "session",
-            "fdi-version": "1.18",
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
           },
-        },
-      );
-      const body = await res.json();
-      expect(res.status).toBe(200);
-      expect(body).toEqual({ status: "OK" });
-      expect(res.headers.get("front-token")).toBeTruthy();
-      expect(
-        res.headers.get("st-access-token") || res.headers.get("set-cookie"),
-      ).toBeTruthy();
-    });
+        );
+        expect(await res.json()).toEqual({ status: "OK" });
 
-    it("create user and then migrate their session", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-session-2",
-      });
-      mockRowndClient.fetchUserInfo.mockResolvedValue({
-        app_user_id: "rownd-session-2",
-        data: { user_id: "rownd-session-2", email: "session2@example.com" },
-        verified_data: { email: true },
+        const migratedUser = await getMigratedUserByRowndUserId("rownd-dup");
+        expect(migratedUser).toBeDefined();
+        const user = migratedUser!.user;
+        expect(user).toBeDefined();
       });
 
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: "Bearer some-token",
-            rid: "session",
-            "fdi-version": "1.18",
+      it("error if user not found in rownd", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-missing",
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue(undefined);
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
           },
-        },
-      );
-      expect(await res.json()).toEqual({ status: "OK" });
-    });
-
-    it("error if the auth header is missing", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
-          method: "POST",
-        },
-      );
-      const body = await res.json();
-      expect(body.status).toBe("ERROR");
-    });
-
-    it("error if rownd token validation fails", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      mockRowndClient.validateToken.mockRejectedValue(
-        new Error("Invalid token"),
-      );
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
-          method: "POST",
-          headers: { Authorization: "Bearer some-token" },
-        },
-      );
-      expect((await res.json()).status).toBe("ERROR");
-    });
-
-    it("error if rownd user info fetch fails", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      mockRowndClient.validateToken.mockResolvedValue({
-        user_id: "rownd-session-3",
+        );
+        const body = await res.json();
+        expect(body.status).toBe("ERROR");
+        expect(body.message).toBe(
+          ROWND_PLUGIN_ERROR_MESSAGES.ROWND_USER_NOT_FOUND,
+        );
       });
-      mockRowndClient.fetchUserInfo.mockRejectedValue(new Error("Failed"));
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-        {
-          method: "POST",
-          headers: { Authorization: "Bearer some-token" },
-        },
-      );
-      expect((await res.json()).status).toBe("ERROR");
-    });
-  });
 
-  describe("/app-config", () => {
-    it("returns 200 with defaults when no appConfig is provided", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
+      it("error if Bulk Import API fails (500)", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-import-fail",
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-import-fail",
+          data: { user_id: "rownd-import-fail", email: "fail@example.com" },
+          verified_data: { email: true },
+        });
 
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
-      );
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.status).toBe("OK");
-      expect(body.id).toBe("");
-      expect(body.name).toBe("");
-      // TODO: We should use the default config object not plain values here
-      expect(body.config.hub.auth.sign_in_methods.email.enabled).toBe(false);
-      expect(body.config.hub.auth.sign_in_methods.google.enabled).toBe(false);
-      expect(body.config.customizations.primary_color).toBe("#5b5bd6");
-      expect(body.config.hub.customizations.rounded_corners).toBe(true);
-      expect(body.config.hub.customizations.dark_mode).toBe("auto");
-    });
+        // Mock global fetch to return 500 for bulk import
+        const originalFetch = global.fetch;
+        vi.stubGlobal("fetch", async (url: string, init: any) => {
+          if (url.includes("/bulk-import/import")) {
+            return {
+              ok: false,
+              status: 500,
+              text: async () => "Internal Server Error",
+            };
+          }
+          return originalFetch(url, init);
+        });
 
-    it("does not require authentication", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-
-      // No Authorization header, no session cookie
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
-      );
-      expect(res.status).toBe(200);
-    });
-
-    // TODO: This functionality needs to be refactored.
-    // The plugin should return sign_in_methods based on a mix between the supertokens recipes and the plugin config.
-    // For passwordless, thirdparty, apple, google we can infer config from the recipes
-    // The only things that we need from app config are:
-    // - Google one tap config
-    // - Guest sign in
-    // - Anonymous sign in
-    // The test should be renamed to something like "returns sign_in_methods from recipes and plugin config"
-    it("returns sign_in_methods from plugin config", async () => {
-      const { server: s, port } = await setup(coreConnectionURI, {
-        appConfig: {
-          signInMethods: {
-            email: { enabled: true },
-            phone: { enabled: true },
-            google: {
-              enabled: true,
-              clientId: "test-client-id.apps.googleusercontent.com",
-              oneTap: { browser: { autoPrompt: true, delay: 3000 } },
-            },
-            apple: { enabled: true, clientId: "com.example.app" },
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
           },
-        },
+        );
+        const body = await res.json();
+        expect(body.status).toBe("ERROR");
+        expect(body.message).toBe("Migration failed");
       });
-      server = s;
-      testPORT = port;
 
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
-      );
-      const body = await res.json();
-      const methods = body.config.hub.auth.sign_in_methods;
-
-      expect(methods.email.enabled).toBe(true);
-      expect(methods.phone.enabled).toBe(true);
-      expect(methods.google.enabled).toBe(true);
-      expect(methods.google.client_id).toBe(
-        "test-client-id.apps.googleusercontent.com",
-      );
-      expect(methods.google.one_tap.browser.auto_prompt).toBe(true);
-      expect(methods.google.one_tap.browser.delay).toBe(3000);
-      expect(methods.apple.enabled).toBe(true);
-      expect(methods.apple.client_id).toBe("com.example.app");
-    });
-
-    // TODO: We should match against a variable not plain values
-    it("returns branding fields from plugin config", async () => {
-      const { server: s, port } = await setup(coreConnectionURI, {
-        appConfig: {
-          id: "app_xyz",
-          name: "Acme App",
-          icon: "https://cdn.acme.com/icon.png",
-          branding: {
-            primaryColor: "#ff0000",
-            roundedCorners: false,
-            darkMode: "dark",
-            showAppIcon: true,
+      it("error if Bulk Import API returns malformed JSON", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-import-malformed",
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-import-malformed",
+          data: {
+            user_id: "rownd-import-malformed",
+            email: "malformed@example.com",
           },
-        },
-      });
-      server = s;
-      testPORT = port;
+          verified_data: { email: true },
+        });
 
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
-      );
-      const body = await res.json();
+        const originalFetch = global.fetch;
+        vi.stubGlobal("fetch", async (url: string, init: any) => {
+          if (url.includes("/bulk-import/import")) {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => {
+                throw new Error("Unexpected token");
+              },
+            };
+          }
+          return originalFetch(url, init);
+        });
 
-      expect(body.id).toBe("app_xyz");
-      expect(body.name).toBe("Acme App");
-      expect(body.icon).toBe("https://cdn.acme.com/icon.png");
-      expect(body.config.customizations.primary_color).toBe("#ff0000");
-      expect(body.config.hub.customizations.rounded_corners).toBe(false);
-      expect(body.config.hub.customizations.dark_mode).toBe("dark");
-      expect(body.config.hub.auth.show_app_icon).toBe(true);
-    });
-
-    // TODO: We should match against a variable not plain values
-    it("returns legal fields from plugin config", async () => {
-      const { server: s, port } = await setup(coreConnectionURI, {
-        appConfig: {
-          legal: {
-            companyName: "Acme Corp",
-            privacyPolicyUrl: "https://acme.com/privacy",
-            termsConditionsUrl: "https://acme.com/terms",
-            supportEmail: "support@acme.com",
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
           },
-        },
+        );
+        const body = await res.json();
+        expect(body.status).toBe("ERROR");
+        expect(body.message).toBe("Migration failed");
       });
-      server = s;
-      testPORT = port;
-
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
-      );
-      const body = await res.json();
-      const legal = body.config.hub.legal;
-
-      expect(legal.company_name).toBe("Acme Corp");
-      expect(legal.privacy_policy_url).toBe("https://acme.com/privacy");
-      expect(legal.terms_conditions_url).toBe("https://acme.com/terms");
-      expect(legal.support_email).toBe("support@acme.com");
     });
 
-    // TODO: We should match against a variable not plain values
-    it("returns operator-provided schema in response", async () => {
-      const { server: s, port } = await setup(coreConnectionURI, {
-        schema: {
-          employee_id: {
-            display_name: "Employee ID",
-            type: "string",
-            data_category: "custom",
-            owned_by: "app",
-            required: true,
-            unique: true,
-            user_visible: false,
-            read_only: true,
-          },
-        },
-      });
-      server = s;
-      testPORT = port;
+    describe("session migration", () => {
+      it("migrate session successfully", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-session-1",
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-session-1",
+          data: { user_id: "rownd-session-1", email: "session@example.com" },
+          verified_data: { email: true },
+        });
 
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
-      );
-      const body = await res.json();
-
-      expect(body.schema.employee_id).toBeDefined();
-      expect(body.schema.employee_id.display_name).toBe("Employee ID");
-      expect(body.schema.employee_id.read_only).toBe(true);
-      // Fields not in DEFAULT_ROWND_SCHEMA should not appear
-      expect(body.schema.email).toBeUndefined();
-    });
-
-    it("fills in empty-string defaults for optional schema text fields", async () => {
-      const { server: s, port } = await setup(coreConnectionURI, {
-        schema: {
-          nickname: {
-            display_name: "Nickname",
-            type: "string",
-            data_category: "pii_basic",
-            owned_by: "user",
-            required: false,
-            unique: false,
-            user_visible: true,
-            // revoke_after, required_retention, etc. intentionally omitted
-          },
-        },
-      });
-      server = s;
-      testPORT = port;
-
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
-      );
-      const body = await res.json();
-      const field = body.schema.nickname;
-
-      expect(field.revoke_after).toBe("");
-      expect(field.required_retention).toBe("");
-      expect(field.collection_justification).toBe("");
-      expect(field.opt_out_warning).toBe("");
-      expect(field.read_only).toBe(false);
-      expect(field.show_empty).toBe(false);
-    });
-
-    it("schema from RowndPluginConfig appears in response (regression for schema drop bug)", async () => {
-      const { server: s, port } = await setup(coreConnectionURI, {
-        schema: DEFAULT_ROWND_SCHEMA,
-      });
-      server = s;
-      testPORT = port;
-
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
-      );
-      const body = await res.json();
-
-      // All default schema fields should be present
-      expect(body.schema.email).toBeDefined();
-      expect(body.schema.first_name).toBeDefined();
-      expect(body.schema.last_name).toBeDefined();
-      expect(body.schema.phone_number).toBeDefined();
-    });
-
-    it("custom OAuth2 provider appears in sign_in_methods", async () => {
-      const { server: s, port } = await setup(coreConnectionURI, {
-        appConfig: {
-          signInMethods: {
-            github: {
-              enabled: true,
-              displayName: "GitHub",
-              iconLightUrl: "https://cdn.example.com/github.png",
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer some-token",
+              rid: "session",
+              "fdi-version": "1.18",
             },
           },
-        },
+        );
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body).toEqual({ status: "OK" });
+        expect(res.headers.get("front-token")).toBeTruthy();
+        expect(
+          res.headers.get("st-access-token") || res.headers.get("set-cookie"),
+        ).toBeTruthy();
       });
-      server = s;
-      testPORT = port;
 
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
-      );
-      const body = await res.json();
-      const methods = body.config.hub.auth.sign_in_methods;
+      it("create user and then migrate their session", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-session-2",
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-session-2",
+          data: { user_id: "rownd-session-2", email: "session2@example.com" },
+          verified_data: { email: true },
+        });
 
-      expect(methods.github).toBeDefined();
-      expect(methods.github.enabled).toBe(true);
-      expect(methods.github.display_name).toBe("GitHub");
-      expect(methods.github.icon_light_url).toBe(
-        "https://cdn.example.com/github.png",
-      );
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer some-token",
+              rid: "session",
+              "fdi-version": "1.18",
+            },
+          },
+        );
+        expect(await res.json()).toEqual({ status: "OK" });
+      });
+
+      it("error if the auth header is missing", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+          },
+        );
+        const body = await res.json();
+        expect(body.status).toBe("ERROR");
+      });
+
+      it("error if rownd token validation fails", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockRejectedValue(
+          new Error("Invalid token"),
+        );
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+        expect((await res.json()).status).toBe("ERROR");
+      });
+
+      it("error if rownd user info fetch fails", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-session-3",
+        });
+        mockRowndClient.fetchUserInfo.mockRejectedValue(new Error("Failed"));
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+        expect((await res.json()).status).toBe("ERROR");
+      });
     });
-  });
 
-  // TODO: Move all the user endpoints under these describe blocks
-  describe("GET /user", () => {});
-  describe("PUT /user", () => {});
-  describe("DELETE /user", () => {});
-  describe("GET /user/meta", () => {});
-  describe("PUT /user/meta", () => {});
-  describe("GET /user/field", () => {});
-  describe("PUT /user/field", () => {});
+    describe("GET /app-config", () => {
+      it("returns 200 with defaults when no appConfig is provided", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
 
-  describe("compatibility user routes", () => {
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.status).toBe("OK");
+        expect(body.id).toBe("");
+        expect(body.name).toBe("Test App");
+
+        expect(body.config.hub.auth.sign_in_methods.email.enabled).toBe(false);
+        expect(body.config.hub.auth.sign_in_methods.google.enabled).toBe(false);
+        expect(body.config.customizations.primary_color).toBe(
+          DEFAULT_PRIMARY_COLOR,
+        );
+        expect(body.config.hub.customizations.rounded_corners).toBe(true);
+        expect(body.config.hub.customizations.dark_mode).toBe("auto");
+      });
+
+      it("does not require authentication", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+
+        // No Authorization header, no session cookie
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        expect(res.status).toBe(200);
+      });
+
+      it("returns sign_in_methods from recipes and plugin config", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: {
+            signInMethods: {
+              email: { enabled: true },
+              phone: { enabled: true },
+              google: {
+                enabled: true,
+                clientId: "test-client-id.apps.googleusercontent.com",
+                oneTap: { browser: { autoPrompt: true, delay: 3000 } },
+              },
+              apple: { enabled: true, clientId: "com.example.app" },
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const body = await res.json();
+        const methods = body.config.hub.auth.sign_in_methods;
+
+        expect(methods.email.enabled).toBe(true);
+        expect(methods.phone.enabled).toBe(true);
+        expect(methods.google.enabled).toBe(true);
+        expect(methods.google.client_id).toBe(
+          "test-client-id.apps.googleusercontent.com",
+        );
+        expect(methods.google.one_tap.browser.auto_prompt).toBe(true);
+        expect(methods.google.one_tap.browser.delay).toBe(3000);
+        expect(methods.apple.enabled).toBe(true);
+        expect(methods.apple.client_id).toBe("com.example.app");
+      });
+
+      it("returns branding fields from plugin config", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: {
+            id: "app_xyz",
+            name: "Acme App",
+            icon: "https://cdn.acme.com/icon.png",
+            branding: {
+              primaryColor: "#ff0000",
+              roundedCorners: false,
+              darkMode: "dark",
+              showAppIcon: true,
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const body = await res.json();
+
+        expect(body.id).toBe("app_xyz");
+        expect(body.name).toBe("Acme App");
+        expect(body.icon).toBe("https://cdn.acme.com/icon.png");
+        expect(body.config.customizations.primary_color).toBe("#ff0000");
+        expect(body.config.hub.customizations.rounded_corners).toBe(false);
+        expect(body.config.hub.customizations.dark_mode).toBe("dark");
+        expect(body.config.hub.auth.show_app_icon).toBe(true);
+      });
+
+      it("returns legal fields from plugin config", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: {
+            legal: {
+              companyName: "Acme Corp",
+              privacyPolicyUrl: "https://acme.com/privacy",
+              termsConditionsUrl: "https://acme.com/terms",
+              supportEmail: "support@acme.com",
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const body = await res.json();
+        const legal = body.config.hub.legal;
+
+        expect(legal.company_name).toBe("Acme Corp");
+        expect(legal.privacy_policy_url).toBe("https://acme.com/privacy");
+        expect(legal.terms_conditions_url).toBe("https://acme.com/terms");
+        expect(legal.support_email).toBe("support@acme.com");
+      });
+
+      it("returns operator-provided schema in response", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          schema: {
+            employee_id: {
+              display_name: "Employee ID",
+              type: "string",
+              data_category: "custom",
+              owned_by: "app",
+              required: true,
+              unique: true,
+              user_visible: false,
+              read_only: true,
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const body = await res.json();
+
+        expect(body.schema.employee_id).toBeDefined();
+        expect(body.schema.employee_id.display_name).toBe("Employee ID");
+        expect(body.schema.employee_id.read_only).toBe(true);
+        // Fields not in DEFAULT_ROWND_SCHEMA should not appear
+        expect(body.schema.email).toBeUndefined();
+      });
+
+      it("fills in empty-string defaults for optional schema text fields", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          schema: {
+            nickname: {
+              display_name: "Nickname",
+              type: "string",
+              data_category: "pii_basic",
+              owned_by: "user",
+              required: false,
+              unique: false,
+              user_visible: true,
+              // revoke_after, required_retention, etc. intentionally omitted
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const body = await res.json();
+        const field = body.schema.nickname;
+
+        expect(field.revoke_after).toBe("");
+        expect(field.required_retention).toBe("");
+        expect(field.collection_justification).toBe("");
+        expect(field.opt_out_warning).toBe("");
+        expect(field.read_only).toBe(false);
+        expect(field.show_empty).toBe(false);
+      });
+
+      it("schema from RowndPluginConfig appears in response (regression for schema drop bug)", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          schema: DEFAULT_ROWND_SCHEMA,
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const body = await res.json();
+
+        // All default schema fields should be present
+        expect(body.schema.email).toBeDefined();
+        expect(body.schema.first_name).toBeDefined();
+        expect(body.schema.last_name).toBeDefined();
+        expect(body.schema.phone_number).toBeDefined();
+      });
+
+      it("custom OAuth2 provider appears in sign_in_methods", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: {
+            signInMethods: {
+              github: {
+                enabled: true,
+                displayName: "GitHub",
+                iconLightUrl: "https://cdn.example.com/github.png",
+              },
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const body = await res.json();
+        const methods = body.config.hub.auth.sign_in_methods;
+
+        expect(methods.github).toBeDefined();
+        expect(methods.github.enabled).toBe(true);
+        expect(methods.github.display_name).toBe("GitHub");
+        expect(methods.github.icon_light_url).toBe(
+          "https://cdn.example.com/github.png",
+        );
+      });
+    });
+
+    describe("GET /user", () => {
+      it("gets compatibility user payload", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser("compat-user-1");
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            headers: getAuthedHeaders(accessToken),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        await expect(res.json()).resolves.toEqual({
+          status: "OK",
+          data: {
+            user_id: "compat-user-1",
+            email: "compat-user-1@example.com",
+          },
+          meta: {
+            created: "2026-01-01T00:00:00.000Z",
+          },
+          verified_data: {
+            email: "compat-user-1@example.com",
+          },
+          redacted: [],
+          groups: [],
+          attributes: {},
+        });
+      });
+
+      it("rejects without session", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+        );
+        // SuperTokens middleware handles sessionRequired by sending a 401 or status: TRY_REFRESH_TOKEN or similar
+        // depending on the client. For fetch without cookies/headers, it often returns TRY_REFRESH_TOKEN if sessionRequired is true
+        const body = await res.json();
+        expect(body.status).not.toBe("OK");
+      });
+    });
+
+    describe("PUT /user", () => {
+      it("updates compatibility user data", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser("compat-user-2");
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ data: { first_name: "Ada" } }),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.status).toBe("OK");
+        expect(body.data).toEqual({
+          user_id: "compat-user-2",
+          email: "compat-user-2@example.com",
+          first_name: "Ada",
+        });
+        expect(body.meta.created).toBe("2026-01-01T00:00:00.000Z");
+        expect(body.verified_data.email).toBe("compat-user-2@example.com");
+      });
+    });
+
+    describe("DELETE /user", () => {
+      it("deletes the compatibility user", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser("compat-user-5");
+
+        const deleteRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "DELETE",
+            headers: getAuthedHeaders(accessToken),
+          },
+        );
+
+        expect(deleteRes.status).toBe(200);
+        const deletedUser = await SuperTokens.getUser("compat-user-5");
+        expect(deletedUser).toBeUndefined();
+      });
+    });
+
+    describe("GET /user/meta", () => {
+      it("gets compatibility user meta", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser("compat-user-3");
+
+        const initialRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/meta`,
+          {
+            headers: getAuthedHeaders(accessToken),
+          },
+        );
+        await expect(initialRes.json()).resolves.toEqual({
+          status: "OK",
+          id: "compat-user-3",
+          meta: { created: "2026-01-01T00:00:00.000Z" },
+        });
+      });
+    });
+
+    describe("PUT /user/meta", () => {
+      it("updates compatibility user meta", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser("compat-user-3-put");
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/meta`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              meta: {
+                last_passkey_registration_prompt: "2026-04-23T00:00:00.000Z",
+              },
+            }),
+          },
+        );
+
+        expect(updateRes.status).toBe(200);
+        await expect(updateRes.json()).resolves.toEqual({
+          status: "OK",
+          id: "compat-user-3-put",
+          meta: {
+            created: "2026-01-01T00:00:00.000Z",
+            last_passkey_registration_prompt: "2026-04-23T00:00:00.000Z",
+          },
+        });
+      });
+
+      it("rejects without session", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/meta`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ meta: {} }),
+          },
+        );
+        const body = await res.json();
+        expect(body.status).not.toBe("OK");
+      });
+    });
+
+    describe("GET /user/field", () => {
+      it("gets compatibility user fields", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser("compat-user-4-get");
+
+        await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=last_name`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ value: "Lovelace" }),
+          },
+        );
+
+        const getRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=last_name`,
+          {
+            headers: getAuthedHeaders(accessToken),
+          },
+        );
+        expect(getRes.status).toBe(200);
+        await expect(getRes.json()).resolves.toEqual({
+          status: "OK",
+          value: "Lovelace",
+        });
+      });
+
+      it("returns 400 when field is missing", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser(
+          "compat-user-4-missing-field",
+        );
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/field`,
+          {
+            headers: getAuthedHeaders(accessToken),
+          },
+        );
+        expect(res.status).toBe(400);
+        const body = await res.json();
+        expect(body.status).toBe("ERROR");
+        expect(body.code).toBe(400);
+        expect(body.message).toBe("field is required");
+      });
+    });
+
+    describe("PUT /user/field", () => {
+      it("updates compatibility user fields", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser("compat-user-4");
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=last_name`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ value: "Lovelace" }),
+          },
+        );
+        expect(updateRes.status).toBe(200);
+      });
+
+      it("returns 400 when field is missing", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser(
+          "compat-user-4-put-missing",
+        );
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/field`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ value: "Lovelace" }),
+          },
+        );
+        expect(res.status).toBe(400);
+        const body = await res.json();
+        expect(body.status).toBe("ERROR");
+        expect(body.code).toBe(400);
+        expect(body.message).toBe("field is required");
+      });
+    });
+
     async function createSessionForUser(
       userId: string,
       email = `${userId}@example.com`,
@@ -1027,168 +1395,6 @@ describe("rownd-nodejs plugin", () => {
         "st-auth-mode": "header",
       };
     }
-
-    it("gets compatibility user payload", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      const accessToken = await createSessionForUser("compat-user-1");
-
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/user`,
-        {
-          headers: getAuthedHeaders(accessToken),
-        },
-      );
-
-      expect(res.status).toBe(200);
-      // TODO: We should match against a variable not plain values
-      await expect(res.json()).resolves.toEqual({
-        status: "OK",
-        data: {
-          user_id: "compat-user-1",
-          email: "compat-user-1@example.com",
-        },
-        meta: {
-          created: "2026-01-01T00:00:00.000Z",
-        },
-        verified_data: {
-          email: "compat-user-1@example.com",
-        },
-        redacted: [],
-        groups: [],
-        attributes: {},
-      });
-    });
-
-    it("updates compatibility user data", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      const accessToken = await createSessionForUser("compat-user-2");
-
-      const res = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/user`,
-        {
-          method: "PUT",
-          headers: {
-            ...getAuthedHeaders(accessToken),
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ data: { first_name: "Ada" } }),
-        },
-      );
-
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.status).toBe("OK");
-      // TODO: We should match against a variable not plain values
-      expect(body.data).toEqual({
-        user_id: "compat-user-2",
-        email: "compat-user-2@example.com",
-        first_name: "Ada",
-      });
-      expect(body.meta.created).toBe("2026-01-01T00:00:00.000Z");
-      expect(body.verified_data.email).toBe("compat-user-2@example.com");
-    });
-
-    it("gets and updates compatibility user meta", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      const accessToken = await createSessionForUser("compat-user-3");
-
-      const initialRes = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/user/meta`,
-        {
-          headers: getAuthedHeaders(accessToken),
-        },
-      );
-      await expect(initialRes.json()).resolves.toEqual({
-        status: "OK",
-        id: "compat-user-3",
-        meta: { created: "2026-01-01T00:00:00.000Z" },
-      });
-
-      const updateRes = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/user/meta`,
-        {
-          method: "PUT",
-          headers: {
-            ...getAuthedHeaders(accessToken),
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            meta: {
-              last_passkey_registration_prompt: "2026-04-23T00:00:00.000Z",
-            },
-          }),
-        },
-      );
-
-      expect(updateRes.status).toBe(200);
-      // TODO: We should match against a variable not plain values
-      await expect(updateRes.json()).resolves.toEqual({
-        status: "OK",
-        id: "compat-user-3",
-        meta: {
-          created: "2026-01-01T00:00:00.000Z",
-          last_passkey_registration_prompt: "2026-04-23T00:00:00.000Z",
-        },
-      });
-    });
-
-    it("gets and updates compatibility user fields", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      const accessToken = await createSessionForUser("compat-user-4");
-
-      const updateRes = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=last_name`,
-        {
-          method: "PUT",
-          headers: {
-            ...getAuthedHeaders(accessToken),
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ value: "Lovelace" }),
-        },
-      );
-      expect(updateRes.status).toBe(200);
-
-      const getRes = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=last_name`,
-        {
-          headers: getAuthedHeaders(accessToken),
-        },
-      );
-      expect(getRes.status).toBe(200);
-      // TODO: We should match against a variable not plain values
-      await expect(getRes.json()).resolves.toEqual({
-        status: "OK",
-        value: "Lovelace",
-      });
-    });
-
-    it("deletes the compatibility user", async () => {
-      const { server: s, port } = await setup(coreConnectionURI);
-      server = s;
-      testPORT = port;
-      const accessToken = await createSessionForUser("compat-user-5");
-
-      const deleteRes = await fetch(
-        `http://localhost:${testPORT}/auth/plugin/rownd/user`,
-        {
-          method: "DELETE",
-          headers: getAuthedHeaders(accessToken),
-        },
-      );
-
-      expect(deleteRes.status).toBe(200);
-      const deletedUser = await SuperTokens.getUser("compat-user-5");
-      expect(deletedUser).toBeUndefined();
-    });
   });
 });
 

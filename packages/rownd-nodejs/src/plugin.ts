@@ -21,11 +21,11 @@ import {
   setRowndClient,
   validateRowndToken,
   fetchRowndUserInfo,
-  buildRowndStyleUserResponse,
-  getRowndStyleMetadata,
-  updateRowndUserData,
-  updateRowndUserMetadata,
-  buildAppConfigResponse,
+  getUserById,
+  getUserMetadata,
+  updateUserData,
+  updateUserMetadata,
+  buildAppConfig,
 } from "./pluginImplementation";
 
 export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
@@ -72,7 +72,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 handler: withRequestHandler(async (_req, _res, _session) => {
                   return {
                     status: "OK" as const,
-                    ...buildAppConfigResponse(pluginConfig),
+                    ...buildAppConfig(pluginConfig, stConfig),
                   };
                 }),
               },
@@ -104,14 +104,30 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                         const rowndUser = await fetchRowndUserInfo(rowndUserId);
                         const stUserImport =
                           mapRowndUserToSuperTokens(rowndUser);
-                        const importedUser = await importUser(
-                          stUserImport,
-                          stConfig.supertokens,
-                        );
-                        superTokensUserId = importedUser.id;
-                        if (importedUser.loginMethods[0]?.recipeUserId) {
-                          recipeUserId = supertokens.convertToRecipeUserId(
-                            importedUser.loginMethods[0].recipeUserId,
+                        try {
+                          const importedUser = await importUser(
+                            stUserImport,
+                            stConfig.supertokens,
+                          );
+                          superTokensUserId = importedUser.id;
+                          if (importedUser.loginMethods[0]?.recipeUserId) {
+                            recipeUserId = supertokens.convertToRecipeUserId(
+                              importedUser.loginMethods[0].recipeUserId,
+                            );
+                          }
+                        } catch (err) {
+                          // Handle race condition: user might have been migrated by another request
+                          user = await supertokens.getUser(
+                            rowndUserId,
+                            userContext,
+                          );
+                          if (!user) {
+                            throw err;
+                          }
+                          superTokensUserId = user.id;
+                          recipeUserId = user.loginMethods[0]?.recipeUserId;
+                          logDebugMessage(
+                            `User already migrated (race condition). tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
                           );
                         }
                         logDebugMessage(
@@ -194,7 +210,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   const userId = session.getUserId();
                   return {
                     status: "OK" as const,
-                    ...(await buildRowndStyleUserResponse(userId)),
+                    ...(await getUserById(userId)),
                   };
                 }),
               },
@@ -214,7 +230,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     | undefined;
                   return {
                     status: "OK" as const,
-                    ...(await updateRowndUserData(
+                    ...(await updateUserData(
                       session.getUserId(),
                       payload?.data || {},
                     )),
@@ -247,9 +263,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     throw new Error("Session not found");
                   }
 
-                  const metadata = await getRowndStyleMetadata(
-                    session.getUserId(),
-                  );
+                  const metadata = await getUserMetadata(session.getUserId());
                   return {
                     status: "OK" as const,
                     id: session.getUserId(),
@@ -273,7 +287,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     | undefined;
                   return {
                     status: "OK" as const,
-                    ...(await updateRowndUserMetadata(
+                    ...(await updateUserMetadata(
                       session.getUserId(),
                       payload?.meta || {},
                     )),
@@ -299,9 +313,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       message: "field is required",
                     };
                   }
-                  const metadata = await getRowndStyleMetadata(
-                    session.getUserId(),
-                  );
+                  const metadata = await getUserMetadata(session.getUserId());
                   return {
                     status: "OK" as const,
                     value: metadata.data[field],
@@ -332,7 +344,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     | undefined;
                   return {
                     status: "OK" as const,
-                    ...(await updateRowndUserData(session.getUserId(), {
+                    ...(await updateUserData(session.getUserId(), {
                       [field]: payload?.value,
                     })),
                   };
