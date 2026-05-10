@@ -6,6 +6,12 @@ export type RowndSchemaField = {
   required: boolean;
   unique: boolean;
   user_visible: boolean;
+  read_only?: boolean;
+  show_empty?: boolean;
+  revoke_after?: string;
+  required_retention?: string;
+  collection_justification?: string;
+  opt_out_warning?: string;
 };
 
 export type RowndSchema = Record<string, RowndSchemaField>;
@@ -19,6 +25,10 @@ export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
     required: false,
     unique: false,
     user_visible: true,
+    revoke_after: "",
+    required_retention: "",
+    collection_justification: "",
+    opt_out_warning: "",
   },
   zip_code: {
     display_name: "Zip code",
@@ -28,6 +38,10 @@ export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
     required: false,
     unique: false,
     user_visible: true,
+    revoke_after: "",
+    required_retention: "",
+    collection_justification: "",
+    opt_out_warning: "",
   },
   google_id: {
     display_name: "Google ID",
@@ -37,6 +51,11 @@ export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
     required: false,
     unique: false,
     user_visible: false,
+    read_only: true,
+    revoke_after: "",
+    required_retention: "",
+    collection_justification: "",
+    opt_out_warning: "",
   },
   last_name: {
     display_name: "Last name",
@@ -46,6 +65,10 @@ export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
     required: false,
     unique: false,
     user_visible: true,
+    revoke_after: "",
+    required_retention: "",
+    collection_justification: "",
+    opt_out_warning: "",
   },
   nick_name: {
     display_name: "Nick name",
@@ -55,6 +78,10 @@ export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
     required: false,
     unique: false,
     user_visible: true,
+    revoke_after: "",
+    required_retention: "",
+    collection_justification: "",
+    opt_out_warning: "",
   },
   first_name: {
     display_name: "First name",
@@ -64,6 +91,10 @@ export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
     required: false,
     unique: false,
     user_visible: true,
+    revoke_after: "",
+    required_retention: "",
+    collection_justification: "",
+    opt_out_warning: "",
   },
   phone_number: {
     display_name: "Phone number",
@@ -73,5 +104,9 @@ export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
     required: false,
     unique: false,
     user_visible: true,
+    revoke_after: "",
+    required_retention: "",
+    collection_justification: "",
+    opt_out_warning: "",
   },
 };

@@ -40,7 +40,11 @@ import { init } from "./plugin";
 import { HANDLE_BASE_PATH } from "./constants";
 import { RowndPluginConfig, RowndTelemetryClient } from "./types";
 import { ROWND_PLUGIN_ERROR_MESSAGES } from "./errors";
-import { mapRowndUserToSuperTokens } from "./pluginImplementation";
+import {
+  mapRowndUserToSuperTokens,
+  buildAppConfigResponse,
+} from "./pluginImplementation";
+import { DEFAULT_ROWND_SCHEMA } from "./schema";
 
 let testPORT = 30001;
 
@@ -613,6 +617,9 @@ describe("rownd-nodejs plugin", () => {
     });
   });
 
+  // TODO: Move all integration tests that validate endpoints in this descibe block
+  describe("endpoints", () => {});
+
   describe("session migration", () => {
     it("migrate session successfully", async () => {
       const { server: s, port } = await setup(coreConnectionURI);
@@ -724,8 +731,269 @@ describe("rownd-nodejs plugin", () => {
     });
   });
 
+  describe("/app-config", () => {
+    it("returns 200 with defaults when no appConfig is provided", async () => {
+      const { server: s, port } = await setup(coreConnectionURI);
+      server = s;
+      testPORT = port;
+
+      const res = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("OK");
+      expect(body.id).toBe("");
+      expect(body.name).toBe("");
+      // TODO: We should use the default config object not plain values here
+      expect(body.config.hub.auth.sign_in_methods.email.enabled).toBe(false);
+      expect(body.config.hub.auth.sign_in_methods.google.enabled).toBe(false);
+      expect(body.config.customizations.primary_color).toBe("#5b5bd6");
+      expect(body.config.hub.customizations.rounded_corners).toBe(true);
+      expect(body.config.hub.customizations.dark_mode).toBe("auto");
+    });
+
+    it("does not require authentication", async () => {
+      const { server: s, port } = await setup(coreConnectionURI);
+      server = s;
+      testPORT = port;
+
+      // No Authorization header, no session cookie
+      const res = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+      );
+      expect(res.status).toBe(200);
+    });
+
+    // TODO: This functionality needs to be refactored.
+    // The plugin should return sign_in_methods based on a mix between the supertokens recipes and the plugin config.
+    // For passwordless, thirdparty, apple, google we can infer config from the recipes
+    // The only things that we need from app config are:
+    // - Google one tap config
+    // - Guest sign in
+    // - Anonymous sign in
+    // The test should be renamed to something like "returns sign_in_methods from recipes and plugin config"
+    it("returns sign_in_methods from plugin config", async () => {
+      const { server: s, port } = await setup(coreConnectionURI, {
+        appConfig: {
+          signInMethods: {
+            email: { enabled: true },
+            phone: { enabled: true },
+            google: {
+              enabled: true,
+              clientId: "test-client-id.apps.googleusercontent.com",
+              oneTap: { browser: { autoPrompt: true, delay: 3000 } },
+            },
+            apple: { enabled: true, clientId: "com.example.app" },
+          },
+        },
+      });
+      server = s;
+      testPORT = port;
+
+      const res = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+      );
+      const body = await res.json();
+      const methods = body.config.hub.auth.sign_in_methods;
+
+      expect(methods.email.enabled).toBe(true);
+      expect(methods.phone.enabled).toBe(true);
+      expect(methods.google.enabled).toBe(true);
+      expect(methods.google.client_id).toBe(
+        "test-client-id.apps.googleusercontent.com",
+      );
+      expect(methods.google.one_tap.browser.auto_prompt).toBe(true);
+      expect(methods.google.one_tap.browser.delay).toBe(3000);
+      expect(methods.apple.enabled).toBe(true);
+      expect(methods.apple.client_id).toBe("com.example.app");
+    });
+
+    // TODO: We should match against a variable not plain values
+    it("returns branding fields from plugin config", async () => {
+      const { server: s, port } = await setup(coreConnectionURI, {
+        appConfig: {
+          id: "app_xyz",
+          name: "Acme App",
+          icon: "https://cdn.acme.com/icon.png",
+          branding: {
+            primaryColor: "#ff0000",
+            roundedCorners: false,
+            darkMode: "dark",
+            showAppIcon: true,
+          },
+        },
+      });
+      server = s;
+      testPORT = port;
+
+      const res = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+      );
+      const body = await res.json();
+
+      expect(body.id).toBe("app_xyz");
+      expect(body.name).toBe("Acme App");
+      expect(body.icon).toBe("https://cdn.acme.com/icon.png");
+      expect(body.config.customizations.primary_color).toBe("#ff0000");
+      expect(body.config.hub.customizations.rounded_corners).toBe(false);
+      expect(body.config.hub.customizations.dark_mode).toBe("dark");
+      expect(body.config.hub.auth.show_app_icon).toBe(true);
+    });
+
+    // TODO: We should match against a variable not plain values
+    it("returns legal fields from plugin config", async () => {
+      const { server: s, port } = await setup(coreConnectionURI, {
+        appConfig: {
+          legal: {
+            companyName: "Acme Corp",
+            privacyPolicyUrl: "https://acme.com/privacy",
+            termsConditionsUrl: "https://acme.com/terms",
+            supportEmail: "support@acme.com",
+          },
+        },
+      });
+      server = s;
+      testPORT = port;
+
+      const res = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+      );
+      const body = await res.json();
+      const legal = body.config.hub.legal;
+
+      expect(legal.company_name).toBe("Acme Corp");
+      expect(legal.privacy_policy_url).toBe("https://acme.com/privacy");
+      expect(legal.terms_conditions_url).toBe("https://acme.com/terms");
+      expect(legal.support_email).toBe("support@acme.com");
+    });
+
+    // TODO: We should match against a variable not plain values
+    it("returns operator-provided schema in response", async () => {
+      const { server: s, port } = await setup(coreConnectionURI, {
+        schema: {
+          employee_id: {
+            display_name: "Employee ID",
+            type: "string",
+            data_category: "custom",
+            owned_by: "app",
+            required: true,
+            unique: true,
+            user_visible: false,
+            read_only: true,
+          },
+        },
+      });
+      server = s;
+      testPORT = port;
+
+      const res = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+      );
+      const body = await res.json();
+
+      expect(body.schema.employee_id).toBeDefined();
+      expect(body.schema.employee_id.display_name).toBe("Employee ID");
+      expect(body.schema.employee_id.read_only).toBe(true);
+      // Fields not in DEFAULT_ROWND_SCHEMA should not appear
+      expect(body.schema.email).toBeUndefined();
+    });
+
+    it("fills in empty-string defaults for optional schema text fields", async () => {
+      const { server: s, port } = await setup(coreConnectionURI, {
+        schema: {
+          nickname: {
+            display_name: "Nickname",
+            type: "string",
+            data_category: "pii_basic",
+            owned_by: "user",
+            required: false,
+            unique: false,
+            user_visible: true,
+            // revoke_after, required_retention, etc. intentionally omitted
+          },
+        },
+      });
+      server = s;
+      testPORT = port;
+
+      const res = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+      );
+      const body = await res.json();
+      const field = body.schema.nickname;
+
+      expect(field.revoke_after).toBe("");
+      expect(field.required_retention).toBe("");
+      expect(field.collection_justification).toBe("");
+      expect(field.opt_out_warning).toBe("");
+      expect(field.read_only).toBe(false);
+      expect(field.show_empty).toBe(false);
+    });
+
+    it("schema from RowndPluginConfig appears in response (regression for schema drop bug)", async () => {
+      const { server: s, port } = await setup(coreConnectionURI, {
+        schema: DEFAULT_ROWND_SCHEMA,
+      });
+      server = s;
+      testPORT = port;
+
+      const res = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+      );
+      const body = await res.json();
+
+      // All default schema fields should be present
+      expect(body.schema.email).toBeDefined();
+      expect(body.schema.first_name).toBeDefined();
+      expect(body.schema.last_name).toBeDefined();
+      expect(body.schema.phone_number).toBeDefined();
+    });
+
+    it("custom OAuth2 provider appears in sign_in_methods", async () => {
+      const { server: s, port } = await setup(coreConnectionURI, {
+        appConfig: {
+          signInMethods: {
+            github: {
+              enabled: true,
+              displayName: "GitHub",
+              iconLightUrl: "https://cdn.example.com/github.png",
+            },
+          },
+        },
+      });
+      server = s;
+      testPORT = port;
+
+      const res = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+      );
+      const body = await res.json();
+      const methods = body.config.hub.auth.sign_in_methods;
+
+      expect(methods.github).toBeDefined();
+      expect(methods.github.enabled).toBe(true);
+      expect(methods.github.display_name).toBe("GitHub");
+      expect(methods.github.icon_light_url).toBe(
+        "https://cdn.example.com/github.png",
+      );
+    });
+  });
+
+  // TODO: Move all the user endpoints under these describe blocks
+  describe("GET /user", () => {});
+  describe("PUT /user", () => {});
+  describe("DELETE /user", () => {});
+  describe("GET /user/meta", () => {});
+  describe("PUT /user/meta", () => {});
+  describe("GET /user/field", () => {});
+  describe("PUT /user/field", () => {});
+
   describe("compatibility user routes", () => {
-    async function createSessionForUser(userId: string, email = `${userId}@example.com`) {
+    async function createSessionForUser(
+      userId: string,
+      email = `${userId}@example.com`,
+    ) {
       mockRowndClient.validateToken.mockResolvedValue({ user_id: userId });
       mockRowndClient.fetchUserInfo.mockResolvedValue({
         app_user_id: userId,
@@ -734,14 +1002,17 @@ describe("rownd-nodejs plugin", () => {
         meta: { created: "2026-01-01T00:00:00.000Z" },
       });
 
-      const res = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate`, {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer some-token",
-          rid: "session",
-          "fdi-version": "1.18",
+      const res = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer some-token",
+            rid: "session",
+            "fdi-version": "1.18",
+          },
         },
-      });
+      );
 
       const accessToken = res.headers.get("st-access-token");
       expect(accessToken).toBeTruthy();
@@ -763,11 +1034,15 @@ describe("rownd-nodejs plugin", () => {
       testPORT = port;
       const accessToken = await createSessionForUser("compat-user-1");
 
-      const res = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
-        headers: getAuthedHeaders(accessToken),
-      });
+      const res = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+        {
+          headers: getAuthedHeaders(accessToken),
+        },
+      );
 
       expect(res.status).toBe(200);
+      // TODO: We should match against a variable not plain values
       await expect(res.json()).resolves.toEqual({
         status: "OK",
         data: {
@@ -792,18 +1067,22 @@ describe("rownd-nodejs plugin", () => {
       testPORT = port;
       const accessToken = await createSessionForUser("compat-user-2");
 
-      const res = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
-        method: "PUT",
-        headers: {
-          ...getAuthedHeaders(accessToken),
-          "Content-Type": "application/json",
+      const res = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+        {
+          method: "PUT",
+          headers: {
+            ...getAuthedHeaders(accessToken),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ data: { first_name: "Ada" } }),
         },
-        body: JSON.stringify({ data: { first_name: "Ada" } }),
-      });
+      );
 
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.status).toBe("OK");
+      // TODO: We should match against a variable not plain values
       expect(body.data).toEqual({
         user_id: "compat-user-2",
         email: "compat-user-2@example.com",
@@ -819,25 +1098,36 @@ describe("rownd-nodejs plugin", () => {
       testPORT = port;
       const accessToken = await createSessionForUser("compat-user-3");
 
-      const initialRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user/meta`, {
-        headers: getAuthedHeaders(accessToken),
-      });
+      const initialRes = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/user/meta`,
+        {
+          headers: getAuthedHeaders(accessToken),
+        },
+      );
       await expect(initialRes.json()).resolves.toEqual({
         status: "OK",
         id: "compat-user-3",
         meta: { created: "2026-01-01T00:00:00.000Z" },
       });
 
-      const updateRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user/meta`, {
-        method: "PUT",
-        headers: {
-          ...getAuthedHeaders(accessToken),
-          "Content-Type": "application/json",
+      const updateRes = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/user/meta`,
+        {
+          method: "PUT",
+          headers: {
+            ...getAuthedHeaders(accessToken),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            meta: {
+              last_passkey_registration_prompt: "2026-04-23T00:00:00.000Z",
+            },
+          }),
         },
-        body: JSON.stringify({ meta: { last_passkey_registration_prompt: "2026-04-23T00:00:00.000Z" } }),
-      });
+      );
 
       expect(updateRes.status).toBe(200);
+      // TODO: We should match against a variable not plain values
       await expect(updateRes.json()).resolves.toEqual({
         status: "OK",
         id: "compat-user-3",
@@ -854,21 +1144,31 @@ describe("rownd-nodejs plugin", () => {
       testPORT = port;
       const accessToken = await createSessionForUser("compat-user-4");
 
-      const updateRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=last_name`, {
-        method: "PUT",
-        headers: {
-          ...getAuthedHeaders(accessToken),
-          "Content-Type": "application/json",
+      const updateRes = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=last_name`,
+        {
+          method: "PUT",
+          headers: {
+            ...getAuthedHeaders(accessToken),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ value: "Lovelace" }),
         },
-        body: JSON.stringify({ value: "Lovelace" }),
-      });
+      );
       expect(updateRes.status).toBe(200);
 
-      const getRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=last_name`, {
-        headers: getAuthedHeaders(accessToken),
-      });
+      const getRes = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=last_name`,
+        {
+          headers: getAuthedHeaders(accessToken),
+        },
+      );
       expect(getRes.status).toBe(200);
-      await expect(getRes.json()).resolves.toEqual({ status: "OK", value: "Lovelace" });
+      // TODO: We should match against a variable not plain values
+      await expect(getRes.json()).resolves.toEqual({
+        status: "OK",
+        value: "Lovelace",
+      });
     });
 
     it("deletes the compatibility user", async () => {
@@ -877,10 +1177,13 @@ describe("rownd-nodejs plugin", () => {
       testPORT = port;
       const accessToken = await createSessionForUser("compat-user-5");
 
-      const deleteRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
-        method: "DELETE",
-        headers: getAuthedHeaders(accessToken),
-      });
+      const deleteRes = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+        {
+          method: "DELETE",
+          headers: getAuthedHeaders(accessToken),
+        },
+      );
 
       expect(deleteRes.status).toBe(200);
       const deletedUser = await SuperTokens.getUser("compat-user-5");
