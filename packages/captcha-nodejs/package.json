@@ -15,7 +15,7 @@
   "keywords": [],
   "license": "Apache-2.0",
   "dependencies": {
-    "supertokens-node": "^23.0.0"
+    "supertokens-node": ">=23.0.0"
   },
   "devDependencies": {
     "@shared/eslint": "*",
