@@ -157,15 +157,24 @@ describe("rownd-nodejs plugin", () => {
       ).toThrowError(new Error("Rownd Apple user is missing email"));
     });
 
-    it("throws when no supported login method can be derived", () => {
-      expect(() =>
-        mapRowndUserToSuperTokens({
-          data: { user_id: "rownd-no-login-method" },
-          verified_data: {},
-        } as any),
-      ).toThrowError(
-        new Error("No valid login methods found in Rownd user data"),
-      );
+    it("maps a user with no login methods as a guest", () => {
+      const user = mapRowndUserToSuperTokens({
+        data: {
+          user_id: "test-user-id",
+        },
+        verified_data: {},
+      } as any);
+
+      expect(user.loginMethods).toHaveLength(1);
+      expect(user.loginMethods[0]).toEqual({
+        recipeId: "thirdparty",
+        thirdPartyId: "guest",
+        thirdPartyUserId: "test-user-id",
+        email: "test-user-id@anonymous.local",
+        isVerified: false,
+      });
+      expect(user.userMetadata.auth_level).toBe("guest");
+      expect(user.userMetadata.is_anonymous).toBe(true);
     });
 
     it("throws a type error when verified_data is missing for an otherwise valid email user", () => {
@@ -434,6 +443,61 @@ describe("rownd-nodejs plugin", () => {
         expect(migratedUser).toBeDefined();
         const user = migratedUser!.user;
         expect(user?.loginMethods[0].phoneNumber).toBe("+1234567890");
+      });
+
+      
+      it("migrates a user with no login methods as guest", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-user-guest",
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-user-guest",
+          data: {
+            user_id: "rownd-user-guest",
+          },
+          verified_data: {},
+          auth_level: "guest",
+        });
+
+        const res = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate`, {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer valid-token",
+            rid: "session",
+            "fdi-version": "1.18",
+          },
+        });
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.status).toBe("OK");
+
+        const accessToken = res.headers.get("st-access-token");
+        expect(accessToken).toBeTruthy();
+
+        // Verify user in ST
+        const stUser = await SuperTokens.getUser("rownd-user-guest");
+        expect(stUser).toBeDefined();
+
+        const guestLogin = stUser?.loginMethods.find(
+          (m) => m.recipeId === "thirdparty" && m.thirdParty?.id === "guest",
+        );
+        expect(guestLogin).toBeDefined();
+        expect(guestLogin?.thirdParty?.userId).toBe("rownd-user-guest");
+        expect(guestLogin?.email).toBe("rownd-user-guest@anonymous.local");
+
+        // Verify session claims via /user
+        const userRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
+          headers: getAuthedHeaders(accessToken!),
+        });
+        expect(userRes.status).toBe(200);
+        const userData = await userRes.json();
+        expect(userData.status).toBe("OK");
+        expect(userData.auth_level).toBe("guest");
       });
 
       it("migrate a google auth user", async () => {

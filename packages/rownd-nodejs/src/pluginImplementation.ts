@@ -124,11 +124,25 @@ export function mapRowndUserToSuperTokens(
   }
 
   if (loginMethods.length === 0) {
-    throw new Error("No valid login methods found in Rownd user data");
+    loginMethods.push({
+      recipeId: "thirdparty",
+      thirdPartyId: "guest",
+      thirdPartyUserId: rowndUserData.user_id,
+      email: `${rowndUserData.user_id}@anonymous.local`,
+      isVerified: false,
+      ...(tenantIds ? { tenantIds } : {}),
+    });
   }
 
   const rowndUserMeta = rowndUser.meta || {};
   const rowndUserAttributes = rowndUser.attributes || {};
+
+  const isGuestMethod = loginMethods.length === 1 && loginMethods[0].recipeId === "thirdparty" && loginMethods[0].thirdPartyId === "guest";
+
+  let finalAuthLevel = rowndUser.auth_level;
+  if (isGuestMethod && !finalAuthLevel) {
+    finalAuthLevel = "guest";
+  }
 
   const userMetadata: JSONObject = {
     data: {
@@ -146,7 +160,8 @@ export function mapRowndUserToSuperTokens(
     rownd_migrated: true,
     rownd_user_id: rowndUserData.user_id,
     state: rowndUser.state,
-    auth_level: rowndUser.auth_level,
+    auth_level: finalAuthLevel,
+    ...(isGuestMethod ? { is_anonymous: true } : {}),
   };
 
   return {
