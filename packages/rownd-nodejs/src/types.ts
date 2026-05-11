@@ -1,43 +1,56 @@
 import type { JSONObject } from "supertokens-node/types";
 
-export type RowndSignInMethods = {
-  email?: { enabled: boolean };
-  phone?: { enabled: boolean };
-  apple?: {
-    enabled?: boolean;
-    clientId?: string;
-  };
-  google?: {
-    enabled?: boolean;
-    clientId?: string;
-    iosClientId?: string;
-    scopes?: string[];
-    oneTap?: {
-      browser?: {
-        autoPrompt?: boolean;
-        delay?: number;
+export type RowndSignInMethod =
+  | { method: "email" }
+  | { method: "phone" }
+  | {
+      method: "apple";
+      clientId?: string;
+    }
+  | {
+      method: "google";
+      clientId?: string;
+      iosClientId?: string;
+      scopes?: string[];
+      oneTap?: {
+        browser?: {
+          autoPrompt?: boolean;
+          delay?: number;
+        };
+        mobileApp?: {
+          autoPrompt?: boolean;
+          delay?: number;
+        };
       };
+    }
+  | {
+      method: "anonymous";
+      displayName?: string;
+      iconLightUrl?: string;
+      iconDarkUrl?: string;
+    }
+  // Custom OAuth2 providers
+  | {
+      method: string;
+      displayName?: string;
+      iconLightUrl?: string;
+      iconDarkUrl?: string;
+      [key: string]: any;
     };
-  };
-  anonymous?: {
-    enabled: boolean;
-    displayName?: string;
-    iconLightUrl?: string;
-    iconDarkUrl?: string;
-  };
-  // Custom OAuth2 providers: key = provider ID (hub prefixes with oauth2_ automatically)
-  [customProvider: string]: any;
-};
 
 export type RowndBranding = {
   primaryColor?: string;
+  primaryColorDarkMode?: string;
   logo?: string;
   logoDarkMode?: string;
   roundedCorners?: boolean;
+  containerBorderRadius?: number;
+  placement?: string;
   visualSwoops?: boolean;
   blurBackground?: boolean;
   darkMode?: "auto" | "light" | "dark";
   showAppIcon?: boolean;
+  customStyles?: { content: string }[];
 };
 
 export type RowndLegal = {
@@ -98,7 +111,7 @@ export type RowndAppConfigInput = {
   customContent?: RowndCustomContent;
   profile?: RowndProfileConfig;
   auth?: RowndAuthConfig;
-  signInMethods?: RowndSignInMethods;
+  signInMethods?: RowndSignInMethod[];
 };
 
 export interface RowndPluginConfig {
@@ -236,17 +249,10 @@ export interface IRowndClient {
 export type RowndSchemaField = {
   display_name: string;
   type: string;
-  data_category: string;
-  owned_by: string;
-  required: boolean;
-  unique: boolean;
   user_visible: boolean;
+  owned_by?: string;
   read_only?: boolean;
   show_empty?: boolean;
-  revoke_after?: string;
-  required_retention?: string;
-  collection_justification?: string;
-  opt_out_warning?: string;
 };
 
 export type RowndSchema = Record<string, RowndSchemaField>;

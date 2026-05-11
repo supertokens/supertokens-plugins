@@ -1,10 +1,17 @@
 import * as fs from "node:fs/promises";
 import { resolve } from "node:path";
 import { loadConfig, fetchWithRetry } from "./scriptUtils";
-import { RowndAppConfigInput, RowndPluginConfig } from "../src/types";
+import {
+  RowndAppConfigInput,
+  RowndPluginConfig,
+  RowndSignInMethod,
+} from "../src/types";
 
 // Helper to convert snake_case to camelCase where needed
-function convertRowndConfigToPluginConfig(rowndApp: any): Partial<RowndPluginConfig> & { _instructions?: string[] } {
+function convertRowndConfigToPluginConfig(
+  rowndApp: any,
+  creds: { appKey: string; appSecret: string },
+): RowndPluginConfig & { _instructions?: string[] } {
   const config = rowndApp.config || {};
   const customizations = config.customizations || {};
   const hub = config.hub || {};
@@ -16,19 +23,30 @@ function convertRowndConfigToPluginConfig(rowndApp: any): Partial<RowndPluginCon
 
   const instructions: string[] = [];
 
+  const authTokens = config.auth?.access_tokens || {};
+  if (authTokens.custom_claims) {
+    instructions.push(
+      "Custom claims were found in your Rownd configuration. Please follow the SuperTokens documentation to add custom claims to your access token payload: https://supertokens.com/docs/additional-verification/session-verification/claim-validation#1-add-custom-claims-to-the-access-token-payload",
+    );
+  }
+
   const appConfig: RowndAppConfigInput = {
     id: rowndApp.id,
     name: rowndApp.name,
     icon: rowndApp.icon,
     branding: {
       primaryColor: customizations.primary_color,
+      primaryColorDarkMode: hubCustomizations.primary_color_dark_mode,
       logo: customizations.logo,
       logoDarkMode: customizations.logo_dark_mode,
       roundedCorners: hubCustomizations.rounded_corners,
+      containerBorderRadius: hubCustomizations.container_border_radius,
+      placement: hubCustomizations.placement,
       visualSwoops: hubCustomizations.visual_swoops,
       blurBackground: hubCustomizations.blur_background,
       darkMode: hubCustomizations.dark_mode,
       showAppIcon: hubAuth.show_app_icon,
+      customStyles: hub.custom_styles,
     },
     legal: {
       companyName: legal.company_name,
@@ -71,66 +89,100 @@ function convertRowndConfigToPluginConfig(rowndApp: any): Partial<RowndPluginCon
     },
     signInMethods: (() => {
       const methods = hubAuth.sign_in_methods || {};
-      const result: Record<string, any> = {};
-      
+      const result: RowndSignInMethod[] = [];
+
       for (const [key, value] of Object.entries<any>(methods)) {
-        if (!value) continue;
-        
+        if (!value || !value.enabled) continue;
+
         if (key === "google") {
-          result.google = {
+          result.push({
+            method: "google",
+            clientId: value.client_id,
             iosClientId: value.ios_client_id,
-            oneTap: value.one_tap,
-          };
-          if (value.enabled) {
-            instructions.push(
-              `Google sign-in was enabled. Please ensure you configure the "google" provider in your SuperTokens ThirdParty recipe. You will need to manually provide the Google 'clientSecret' as Rownd cannot export it.`
-            );
-          }
+            scopes: value.scopes,
+            oneTap: value.one_tap
+              ? {
+                  browser: value.one_tap.browser
+                    ? {
+                        autoPrompt: value.one_tap.browser.auto_prompt,
+                        delay: value.one_tap.browser.delay,
+                      }
+                    : undefined,
+                  mobileApp: value.one_tap.mobile_app
+                    ? {
+                        autoPrompt: value.one_tap.mobile_app.auto_prompt,
+                        delay: value.one_tap.mobile_app.delay,
+                      }
+                    : undefined,
+                }
+              : undefined,
+          });
+          instructions.push(
+            `Google sign-in was enabled. Please ensure you configure the "google" provider in your SuperTokens ThirdParty recipe. You will need to manually provide the Google 'clientSecret' as Rownd cannot export it.`,
+          );
         } else if (key === "apple") {
-          if (value.enabled) {
-            instructions.push(
-              `Apple sign-in was enabled. Please ensure you configure the "apple" provider in your SuperTokens ThirdParty recipe. You will need to manually provide the Apple 'clientSecret' (or private key) as Rownd cannot export it.`
-            );
-          }
+          result.push({
+            method: "apple",
+            clientId: value.client_id,
+          });
+          instructions.push(
+            `Apple sign-in was enabled. Please ensure you configure the "apple" provider in your SuperTokens ThirdParty recipe. You will need to manually provide the Apple 'clientSecret' (or private key) as Rownd cannot export it.`,
+          );
         } else if (key === "email" || key === "phone") {
-          if (value.enabled) {
-            instructions.push(
-              `${key} sign-in was enabled. Please ensure you configure the SuperTokens Passwordless recipe with the appropriate contactMethod.`
-            );
-          }
+          result.push({ method: key as "email" | "phone" });
+          instructions.push(
+            `${key} sign-in was enabled. Please ensure you configure the SuperTokens Passwordless recipe with the appropriate contactMethod.`,
+          );
         } else if (key === "anonymous") {
-          result.anonymous = {
-            enabled: value.enabled,
+          result.push({
+            method: "anonymous",
             displayName: value.display_name,
             iconLightUrl: value.icon_light_url,
             iconDarkUrl: value.icon_dark_url,
-          };
+          });
         } else {
           // custom providers
-          result[key] = {
-            enabled: value.enabled,
+          result.push({
+            method: key,
             displayName: value.display_name,
             iconLightUrl: value.icon_light_url,
             iconDarkUrl: value.icon_dark_url,
-          };
-          if (value.enabled) {
-             instructions.push(
-               `Custom provider '${key}' was enabled. Please ensure you configure this provider in your SuperTokens ThirdParty recipe. You will need to manually provide the 'clientSecret' as Rownd cannot export it.`
-             );
-          }
+          });
+          instructions.push(
+            `Custom provider '${key}' was enabled. Please ensure you configure this provider in your SuperTokens ThirdParty recipe. You will need to manually provide the 'clientSecret' as Rownd cannot export it.`,
+          );
         }
       }
       return result;
     })(),
   };
 
+  const cleanSchema: Record<string, any> = {};
+  if (rowndApp.schema) {
+    for (const [key, field] of Object.entries<any>(rowndApp.schema)) {
+      cleanSchema[key] = {
+        display_name: field.display_name,
+        type: field.type,
+        user_visible: field.user_visible,
+        read_only: field.read_only,
+        show_empty: field.show_empty,
+      };
+      // Drop undefined properties
+      Object.keys(cleanSchema[key]).forEach(
+        (k) => cleanSchema[key][k] === undefined && delete cleanSchema[key][k],
+      );
+    }
+  }
+
   // Ensure undefined fields are dropped so JSON.stringify is clean
   const cleanAppConfig = JSON.parse(JSON.stringify(appConfig));
 
   return {
-    ...(instructions.length > 0 ? { _instructions: instructions } : {}),
-    schema: rowndApp.schema,
+    rowndAppKey: creds.appKey,
+    rowndAppSecret: creds.appSecret,
+    schema: cleanSchema,
     appConfig: cleanAppConfig,
+    ...(instructions.length > 0 ? { _instructions: instructions } : {}),
   };
 }
 
@@ -138,7 +190,9 @@ async function run() {
   const config = await loadConfig();
 
   if (!config.rownd.appId || !config.rownd.appKey || !config.rownd.appSecret) {
-    throw new Error("Missing rownd.appId, rownd.appKey, or rownd.appSecret in config.yaml");
+    throw new Error(
+      "Missing rownd.appId, rownd.appKey, or rownd.appSecret in config.yaml",
+    );
   }
 
   const url = new URL("/hub/app-config", "https://api.rownd.io");
@@ -159,7 +213,9 @@ async function run() {
   });
 
   if (!response.ok) {
-    throw new Error(`Rownd API error: ${response.status} ${await response.text()}`);
+    throw new Error(
+      `Rownd API error: ${response.status} ${await response.text()}`,
+    );
   }
 
   const rawConfig = await response.json();
@@ -167,13 +223,18 @@ async function run() {
     throw new Error("Rownd API response is missing the 'app' property.");
   }
 
-  const pluginConfig = convertRowndConfigToPluginConfig(rawConfig.app);
+  const pluginConfig = convertRowndConfigToPluginConfig(rawConfig.app, {
+    appKey: config.rownd.appKey,
+    appSecret: config.rownd.appSecret,
+  });
 
   if (pluginConfig._instructions) {
     console.warn("\n=== IMPORTANT INSTRUCTIONS ===");
-    pluginConfig._instructions.forEach(inst => console.warn(`- ${inst}`));
+    pluginConfig._instructions.forEach((inst) => console.warn(`- ${inst}`));
     console.warn("==============================\n");
   }
+
+  delete pluginConfig._instructions;
 
   const outputPath = resolve(process.cwd(), "rownd-plugin-config.json");
   await fs.writeFile(outputPath, JSON.stringify(pluginConfig, null, 2), "utf8");

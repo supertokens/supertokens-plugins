@@ -855,6 +855,10 @@ describe("rownd-nodejs plugin", () => {
         );
         expect(body.config.hub.customizations.rounded_corners).toBe(true);
         expect(body.config.hub.customizations.dark_mode).toBe("auto");
+
+        // Auth fields should NOT be in schema if methods are disabled
+        expect(body.schema.email).toBeUndefined();
+        expect(body.schema.google_id).toBeUndefined();
       });
 
       it("does not require authentication", async () => {
@@ -872,16 +876,16 @@ describe("rownd-nodejs plugin", () => {
       it("returns sign_in_methods from recipes and plugin config", async () => {
         const { server: s, port } = await setup(coreConnectionURI, {
           appConfig: {
-            signInMethods: {
-              email: { enabled: true },
-              phone: { enabled: true },
-              google: {
-                enabled: true,
+            signInMethods: [
+              { method: "email" },
+              { method: "phone" },
+              {
+                method: "google",
                 clientId: "test-client-id.apps.googleusercontent.com",
                 oneTap: { browser: { autoPrompt: true, delay: 3000 } },
               },
-              apple: { enabled: true, clientId: "com.example.app" },
-            },
+              { method: "apple", clientId: "com.example.app" },
+            ],
           },
         });
         server = s;
@@ -968,10 +972,7 @@ describe("rownd-nodejs plugin", () => {
             employee_id: {
               display_name: "Employee ID",
               type: "string",
-              data_category: "custom",
               owned_by: "app",
-              required: true,
-              unique: true,
               user_visible: false,
               read_only: true,
             },
@@ -988,22 +989,18 @@ describe("rownd-nodejs plugin", () => {
         expect(body.schema.employee_id).toBeDefined();
         expect(body.schema.employee_id.display_name).toBe("Employee ID");
         expect(body.schema.employee_id.read_only).toBe(true);
-        // Fields not in DEFAULT_ROWND_SCHEMA should not appear
+        expect(body.schema.employee_id.owned_by).toBe("app");
+        // Fields not in userSchema and not injected via auth should not appear
         expect(body.schema.email).toBeUndefined();
       });
 
-      it("fills in empty-string defaults for optional schema text fields", async () => {
+      it("fills in defaults for optional schema fields", async () => {
         const { server: s, port } = await setup(coreConnectionURI, {
           schema: {
             nickname: {
               display_name: "Nickname",
               type: "string",
-              data_category: "pii_basic",
-              owned_by: "user",
-              required: false,
-              unique: false,
               user_visible: true,
-              // revoke_after, required_retention, etc. intentionally omitted
             },
           },
         });
@@ -1016,10 +1013,7 @@ describe("rownd-nodejs plugin", () => {
         const body = await res.json();
         const field = body.schema.nickname;
 
-        expect(field.revoke_after).toBe("");
-        expect(field.required_retention).toBe("");
-        expect(field.collection_justification).toBe("");
-        expect(field.opt_out_warning).toBe("");
+        expect(field.owned_by).toBe("user");
         expect(field.read_only).toBe(false);
         expect(field.show_empty).toBe(false);
       });
@@ -1036,22 +1030,20 @@ describe("rownd-nodejs plugin", () => {
         );
         const body = await res.json();
 
-        expect(body.schema.email).toBeDefined();
         expect(body.schema.first_name).toBeDefined();
         expect(body.schema.last_name).toBeDefined();
-        expect(body.schema.phone_number).toBeDefined();
       });
 
       it("custom OAuth2 provider appears in sign_in_methods", async () => {
         const { server: s, port } = await setup(coreConnectionURI, {
           appConfig: {
-            signInMethods: {
-              github: {
-                enabled: true,
+            signInMethods: [
+              {
+                method: "github",
                 displayName: "GitHub",
                 iconLightUrl: "https://cdn.example.com/github.png",
               },
-            },
+            ],
           },
         });
         server = s;
@@ -1146,9 +1138,7 @@ describe("rownd-nodejs plugin", () => {
             first_name: "",
             last_name: "",
             nick_name: "",
-            phone_number: "",
             zip_code: "",
-            google_id: "",
           },
           meta: {
             created: expect.any(String),
@@ -1254,9 +1244,7 @@ describe("rownd-nodejs plugin", () => {
             first_name: "",
             last_name: "",
             nick_name: "",
-            phone_number: "",
             zip_code: "",
-            google_id: "",
           },
           meta: {
             created: expect.any(String),
@@ -1307,9 +1295,7 @@ describe("rownd-nodejs plugin", () => {
           first_name: "Ada",
           last_name: "",
           nick_name: "",
-          phone_number: "",
           zip_code: "",
-          google_id: "",
         });
         expect(body.meta.created).toEqual(expect.any(String));
         expect(body.meta.first_sign_in).toEqual(expect.any(String));

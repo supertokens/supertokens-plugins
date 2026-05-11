@@ -105,6 +105,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                           undefined,
                           userContext,
                         );
+
+                      if (response.status !== "OK") {
+                        throw new Error(
+                          `Guest user creation failed with status: ${response.status}`,
+                        );
+                      }
+
                       const recipeUserId = response.recipeUserId;
 
                       await UserMetadata.updateUserMetadata(response.user.id, {

@@ -5,7 +5,7 @@ import {
   SuperTokensUserImport,
   IRowndClient,
   RowndPluginNormalisedConfig,
-  RowndSignInMethods,
+  RowndSignInMethod,
   RowndSchemaField,
 } from "./types";
 import { RowndPluginError } from "./errors";
@@ -266,7 +266,7 @@ export async function getUserById(
   const stUser = await SuperTokens.getUser(userId);
 
   if (!stUser) {
-    throw new RowndPluginError("USER_NOT_FOUND");
+    throw new RowndPluginError("ROWND_USER_NOT_FOUND");
   }
 
   const rownd_user = metadata.rownd_user_id || userId;
@@ -283,7 +283,7 @@ export async function getUserById(
 
   let lastUsedAt = stUser.timeJoined;
 
-  for (const method of stUser.loginMethods) {
+  for (const method of stUser.loginMethods as any[]) {
     if (method.lastUsed > lastUsedAt) {
       lastUsedAt = method.lastUsed;
     }
@@ -349,8 +349,8 @@ export async function getUserById(
   const sortedByJoined = [...stUser.loginMethods].sort(
     (a, b) => a.timeJoined - b.timeJoined,
   );
-  const sortedByLastUsed = [...stUser.loginMethods].sort(
-    (a, b) => b.lastUsed - a.lastUsed,
+  const sortedByLastUsed = [...(stUser.loginMethods as any[])].sort(
+    (a, b) => (b.lastUsed || b.timeJoined) - (a.lastUsed || a.timeJoined),
   );
 
   const firstMethod = sortedByJoined[0];
@@ -444,29 +444,35 @@ const BUILTIN_SIGN_IN_METHOD_KEYS = [
   "anonymous",
 ];
 
-function normalizeSchemaField(field: RowndSchemaField) {
+function normalizeSchemaField(key: string, field: RowndSchemaField) {
+  let ownedBy = field.owned_by;
+
+  if (key === "google_id" || key === "apple_id") {
+    ownedBy = "app";
+  } else if (!ownedBy) {
+    ownedBy = "user";
+  }
+
   return {
     display_name: field.display_name,
     type: field.type,
-    data_category: field.data_category,
-    owned_by: field.owned_by,
-    required: field.required,
-    unique: field.unique,
+    owned_by: ownedBy,
     user_visible: field.user_visible,
-    read_only: field.read_only ?? false,
+    read_only: field.read_only ?? (ownedBy === "app"),
     show_empty: field.show_empty ?? false,
-    revoke_after: field.revoke_after ?? "",
-    required_retention: field.required_retention ?? "",
-    collection_justification: field.collection_justification ?? "",
-    opt_out_warning: field.opt_out_warning ?? "",
   };
 }
 
 export const DEFAULT_PRIMARY_COLOR = "#5b5bd6";
 
-function buildSignInMethodsConfig(methods: RowndSignInMethods | undefined) {
+function buildSignInMethodsConfig(methodsArray: RowndSignInMethod[] | undefined) {
+  const methods = (methodsArray ?? []).reduce((acc, curr) => {
+    acc[curr.method] = curr;
+    return acc;
+  }, {} as Record<string, any>);
+
   const customProviders = Object.fromEntries(
-    Object.entries(methods ?? {})
+    Object.entries(methods)
       .filter(([key]) => !BUILTIN_SIGN_IN_METHOD_KEYS.includes(key))
       .map(([key, val]) => {
         const v = val as Record<string, any> | undefined;
@@ -474,7 +480,7 @@ function buildSignInMethodsConfig(methods: RowndSignInMethods | undefined) {
           ? [
               key,
               {
-                enabled: v["enabled"] ?? false,
+                enabled: true,
                 display_name: v["displayName"] ?? key,
                 icon_light_url: v["iconLightUrl"],
                 icon_dark_url: v["iconDarkUrl"],
@@ -485,35 +491,43 @@ function buildSignInMethodsConfig(methods: RowndSignInMethods | undefined) {
       .filter(([_, v]) => v !== undefined),
   );
 
+  const googleMethod = methods.google;
+  const appleMethod = methods.apple;
+  const anonymousMethod = methods.anonymous;
+
   return {
-    email: { enabled: methods?.email?.enabled ?? false },
-    phone: { enabled: methods?.phone?.enabled ?? false },
+    email: { enabled: !!methods.email },
+    phone: { enabled: !!methods.phone },
     google: {
-      enabled: methods?.google?.enabled ?? false,
-      client_id: methods?.google?.clientId ?? "",
-      ios_client_id: methods?.google?.iosClientId ?? "",
-      scopes: methods?.google?.scopes ?? [],
+      enabled: !!googleMethod,
+      client_id: googleMethod?.clientId ?? "",
+      ios_client_id: googleMethod?.iosClientId ?? "",
+      scopes: googleMethod?.scopes ?? [],
       one_tap: {
         browser: {
-          auto_prompt: methods?.google?.oneTap?.browser?.autoPrompt ?? false,
-          delay: methods?.google?.oneTap?.browser?.delay ?? 7000,
+          auto_prompt: googleMethod?.oneTap?.browser?.autoPrompt ?? false,
+          delay: googleMethod?.oneTap?.browser?.delay ?? 7000,
+        },
+        mobile_app: {
+          auto_prompt: googleMethod?.oneTap?.mobileApp?.autoPrompt ?? false,
+          delay: googleMethod?.oneTap?.mobileApp?.delay ?? 7000,
         },
       },
     },
     apple: {
-      enabled: methods?.apple?.enabled ?? false,
-      client_id: methods?.apple?.clientId ?? "",
+      enabled: !!appleMethod,
+      client_id: appleMethod?.clientId ?? "",
     },
     anonymous: {
-      enabled: methods?.anonymous?.enabled ?? false,
-      ...(methods?.anonymous?.displayName !== undefined
-        ? { display_name: methods.anonymous.displayName }
+      enabled: !!anonymousMethod,
+      ...(anonymousMethod?.displayName !== undefined
+        ? { display_name: anonymousMethod.displayName }
         : {}),
-      ...(methods?.anonymous?.iconLightUrl !== undefined
-        ? { icon_light_url: methods.anonymous.iconLightUrl }
+      ...(anonymousMethod?.iconLightUrl !== undefined
+        ? { icon_light_url: anonymousMethod.iconLightUrl }
         : {}),
-      ...(methods?.anonymous?.iconDarkUrl !== undefined
-        ? { icon_dark_url: methods.anonymous.iconDarkUrl }
+      ...(anonymousMethod?.iconDarkUrl !== undefined
+        ? { icon_dark_url: anonymousMethod.iconDarkUrl }
         : {}),
     },
     ...customProviders,
@@ -524,19 +538,52 @@ export function buildAppConfig(
   config: RowndPluginNormalisedConfig,
   stConfig: SuperTokensPublicConfig,
 ) {
-  const schema = config.schema ?? DEFAULT_ROWND_SCHEMA;
+  const userSchema = config.schema ?? DEFAULT_ROWND_SCHEMA;
   const app = config.appConfig ?? {};
   const branding = app.branding ?? {};
   const auth = app.auth ?? {};
+  const signInMethods = buildSignInMethodsConfig(app.signInMethods);
+
+  const finalSchema: Record<string, RowndSchemaField> = { ...userSchema };
+
+  // Inject auth fields if not present
+  if (signInMethods.email.enabled && !finalSchema.email) {
+    finalSchema.email = {
+      display_name: "Email",
+      type: "string",
+      user_visible: true,
+    };
+  }
+  if (signInMethods.phone.enabled && !finalSchema.phone_number) {
+    finalSchema.phone_number = {
+      display_name: "Phone number",
+      type: "string",
+      user_visible: true,
+    };
+  }
+  if (signInMethods.google.enabled && !finalSchema.google_id) {
+    finalSchema.google_id = {
+      display_name: "Google ID",
+      type: "string",
+      user_visible: false,
+    };
+  }
+  if (signInMethods.apple.enabled && !finalSchema.apple_id) {
+    finalSchema.apple_id = {
+      display_name: "Apple ID",
+      type: "string",
+      user_visible: false,
+    };
+  }
 
   return {
     id: app.id ?? "",
     name: app.name ?? stConfig.appInfo.appName,
     icon: app.icon ?? "",
     schema: Object.fromEntries(
-      Object.entries(schema).map(([key, field]) => [
+      Object.entries(finalSchema).map(([key, field]) => [
         key,
-        normalizeSchemaField(field),
+        normalizeSchemaField(key, field),
       ]),
     ),
     config: {
@@ -550,13 +597,25 @@ export function buildAppConfig(
       hub: {
         customizations: {
           rounded_corners: branding.roundedCorners ?? true,
+          ...(branding.containerBorderRadius !== undefined
+            ? { container_border_radius: branding.containerBorderRadius }
+            : {}),
+          ...(branding.placement !== undefined
+            ? { placement: branding.placement }
+            : {}),
+          ...(branding.primaryColorDarkMode !== undefined
+            ? { primary_color_dark_mode: branding.primaryColorDarkMode }
+            : {}),
           visual_swoops: branding.visualSwoops ?? true,
           blur_background: branding.blurBackground ?? true,
           dark_mode: branding.darkMode ?? "auto",
         },
+        ...(branding.customStyles
+          ? { custom_styles: branding.customStyles }
+          : {}),
         auth: {
           email: { from_address: "no-reply@rownd.io", image: "" },
-          sign_in_methods: buildSignInMethodsConfig(app.signInMethods),
+          sign_in_methods: signInMethods,
           additional_fields: auth.additionalFields ?? [],
           ...(auth.rememberSignInMethod !== undefined
             ? { remember_sign_in_method: auth.rememberSignInMethod }
