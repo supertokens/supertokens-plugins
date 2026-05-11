@@ -1065,42 +1065,47 @@ describe("rownd-nodejs plugin", () => {
     });
 
     describe("POST /guest", () => {
-      it("should create a guest user and a session with correct claims", async () => {
+      it("should create a guest user and a session with correct claims (default auth_level)", async () => {
         const { server: s, port } = await setup(coreConnectionURI);
         server = s;
         testPORT = port;
 
-        const res = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/guest`, {
-          method: "POST",
-          headers: {
-            rid: "session",
-            "fdi-version": "1.18",
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/guest`,
+          {
+            method: "POST",
+            headers: {
+              rid: "session",
+              "fdi-version": "1.18",
+            },
           },
-        });
+        );
 
         expect(res.status).toBe(200);
         const body = await res.json();
         expect(body.status).toBe("OK");
+        expect(body.createdNewRecipeUser).toBe(true);
 
-        // Extract access token from headers (FDI 1.18 style)
         const accessToken = res.headers.get("st-access-token");
         expect(accessToken).toBeTruthy();
 
-        // Verify session claims by calling the /user endpoint
-        const userRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
-          headers: getAuthedHeaders(accessToken!),
-        });
+        const userRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            headers: getAuthedHeaders(accessToken!),
+          },
+        );
         expect(userRes.status).toBe(200);
         const userData = await userRes.json();
         expect(userData.status).toBe("OK");
         expect(userData.auth_level).toBe("guest");
 
-        // Verify user record in SuperTokens
         const stUser = await SuperTokens.getUser(userData.data.user_id);
         expect(stUser).toBeDefined();
 
-        // Verify session claims in the access token payload
-        const session = await Session.getSessionWithoutRequestResponse(accessToken!);
+        const session = await Session.getSessionWithoutRequestResponse(
+          accessToken!,
+        );
         const accessTokenPayload = session!.getAccessTokenPayload();
         expect(accessTokenPayload["auth_level"]).toBe("guest");
         expect(accessTokenPayload["is_anonymous"]).toBe(true);
@@ -1111,6 +1116,38 @@ describe("rownd-nodejs plugin", () => {
         );
         expect(guestLogin).toBeDefined();
         expect(guestLogin?.thirdParty?.userId).toMatch(/^guest_[a-f0-9-]{36}$/);
+      });
+
+      it("should create a guest user and a session with anonymous auth_level", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/guest`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              rid: "session",
+              "fdi-version": "1.18",
+            },
+            body: JSON.stringify({ auth_level: "anonymous" }),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.status).toBe("OK");
+
+        const accessToken = res.headers.get("st-access-token");
+        expect(accessToken).toBeTruthy();
+
+        const session = await Session.getSessionWithoutRequestResponse(
+          accessToken!,
+        );
+        const accessTokenPayload = session!.getAccessTokenPayload();
+        expect(accessTokenPayload["auth_level"]).toBe("anonymous");
       });
     });
 

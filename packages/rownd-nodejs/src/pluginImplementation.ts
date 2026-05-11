@@ -269,7 +269,7 @@ export async function getUserById(
     throw new RowndPluginError("ROWND_USER_NOT_FOUND");
   }
 
-  const rownd_user = metadata.rownd_user_id || userId;
+  const rowndUser = metadata.rownd_user_id || userId;
   const state = metadata.state || "enabled";
 
   const data: Record<string, any> = {
@@ -277,7 +277,7 @@ export async function getUserById(
     ...metadata.data,
   };
 
-  const verified_data: Record<string, any> = {
+  const verifiedData: Record<string, any> = {
     ...metadata.verified_data,
   };
 
@@ -290,17 +290,17 @@ export async function getUserById(
 
     if (method.recipeId === "passwordless") {
       if (method.email) {
-        verified_data.email = method.email;
+        verifiedData.email = method.email;
         if (data.email === undefined) data.email = method.email;
       }
       if (method.phoneNumber) {
-        verified_data.phone_number = method.phoneNumber;
+        verifiedData.phone_number = method.phoneNumber;
         if (data.phone_number === undefined)
           data.phone_number = method.phoneNumber;
       }
     } else if (method.recipeId === "thirdparty") {
       if (method.verified && method.email) {
-        verified_data.email = method.email;
+        verifiedData.email = method.email;
       }
       if (method.email && data.email === undefined) {
         data.email = method.email;
@@ -312,19 +312,19 @@ export async function getUserById(
     }
   }
 
-  if (verified_data.email === true && typeof data.email === "string") {
-    verified_data.email = data.email;
+  if (verifiedData.email === true && typeof data.email === "string") {
+    verifiedData.email = data.email;
   }
   if (
-    verified_data.phone_number === true &&
+    verifiedData.phone_number === true &&
     typeof data.phone_number === "string"
   ) {
-    verified_data.phone_number = data.phone_number;
+    verifiedData.phone_number = data.phone_number;
   }
 
-  const auth_level =
+  const authLevel =
     metadata.auth_level ||
-    (Object.keys(verified_data).length > 0 ? "verified" : "unverified");
+    (Object.keys(verifiedData).length > 0 ? "verified" : "unverified");
 
   const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;
   for (const [key, field] of Object.entries(schema)) {
@@ -367,12 +367,12 @@ export async function getUserById(
   };
 
   return {
-    rownd_user,
+    rownd_user: rowndUser,
     data,
     meta,
-    verified_data,
+    verified_data: verifiedData,
     state,
-    auth_level,
+    auth_level: authLevel,
     redacted: [],
     groups: [],
     attributes: metadata.attributes,
@@ -458,18 +458,23 @@ function normalizeSchemaField(key: string, field: RowndSchemaField) {
     type: field.type,
     owned_by: ownedBy,
     user_visible: field.user_visible,
-    read_only: field.read_only ?? (ownedBy === "app"),
+    read_only: field.read_only ?? ownedBy === "app",
     show_empty: field.show_empty ?? false,
   };
 }
 
 export const DEFAULT_PRIMARY_COLOR = "#5b5bd6";
 
-function buildSignInMethodsConfig(methodsArray: RowndSignInMethod[] | undefined) {
-  const methods = (methodsArray ?? []).reduce((acc, curr) => {
-    acc[curr.method] = curr;
-    return acc;
-  }, {} as Record<string, any>);
+function buildSignInMethodsConfig(
+  methodsArray: RowndSignInMethod[] | undefined,
+) {
+  const methods = (methodsArray ?? []).reduce(
+    (acc, curr) => {
+      acc[curr.method] = curr;
+      return acc;
+    },
+    {} as Record<string, any>,
+  );
 
   const customProviders = Object.fromEntries(
     Object.entries(methods)
@@ -478,17 +483,17 @@ function buildSignInMethodsConfig(methodsArray: RowndSignInMethod[] | undefined)
         const v = val as Record<string, any> | undefined;
         return v
           ? [
-              key,
-              {
-                enabled: true,
-                display_name: v["displayName"] ?? key,
-                icon_light_url: v["iconLightUrl"],
-                icon_dark_url: v["iconDarkUrl"],
-              },
-            ]
+            key,
+            {
+              enabled: true,
+              display_name: v["displayName"] ?? key,
+              icon_light_url: v["iconLightUrl"],
+              icon_dark_url: v["iconDarkUrl"],
+            },
+          ]
           : [key, undefined];
       })
-      .filter(([_, v]) => v !== undefined),
+      .filter(([, v]) => v !== undefined),
   );
 
   const googleMethod = methods.google;
@@ -649,50 +654,50 @@ export function buildAppConfig(
         custom_content: {
           ...(app.customContent?.signInModal
             ? {
-                sign_in_modal: {
-                  ...(app.customContent.signInModal.title
-                    ? { title: app.customContent.signInModal.title }
-                    : {}),
-                  ...(app.customContent.signInModal.subtitle
-                    ? { subtitle: app.customContent.signInModal.subtitle }
-                    : {}),
-                  ...(app.customContent.signInModal.signInTitle
-                    ? {
-                        sign_in_title:
+              sign_in_modal: {
+                ...(app.customContent.signInModal.title
+                  ? { title: app.customContent.signInModal.title }
+                  : {}),
+                ...(app.customContent.signInModal.subtitle
+                  ? { subtitle: app.customContent.signInModal.subtitle }
+                  : {}),
+                ...(app.customContent.signInModal.signInTitle
+                  ? {
+                    sign_in_title:
                           app.customContent.signInModal.signInTitle,
-                      }
-                    : {}),
-                  ...(app.customContent.signInModal.signUpTitle
-                    ? {
-                        sign_up_title:
+                  }
+                  : {}),
+                ...(app.customContent.signInModal.signUpTitle
+                  ? {
+                    sign_up_title:
                           app.customContent.signInModal.signUpTitle,
-                      }
-                    : {}),
-                  ...(app.customContent.signInModal.signInSubtitle
-                    ? {
-                        sign_in_subtitle:
+                  }
+                  : {}),
+                ...(app.customContent.signInModal.signInSubtitle
+                  ? {
+                    sign_in_subtitle:
                           app.customContent.signInModal.signInSubtitle,
-                      }
-                    : {}),
-                  ...(app.customContent.signInModal.signUpSubtitle
-                    ? {
-                        sign_up_subtitle:
+                  }
+                  : {}),
+                ...(app.customContent.signInModal.signUpSubtitle
+                  ? {
+                    sign_up_subtitle:
                           app.customContent.signInModal.signUpSubtitle,
-                      }
-                    : {}),
-                },
-              }
+                  }
+                  : {}),
+              },
+            }
             : {}),
           ...(app.customContent?.profileModal
             ? { profile_modal: app.customContent.profileModal }
             : {}),
           ...(app.customContent?.signInFailureModal
             ? {
-                sign_in_failure_modal: {
-                  failure_message:
+              sign_in_failure_modal: {
+                failure_message:
                     app.customContent.signInFailureModal.failureMessage,
-                },
-              }
+              },
+            }
             : {}),
         },
         profile: {

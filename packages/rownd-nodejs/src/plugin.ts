@@ -79,7 +79,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/app-config`,
                 method: "get",
-                handler: withRequestHandler(async (_req, _res, _session) => {
+                handler: withRequestHandler(async () => {
                   return {
                     status: "OK" as const,
                     ...buildAppConfig(pluginConfig, stConfig),
@@ -95,6 +95,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     const guestId = `guest_${randomUUID()}`;
 
                     try {
+                      const body = (await req.getJSONBody()) as
+                        | { auth_level?: string }
+                        | undefined;
+                      const authLevel =
+                        body?.auth_level === "anonymous"
+                          ? "anonymous"
+                          : "guest";
+
                       const response =
                         await ThirdParty.manuallyCreateOrUpdateUser(
                           PUBLIC_TENANT_ID,
@@ -115,7 +123,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       const recipeUserId = response.recipeUserId;
 
                       await UserMetadata.updateUserMetadata(response.user.id, {
-                        auth_level: "guest",
+                        auth_level: authLevel,
                         is_anonymous: true,
                       });
 
@@ -125,7 +133,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                         PUBLIC_TENANT_ID,
                         recipeUserId,
                         {
-                          auth_level: "guest",
+                          auth_level: authLevel,
                           is_anonymous: true,
                           app_user_id: response.user.id,
                         },
@@ -144,7 +152,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                         superTokensUserId: response.user.id,
                       });
 
-                      return { status: "OK" };
+                      return {
+                        status: "OK",
+                        createdNewRecipeUser: response.createdNewRecipeUser,
+                      };
                     } catch (error) {
                       logDebugMessage(
                         `Guest login failed. Error: ${
