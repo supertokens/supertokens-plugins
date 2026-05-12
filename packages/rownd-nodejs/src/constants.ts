@@ -6,6 +6,9 @@ export const PLUGIN_SDK_VERSION = ["23.0.0", "23.0.1", ">=23.0.1"];
 export const HANDLE_BASE_PATH = "/plugin/rownd";
 export const PUBLIC_TENANT_ID = "public";
 
+export const GUEST_AUTH_METHOD_ID = "guest";
+export const ANONYMOUS_AUTH_METHOD_ID = "anonymous";
+
 export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
   zip_code: {
     display_name: "Zip code",

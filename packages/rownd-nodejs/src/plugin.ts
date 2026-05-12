@@ -9,6 +9,8 @@ import {
   PLUGIN_SDK_VERSION,
   HANDLE_BASE_PATH,
   PUBLIC_TENANT_ID,
+  ANONYMOUS_AUTH_METHOD_ID,
+  GUEST_AUTH_METHOD_ID,
 } from "./constants";
 import { RowndPluginConfig, RowndPluginNormalisedConfig } from "./types";
 import { enableDebugLogs, logDebugMessage } from "./logger";
@@ -98,15 +100,15 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       const body = (await req.getJSONBody()) as
                         | { auth_level?: string }
                         | undefined;
-                      const authLevel =
-                        body?.auth_level === "anonymous"
-                          ? "anonymous"
-                          : "guest";
+                      const thirdPartyId =
+                        body?.auth_level === ANONYMOUS_AUTH_METHOD_ID
+                          ? ANONYMOUS_AUTH_METHOD_ID
+                          : GUEST_AUTH_METHOD_ID;
 
                       const response =
                         await ThirdParty.manuallyCreateOrUpdateUser(
                           PUBLIC_TENANT_ID,
-                          "guest",
+                          thirdPartyId,
                           guestId,
                           `${guestId}@anonymous.local`,
                           false,
@@ -123,7 +125,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       const recipeUserId = response.recipeUserId;
 
                       await UserMetadata.updateUserMetadata(response.user.id, {
-                        auth_level: authLevel,
+                        auth_level: thirdPartyId,
                         is_anonymous: true,
                       });
 
@@ -133,7 +135,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                         PUBLIC_TENANT_ID,
                         recipeUserId,
                         {
-                          auth_level: authLevel,
+                          auth_level: thirdPartyId,
                           is_anonymous: true,
                           app_user_id: response.user.id,
                         },

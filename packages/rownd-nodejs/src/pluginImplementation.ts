@@ -9,7 +9,11 @@ import {
   RowndSchemaField,
 } from "./types";
 import { RowndPluginError } from "./errors";
-import { DEFAULT_ROWND_SCHEMA } from "./constants";
+import {
+  ANONYMOUS_AUTH_METHOD_ID,
+  DEFAULT_ROWND_SCHEMA,
+  GUEST_AUTH_METHOD_ID,
+} from "./constants";
 import type {
   JSONObject,
   SuperTokensPublicConfig,
@@ -123,10 +127,16 @@ export function mapRowndUserToSuperTokens(
     });
   }
 
+  let authLevel = rowndUser.auth_level;
   if (loginMethods.length === 0) {
+    const thirdPartyId =
+      authLevel === GUEST_AUTH_METHOD_ID
+        ? GUEST_AUTH_METHOD_ID
+        : ANONYMOUS_AUTH_METHOD_ID;
+    if (!authLevel) authLevel = thirdPartyId;
     loginMethods.push({
       recipeId: "thirdparty",
-      thirdPartyId: "guest",
+      thirdPartyId,
       thirdPartyUserId: rowndUserData.user_id,
       email: `${rowndUserData.user_id}@anonymous.local`,
       isVerified: false,
@@ -136,13 +146,6 @@ export function mapRowndUserToSuperTokens(
 
   const rowndUserMeta = rowndUser.meta || {};
   const rowndUserAttributes = rowndUser.attributes || {};
-
-  const isGuestMethod = loginMethods.length === 1 && loginMethods[0].recipeId === "thirdparty" && loginMethods[0].thirdPartyId === "guest";
-
-  let finalAuthLevel = rowndUser.auth_level;
-  if (isGuestMethod && !finalAuthLevel) {
-    finalAuthLevel = "guest";
-  }
 
   const userMetadata: JSONObject = {
     data: {
@@ -160,8 +163,7 @@ export function mapRowndUserToSuperTokens(
     rownd_migrated: true,
     rownd_user_id: rowndUserData.user_id,
     state: rowndUser.state,
-    auth_level: finalAuthLevel,
-    ...(isGuestMethod ? { is_anonymous: true } : {}),
+    auth_level: authLevel,
   };
 
   return {
@@ -498,14 +500,14 @@ function buildSignInMethodsConfig(
         const v = val as Record<string, any> | undefined;
         return v
           ? [
-            key,
-            {
-              enabled: true,
-              display_name: v["displayName"] ?? key,
-              icon_light_url: v["iconLightUrl"],
-              icon_dark_url: v["iconDarkUrl"],
-            },
-          ]
+              key,
+              {
+                enabled: true,
+                display_name: v["displayName"] ?? key,
+                icon_light_url: v["iconLightUrl"],
+                icon_dark_url: v["iconDarkUrl"],
+              },
+            ]
           : [key, undefined];
       })
       .filter(([, v]) => v !== undefined),
@@ -669,50 +671,50 @@ export function buildAppConfig(
         custom_content: {
           ...(app.customContent?.signInModal
             ? {
-              sign_in_modal: {
-                ...(app.customContent.signInModal.title
-                  ? { title: app.customContent.signInModal.title }
-                  : {}),
-                ...(app.customContent.signInModal.subtitle
-                  ? { subtitle: app.customContent.signInModal.subtitle }
-                  : {}),
-                ...(app.customContent.signInModal.signInTitle
-                  ? {
-                    sign_in_title:
+                sign_in_modal: {
+                  ...(app.customContent.signInModal.title
+                    ? { title: app.customContent.signInModal.title }
+                    : {}),
+                  ...(app.customContent.signInModal.subtitle
+                    ? { subtitle: app.customContent.signInModal.subtitle }
+                    : {}),
+                  ...(app.customContent.signInModal.signInTitle
+                    ? {
+                        sign_in_title:
                           app.customContent.signInModal.signInTitle,
-                  }
-                  : {}),
-                ...(app.customContent.signInModal.signUpTitle
-                  ? {
-                    sign_up_title:
+                      }
+                    : {}),
+                  ...(app.customContent.signInModal.signUpTitle
+                    ? {
+                        sign_up_title:
                           app.customContent.signInModal.signUpTitle,
-                  }
-                  : {}),
-                ...(app.customContent.signInModal.signInSubtitle
-                  ? {
-                    sign_in_subtitle:
+                      }
+                    : {}),
+                  ...(app.customContent.signInModal.signInSubtitle
+                    ? {
+                        sign_in_subtitle:
                           app.customContent.signInModal.signInSubtitle,
-                  }
-                  : {}),
-                ...(app.customContent.signInModal.signUpSubtitle
-                  ? {
-                    sign_up_subtitle:
+                      }
+                    : {}),
+                  ...(app.customContent.signInModal.signUpSubtitle
+                    ? {
+                        sign_up_subtitle:
                           app.customContent.signInModal.signUpSubtitle,
-                  }
-                  : {}),
-              },
-            }
+                      }
+                    : {}),
+                },
+              }
             : {}),
           ...(app.customContent?.profileModal
             ? { profile_modal: app.customContent.profileModal }
             : {}),
           ...(app.customContent?.signInFailureModal
             ? {
-              sign_in_failure_modal: {
-                failure_message:
+                sign_in_failure_modal: {
+                  failure_message:
                     app.customContent.signInFailureModal.failureMessage,
-              },
-            }
+                },
+              }
             : {}),
         },
         profile: {

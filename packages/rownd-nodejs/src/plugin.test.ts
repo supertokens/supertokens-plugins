@@ -163,6 +163,7 @@ describe("rownd-nodejs plugin", () => {
           user_id: "test-user-id",
         },
         verified_data: {},
+        auth_level: "guest",
       } as any);
 
       expect(user.loginMethods).toHaveLength(1);
@@ -174,7 +175,6 @@ describe("rownd-nodejs plugin", () => {
         isVerified: false,
       });
       expect(user.userMetadata.auth_level).toBe("guest");
-      expect(user.userMetadata.is_anonymous).toBe(true);
     });
 
     it("throws a type error when verified_data is missing for an otherwise valid email user", () => {
@@ -445,7 +445,6 @@ describe("rownd-nodejs plugin", () => {
         expect(user?.loginMethods[0].phoneNumber).toBe("+1234567890");
       });
 
-      
       it("migrates a user with no login methods as guest", async () => {
         const { server: s, port } = await setup(coreConnectionURI);
         server = s;
@@ -463,14 +462,17 @@ describe("rownd-nodejs plugin", () => {
           auth_level: "guest",
         });
 
-        const res = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate`, {
-          method: "POST",
-          headers: {
-            Authorization: "Bearer valid-token",
-            rid: "session",
-            "fdi-version": "1.18",
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer valid-token",
+              rid: "session",
+              "fdi-version": "1.18",
+            },
           },
-        });
+        );
 
         expect(res.status).toBe(200);
         const body = await res.json();
@@ -479,10 +481,8 @@ describe("rownd-nodejs plugin", () => {
         const accessToken = res.headers.get("st-access-token");
         expect(accessToken).toBeTruthy();
 
-        // Verify user in ST
         const stUser = await SuperTokens.getUser("rownd-user-guest");
         expect(stUser).toBeDefined();
-
         const guestLogin = stUser?.loginMethods.find(
           (m) => m.recipeId === "thirdparty" && m.thirdParty?.id === "guest",
         );
@@ -490,10 +490,12 @@ describe("rownd-nodejs plugin", () => {
         expect(guestLogin?.thirdParty?.userId).toBe("rownd-user-guest");
         expect(guestLogin?.email).toBe("rownd-user-guest@anonymous.local");
 
-        // Verify session claims via /user
-        const userRes = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
-          headers: getAuthedHeaders(accessToken!),
-        });
+        const userRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            headers: getAuthedHeaders(accessToken!),
+          },
+        );
         expect(userRes.status).toBe(200);
         const userData = await userRes.json();
         expect(userData.status).toBe("OK");
