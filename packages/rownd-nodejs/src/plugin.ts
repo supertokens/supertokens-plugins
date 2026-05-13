@@ -1,4 +1,5 @@
 import { SuperTokensPlugin } from "supertokens-node/types";
+import type { APIInterface as EmailVerificationAPIInterface } from "supertokens-node/recipe/emailverification";
 import { createPluginInitFunction } from "@shared/js";
 import { withRequestHandler } from "@shared/nodejs";
 import { createInstance } from "@rownd/node";
@@ -31,6 +32,8 @@ import {
   getUserMetadata,
   updateUserData,
   updateUserMetadata,
+  startPendingEmailVerification,
+  completePendingEmailVerification,
   buildAppConfig,
 } from "./pluginImplementation";
 
@@ -69,6 +72,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           if (!supertokens.isRecipeInitialized("thirdparty")) {
             console.warn(
               "RowndMigrationPlugin: ThirdParty recipe is not initialized. Guest login will fail.",
+            );
+          }
+          if (!supertokens.isRecipeInitialized("emailverification")) {
+            console.warn(
+              "RowndMigrationPlugin: EmailVerification recipe is not initialized. Verified email profile updates will fail.",
             );
           }
         },
@@ -323,22 +331,48 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 verifySessionOptions: {
                   sessionRequired: true,
                 },
-                handler: withRequestHandler(async (req, _res, session) => {
-                  if (!session) {
-                    throw new Error("Session not found");
-                  }
+                handler: withRequestHandler(
+                  async (req, _res, session, userContext) => {
+                    if (!session) {
+                      throw new Error("Session not found");
+                    }
 
-                  const payload = (await req.getJSONBody()) as
-                    | { data?: Record<string, any> }
-                    | undefined;
-                  return {
-                    status: "OK" as const,
-                    ...(await updateUserData(
-                      session.getUserId(),
-                      payload?.data || {},
-                    )),
-                  };
-                }),
+                    const payload = (await req.getJSONBody()) as
+                      | { data?: Record<string, any> }
+                      | undefined;
+                    const inputData = payload?.data || {};
+                    const { email, ...dataWithoutEmail } = inputData;
+                    const hasEmailUpdate =
+                      Object.prototype.hasOwnProperty.call(inputData, "email") &&
+                      typeof email === "string";
+
+                    if (Object.keys(dataWithoutEmail).length > 0) {
+                      await updateUserData(
+                        session.getUserId(),
+                        dataWithoutEmail,
+                      );
+                    }
+
+                    if (hasEmailUpdate) {
+                      return {
+                        status: "OK" as const,
+                        ...(await startPendingEmailVerification({
+                          userId: session.getUserId(),
+                          recipeUserId: session.getRecipeUserId(),
+                          tenantId: session.getTenantId(),
+                          email,
+                          pendingVerificationId: randomUUID(),
+                          userContext,
+                        })),
+                      };
+                    }
+
+                    return {
+                      status: "OK" as const,
+                      ...(await getUserById(session.getUserId())),
+                    };
+                  },
+                ),
               },
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user`,
@@ -429,32 +463,85 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 verifySessionOptions: {
                   sessionRequired: true,
                 },
-                handler: withRequestHandler(async (req, _res, session) => {
-                  if (!session) {
-                    throw new Error("Session not found");
-                  }
+                handler: withRequestHandler(
+                  async (req, _res, session, userContext) => {
+                    if (!session) {
+                      throw new Error("Session not found");
+                    }
 
-                  const field = req.getKeyValueFromQuery("field");
-                  if (!field) {
+                    const field = req.getKeyValueFromQuery("field");
+                    if (!field) {
+                      return {
+                        status: "ERROR" as const,
+                        code: 400,
+                        message: "field is required",
+                      };
+                    }
+                    const payload = (await req.getJSONBody()) as
+                      | { value?: any }
+                      | undefined;
+                    if (
+                      field === "email" &&
+                      typeof payload?.value === "string"
+                    ) {
+                      return {
+                        status: "OK" as const,
+                        ...(await startPendingEmailVerification({
+                          userId: session.getUserId(),
+                          recipeUserId: session.getRecipeUserId(),
+                          tenantId: session.getTenantId(),
+                          email: payload.value,
+                          pendingVerificationId: randomUUID(),
+                          userContext,
+                        })),
+                      };
+                    }
+
                     return {
-                      status: "ERROR" as const,
-                      code: 400,
-                      message: "field is required",
+                      status: "OK" as const,
+                      ...(await updateUserData(session.getUserId(), {
+                        [field]: payload?.value,
+                      })),
                     };
-                  }
-                  const payload = (await req.getJSONBody()) as
-                    | { value?: any }
-                    | undefined;
-                  return {
-                    status: "OK" as const,
-                    ...(await updateUserData(session.getUserId(), {
-                      [field]: payload?.value,
-                    })),
-                  };
-                }),
+                  },
+                ),
               },
             ],
           };
+        },
+        overrideMap: {
+          session: {
+            recipeInitRequired: true,
+          },
+          emailverification: {
+            recipeInitRequired: true,
+            apis: (originalImplementation: EmailVerificationAPIInterface) => ({
+              ...originalImplementation,
+              verifyEmailPOST: async (
+                input: Parameters<
+                  NonNullable<EmailVerificationAPIInterface["verifyEmailPOST"]>
+                >[0],
+              ) => {
+                if (originalImplementation.verifyEmailPOST === undefined) {
+                  throw new Error(
+                    "EmailVerification verifyEmailPOST is unavailable",
+                  );
+                }
+
+                const response =
+                  await originalImplementation.verifyEmailPOST(input);
+                if (response.status === "OK") {
+                  await completePendingEmailVerification({
+                    recipeUserId: response.user.recipeUserId,
+                    email: response.user.email,
+                    userContext: input.userContext,
+                  });
+                }
+
+                return response;
+              },
+            }),
+          },
         },
       };
     },

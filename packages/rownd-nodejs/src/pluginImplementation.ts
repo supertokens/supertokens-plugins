@@ -1,4 +1,5 @@
 import SuperTokens from "supertokens-node";
+import EmailVerification from "supertokens-node/recipe/emailverification";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import {
   RowndUser,
@@ -242,10 +243,18 @@ type RowndMetadata = {
   meta: Record<string, any>;
   verified_data: Record<string, any>;
   attributes: Record<string, any>;
+  rownd_pending_verification?: RowndPendingVerification | null;
   rownd_migrated?: boolean;
   rownd_user_id?: string;
   state?: string;
   auth_level?: string;
+};
+
+export type RowndPendingVerification = {
+  id: string;
+  field: "email";
+  value: string;
+  created_at: string;
 };
 
 export type RowndCompatUserResponse = {
@@ -269,6 +278,7 @@ export async function getUserMetadata(userId: string): Promise<RowndMetadata> {
     meta: rowndMetadata.meta || {},
     verified_data: rowndMetadata.verified_data || {},
     attributes: rowndMetadata.attributes || {},
+    rownd_pending_verification: rowndMetadata.rownd_pending_verification,
     rownd_migrated: rowndMetadata.rownd_migrated,
     rownd_user_id: rowndMetadata.rownd_user_id,
     state: rowndMetadata.state,
@@ -423,6 +433,106 @@ export async function updateUserData(
   return getUserById(userId);
 }
 
+export async function startPendingEmailVerification(
+  input: {
+    userId: string;
+    recipeUserId: Parameters<
+      typeof EmailVerification.sendEmailVerificationEmail
+    >[2];
+    email: string;
+    tenantId: string;
+    pendingVerificationId: string;
+    userContext?: Record<string, any>;
+  },
+) {
+  const metadata = await getUserMetadata(input.userId);
+  const currentEmail = metadata.data.email;
+  if (currentEmail === input.email) {
+    return getUserById(input.userId);
+  }
+
+  if (metadata.rownd_pending_verification?.value) {
+    await EmailVerification.revokeEmailVerificationTokens(
+      input.tenantId,
+      input.recipeUserId,
+      metadata.rownd_pending_verification.value,
+      input.userContext,
+    );
+  }
+
+  const pendingVerification: RowndPendingVerification = {
+    id: input.pendingVerificationId,
+    field: "email",
+    value: input.email,
+    created_at: new Date().toISOString(),
+  };
+
+  await UserMetadata.updateUserMetadata(input.userId, {
+    ...metadata,
+    rownd_pending_verification: pendingVerification,
+  });
+
+  const response = await EmailVerification.sendEmailVerificationEmail(
+    input.tenantId,
+    input.userId,
+    input.recipeUserId,
+    input.email,
+    {
+      ...input.userContext,
+      rowndPendingVerificationId: pendingVerification.id,
+    },
+  );
+
+  if (response.status === "EMAIL_ALREADY_VERIFIED_ERROR") {
+    await completePendingEmailVerification({
+      recipeUserId: input.recipeUserId,
+      email: input.email,
+      userContext: input.userContext,
+    });
+  }
+
+  return getUserById(input.userId);
+}
+
+export async function completePendingEmailVerification(
+  input: {
+    recipeUserId: { getAsString: () => string };
+    email: string;
+    userContext?: Record<string, any>;
+  },
+) {
+  const user = await SuperTokens.getUser(
+    input.recipeUserId.getAsString(),
+    input.userContext,
+  );
+  const userId = user?.id ?? input.recipeUserId.getAsString();
+  const metadata = await getUserMetadata(userId);
+  const pendingVerification = metadata.rownd_pending_verification;
+
+  if (
+    pendingVerification?.field !== "email" ||
+    pendingVerification.value !== input.email
+  ) {
+    return;
+  }
+
+  const updatedMetadata: RowndMetadata = {
+    ...metadata,
+    data: {
+      ...metadata.data,
+      email: input.email,
+      user_id: userId,
+    },
+    verified_data: {
+      ...metadata.verified_data,
+      email: input.email,
+    },
+    rownd_pending_verification: null,
+  };
+
+  await UserMetadata.updateUserMetadata(userId, updatedMetadata);
+}
+
 export async function updateUserMetadata(
   userId: string,
   inputMeta: Record<string, any>,
@@ -500,14 +610,14 @@ function buildSignInMethodsConfig(
         const v = val as Record<string, any> | undefined;
         return v
           ? [
-              key,
-              {
-                enabled: true,
-                display_name: v["displayName"] ?? key,
-                icon_light_url: v["iconLightUrl"],
-                icon_dark_url: v["iconDarkUrl"],
-              },
-            ]
+            key,
+            {
+              enabled: true,
+              display_name: v["displayName"] ?? key,
+              icon_light_url: v["iconLightUrl"],
+              icon_dark_url: v["iconDarkUrl"],
+            },
+          ]
           : [key, undefined];
       })
       .filter(([, v]) => v !== undefined),
@@ -671,50 +781,50 @@ export function buildAppConfig(
         custom_content: {
           ...(app.customContent?.signInModal
             ? {
-                sign_in_modal: {
-                  ...(app.customContent.signInModal.title
-                    ? { title: app.customContent.signInModal.title }
-                    : {}),
-                  ...(app.customContent.signInModal.subtitle
-                    ? { subtitle: app.customContent.signInModal.subtitle }
-                    : {}),
-                  ...(app.customContent.signInModal.signInTitle
-                    ? {
-                        sign_in_title:
+              sign_in_modal: {
+                ...(app.customContent.signInModal.title
+                  ? { title: app.customContent.signInModal.title }
+                  : {}),
+                ...(app.customContent.signInModal.subtitle
+                  ? { subtitle: app.customContent.signInModal.subtitle }
+                  : {}),
+                ...(app.customContent.signInModal.signInTitle
+                  ? {
+                    sign_in_title:
                           app.customContent.signInModal.signInTitle,
-                      }
-                    : {}),
-                  ...(app.customContent.signInModal.signUpTitle
-                    ? {
-                        sign_up_title:
+                  }
+                  : {}),
+                ...(app.customContent.signInModal.signUpTitle
+                  ? {
+                    sign_up_title:
                           app.customContent.signInModal.signUpTitle,
-                      }
-                    : {}),
-                  ...(app.customContent.signInModal.signInSubtitle
-                    ? {
-                        sign_in_subtitle:
+                  }
+                  : {}),
+                ...(app.customContent.signInModal.signInSubtitle
+                  ? {
+                    sign_in_subtitle:
                           app.customContent.signInModal.signInSubtitle,
-                      }
-                    : {}),
-                  ...(app.customContent.signInModal.signUpSubtitle
-                    ? {
-                        sign_up_subtitle:
+                  }
+                  : {}),
+                ...(app.customContent.signInModal.signUpSubtitle
+                  ? {
+                    sign_up_subtitle:
                           app.customContent.signInModal.signUpSubtitle,
-                      }
-                    : {}),
-                },
-              }
+                  }
+                  : {}),
+              },
+            }
             : {}),
           ...(app.customContent?.profileModal
             ? { profile_modal: app.customContent.profileModal }
             : {}),
           ...(app.customContent?.signInFailureModal
             ? {
-                sign_in_failure_modal: {
-                  failure_message:
+              sign_in_failure_modal: {
+                failure_message:
                     app.customContent.signInFailureModal.failureMessage,
-                },
-              }
+              },
+            }
             : {}),
         },
         profile: {

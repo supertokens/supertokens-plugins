@@ -16,6 +16,7 @@ import UserMetadata, {
 } from "supertokens-node/recipe/usermetadata";
 import Passwordless from "supertokens-node/recipe/passwordless";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
+import EmailVerification from "supertokens-node/recipe/emailverification";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
 import { middleware, errorHandler } from "supertokens-node/framework/express";
 import { ProcessState } from "supertokens-node/lib/build/processState";
@@ -25,6 +26,7 @@ import UserMetadataRaw from "supertokens-node/lib/build/recipe/usermetadata/reci
 import UserRolesRaw from "supertokens-node/lib/build/recipe/userroles/recipe";
 import AccountLinkingRaw from "supertokens-node/lib/build/recipe/accountlinking/recipe";
 import EmailPasswordRaw from "supertokens-node/lib/build/recipe/emailpassword/recipe";
+import EmailVerificationRaw from "supertokens-node/lib/build/recipe/emailverification/recipe";
 import ThirdPartyRaw from "supertokens-node/lib/build/recipe/thirdparty/recipe";
 import PasswordlessRaw from "supertokens-node/lib/build/recipe/passwordless/recipe";
 import MultitenancyRaw from "supertokens-node/lib/build/recipe/multitenancy/recipe";
@@ -380,7 +382,9 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("migrate user with custom metadata successfully", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
@@ -1407,6 +1411,135 @@ describe("rownd-nodejs plugin", () => {
         expect(body.auth_level).toBe("verified");
       });
 
+      it("defers email updates until verification completes", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const { accessToken, userId, recipeUserId } =
+          await createPasswordlessSessionForUser(
+            "email-update-user@example.com",
+          );
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: {
+                email: "new-email-update@example.com",
+                first_name: "Grace",
+              },
+            }),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.status).toBe("OK");
+        expect(body.data.email).toBe("email-update-user@example.com");
+        expect(body.data.first_name).toBe("Grace");
+        expect(body.verified_data.email).toBe("email-update-user@example.com");
+
+        let metadata = await UserMetadata.getUserMetadata(userId);
+        expect(metadata.metadata).toEqual(
+          expect.objectContaining({
+            rownd_pending_verification: expect.objectContaining({
+              field: "email",
+              value: "new-email-update@example.com",
+            }),
+          }),
+        );
+        expect((metadata.metadata as any).data.email).toBe(
+          "email-update-user@example.com",
+        );
+
+        const tokenResponse = await EmailVerification.createEmailVerificationToken(
+          "public",
+          recipeUserId,
+          "new-email-update@example.com",
+        );
+        expect(tokenResponse.status).toBe("OK");
+
+        const verifyRes = await fetch(
+          `http://localhost:${testPORT}/auth/user/email/verify`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              method: "token",
+              token:
+                tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+            }),
+          },
+        );
+        expect(verifyRes.status).toBe(200);
+        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+
+        metadata = await UserMetadata.getUserMetadata(userId);
+        expect((metadata.metadata as any).data.email).toBe(
+          "new-email-update@example.com",
+        );
+        expect((metadata.metadata as any).verified_data.email).toBe(
+          "new-email-update@example.com",
+        );
+        expect(
+          (metadata.metadata as any).rownd_pending_verification,
+        ).toBeUndefined();
+      });
+
+      it("sends verification for the new email even if the current email is verified", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+
+        const { accessToken, userId, recipeUserId } =
+          await createPasswordlessSessionForUser(
+            "email-verified-current@example.com",
+          );
+        const sendEmailSpy = vi.spyOn(
+          EmailVerification,
+          "sendEmailVerificationEmail",
+        );
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: {
+                email: "email-new-target@example.com",
+              },
+            }),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        expect(sendEmailSpy).toHaveBeenCalledTimes(1);
+        const [tenantIdArg, userIdArg, recipeUserIdArg, emailArg, userContext] =
+          sendEmailSpy.mock.calls[0]!;
+        expect(tenantIdArg).toBe("public");
+        expect(userIdArg).toBe(userId);
+        expect(recipeUserIdArg.getAsString()).toBe(recipeUserId.getAsString());
+        expect(emailArg).toBe("email-new-target@example.com");
+        expect(userContext).toEqual(
+          expect.objectContaining({
+            rowndPendingVerificationId: expect.any(String),
+          }),
+        );
+      });
+
       it("preserves metadata structure after update", async () => {
         const { server: s, port } = await setup(coreConnectionURI);
         server = s;
@@ -1630,6 +1763,44 @@ describe("rownd-nodejs plugin", () => {
         expect(body.auth_level).toBe("verified");
       });
 
+      it("defers email field updates until verification completes", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const { accessToken, userId } = await createPasswordlessSessionForUser(
+          "email-field-user@example.com",
+        );
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=email`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ value: "new-email-field@example.com" }),
+          },
+        );
+        expect(updateRes.status).toBe(200);
+        const body = await updateRes.json();
+        expect(body.status).toBe("OK");
+        expect(body.data.email).toBe("email-field-user@example.com");
+        expect(body.verified_data.email).toBe("email-field-user@example.com");
+
+        const metadata = await UserMetadata.getUserMetadata(userId);
+        expect(metadata.metadata).toEqual(
+          expect.objectContaining({
+            rownd_pending_verification: expect.objectContaining({
+              field: "email",
+              value: "new-email-field@example.com",
+            }),
+          }),
+        );
+      });
+
       it("returns 400 when field is missing", async () => {
         const { server: s, port } = await setup(coreConnectionURI);
         server = s;
@@ -1686,6 +1857,48 @@ describe("rownd-nodejs plugin", () => {
       return accessToken!;
     }
 
+    async function createPasswordlessSessionForUser(email: string) {
+      const signInUpResponse = await Passwordless.signInUp({
+        email,
+        tenantId: "public",
+      });
+      const user = signInUpResponse.user;
+      const recipeUserId = user.loginMethods[0]?.recipeUserId;
+      expect(recipeUserId).toBeDefined();
+
+      await UserMetadata.updateUserMetadata(user.id, {
+        data: {
+          user_id: user.id,
+          email,
+        },
+        meta: {
+          created: "2026-01-01T00:00:00.000Z",
+        },
+        verified_data: {
+          email,
+        },
+        attributes: {},
+        rownd_migrated: true,
+        rownd_user_id: user.id,
+        state: "enabled",
+        auth_level: "verified",
+      });
+
+      const session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        recipeUserId!,
+        {},
+        {},
+        true,
+      );
+
+      return {
+        accessToken: session.getAccessToken(),
+        userId: user.id,
+        recipeUserId: recipeUserId!,
+      };
+    }
+
     function getAuthedHeaders(accessToken: string) {
       return {
         Authorization: `Bearer ${accessToken}`,
@@ -1706,6 +1919,7 @@ function resetST() {
   EmailPasswordRaw.reset();
   PasswordlessRaw.reset();
   ThirdPartyRaw.reset();
+  EmailVerificationRaw.reset();
   MultitenancyRaw.reset();
   SuperTokensRaw.reset();
   Querier.reset();
@@ -1728,6 +1942,9 @@ async function getMigratedUserByRowndUserId(rowndUserId: string) {
 async function setup(
   coreConnectionURI: string,
   config?: Partial<RowndPluginConfig>,
+  options?: {
+    enableEmailVerification?: boolean;
+  },
 ): Promise<{ server: Server; port: number }> {
   const app = express();
 
@@ -1758,6 +1975,19 @@ async function setup(
             contactMethod: "EMAIL",
             flowType: "MAGIC_LINK",
           }),
+          ...(options?.enableEmailVerification
+            ? [
+                EmailVerification.init({
+                  mode: "OPTIONAL",
+                  emailDelivery: {
+                    override: (originalImplementation) => ({
+                      ...originalImplementation,
+                      sendEmail: async () => {},
+                    }),
+                  },
+                }),
+              ]
+            : []),
           ThirdParty.init({
             signInAndUpFeature: {
               providers: [
