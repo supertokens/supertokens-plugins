@@ -1,116 +1,494 @@
 import type { JSONObject } from "supertokens-node/types";
 
 export type RowndSignInMethod =
-  | { method: "email" }
-  | { method: "phone" }
   | {
+      /**
+       * Enables email passwordless sign-in.
+       * @default Disabled when omitted.
+       */
+      method: "email";
+    }
+  | {
+      /**
+       * Enables phone passwordless sign-in.
+       * @default Disabled when omitted.
+       */
+      method: "phone";
+    }
+  | {
+      /**
+       * Enables Sign in with Apple.
+       * @default Disabled when omitted.
+       */
       method: "apple";
+      /**
+       * Apple Services ID used by the hub Apple sign-in script.
+       * @default ""
+       */
       clientId?: string;
     }
   | {
+      /**
+       * Enables Sign in with Google.
+       * @default Disabled when omitted.
+       */
       method: "google";
+      /**
+       * Google web client ID used by the hub and Google scripts.
+       * @default ""
+       */
       clientId?: string;
+      /**
+       * Google iOS client ID used by mobile-app flows.
+       * @default ""
+       */
       iosClientId?: string;
+      /**
+       * Extra OAuth scopes requested by Google sign-in.
+       * @default []
+       */
       scopes?: string[];
+      /**
+       * Google One Tap prompt settings.
+       * @default autoPrompt false and 7000ms delay per platform.
+       */
       oneTap?: {
         browser?: {
+          /**
+           * Whether the browser hub should automatically show One Tap.
+           * @default false
+           */
           autoPrompt?: boolean;
+          /**
+           * Delay before the browser One Tap prompt is shown, in milliseconds.
+           * @default 7000
+           */
           delay?: number;
         };
         mobileApp?: {
+          /**
+           * Whether mobile-app integrations should automatically show One Tap.
+           * @default false
+           */
           autoPrompt?: boolean;
+          /**
+           * Delay before the mobile-app One Tap prompt is shown, in milliseconds.
+           * @default 7000
+           */
           delay?: number;
         };
       };
     }
   | {
+      /**
+       * Enables guest/instant-user sign-in.
+       * @default Disabled when omitted.
+       */
       method: "anonymous";
+      /**
+       * Button label for anonymous sign-in.
+       * @default "Continue as a guest"
+       */
       displayName?: string;
+      /**
+       * Light-mode icon URL for the anonymous sign-in button.
+       * @default Built-in icon.
+       */
       iconLightUrl?: string;
+      /**
+       * Dark-mode icon URL for the anonymous sign-in button.
+       * @default iconLightUrl or the built-in icon.
+       */
       iconDarkUrl?: string;
     }
-  // Custom OAuth2 providers
   | {
+      /**
+       * Enables a custom OAuth2 provider under this method key.
+       * @default Disabled when omitted.
+       */
       method: string;
+      /**
+       * Provider display name in the sign-in button.
+       * @default method
+       */
       displayName?: string;
+      /**
+       * Light-mode provider icon URL for the sign-in button.
+       * @default No custom icon.
+       */
       iconLightUrl?: string;
+      /**
+       * Dark-mode provider icon URL for the sign-in button.
+       * @default iconLightUrl or no custom icon.
+       */
       iconDarkUrl?: string;
+      /** Additional provider-specific config retained for future Rownd-compatible options. */
       [key: string]: unknown;
     };
 
 export type RowndBranding = {
+  /**
+   * Primary hub color in light mode.
+   * @default "#5b5bd6"
+   */
   primaryColor?: string;
+  /**
+   * Primary hub color in dark mode.
+   * @default "#c8aaff"
+   */
   primaryColorDarkMode?: string;
+  /**
+   * Light-mode logo URL.
+   * @default appConfig.icon
+   */
   logo?: string;
+  /**
+   * Dark-mode logo URL.
+   * @default logo, then appConfig.icon
+   */
   logoDarkMode?: string;
+  /**
+   * Whether hub controls use rounded corners.
+   * @default true
+   */
   roundedCorners?: boolean;
+  /**
+   * Radius in pixels applied to hub containers and controls. Hub caps it at 30px.
+   * @default undefined
+   */
   containerBorderRadius?: number;
+  /**
+   * Floating launcher placement, such as "bottom-left" or "hidden".
+   * @default "bottom-left"
+   */
   placement?: string;
+  /**
+   * Whether decorative swoops are shown on sign-in and wallet screens.
+   * @default true
+   */
   visualSwoops?: boolean;
+  /**
+   * Whether modal background blur is enabled.
+   * @default true
+   */
   blurBackground?: boolean;
+  /**
+   * Hub color mode.
+   * @default "auto"
+   */
   darkMode?: "auto" | "light" | "dark";
+  /**
+   * Whether the app icon/logo appears inside sign-in and profile modals.
+   * @default false
+   */
   showAppIcon?: boolean;
-  customStyles?: { content: string }[];
+  /**
+   * Raw CSS snippets injected into the hub document.
+   * @default []
+   */
+  customStyles?: {
+    /** CSS text injected into a style tag. */
+    content: string;
+  }[];
 };
 
 export type RowndLegal = {
+  /**
+   * Company name shown in legal copy.
+   * @default appConfig.name
+   */
   companyName?: string;
+  /**
+   * Privacy policy link shown in legal/footer components.
+   * @default ""
+   */
   privacyPolicyUrl?: string;
+  /**
+   * Terms and conditions link shown in legal/footer components.
+   * @default ""
+   */
   termsConditionsUrl?: string;
+  /**
+   * Support address used in error and profile support links.
+   * @default Rownd support email.
+   */
   supportEmail?: string;
 };
 
 export type RowndAuthConfig = {
+  /**
+   * Whether the hub should preselect the user's previous sign-in method.
+   * @default true
+   */
   rememberSignInMethod?: boolean;
+  /**
+   * Enables separate sign-in/sign-up intent flows.
+   * @default false
+   */
   useExplicitSignUpFlow?: boolean;
+  /**
+   * Method to use first for explicit sign-up.
+   * @default The only visible ordered method, when there is exactly one.
+   */
   primarySignUpMethod?: string;
+  /**
+   * Preferred identifier input when no auth order is provided.
+   * @default First ordered input, then "email".
+   */
   preferredMethod?: string;
+  /**
+   * Per-platform sign-in button/input ordering.
+   * @default Rownd hub's built-in method order.
+   */
   order?: {
-    default?: { type: "button" | "input"; name: string; hidden?: boolean }[];
-    ios?: { type: "button" | "input"; name: string; hidden?: boolean }[];
-    android?: { type: "button" | "input"; name: string; hidden?: boolean }[];
+    /**
+     * Browser/default ordering. Each entry names an auth method and whether it renders as a button or input.
+     * @default undefined
+     */
+    default?: {
+      /** Whether the method renders as a button or identifier input. */
+      type: "button" | "input";
+      /** Sign-in method key, for example email, phone, google, apple, anonymous, or a custom provider key. */
+      name: string;
+      /**
+       * Hides the method from the initial sign-up view; sign-in flows can still show it.
+       * @default false
+       */
+      hidden?: boolean;
+    }[];
+    /**
+     * iOS webview ordering.
+     * @default default
+     */
+    ios?: {
+      /** Whether the method renders as a button or identifier input. */
+      type: "button" | "input";
+      /** Sign-in method key, for example email, phone, google, apple, anonymous, or a custom provider key. */
+      name: string;
+      /**
+       * Hides the method from the initial sign-up view; sign-in flows can still show it.
+       * @default false
+       */
+      hidden?: boolean;
+    }[];
+    /**
+     * Android webview ordering.
+     * @default default
+     */
+    android?: {
+      /** Whether the method renders as a button or identifier input. */
+      type: "button" | "input";
+      /** Sign-in method key, for example email, phone, google, apple, anonymous, or a custom provider key. */
+      name: string;
+      /**
+       * Hides the method from the initial sign-up view; sign-in flows can still show it.
+       * @default false
+       */
+      hidden?: boolean;
+    }[];
   };
+  /**
+   * Extra fields collected during sign-in/sign-up.
+   * @default []
+   */
   additionalFields?: {
+    /** User data key posted with the collected value. */
     name: string;
+    /** Input renderer type, for example input, text, tel, email, or select. */
     type: string;
+    /** Label shown next to the field. */
     label: string;
+    /**
+     * Placeholder shown for text-like inputs.
+     * @default undefined
+     */
     placeholder?: string;
-    options: { value: string; label: string }[];
+    /**
+     * Select/radio choices. For option-based fields, the first option is the default when no value is provided.
+     * @default First option value.
+     */
+    options: {
+      /** Submitted value for this option. */
+      value: string;
+      /** Label shown to the user for this option. */
+      label: string;
+    }[];
   }[];
 };
 
 export type RowndProfileConfig = {
+  /**
+   * Controls which account identifiers/sign-in methods are shown in the profile account section.
+   * @default All visible user-facing account fields.
+   */
   accountInformation?: {
-    methods?: Record<string, { enabled?: boolean }>;
+    /**
+     * Per-method visibility.
+     * @default Each method enabled when omitted.
+     */
+    methods?: Record<
+      string,
+      {
+        /**
+         * Whether the method/account identifier is visible.
+         * @default true
+         */
+        enabled?: boolean;
+      }
+    >;
   };
-  personalInformation?: { enabled?: boolean };
-  preferences?: { enabled?: boolean };
-  signOutButton?: { enabled?: boolean };
-  deleteAccountButton?: { enabled?: boolean };
+  /**
+   * Shows the personal information profile section.
+   * @default true
+   */
+  personalInformation?: {
+    /**
+     * Whether the section is visible.
+     * @default true
+     */
+    enabled?: boolean;
+  };
+  /**
+   * Shows the preferences/support profile section.
+   * @default true
+   */
+  preferences?: {
+    /**
+     * Whether the section is visible.
+     * @default true
+     */
+    enabled?: boolean;
+  };
+  /**
+   * Shows the sign-out button in the profile modal.
+   * @default true
+   */
+  signOutButton?: {
+    /**
+     * Whether the button is visible.
+     * @default true
+     */
+    enabled?: boolean;
+  };
+  /**
+   * Shows the delete-account action in preferences.
+   * @default false
+   */
+  deleteAccountButton?: {
+    /**
+     * Whether the delete-account action is visible.
+     * @default false
+     */
+    enabled?: boolean;
+  };
 };
 
 export type RowndCustomContent = {
+  /**
+   * Text overrides for the sign-in modal.
+   * @default Rownd hub built-in copy.
+   */
   signInModal?: {
+    /**
+     * Main modal title. Can be overridden per requestSignIn call.
+     * @default Rownd hub built-in title.
+     */
     title?: string;
+    /**
+     * Main modal subtitle.
+     * @default Rownd hub built-in subtitle.
+     */
     subtitle?: string;
+    /**
+     * Title when explicit sign-in intent is active.
+     * @default Rownd hub built-in sign-in title.
+     */
     signInTitle?: string;
+    /**
+     * Title when explicit sign-up intent is active.
+     * @default Rownd hub built-in sign-up title.
+     */
     signUpTitle?: string;
+    /**
+     * Subtitle when explicit sign-in intent is active.
+     * @default Rownd hub built-in sign-in subtitle.
+     */
     signInSubtitle?: string;
+    /**
+     * Subtitle when explicit sign-up intent is active.
+     * @default Rownd hub built-in sign-up subtitle.
+     */
     signUpSubtitle?: string;
   };
-  profileModal?: { title?: string };
-  signInFailureModal?: { failureMessage?: string };
+  /**
+   * Profile modal text overrides.
+   * @default Rownd hub built-in profile copy.
+   */
+  profileModal?: {
+    /**
+     * Profile modal title.
+     * @default "Your profile"
+     */
+    title?: string;
+  };
+  /**
+   * Sign-in failure modal text overrides.
+   * @default Rownd hub built-in error copy.
+   */
+  signInFailureModal?: {
+    /**
+     * Message shown when sign-in fails.
+     * @default Rownd hub built-in error copy.
+     */
+    failureMessage?: string;
+  };
 };
 
 export type RowndAppConfigInput = {
+  /**
+   * Rownd app ID returned by the app-config endpoint.
+   * @default ""
+   */
   id?: string;
+  /**
+   * App display name used in the hub UI and legal fallback copy.
+   * @default SuperTokens appInfo.appName
+   */
   name?: string;
+  /**
+   * App icon URL used as the fallback logo/favicon.
+   * @default ""
+   */
   icon?: string;
+  /**
+   * Visual customization for the hub UI.
+   * @default Defaults documented in RowndBranding.
+   */
   branding?: RowndBranding;
+  /**
+   * Legal links and support contact shown in hub flows.
+   * @default Defaults documented in RowndLegal.
+   */
   legal?: RowndLegal;
+  /**
+   * Copy overrides for hub modals.
+   * @default Rownd hub built-in copy.
+   */
   customContent?: RowndCustomContent;
+  /**
+   * Profile modal feature visibility.
+   * @default Defaults documented in RowndProfileConfig.
+   */
   profile?: RowndProfileConfig;
+  /**
+   * Authentication flow options.
+   * @default Defaults documented in RowndAuthConfig.
+   */
   auth?: RowndAuthConfig;
+  /**
+   * Enabled sign-in methods.
+   * @default []
+   */
   signInMethods?: RowndSignInMethod[];
 };
 
