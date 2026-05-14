@@ -1,5 +1,9 @@
+import { randomUUID } from "crypto";
 import SuperTokens from "supertokens-node";
 import EmailVerification from "supertokens-node/recipe/emailverification";
+import Session from "supertokens-node/recipe/session";
+import { BooleanClaim } from "supertokens-node/recipe/session/claims";
+import ThirdParty from "supertokens-node/recipe/thirdparty";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import {
   RowndUser,
@@ -14,11 +18,30 @@ import {
   ANONYMOUS_AUTH_METHOD_ID,
   DEFAULT_ROWND_SCHEMA,
   GUEST_AUTH_METHOD_ID,
+  PUBLIC_TENANT_ID,
 } from "./constants";
 import type {
   JSONObject,
+  PluginRouteHandler,
   SuperTokensPublicConfig,
 } from "supertokens-node/types";
+import { logDebugMessage } from "./logger";
+import { createClient } from "./telemetry/createTelemetryClient";
+
+type SuperTokensRequest = Parameters<PluginRouteHandler["handler"]>[0];
+type SuperTokensResponse = Parameters<PluginRouteHandler["handler"]>[1];
+type SuperTokensSession = Parameters<PluginRouteHandler["handler"]>[2];
+type SuperTokensUserContext = Parameters<PluginRouteHandler["handler"]>[3];
+type RequiredSuperTokensSession = NonNullable<SuperTokensSession>;
+type JsonRecord = JSONObject;
+type JsonValue = JsonRecord[string];
+type TelemetryClient = ReturnType<typeof createClient>;
+
+export type RowndRouteHandlerDeps = {
+  pluginConfig: RowndPluginNormalisedConfig;
+  stConfig: SuperTokensPublicConfig;
+  telemetryClient: TelemetryClient;
+};
 
 let rowndClient: IRowndClient | undefined;
 let pluginConfig: RowndPluginNormalisedConfig | undefined;
@@ -42,7 +65,7 @@ export function getPluginConfig() {
   return pluginConfig;
 }
 
-export async function parseRequest(req: any): Promise<{
+export async function parseRequest(req: SuperTokensRequest): Promise<{
   token: string;
 }> {
   const authHeader = req.getHeaderValue("authorization");
@@ -60,16 +83,460 @@ export async function parseRequest(req: any): Promise<{
   };
 }
 
+export function handleGetAppConfig(deps: RowndRouteHandlerDeps) {
+  return async () => ({
+    status: "OK" as const,
+    ...buildAppConfig(deps.pluginConfig, deps.stConfig),
+  });
+}
+
+export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
+  return async (
+    req: SuperTokensRequest,
+    res: SuperTokensResponse,
+    _session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const startedAt = Date.now();
+    const guestId = `guest_${randomUUID()}`;
+
+    try {
+      const body = parseGuestBody(await getJsonBody(req));
+      const thirdPartyId =
+        body.authLevel === ANONYMOUS_AUTH_METHOD_ID
+          ? ANONYMOUS_AUTH_METHOD_ID
+          : GUEST_AUTH_METHOD_ID;
+
+      const response = await ThirdParty.manuallyCreateOrUpdateUser(
+        PUBLIC_TENANT_ID,
+        thirdPartyId,
+        guestId,
+        `${guestId}@anonymous.local`,
+        false,
+        undefined,
+        userContext,
+      );
+
+      if (response.status !== "OK") {
+        throw new Error(
+          `Guest user creation failed with status: ${response.status}`,
+        );
+      }
+
+      await UserMetadata.updateUserMetadata(response.user.id, {
+        auth_level: thirdPartyId,
+        is_anonymous: true,
+      });
+
+      await Session.createNewSession(
+        req,
+        res,
+        PUBLIC_TENANT_ID,
+        response.recipeUserId,
+        {
+          auth_level: thirdPartyId,
+          is_anonymous: true,
+          app_user_id: response.user.id,
+        },
+        {},
+        userContext,
+      );
+
+      logDebugMessage(`Guest session created for user: ${response.user.id}`);
+      deps.telemetryClient.recordSuccess({
+        outcome: "success",
+        durationMs: Date.now() - startedAt,
+        tenantId: PUBLIC_TENANT_ID,
+        superTokensUserId: response.user.id,
+      });
+
+      return {
+        status: "OK" as const,
+        createdNewRecipeUser: response.createdNewRecipeUser,
+      };
+    } catch (error) {
+      logDebugMessage(`Guest login failed. Error: ${getErrorMessage(error)}`);
+      deps.telemetryClient.recordError({
+        error,
+        startedAt,
+        tenantId: PUBLIC_TENANT_ID,
+      });
+      return {
+        status: "ERROR" as const,
+        message: "Guest login failed",
+      };
+    }
+  };
+}
+
+export function handleMigrate(deps: RowndRouteHandlerDeps) {
+  return async (
+    req: SuperTokensRequest,
+    res: SuperTokensResponse,
+    _session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const startedAt = Date.now();
+    let tenantId: string | undefined = PUBLIC_TENANT_ID;
+    let rowndUserId: string | undefined;
+    let superTokensUserId: string | undefined;
+    let user: Awaited<ReturnType<typeof SuperTokens.getUser>>;
+    let recipeUserId:
+      | Parameters<typeof Session.createNewSession>[3]
+      | undefined;
+
+    try {
+      if (!deps.stConfig.supertokens) {
+        throw new Error("Supertokens config not found");
+      }
+
+      const parsed = await parseRequest(req);
+      rowndUserId = await validateRowndToken(parsed.token);
+      user = await SuperTokens.getUser(rowndUserId, userContext);
+
+      if (!user) {
+        const rowndUser = await fetchRowndUserInfo(rowndUserId);
+        const stUserImport = mapRowndUserToSuperTokens(rowndUser);
+
+        try {
+          const importedUser = await importUser(
+            stUserImport,
+            deps.stConfig.supertokens,
+          );
+          superTokensUserId = importedUser.id;
+          if (importedUser.loginMethods[0]?.recipeUserId) {
+            recipeUserId = SuperTokens.convertToRecipeUserId(
+              importedUser.loginMethods[0].recipeUserId,
+            );
+          }
+        } catch (err) {
+          user = await SuperTokens.getUser(rowndUserId, userContext);
+          if (!user) {
+            throw err;
+          }
+          superTokensUserId = user.id;
+          recipeUserId = user.loginMethods[0]?.recipeUserId;
+          logDebugMessage(
+            `User already migrated (race condition). tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
+          );
+        }
+
+        logDebugMessage(
+          `User migrated successfully. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
+        );
+      } else {
+        superTokensUserId = user.id;
+        recipeUserId = user.loginMethods[0]?.recipeUserId;
+        logDebugMessage(
+          `User already migrated. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
+        );
+      }
+
+      if (!recipeUserId) {
+        throw new Error("User not found or has no login methods");
+      }
+
+      await Session.createNewSession(
+        req,
+        res,
+        PUBLIC_TENANT_ID,
+        recipeUserId,
+        {},
+        {},
+        userContext,
+      );
+
+      logDebugMessage(
+        `Session migrated successfully. tenantId: ${PUBLIC_TENANT_ID}, userId: ${superTokensUserId}`,
+      );
+
+      deps.telemetryClient.recordSuccess({
+        outcome: "success",
+        durationMs: Date.now() - startedAt,
+        tenantId,
+        rowndUserId,
+        superTokensUserId,
+      });
+
+      return { status: "OK" as const };
+    } catch (error) {
+      logDebugMessage(`Migration failed. Error: ${getErrorMessage(error)}`);
+      deps.telemetryClient.recordError({
+        error,
+        startedAt,
+        tenantId,
+        rowndUserId,
+        superTokensUserId,
+      });
+      return {
+        status: "ERROR" as const,
+        message:
+          error instanceof RowndPluginError
+            ? error.message
+            : "Migration failed",
+      };
+    }
+  };
+}
+
+export function handleGetUser() {
+  return async (
+    _req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    maybeSession: SuperTokensSession,
+  ) => {
+    const session = requireSession(maybeSession);
+    return {
+      status: "OK" as const,
+      ...(await getUserById(session.getUserId())),
+    };
+  };
+}
+
+export function handleUpdateUser() {
+  return async (
+    req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    maybeSession: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const session = requireSession(maybeSession);
+    const payload = parseUpdateUserBody(await getJsonBody(req));
+    const inputData = payload.data ?? {};
+    const { email, ...dataWithoutEmail } = inputData;
+    const hasEmailUpdate =
+      hasOwn(inputData, "email") && typeof email === "string";
+    const permissionError = validateWritableFields(
+      Object.keys(dataWithoutEmail),
+    );
+
+    if (permissionError) {
+      return permissionError;
+    }
+
+    if (Object.keys(dataWithoutEmail).length > 0) {
+      await updateUserData(session.getUserId(), dataWithoutEmail);
+    }
+
+    if (hasEmailUpdate) {
+      return {
+        status: "OK" as const,
+        ...(await startPendingEmailVerification({
+          userId: session.getUserId(),
+          recipeUserId: session.getRecipeUserId(),
+          tenantId: session.getTenantId(),
+          email,
+          pendingVerificationId: randomUUID(),
+          userContext,
+        })),
+      };
+    }
+
+    return {
+      status: "OK" as const,
+      ...(await getUserById(session.getUserId())),
+    };
+  };
+}
+
+export function handleDeleteUser() {
+  return async (
+    _req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    maybeSession: SuperTokensSession,
+  ) => {
+    const session = requireSession(maybeSession);
+    await SuperTokens.deleteUser(session.getUserId(), true);
+    return { status: "OK" as const };
+  };
+}
+
+export function handleGetUserMeta() {
+  return async (
+    _req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    maybeSession: SuperTokensSession,
+  ) => {
+    const session = requireSession(maybeSession);
+    const metadata = await getUserMetadata(session.getUserId());
+    return {
+      status: "OK" as const,
+      id: session.getUserId(),
+      meta: metadata.meta,
+    };
+  };
+}
+
+export function handleUpdateUserMeta() {
+  return async (
+    req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    maybeSession: SuperTokensSession,
+  ) => {
+    const session = requireSession(maybeSession);
+    const payload = parseUpdateMetaBody(await getJsonBody(req));
+    return {
+      status: "OK" as const,
+      ...(await updateUserMetadata(session.getUserId(), payload.meta ?? {})),
+    };
+  };
+}
+
+export function handleGetUserField() {
+  return async (
+    req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    maybeSession: SuperTokensSession,
+  ) => {
+    const session = requireSession(maybeSession);
+    const field = req.getKeyValueFromQuery("field");
+    if (!field) {
+      return missingFieldResponse();
+    }
+
+    const metadata = await getUserMetadata(session.getUserId());
+    return {
+      status: "OK" as const,
+      value: metadata.data[field],
+    };
+  };
+}
+
+export function handleUpdateUserField() {
+  return async (
+    req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    maybeSession: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const session = requireSession(maybeSession);
+    const field = req.getKeyValueFromQuery("field");
+    if (!field) {
+      return missingFieldResponse();
+    }
+
+    const payload = parseUpdateFieldBody(await getJsonBody(req));
+    if (field === "email" && typeof payload.value === "string") {
+      return {
+        status: "OK" as const,
+        ...(await startPendingEmailVerification({
+          userId: session.getUserId(),
+          recipeUserId: session.getRecipeUserId(),
+          tenantId: session.getTenantId(),
+          email: payload.value,
+          pendingVerificationId: randomUUID(),
+          userContext,
+        })),
+      };
+    }
+
+    const permissionError = validateWritableFields([field]);
+    if (permissionError) {
+      return permissionError;
+    }
+
+    return {
+      status: "OK" as const,
+      ...(await updateUserData(session.getUserId(), {
+        [field]: payload.value,
+      })),
+    };
+  };
+}
+
+function requireSession(
+  session: SuperTokensSession,
+): RequiredSuperTokensSession {
+  if (!session) {
+    throw new Error("Session not found");
+  }
+
+  return session;
+}
+
+async function getJsonBody(req: SuperTokensRequest): Promise<unknown> {
+  return req.getJSONBody();
+}
+
+function parseGuestBody(value: unknown) {
+  if (!isJsonRecord(value)) {
+    return {};
+  }
+
+  return {
+    authLevel:
+      typeof value.auth_level === "string" ? value.auth_level : undefined,
+  };
+}
+
+function parseUpdateUserBody(value: unknown): { data?: JsonRecord } {
+  if (!isJsonRecord(value) || !isJsonRecord(value.data)) {
+    return {};
+  }
+
+  return { data: value.data };
+}
+
+function parseUpdateMetaBody(value: unknown): { meta?: JsonRecord } {
+  if (!isJsonRecord(value) || !isJsonRecord(value.meta)) {
+    return {};
+  }
+
+  return { meta: value.meta };
+}
+
+function parseUpdateFieldBody(value: unknown): { value?: JsonValue } {
+  if (!isJsonRecord(value) || !hasOwn(value, "value")) {
+    return {};
+  }
+
+  return { value: value.value as JsonValue };
+}
+
+function validateWritableFields(fields: string[]) {
+  const readOnlyField = fields.find((field) => !canUpdateUserDataField(field));
+
+  if (!readOnlyField) {
+    return undefined;
+  }
+
+  return {
+    status: "ERROR" as const,
+    code: 403,
+    message: `field is not writable: ${readOnlyField}`,
+  };
+}
+
+function missingFieldResponse() {
+  return {
+    status: "ERROR" as const,
+    code: 400,
+    message: "field is required",
+  };
+}
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOwn<T extends object, K extends PropertyKey>(
+  value: T,
+  key: K,
+): value is T & Record<K, unknown> {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Unknown error";
+}
+
 export function mapRowndUserToSuperTokens(
   rowndUser: RowndUser,
   tenantIds?: string[],
 ): SuperTokensUserImport {
   const loginMethods: SuperTokensUserImport["loginMethods"] = [];
-  const rowndUserData = (rowndUser.data || {}) as Record<string, string>;
-  const rowndUserVerifiedData = (rowndUser.verified_data || {}) as Record<
-    string,
-    any
-  >;
+  const rowndUserData = rowndUser.data || {};
+  const rowndUserVerifiedData = rowndUser.verified_data || {};
   if (!rowndUserData.user_id) {
     throw new Error("Rownd user has no user_id");
   }
@@ -145,18 +612,20 @@ export function mapRowndUserToSuperTokens(
     });
   }
 
-  const rowndUserMeta = rowndUser.meta || {};
-  const rowndUserAttributes = rowndUser.attributes || {};
+  const rowndUserMeta = (rowndUser.meta || {}) as JSONObject;
+  const rowndUserAttributes = (rowndUser.attributes || {}) as JSONObject;
+  const rowndUserDataJson = rowndUserData as JSONObject;
+  const rowndUserVerifiedDataJson = rowndUserVerifiedData as JSONObject;
 
   const userMetadata: JSONObject = {
     data: {
-      ...rowndUserData,
+      ...rowndUserDataJson,
     },
     meta: {
       ...rowndUserMeta,
     },
     verified_data: {
-      ...rowndUserVerifiedData,
+      ...rowndUserVerifiedDataJson,
     },
     attributes: {
       ...rowndUserAttributes,
@@ -239,16 +708,29 @@ export async function fetchRowndUserInfo(userId: string): Promise<RowndUser> {
 }
 
 type RowndMetadata = {
-  data: Record<string, any>;
-  meta: Record<string, any>;
-  verified_data: Record<string, any>;
-  attributes: Record<string, any>;
+  data: JsonRecord;
+  meta: JsonRecord;
+  verified_data: JsonRecord;
+  attributes: JsonRecord;
   rownd_pending_verification?: RowndPendingVerification | null;
   rownd_migrated?: boolean;
   rownd_user_id?: string;
   state?: string;
   auth_level?: string;
+  is_anonymous?: boolean;
 };
+
+export const RowndIsAnonymousClaim = new BooleanClaim({
+  key: "is_anonymous",
+  fetchValue: async (userId) => {
+    const metadata = await getUserMetadata(userId);
+    return (
+      metadata.is_anonymous === true ||
+      metadata.auth_level === GUEST_AUTH_METHOD_ID ||
+      metadata.auth_level === ANONYMOUS_AUTH_METHOD_ID
+    );
+  },
+});
 
 export type RowndPendingVerification = {
   id: string;
@@ -259,14 +741,14 @@ export type RowndPendingVerification = {
 
 export type RowndCompatUserResponse = {
   rownd_user: string;
-  data: Record<string, any>;
-  meta: Record<string, any>;
-  verified_data: Record<string, any>;
+  data: JsonRecord;
+  meta: JsonRecord;
+  verified_data: JsonRecord;
   state: string;
   auth_level: string;
   redacted: string[];
-  groups: any[];
-  attributes?: Record<string, any>;
+  groups: JSONObject[];
+  attributes?: JsonRecord;
 };
 
 export async function getUserMetadata(userId: string): Promise<RowndMetadata> {
@@ -283,6 +765,7 @@ export async function getUserMetadata(userId: string): Promise<RowndMetadata> {
     rownd_user_id: rowndMetadata.rownd_user_id,
     state: rowndMetadata.state,
     auth_level: rowndMetadata.auth_level,
+    is_anonymous: rowndMetadata.is_anonymous,
   };
 }
 
@@ -299,19 +782,19 @@ export async function getUserById(
   const rowndUser = metadata.rownd_user_id || userId;
   const state = metadata.state || "enabled";
 
-  const data: Record<string, any> = {
+  const data: JsonRecord = {
     user_id: userId,
     ...metadata.data,
   };
 
-  const verifiedData: Record<string, any> = {
+  const verifiedData: JsonRecord = {
     ...metadata.verified_data,
   };
 
   let lastUsedAt = stUser.timeJoined;
 
-  for (const method of stUser.loginMethods as any[]) {
-    if (method.lastUsed > lastUsedAt) {
+  for (const method of stUser.loginMethods as RowndLoginMethod[]) {
+    if (typeof method.lastUsed === "number" && method.lastUsed > lastUsedAt) {
       lastUsedAt = method.lastUsed;
     }
 
@@ -360,7 +843,7 @@ export async function getUserById(
     }
   }
 
-  const mapMethod = (method: any) => {
+  const mapMethod = (method: RowndLoginMethod) => {
     if (method.recipeId === "thirdparty") {
       if (method.thirdPartyId === "google") return "google";
       if (method.thirdPartyId === "apple") return "apple";
@@ -376,9 +859,9 @@ export async function getUserById(
   const sortedByJoined = [...stUser.loginMethods].sort(
     (a, b) => a.timeJoined - b.timeJoined,
   );
-  const sortedByLastUsed = [...(stUser.loginMethods as any[])].sort(
-    (a, b) => (b.lastUsed || b.timeJoined) - (a.lastUsed || a.timeJoined),
-  );
+  const sortedByLastUsed = [
+    ...(stUser.loginMethods as RowndLoginMethod[]),
+  ].sort((a, b) => (b.lastUsed || b.timeJoined) - (a.lastUsed || a.timeJoined));
 
   const firstMethod = sortedByJoined[0];
   const lastMethod = sortedByLastUsed[0];
@@ -406,10 +889,7 @@ export async function getUserById(
   };
 }
 
-export async function updateUserData(
-  userId: string,
-  inputData: Record<string, any>,
-) {
+export async function updateUserData(userId: string, inputData: JsonRecord) {
   const metadata = await getUserMetadata(userId);
   const updatedMetadata: JSONObject = {
     ...metadata,
@@ -433,18 +913,16 @@ export async function updateUserData(
   return getUserById(userId);
 }
 
-export async function startPendingEmailVerification(
-  input: {
-    userId: string;
-    recipeUserId: Parameters<
-      typeof EmailVerification.sendEmailVerificationEmail
-    >[2];
-    email: string;
-    tenantId: string;
-    pendingVerificationId: string;
-    userContext?: Record<string, any>;
-  },
-) {
+export async function startPendingEmailVerification(input: {
+  userId: string;
+  recipeUserId: Parameters<
+    typeof EmailVerification.sendEmailVerificationEmail
+  >[2];
+  email: string;
+  tenantId: string;
+  pendingVerificationId: string;
+  userContext?: JsonRecord;
+}) {
   const metadata = await getUserMetadata(input.userId);
   const currentEmail = metadata.data.email;
   if (currentEmail === input.email) {
@@ -494,13 +972,11 @@ export async function startPendingEmailVerification(
   return getUserById(input.userId);
 }
 
-export async function completePendingEmailVerification(
-  input: {
-    recipeUserId: { getAsString: () => string };
-    email: string;
-    userContext?: Record<string, any>;
-  },
-) {
+export async function completePendingEmailVerification(input: {
+  recipeUserId: { getAsString: () => string };
+  email: string;
+  userContext?: JsonRecord;
+}) {
   const user = await SuperTokens.getUser(
     input.recipeUserId.getAsString(),
     input.userContext,
@@ -535,7 +1011,7 @@ export async function completePendingEmailVerification(
 
 export async function updateUserMetadata(
   userId: string,
-  inputMeta: Record<string, any>,
+  inputMeta: JsonRecord,
 ) {
   const metadata = await getUserMetadata(userId);
   const updatedMetadata: JSONObject = {
@@ -559,8 +1035,34 @@ export async function updateUserMetadata(
 
   return {
     id: userId,
-    meta: (updatedMetadata.meta || {}) as Record<string, any>,
+    meta: (updatedMetadata.meta || {}) as JsonRecord,
   };
+}
+
+type RowndLoginMethod = {
+  recipeId: string;
+  timeJoined: number;
+  lastUsed?: number;
+  email?: string;
+  phoneNumber?: string;
+  verified?: boolean;
+  thirdPartyId?: string;
+};
+
+export function canUpdateUserDataField(field: string) {
+  const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;
+  const schemaField = schema[field];
+
+  if (!schemaField) {
+    return false;
+  }
+
+  const ownedBy =
+    field === "google_id" || field === "apple_id"
+      ? "app"
+      : schemaField.owned_by || "user";
+
+  return ownedBy !== "app" && schemaField.read_only !== true;
 }
 
 const BUILTIN_SIGN_IN_METHOD_KEYS = [
@@ -600,24 +1102,24 @@ function buildSignInMethodsConfig(
       acc[curr.method] = curr;
       return acc;
     },
-    {} as Record<string, any>,
+    {} as Record<string, RowndSignInMethod>,
   );
 
   const customProviders = Object.fromEntries(
     Object.entries(methods)
       .filter(([key]) => !BUILTIN_SIGN_IN_METHOD_KEYS.includes(key))
       .map(([key, val]) => {
-        const v = val as Record<string, any> | undefined;
-        return v
+        return val
           ? [
-            key,
-            {
-              enabled: true,
-              display_name: v["displayName"] ?? key,
-              icon_light_url: v["iconLightUrl"],
-              icon_dark_url: v["iconDarkUrl"],
-            },
-          ]
+              key,
+              {
+                enabled: true,
+                display_name:
+                  getStringMethodProperty(val, "displayName") ?? key,
+                icon_light_url: getStringMethodProperty(val, "iconLightUrl"),
+                icon_dark_url: getStringMethodProperty(val, "iconDarkUrl"),
+              },
+            ]
           : [key, undefined];
       })
       .filter(([, v]) => v !== undefined),
@@ -626,44 +1128,118 @@ function buildSignInMethodsConfig(
   const googleMethod = methods.google;
   const appleMethod = methods.apple;
   const anonymousMethod = methods.anonymous;
+  const googleOneTap = getOneTapConfig(googleMethod);
 
   return {
     email: { enabled: !!methods.email },
     phone: { enabled: !!methods.phone },
     google: {
       enabled: !!googleMethod,
-      client_id: googleMethod?.clientId ?? "",
-      ios_client_id: googleMethod?.iosClientId ?? "",
-      scopes: googleMethod?.scopes ?? [],
+      client_id: getStringMethodProperty(googleMethod, "clientId") ?? "",
+      ios_client_id: getStringMethodProperty(googleMethod, "iosClientId") ?? "",
+      scopes: getStringArrayMethodProperty(googleMethod, "scopes") ?? [],
       one_tap: {
         browser: {
-          auto_prompt: googleMethod?.oneTap?.browser?.autoPrompt ?? false,
-          delay: googleMethod?.oneTap?.browser?.delay ?? 7000,
+          auto_prompt: googleOneTap?.browser?.autoPrompt ?? false,
+          delay: googleOneTap?.browser?.delay ?? 7000,
         },
         mobile_app: {
-          auto_prompt: googleMethod?.oneTap?.mobileApp?.autoPrompt ?? false,
-          delay: googleMethod?.oneTap?.mobileApp?.delay ?? 7000,
+          auto_prompt: googleOneTap?.mobileApp?.autoPrompt ?? false,
+          delay: googleOneTap?.mobileApp?.delay ?? 7000,
         },
       },
     },
     apple: {
       enabled: !!appleMethod,
-      client_id: appleMethod?.clientId ?? "",
+      client_id: getStringMethodProperty(appleMethod, "clientId") ?? "",
     },
     anonymous: {
       enabled: !!anonymousMethod,
-      ...(anonymousMethod?.displayName !== undefined
-        ? { display_name: anonymousMethod.displayName }
+      ...(getStringMethodProperty(anonymousMethod, "displayName") !== undefined
+        ? {
+            display_name: getStringMethodProperty(
+              anonymousMethod,
+              "displayName",
+            ),
+          }
         : {}),
-      ...(anonymousMethod?.iconLightUrl !== undefined
-        ? { icon_light_url: anonymousMethod.iconLightUrl }
+      ...(getStringMethodProperty(anonymousMethod, "iconLightUrl") !== undefined
+        ? {
+            icon_light_url: getStringMethodProperty(
+              anonymousMethod,
+              "iconLightUrl",
+            ),
+          }
         : {}),
-      ...(anonymousMethod?.iconDarkUrl !== undefined
-        ? { icon_dark_url: anonymousMethod.iconDarkUrl }
+      ...(getStringMethodProperty(anonymousMethod, "iconDarkUrl") !== undefined
+        ? {
+            icon_dark_url: getStringMethodProperty(
+              anonymousMethod,
+              "iconDarkUrl",
+            ),
+          }
         : {}),
     },
     ...customProviders,
   };
+}
+
+function getMethodProperty(
+  method: RowndSignInMethod | undefined,
+  property: string,
+) {
+  if (!method) {
+    return undefined;
+  }
+
+  return (method as RowndSignInMethod & Record<string, unknown>)[property];
+}
+
+function getStringMethodProperty(
+  method: RowndSignInMethod | undefined,
+  property: string,
+) {
+  const value = getMethodProperty(method, property);
+  return typeof value === "string" ? value : undefined;
+}
+
+function getStringArrayMethodProperty(
+  method: RowndSignInMethod | undefined,
+  property: string,
+) {
+  const value = getMethodProperty(method, property);
+  return Array.isArray(value) &&
+    value.every((entry) => typeof entry === "string")
+    ? value
+    : undefined;
+}
+
+function getOneTapConfig(method: RowndSignInMethod | undefined) {
+  const oneTap = getMethodProperty(method, "oneTap");
+  if (!isRecord(oneTap)) {
+    return undefined;
+  }
+
+  return {
+    browser: parseOneTapPlatform(oneTap.browser),
+    mobileApp: parseOneTapPlatform(oneTap.mobileApp),
+  };
+}
+
+function parseOneTapPlatform(value: unknown) {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  return {
+    autoPrompt:
+      typeof value.autoPrompt === "boolean" ? value.autoPrompt : undefined,
+    delay: typeof value.delay === "number" ? value.delay : undefined,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function buildAppConfig(
@@ -781,50 +1357,50 @@ export function buildAppConfig(
         custom_content: {
           ...(app.customContent?.signInModal
             ? {
-              sign_in_modal: {
-                ...(app.customContent.signInModal.title
-                  ? { title: app.customContent.signInModal.title }
-                  : {}),
-                ...(app.customContent.signInModal.subtitle
-                  ? { subtitle: app.customContent.signInModal.subtitle }
-                  : {}),
-                ...(app.customContent.signInModal.signInTitle
-                  ? {
-                    sign_in_title:
+                sign_in_modal: {
+                  ...(app.customContent.signInModal.title
+                    ? { title: app.customContent.signInModal.title }
+                    : {}),
+                  ...(app.customContent.signInModal.subtitle
+                    ? { subtitle: app.customContent.signInModal.subtitle }
+                    : {}),
+                  ...(app.customContent.signInModal.signInTitle
+                    ? {
+                        sign_in_title:
                           app.customContent.signInModal.signInTitle,
-                  }
-                  : {}),
-                ...(app.customContent.signInModal.signUpTitle
-                  ? {
-                    sign_up_title:
+                      }
+                    : {}),
+                  ...(app.customContent.signInModal.signUpTitle
+                    ? {
+                        sign_up_title:
                           app.customContent.signInModal.signUpTitle,
-                  }
-                  : {}),
-                ...(app.customContent.signInModal.signInSubtitle
-                  ? {
-                    sign_in_subtitle:
+                      }
+                    : {}),
+                  ...(app.customContent.signInModal.signInSubtitle
+                    ? {
+                        sign_in_subtitle:
                           app.customContent.signInModal.signInSubtitle,
-                  }
-                  : {}),
-                ...(app.customContent.signInModal.signUpSubtitle
-                  ? {
-                    sign_up_subtitle:
+                      }
+                    : {}),
+                  ...(app.customContent.signInModal.signUpSubtitle
+                    ? {
+                        sign_up_subtitle:
                           app.customContent.signInModal.signUpSubtitle,
-                  }
-                  : {}),
-              },
-            }
+                      }
+                    : {}),
+                },
+              }
             : {}),
           ...(app.customContent?.profileModal
             ? { profile_modal: app.customContent.profileModal }
             : {}),
           ...(app.customContent?.signInFailureModal
             ? {
-              sign_in_failure_modal: {
-                failure_message:
+                sign_in_failure_modal: {
+                  failure_message:
                     app.customContent.signInFailureModal.failureMessage,
-              },
-            }
+                },
+              }
             : {}),
         },
         profile: {

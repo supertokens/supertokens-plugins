@@ -35,7 +35,7 @@ export type RowndSignInMethod =
       displayName?: string;
       iconLightUrl?: string;
       iconDarkUrl?: string;
-      [key: string]: any;
+      [key: string]: unknown;
     };
 
 export type RowndBranding = {
@@ -178,18 +178,13 @@ export interface RowndUser {
   };
   attributes?: Record<string, string | string[]>;
   verified_data: {
-    email?: string;
-    phone_number?: string;
-    google_id?: string;
-    apple_id?: string;
+    email?: string | boolean;
+    phone_number?: string | boolean;
+    google_id?: string | boolean;
+    apple_id?: string | boolean;
   };
-  groups?: string[];
-  meta?: {
-    created?: string;
-    modified?: string;
-    first_sign_in?: string;
-    last_sign_in?: string;
-  };
+  groups?: unknown[];
+  meta?: Record<string, unknown>;
 }
 
 export interface MigrationResponse {

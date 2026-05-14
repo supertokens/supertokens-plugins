@@ -17,7 +17,6 @@
     "setup-core-instance": "tsx scripts/setupCoreInstance.ts",
     "diff-users": "tsx scripts/diffUsers.ts",
     "generate-config": "tsx scripts/generateAppConfig.ts",
-    "fetch-configs": "tsx scripts/fetchConfigs.ts",
     "lint": "eslint ./src --ext .ts",
     "test": "TEST_MODE=testing vitest run --pool=forks"
   },

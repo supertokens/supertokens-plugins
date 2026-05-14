@@ -94,7 +94,10 @@ const ConfigSchema = z.object({
     .optional(),
 });
 
-const RowndUserSchema = z.looseObject({
+const RowndUserRecordSchema = z.looseObject({
+  user_id: z.string().optional(),
+  rownd_user: z.string().optional(),
+  subject: z.string().optional(),
   state: z.string().optional(),
   auth_level: z.string().optional(),
   data: z.looseObject({
@@ -106,16 +109,22 @@ const RowndUserSchema = z.looseObject({
     first_name: z.string().optional(),
     last_name: z.string().optional(),
   }),
-  verified_data: z.record(z.string(), z.unknown()).optional(),
-  attributes: z.record(z.string(), z.unknown()).optional(),
-  groups: z.array(z.string()).optional(),
+  verified_data: z.record(z.string(), z.unknown()).default({}),
+  attributes: z.record(z.string(), z.array(z.string())).optional(),
+  groups: z.array(z.unknown()).optional(),
   meta: z.record(z.string(), z.unknown()).optional(),
+  connection_map: z.record(z.string(), z.unknown()).optional(),
+});
+
+const RowndUserListItemSchema = z.object({
+  data: RowndUserRecordSchema,
 });
 
 const RowndUsersPageSchema = z
   .object({
-    results: z.array(RowndUserSchema).optional(),
-    data: z.array(RowndUserSchema).optional(),
+    results: z.array(RowndUserRecordSchema).optional(),
+    data: z.array(RowndUserListItemSchema).optional(),
+    total_results: z.number().optional(),
   })
   .superRefine((value, context) => {
     if (!value.results && !value.data) {
@@ -125,6 +134,8 @@ const RowndUsersPageSchema = z
       });
     }
   });
+
+type RowndUserRecord = z.infer<typeof RowndUserRecordSchema>;
 
 export function formatIssuePath(path: Array<string | number>) {
   if (path.length === 0) {
@@ -181,28 +192,16 @@ export async function loadConfig(
   return parseConfig(parseYaml(configFile), dirname(configFilePath));
 }
 
-function parseRowndUser(rawUser: unknown) {
-  const parseResult = RowndUserSchema.safeParse(rawUser);
-  if (!parseResult.success) {
-    console.error(parseResult.error);
-    throw new Error(`Schema parse error - ${parseResult.error.message}`);
-  }
-  const parsed = parseResult.data;
-  const rowndUserId = (parsed.data.user_id ||
-    parsed.user_id ||
-    parsed.app_user_id) as string | undefined;
-
-  if (!rowndUserId) {
-    console.error(parsed);
-    throw new Error(
-      "Rownd user is missing a stable user id. Cannot continue pagination safely.",
-    );
-  }
+function parseRowndUser(parsed: RowndUserRecord) {
+  const rowndUserId = parsed.data.user_id;
 
   const rowndUser: RowndUser = {
     state: parsed.state ?? "",
     auth_level: parsed.auth_level ?? "",
-    data: parsed.data as RowndUser["data"],
+    data: {
+      ...parsed.data,
+      user_id: rowndUserId,
+    },
     verified_data: (parsed.verified_data ?? {}) as RowndUser["verified_data"],
     attributes: parsed.attributes as RowndUser["attributes"],
     groups: parsed.groups,
@@ -248,7 +247,8 @@ export async function fetchRowndUsersPage(
   }
 
   const page = RowndUsersPageSchema.parse(await response.json());
-  return (page.results ?? page.data ?? []).map(parseRowndUser);
+  const users = page.data?.map((entry) => entry.data) ?? page.results ?? [];
+  return users.map(parseRowndUser);
 }
 
 function isRetryableStatus(status: number) {

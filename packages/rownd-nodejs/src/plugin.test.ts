@@ -42,6 +42,7 @@ import { ROWND_PLUGIN_ERROR_MESSAGES, DEFAULT_ROWND_SCHEMA } from "./errors";
 import {
   mapRowndUserToSuperTokens,
   DEFAULT_PRIMARY_COLOR,
+  RowndIsAnonymousClaim,
 } from "./pluginImplementation";
 
 let testPORT = 30001;
@@ -824,6 +825,52 @@ describe("rownd-nodejs plugin", () => {
         expect(
           res.headers.get("st-access-token") || res.headers.get("set-cookie"),
         ).toBeTruthy();
+
+        const accessToken = res.headers.get("st-access-token");
+        expect(accessToken).toBeTruthy();
+        const session = await Session.getSessionWithoutRequestResponse(
+          accessToken!,
+        );
+        await expect(
+          session?.getClaimValue(RowndIsAnonymousClaim),
+        ).resolves.toBe(false);
+      });
+
+      it("adds is_anonymous claim for anonymous Rownd sessions", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-session-anonymous",
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-session-anonymous",
+          auth_level: "anonymous",
+          data: { user_id: "rownd-session-anonymous" },
+          verified_data: {},
+        });
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer some-token",
+              rid: "session",
+              "fdi-version": "1.18",
+            },
+          },
+        );
+
+        expect(await res.json()).toEqual({ status: "OK" });
+        const accessToken = res.headers.get("st-access-token");
+        expect(accessToken).toBeTruthy();
+        const session = await Session.getSessionWithoutRequestResponse(
+          accessToken!,
+        );
+        await expect(
+          session?.getClaimValue(RowndIsAnonymousClaim),
+        ).resolves.toBe(true);
       });
 
       it("create user and then migrate their session", async () => {
@@ -1178,7 +1225,9 @@ describe("rownd-nodejs plugin", () => {
         );
         const accessTokenPayload = session!.getAccessTokenPayload();
         expect(accessTokenPayload["auth_level"]).toBe("guest");
-        expect(accessTokenPayload["is_anonymous"]).toBe(true);
+        await expect(
+          session?.getClaimValue(RowndIsAnonymousClaim),
+        ).resolves.toBe(true);
         expect(accessTokenPayload["app_user_id"]).toBe(stUser?.id);
 
         const guestLogin = stUser?.loginMethods.find(
@@ -1411,6 +1460,39 @@ describe("rownd-nodejs plugin", () => {
         expect(body.auth_level).toBe("verified");
       });
 
+      it("rejects updates to app-owned user data fields", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          schema: {
+            employee_id: {
+              display_name: "Employee ID",
+              type: "string",
+              owned_by: "app",
+              user_visible: false,
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser("app-owned-field-user");
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ data: { employee_id: "E-123" } }),
+          },
+        );
+
+        expect(res.status).toBe(403);
+        const body = await res.json();
+        expect(body.status).toBe("ERROR");
+        expect(body.message).toBe("field is not writable: employee_id");
+      });
+
       it("defers email updates until verification completes", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
@@ -1459,11 +1541,12 @@ describe("rownd-nodejs plugin", () => {
           "email-update-user@example.com",
         );
 
-        const tokenResponse = await EmailVerification.createEmailVerificationToken(
-          "public",
-          recipeUserId,
-          "new-email-update@example.com",
-        );
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            recipeUserId,
+            "new-email-update@example.com",
+          );
         expect(tokenResponse.status).toBe("OK");
 
         const verifyRes = await fetch(
@@ -1761,6 +1844,32 @@ describe("rownd-nodejs plugin", () => {
         expect(body.data.last_name).toBe("Lovelace");
         expect(body.state).toBe("enabled");
         expect(body.auth_level).toBe("verified");
+      });
+
+      it("rejects updates to unknown or app-owned fields", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser(
+          "app-owned-field-user-2",
+        );
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=google_id`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ value: "google-123" }),
+          },
+        );
+
+        expect(updateRes.status).toBe(403);
+        const body = await updateRes.json();
+        expect(body.status).toBe("ERROR");
+        expect(body.message).toBe("field is not writable: google_id");
       });
 
       it("defers email field updates until verification completes", async () => {
