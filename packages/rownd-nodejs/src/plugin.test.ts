@@ -1529,10 +1529,12 @@ describe("rownd-nodejs plugin", () => {
         let metadata = await UserMetadata.getUserMetadata(userId);
         expect(metadata.metadata).toEqual(
           expect.objectContaining({
-            rownd_pending_verification: expect.objectContaining({
-              field: "email",
-              value: "new-email-update@example.com",
-            }),
+            rownd_pending_verification: [
+              expect.objectContaining({
+                field: "email",
+                value: "new-email-update@example.com",
+              }),
+            ],
           }),
         );
         expect((metadata.metadata as any).email).toBeUndefined();
@@ -1571,7 +1573,7 @@ describe("rownd-nodejs plugin", () => {
         );
         expect(
           (metadata.metadata as any).rownd_pending_verification,
-        ).toBeUndefined();
+        ).toEqual([]);
       });
 
       it("sends verification for the new email even if the current email is verified", async () => {
@@ -1619,6 +1621,76 @@ describe("rownd-nodejs plugin", () => {
             rowndPendingVerificationId: expect.any(String),
           }),
         );
+      });
+
+      it("replaces only the pending email verification entry", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const { accessToken, userId, recipeUserId } =
+          await createPasswordlessSessionForUser(
+            "email-replace-pending@example.com",
+          );
+        const revokeSpy = vi.spyOn(
+          EmailVerification,
+          "revokeEmailVerificationTokens",
+        );
+
+        await UserMetadata.updateUserMetadata(userId, {
+          rownd_pending_verification: [
+            {
+              id: "old-email-verification",
+              field: "email",
+              value: "old-pending-email@example.com",
+              created_at: "2026-01-01T00:00:00.000Z",
+            },
+            {
+              id: "future-phone-verification",
+              field: "phone_number",
+              value: "+15555550123",
+              created_at: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        });
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: {
+                email: "new-pending-email@example.com",
+              },
+            }),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        expect(revokeSpy).toHaveBeenCalledTimes(1);
+        const [tenantIdArg, recipeUserIdArg, emailArg] =
+          revokeSpy.mock.calls[0]!;
+        expect(tenantIdArg).toBe("public");
+        expect(recipeUserIdArg.getAsString()).toBe(recipeUserId.getAsString());
+        expect(emailArg).toBe("old-pending-email@example.com");
+
+        const metadata = await UserMetadata.getUserMetadata(userId);
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual([
+          expect.objectContaining({
+            id: "future-phone-verification",
+            field: "phone_number",
+            value: "+15555550123",
+          }),
+          expect.objectContaining({
+            field: "email",
+            value: "new-pending-email@example.com",
+          }),
+        ]);
       });
 
       it("preserves metadata structure after update", async () => {
@@ -1902,10 +1974,12 @@ describe("rownd-nodejs plugin", () => {
         const metadata = await UserMetadata.getUserMetadata(userId);
         expect(metadata.metadata).toEqual(
           expect.objectContaining({
-            rownd_pending_verification: expect.objectContaining({
-              field: "email",
-              value: "new-email-field@example.com",
-            }),
+            rownd_pending_verification: [
+              expect.objectContaining({
+                field: "email",
+                value: "new-email-field@example.com",
+              }),
+            ],
           }),
         );
       });

@@ -189,12 +189,12 @@ export type RowndUser = JSONObject & {
 
 export type RowndUserMetadata = {
   original_rownd_user?: RowndUser;
-  rownd_pending_verification?: {
+  rownd_pending_verification?: Array<{
     id: string;
-    field: "email";
+    field: string;
     value: string;
     created_at: string;
-  } | null;
+  }>;
   [key: string]: unknown;
 };
 

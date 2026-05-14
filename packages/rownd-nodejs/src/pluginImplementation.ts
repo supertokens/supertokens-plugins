@@ -731,9 +731,11 @@ export const RowndIsAnonymousClaim = new BooleanClaim({
   },
 });
 
+export type RowndVerifiableField = string;
+
 export type RowndPendingVerification = {
   id: string;
-  field: "email";
+  field: RowndVerifiableField;
   value: string;
   created_at: string;
 };
@@ -753,6 +755,30 @@ export type RowndCompatUserResponse = {
 export async function getUserMetadata(userId: string): Promise<RowndMetadata> {
   const metadata = await UserMetadata.getUserMetadata(userId);
   return (metadata.metadata || {}) as RowndMetadata;
+}
+
+function getPendingVerifications(
+  metadata: RowndMetadata,
+): RowndPendingVerification[] {
+  const pendingVerification = metadata.rownd_pending_verification;
+
+  if (Array.isArray(pendingVerification)) {
+    return pendingVerification.filter(isPendingVerification);
+  }
+
+  return [];
+}
+
+function isPendingVerification(
+  value: unknown,
+): value is RowndPendingVerification {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.field === "string" &&
+    typeof value.value === "string" &&
+    typeof value.created_at === "string"
+  );
 }
 
 export async function getUserById(
@@ -934,11 +960,16 @@ export async function startPendingEmailVerification(input: {
     return getUserById(input.userId);
   }
 
-  if (metadata.rownd_pending_verification?.value) {
+  const pendingVerifications = getPendingVerifications(metadata);
+  const pendingEmailVerifications = pendingVerifications.filter(
+    (pendingVerification) => pendingVerification.field === "email",
+  );
+
+  for (const pendingVerification of pendingEmailVerifications) {
     await EmailVerification.revokeEmailVerificationTokens(
       input.tenantId,
       input.recipeUserId,
-      metadata.rownd_pending_verification.value,
+      pendingVerification.value,
       input.userContext,
     );
   }
@@ -952,7 +983,12 @@ export async function startPendingEmailVerification(input: {
 
   await UserMetadata.updateUserMetadata(input.userId, {
     ...metadata,
-    rownd_pending_verification: pendingVerification,
+    rownd_pending_verification: [
+      ...pendingVerifications.filter(
+        (pendingVerification) => pendingVerification.field !== "email",
+      ),
+      pendingVerification,
+    ],
   });
 
   const response = await EmailVerification.sendEmailVerificationEmail(
@@ -988,12 +1024,14 @@ export async function completePendingEmailVerification(input: {
   );
   const userId = user?.id ?? input.recipeUserId.getAsString();
   const metadata = await getUserMetadata(userId);
-  const pendingVerification = metadata.rownd_pending_verification;
+  const pendingVerifications = getPendingVerifications(metadata);
+  const pendingVerification = pendingVerifications.find(
+    (pendingVerification) =>
+      pendingVerification.field === "email" &&
+      pendingVerification.value === input.email,
+  );
 
-  if (
-    pendingVerification?.field !== "email" ||
-    pendingVerification.value !== input.email
-  ) {
+  if (!pendingVerification) {
     return;
   }
 
@@ -1014,7 +1052,9 @@ export async function completePendingEmailVerification(input: {
           },
         }
       : {}),
-    rownd_pending_verification: null,
+    rownd_pending_verification: pendingVerifications.filter(
+      (verification) => verification !== pendingVerification,
+    ),
   };
 
   await UserMetadata.updateUserMetadata(userId, updatedMetadata);
