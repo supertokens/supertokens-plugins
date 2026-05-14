@@ -7,6 +7,7 @@ import ThirdParty from "supertokens-node/recipe/thirdparty";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import {
   RowndUser,
+  RowndUserMetadata,
   SuperTokensUserImport,
   IRowndClient,
   RowndPluginNormalisedConfig,
@@ -122,11 +123,6 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
           `Guest user creation failed with status: ${response.status}`,
         );
       }
-
-      await UserMetadata.updateUserMetadata(response.user.id, {
-        auth_level: thirdPartyId,
-        is_anonymous: true,
-      });
 
       await Session.createNewSession(
         req,
@@ -362,7 +358,11 @@ export function handleGetUserMeta() {
     return {
       status: "OK" as const,
       id: session.getUserId(),
-      meta: metadata.meta,
+      meta: Object.fromEntries(
+        Object.entries(metadata).filter(
+          ([key]) => !isInternalMetadataField(key),
+        ),
+      ),
     };
   };
 }
@@ -397,7 +397,7 @@ export function handleGetUserField() {
     const metadata = await getUserMetadata(session.getUserId());
     return {
       status: "OK" as const,
-      value: metadata.data[field],
+      value: metadata[field],
     };
   };
 }
@@ -612,29 +612,7 @@ export function mapRowndUserToSuperTokens(
     });
   }
 
-  const rowndUserMeta = (rowndUser.meta || {}) as JSONObject;
-  const rowndUserAttributes = (rowndUser.attributes || {}) as JSONObject;
-  const rowndUserDataJson = rowndUserData as JSONObject;
-  const rowndUserVerifiedDataJson = rowndUserVerifiedData as JSONObject;
-
-  const userMetadata: JSONObject = {
-    data: {
-      ...rowndUserDataJson,
-    },
-    meta: {
-      ...rowndUserMeta,
-    },
-    verified_data: {
-      ...rowndUserVerifiedDataJson,
-    },
-    attributes: {
-      ...rowndUserAttributes,
-    },
-    rownd_migrated: true,
-    rownd_user_id: rowndUserData.user_id,
-    state: rowndUser.state,
-    auth_level: authLevel,
-  };
+  const userMetadata = buildRowndUserMetadata(rowndUser);
 
   return {
     externalUserId: rowndUserData.user_id,
@@ -707,28 +685,49 @@ export async function fetchRowndUserInfo(userId: string): Promise<RowndUser> {
   return rowndUser;
 }
 
-type RowndMetadata = {
-  data: JsonRecord;
-  meta: JsonRecord;
-  verified_data: JsonRecord;
-  attributes: JsonRecord;
-  rownd_pending_verification?: RowndPendingVerification | null;
-  rownd_migrated?: boolean;
-  rownd_user_id?: string;
-  state?: string;
-  auth_level?: string;
-  is_anonymous?: boolean;
-};
+type RowndMetadata = RowndUserMetadata & JsonRecord;
+
+const IDENTITY_USER_DATA_FIELDS = new Set([
+  "user_id",
+  "email",
+  "phone_number",
+  "google_id",
+  "apple_id",
+]);
+
+const INTERNAL_METADATA_FIELDS = new Set([
+  "original_rownd_user",
+  "rownd_pending_verification",
+]);
+
+function isIdentityField(field: string) {
+  return IDENTITY_USER_DATA_FIELDS.has(field);
+}
+
+function isInternalMetadataField(field: string) {
+  return INTERNAL_METADATA_FIELDS.has(field);
+}
+
+export function buildRowndUserMetadata(rowndUser: RowndUser): JSONObject {
+  const metadata: JsonRecord = {
+    ...((rowndUser.meta || {}) as JsonRecord),
+    original_rownd_user: rowndUser as unknown as JsonValue,
+  };
+
+  for (const [key, value] of Object.entries(rowndUser.data || {})) {
+    if (!isIdentityField(key) && value !== undefined) {
+      metadata[key] = value as JsonValue;
+    }
+  }
+
+  return metadata;
+}
 
 export const RowndIsAnonymousClaim = new BooleanClaim({
   key: "is_anonymous",
   fetchValue: async (userId) => {
-    const metadata = await getUserMetadata(userId);
-    return (
-      metadata.is_anonymous === true ||
-      metadata.auth_level === GUEST_AUTH_METHOD_ID ||
-      metadata.auth_level === ANONYMOUS_AUTH_METHOD_ID
-    );
+    const user = await SuperTokens.getUser(userId);
+    return isAnonymousOrGuestUser(user);
   },
 });
 
@@ -753,20 +752,7 @@ export type RowndCompatUserResponse = {
 
 export async function getUserMetadata(userId: string): Promise<RowndMetadata> {
   const metadata = await UserMetadata.getUserMetadata(userId);
-  const rowndMetadata = (metadata.metadata || {}) as Partial<RowndMetadata>;
-
-  return {
-    data: rowndMetadata.data || {},
-    meta: rowndMetadata.meta || {},
-    verified_data: rowndMetadata.verified_data || {},
-    attributes: rowndMetadata.attributes || {},
-    rownd_pending_verification: rowndMetadata.rownd_pending_verification,
-    rownd_migrated: rowndMetadata.rownd_migrated,
-    rownd_user_id: rowndMetadata.rownd_user_id,
-    state: rowndMetadata.state,
-    auth_level: rowndMetadata.auth_level,
-    is_anonymous: rowndMetadata.is_anonymous,
-  };
+  return (metadata.metadata || {}) as RowndMetadata;
 }
 
 export async function getUserById(
@@ -779,16 +765,32 @@ export async function getUserById(
     throw new RowndPluginError("ROWND_USER_NOT_FOUND");
   }
 
-  const rowndUser = metadata.rownd_user_id || userId;
-  const state = metadata.state || "enabled";
+  const originalRowndUser = metadata.original_rownd_user;
+  const rowndUser = originalRowndUser?.data?.user_id || userId;
+  const state = originalRowndUser?.state || "enabled";
+  const dataFieldKeys = new Set<string>();
 
   const data: JsonRecord = {
     user_id: userId,
-    ...metadata.data,
   };
 
+  for (const [key, value] of Object.entries(originalRowndUser?.data || {})) {
+    if (!isIdentityField(key)) {
+      data[key] = value as JsonValue;
+      dataFieldKeys.add(key);
+    }
+  }
+
+  const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;
+  for (const key of Object.keys(schema)) {
+    dataFieldKeys.add(key);
+    if (!isInternalMetadataField(key) && metadata[key] !== undefined) {
+      data[key] = metadata[key];
+    }
+  }
+
   const verifiedData: JsonRecord = {
-    ...metadata.verified_data,
+    ...((originalRowndUser?.verified_data || {}) as JsonRecord),
   };
 
   let lastUsedAt = stUser.timeJoined;
@@ -809,11 +811,21 @@ export async function getUserById(
           data.phone_number = method.phoneNumber;
       }
     } else if (method.recipeId === "thirdparty") {
+      const thirdPartyId = getThirdPartyId(method);
+      const thirdPartyUserId = getThirdPartyUserId(method);
       if (method.verified && method.email) {
         verifiedData.email = method.email;
       }
       if (method.email && data.email === undefined) {
         data.email = method.email;
+      }
+      if (thirdPartyId === "google" && thirdPartyUserId) {
+        data.google_id = thirdPartyUserId;
+        verifiedData.google_id = thirdPartyUserId;
+      }
+      if (thirdPartyId === "apple" && thirdPartyUserId) {
+        data.apple_id = thirdPartyUserId;
+        verifiedData.apple_id = thirdPartyUserId;
       }
     } else if (method.recipeId === "emailpassword") {
       if (method.email && data.email === undefined) {
@@ -833,10 +845,10 @@ export async function getUserById(
   }
 
   const authLevel =
-    metadata.auth_level ||
+    getGuestAuthLevel(stUser) ||
+    originalRowndUser?.auth_level ||
     (Object.keys(verifiedData).length > 0 ? "verified" : "unverified");
 
-  const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;
   for (const [key, field] of Object.entries(schema)) {
     if (data[key] === undefined && field.type === "string") {
       data[key] = "";
@@ -845,8 +857,8 @@ export async function getUserById(
 
   const mapMethod = (method: RowndLoginMethod) => {
     if (method.recipeId === "thirdparty") {
-      if (method.thirdPartyId === "google") return "google";
-      if (method.thirdPartyId === "apple") return "apple";
+      if (getThirdPartyId(method) === "google") return "google";
+      if (getThirdPartyId(method) === "apple") return "apple";
     } else if (method.recipeId === "passwordless") {
       if (method.email) return "email";
       if (method.phoneNumber) return "phone";
@@ -866,8 +878,14 @@ export async function getUserById(
   const firstMethod = sortedByJoined[0];
   const lastMethod = sortedByLastUsed[0];
 
+  const metadataMeta = Object.fromEntries(
+    Object.entries(metadata).filter(
+      ([key]) => !isInternalMetadataField(key) && !dataFieldKeys.has(key),
+    ),
+  );
+
   const meta = {
-    ...metadata.meta,
+    ...metadataMeta,
     created: new Date(stUser.timeJoined).toISOString(),
     first_sign_in: new Date(stUser.timeJoined).toISOString(),
     last_sign_in: new Date(lastUsedAt).toISOString(),
@@ -884,8 +902,8 @@ export async function getUserById(
     state,
     auth_level: authLevel,
     redacted: [],
-    groups: [],
-    attributes: metadata.attributes,
+    groups: (originalRowndUser?.groups || []) as JSONObject[],
+    attributes: (originalRowndUser?.attributes || {}) as JsonRecord,
   };
 }
 
@@ -893,20 +911,7 @@ export async function updateUserData(userId: string, inputData: JsonRecord) {
   const metadata = await getUserMetadata(userId);
   const updatedMetadata: JSONObject = {
     ...metadata,
-    data: {
-      ...metadata.data,
-      ...inputData,
-      user_id: userId,
-    },
-    meta: {
-      ...metadata.meta,
-    },
-    verified_data: {
-      ...metadata.verified_data,
-    },
-    attributes: {
-      ...metadata.attributes,
-    },
+    ...inputData,
   };
 
   await UserMetadata.updateUserMetadata(userId, updatedMetadata);
@@ -924,7 +929,7 @@ export async function startPendingEmailVerification(input: {
   userContext?: JsonRecord;
 }) {
   const metadata = await getUserMetadata(input.userId);
-  const currentEmail = metadata.data.email;
+  const currentEmail = (await getUserById(input.userId)).data.email;
   if (currentEmail === input.email) {
     return getUserById(input.userId);
   }
@@ -994,15 +999,21 @@ export async function completePendingEmailVerification(input: {
 
   const updatedMetadata: RowndMetadata = {
     ...metadata,
-    data: {
-      ...metadata.data,
-      email: input.email,
-      user_id: userId,
-    },
-    verified_data: {
-      ...metadata.verified_data,
-      email: input.email,
-    },
+    ...(metadata.original_rownd_user
+      ? {
+          original_rownd_user: {
+            ...metadata.original_rownd_user,
+            data: {
+              ...metadata.original_rownd_user.data,
+              email: input.email,
+            },
+            verified_data: {
+              ...metadata.original_rownd_user.verified_data,
+              email: input.email,
+            },
+          },
+        }
+      : {}),
     rownd_pending_verification: null,
   };
 
@@ -1016,26 +1027,18 @@ export async function updateUserMetadata(
   const metadata = await getUserMetadata(userId);
   const updatedMetadata: JSONObject = {
     ...metadata,
-    data: {
-      ...metadata.data,
-    },
-    meta: {
-      ...metadata.meta,
-      ...inputMeta,
-    },
-    verified_data: {
-      ...metadata.verified_data,
-    },
-    attributes: {
-      ...metadata.attributes,
-    },
+    ...inputMeta,
   };
 
   await UserMetadata.updateUserMetadata(userId, updatedMetadata);
 
   return {
     id: userId,
-    meta: (updatedMetadata.meta || {}) as JsonRecord,
+    meta: Object.fromEntries(
+      Object.entries(updatedMetadata).filter(
+        ([key]) => !isInternalMetadataField(key),
+      ),
+    ) as JsonRecord,
   };
 }
 
@@ -1047,7 +1050,41 @@ type RowndLoginMethod = {
   phoneNumber?: string;
   verified?: boolean;
   thirdPartyId?: string;
+  thirdPartyUserId?: string;
+  thirdParty?: {
+    id?: string;
+    userId?: string;
+  };
 };
+
+function getThirdPartyId(method: RowndLoginMethod) {
+  return method.thirdPartyId || method.thirdParty?.id;
+}
+
+function getThirdPartyUserId(method: RowndLoginMethod) {
+  return method.thirdPartyUserId || method.thirdParty?.userId;
+}
+
+function getGuestAuthLevel(
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+) {
+  const method = user?.loginMethods.find((loginMethod: RowndLoginMethod) => {
+    const thirdPartyId = getThirdPartyId(loginMethod);
+    return (
+      loginMethod.recipeId === "thirdparty" &&
+      (thirdPartyId === GUEST_AUTH_METHOD_ID ||
+        thirdPartyId === ANONYMOUS_AUTH_METHOD_ID)
+    );
+  }) as RowndLoginMethod | undefined;
+
+  return method ? getThirdPartyId(method) : undefined;
+}
+
+function isAnonymousOrGuestUser(
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+) {
+  return getGuestAuthLevel(user) !== undefined;
+}
 
 export function canUpdateUserDataField(field: string) {
   const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;

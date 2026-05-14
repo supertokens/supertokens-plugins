@@ -177,7 +177,9 @@ describe("rownd-nodejs plugin", () => {
         email: "test-user-id@anonymous.local",
         isVerified: false,
       });
-      expect(user.userMetadata.auth_level).toBe("guest");
+      expect(user.userMetadata.original_rownd_user).toEqual(
+        expect.objectContaining({ auth_level: "guest" }),
+      );
     });
 
     it("throws a type error when verified_data is missing for an otherwise valid email user", () => {
@@ -198,15 +200,12 @@ describe("rownd-nodejs plugin", () => {
           },
         ],
         userMetadata: {
-          data: {
-            user_id: "rownd-missing-verified-data",
-            email: "missing-verified-data@example.com",
+          original_rownd_user: {
+            data: {
+              user_id: "rownd-missing-verified-data",
+              email: "missing-verified-data@example.com",
+            },
           },
-          meta: {},
-          verified_data: {},
-          attributes: {},
-          rownd_migrated: true,
-          rownd_user_id: "rownd-missing-verified-data",
         },
       });
     });
@@ -230,15 +229,13 @@ describe("rownd-nodejs plugin", () => {
           },
         ],
         userMetadata: {
-          data: {
-            user_id: "rownd-metadata-fallback",
-            email: "metadata-fallback@example.com",
+          original_rownd_user: {
+            data: {
+              user_id: "rownd-metadata-fallback",
+              email: "metadata-fallback@example.com",
+            },
+            verified_data: {},
           },
-          meta: {},
-          verified_data: {},
-          attributes: {},
-          rownd_migrated: true,
-          rownd_user_id: "rownd-metadata-fallback",
         },
       });
     });
@@ -266,15 +263,13 @@ describe("rownd-nodejs plugin", () => {
           },
         ],
         userMetadata: {
-          data: {
-            user_id: "rownd-tenant-aware",
-            email: "tenant-aware@example.com",
+          original_rownd_user: {
+            data: {
+              user_id: "rownd-tenant-aware",
+              email: "tenant-aware@example.com",
+            },
+            verified_data: {},
           },
-          meta: {},
-          verified_data: {},
-          attributes: {},
-          rownd_migrated: true,
-          rownd_user_id: "rownd-tenant-aware",
         },
       });
     });
@@ -366,11 +361,11 @@ describe("rownd-nodejs plugin", () => {
         const metadata = migratedUser!.metadata;
         expect(metadata.metadata).toEqual(
           expect.objectContaining({
-            data: expect.objectContaining({
-              email: rowndUser.data.email,
+            original_rownd_user: expect.objectContaining({
+              data: expect.objectContaining({
+                email: rowndUser.data.email,
+              }),
             }),
-            rownd_migrated: true,
-            rownd_user_id: rowndUser.app_user_id,
           }),
         );
         expect(telemetryClient.recordEvent).toHaveBeenCalledWith(
@@ -412,11 +407,14 @@ describe("rownd-nodejs plugin", () => {
         const metadata = migratedUser!.metadata;
         expect(metadata.metadata).toEqual(
           expect.objectContaining({
-            data: expect.objectContaining({
-              first_name: "John",
-              last_name: "Doe",
+            first_name: "John",
+            last_name: "Doe",
+            original_rownd_user: expect.objectContaining({
+              data: expect.objectContaining({
+                first_name: "John",
+                last_name: "Doe",
+              }),
             }),
-            rownd_migrated: true,
           }),
         );
       });
@@ -1537,9 +1535,7 @@ describe("rownd-nodejs plugin", () => {
             }),
           }),
         );
-        expect((metadata.metadata as any).data.email).toBe(
-          "email-update-user@example.com",
-        );
+        expect((metadata.metadata as any).email).toBeUndefined();
 
         const tokenResponse =
           await EmailVerification.createEmailVerificationToken(
@@ -1565,10 +1561,12 @@ describe("rownd-nodejs plugin", () => {
         await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
 
         metadata = await UserMetadata.getUserMetadata(userId);
-        expect((metadata.metadata as any).data.email).toBe(
+        expect((metadata.metadata as any).original_rownd_user.data.email).toBe(
           "new-email-update@example.com",
         );
-        expect((metadata.metadata as any).verified_data.email).toBe(
+        expect(
+          (metadata.metadata as any).original_rownd_user.verified_data.email,
+        ).toBe(
           "new-email-update@example.com",
         );
         expect(
@@ -1657,17 +1655,19 @@ describe("rownd-nodejs plugin", () => {
         );
         expect(metadata.metadata).toEqual(
           expect.objectContaining({
-            data: expect.objectContaining({
-              first_name: "John",
-              user_id: "metadata-structure-user",
+            first_name: "John",
+            custom_field: "custom_value",
+            original_rownd_user: expect.objectContaining({
+              data: expect.objectContaining({
+                user_id: "metadata-structure-user",
+              }),
             }),
-            meta: expect.objectContaining({
-              custom_field: "custom_value",
-            }),
-            verified_data: expect.any(Object),
-            attributes: expect.any(Object),
           }),
         );
+        expect((metadata.metadata as any).data).toBeUndefined();
+        expect((metadata.metadata as any).meta).toBeUndefined();
+        expect((metadata.metadata as any).verified_data).toBeUndefined();
+        expect((metadata.metadata as any).attributes).toBeUndefined();
       });
     });
 
@@ -1976,21 +1976,22 @@ describe("rownd-nodejs plugin", () => {
       expect(recipeUserId).toBeDefined();
 
       await UserMetadata.updateUserMetadata(user.id, {
-        data: {
-          user_id: user.id,
-          email,
+        created: "2026-01-01T00:00:00.000Z",
+        original_rownd_user: {
+          state: "enabled",
+          auth_level: "verified",
+          data: {
+            user_id: user.id,
+            email,
+          },
+          verified_data: {
+            email,
+          },
+          attributes: {},
+          meta: {
+            created: "2026-01-01T00:00:00.000Z",
+          },
         },
-        meta: {
-          created: "2026-01-01T00:00:00.000Z",
-        },
-        verified_data: {
-          email,
-        },
-        attributes: {},
-        rownd_migrated: true,
-        rownd_user_id: user.id,
-        state: "enabled",
-        auth_level: "verified",
       });
 
       const session = await Session.createNewSessionWithoutRequestResponse(

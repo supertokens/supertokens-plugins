@@ -164,10 +164,10 @@ export type RowndTelemetryConfig =
       factory: () => RowndTelemetryClient;
     };
 
-export interface RowndUser {
+export type RowndUser = JSONObject & {
   state: string;
   auth_level: string;
-  data: {
+  data: JSONObject & {
     user_id: string;
     email?: string;
     phone_number?: string;
@@ -176,16 +176,27 @@ export interface RowndUser {
     first_name?: string;
     last_name?: string;
   };
-  attributes?: Record<string, string | string[]>;
-  verified_data: {
+  attributes?: JSONObject;
+  verified_data: JSONObject & {
     email?: string | boolean;
     phone_number?: string | boolean;
     google_id?: string | boolean;
     apple_id?: string | boolean;
   };
-  groups?: unknown[];
-  meta?: Record<string, unknown>;
-}
+  groups?: JSONObject[];
+  meta?: JSONObject;
+};
+
+export type RowndUserMetadata = {
+  original_rownd_user?: RowndUser;
+  rownd_pending_verification?: {
+    id: string;
+    field: "email";
+    value: string;
+    created_at: string;
+  } | null;
+  [key: string]: unknown;
+};
 
 export interface MigrationResponse {
   status: "OK" | "ERROR";
