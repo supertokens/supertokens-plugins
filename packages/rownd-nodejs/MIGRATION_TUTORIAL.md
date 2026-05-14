@@ -14,7 +14,7 @@ The migration flow works as follows:
 ```
 User signs in (Rownd) → Rownd SDK gets access token
        ↓
-Rownd SDK does and authenticated POST to {apiDomain}/{apiBasePath}/plugin/rownd/migrate
+Rownd SDK does an authenticated POST to {apiDomain}{apiBasePath}/plugin/rownd/migrate
        ↓
 SuperTokens plugin validates token, imports user, validates session migration
 ```
@@ -38,36 +38,95 @@ import SuperTokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
+import Passwordless from "supertokens-node/recipe/passwordless";
+import ThirdParty from "supertokens-node/recipe/thirdparty";
+import EmailVerification from "supertokens-node/recipe/emailverification";
 import RowndMigrationPlugin from "@supertokens-plugins/rownd-nodejs";
 
 SuperTokens.init({
+  supertokens: {
+    connectionURI: "<SUPERTOKENS_CONNECTION_URI>",
+    apiKey: "<SUPERTOKENS_API_KEY>", // Optional
+  },
   appInfo: {
     appName: "APP_NAME",
     apiDomain: "<API_DOMAIN>",
     websiteDomain: "<WEBSITE_DOMAIN>",
     apiBasePath: "/auth",
   },
-  recipeList: [Session.init(), UserMetadata.init(), AccountLinking.init()],
+  recipeList: [
+    AccountLinking.init({
+      shouldDoAutomaticAccountLinking: async () => ({
+        shouldAutomaticallyLink: true,
+        shouldRequireVerification: true,
+      }),
+    }),
+    Session.init(),
+    UserMetadata.init(),
+    Passwordless.init({
+      contactMethod: "EMAIL_OR_PHONE",
+      flowType: "MAGIC_LINK",
+    }),
+    EmailVerification.init({
+      mode: "OPTIONAL",
+    }),
+    ThirdParty.init({
+      signInAndUpFeature: {
+        providers: [
+          {
+            config: {
+              thirdPartyId: "google",
+              clients: [
+                {
+                  clientId: "<GOOGLE_CLIENT_ID>",
+                  clientSecret: "<GOOGLE_CLIENT_SECRET>",
+                },
+              ],
+            },
+          },
+          {
+            config: {
+              thirdPartyId: "apple",
+              clients: [
+                {
+                  clientId: "<APPLE_CLIENT_ID>",
+                  clientSecret: "<APPLE_CLIENT_SECRET>",
+                },
+              ],
+            },
+          },
+        ],
+      },
+    }),
+  ],
   experimental: {
     plugins: [
       RowndMigrationPlugin.init({
-        rowndAppKey: "ROWND_APP_KEY",
-        rowndAppSecret: "ROWND_APP_SECRET",
+        rowndAppKey: process.env.ROWND_APP_KEY!,
+        rowndAppSecret: process.env.ROWND_APP_SECRET!,
       }),
     ],
   },
 });
 ```
 
+A complete backend-only example is available in `packages/rownd-nodejs/example`.
+
 ###### How It Works (Backend)
 
-When `POST /plugin/rownd/migrate` is called:
+When `POST {apiDomain}{apiBasePath}/plugin/rownd/migrate` is called, for example `POST /auth/plugin/rownd/migrate` when `apiBasePath` is `/auth`:
 
 1. **Token Validation**: Plugin validates the Rownd access token via Rownd's API
 2. **User Lookup**: Checks if user already exists in SuperTokens
 3. **User Import**: If new, fetches user data from Rownd and imports via SuperTokens bulk-import API
 4. **Session Migration**: Creates a SuperTokens session to confirm the session migration process
 5. **Metadata Storage**: Original Rownd data is preserved in UserMetadata
+
+`Session` and `UserMetadata` are required for migration. `ThirdParty` is required for Google, Apple, guest, and anonymous login methods. `Passwordless` is required for email and phone login methods. `EmailVerification` is required for verified email profile updates. `AccountLinking` should be initialized so migrated identities can link according to your account-linking policy. This plugin setup enables automatic linking with verification required so migrated Rownd identities can attach to matching verified SuperTokens users. Review trusted providers, verified identifiers, and guest upgrade flows before using the same policy in production.
+
+Do not expose SuperTokens Core directly to the public internet. Use a Core API key for any shared or deployed instance, and store Rownd, OAuth, and Core credentials in environment variables or a secret manager.
+
+For production, add rate limits and abuse protection around migration and guest session endpoints.
 
 ---
 
@@ -174,7 +233,9 @@ It should be run after you have setup the on-the-fly migration flow in order to 
 
 ### How to Run
 
-Edit the config and the run `npm run bulk-migrate` from the `rownd-nodejs` folder.
+Edit the config and then run `npm run bulk-import` from the `rownd-nodejs` folder.
+
+Do not commit `scripts/config.yaml` with real Rownd or SuperTokens credentials. Prefer generating it from environment variables or secret-manager values in CI.
 
 ### Configuration
 
