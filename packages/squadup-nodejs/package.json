@@ -1,0 +1,41 @@
+{
+  "name": "@supertokens-plugins/squadup-nodejs",
+  "version": "0.1.0",
+  "description": "SquadUp ticketing plugin for SuperTokens",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "lint": "eslint ./src --ext .ts",
+    "test": "TEST_MODE=testing vitest run --pool=forks"
+  },
+  "keywords": [
+    "supertokens",
+    "squadup",
+    "ticketing",
+    "plugin"
+  ],
+  "license": "Apache-2.0",
+  "dependencies": {},
+  "peerDependencies": {
+    "supertokens-node": ">=23.0.0"
+  },
+  "devDependencies": {
+    "@shared/eslint": "*",
+    "@shared/nodejs": "*",
+    "@shared/tsconfig": "*",
+    "@types/node": "^20.0.0",
+    "eslint": "^8.57.0",
+    "tsup": "^8.0.2",
+    "typescript": "^5.7.3",
+    "vitest": "^1.3.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
