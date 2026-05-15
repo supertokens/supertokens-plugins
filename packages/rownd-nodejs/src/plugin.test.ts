@@ -2163,6 +2163,65 @@ describe("rownd-nodejs plugin", () => {
       });
     });
 
+    describe("POST /signout", () => {
+      it("revokes all sessions for the current user", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const firstAccessToken = await createSessionForUser("signout-user");
+        const secondAccessToken = await createSessionForUser("signout-user");
+        const firstSession = await Session.getSessionWithoutRequestResponse(
+          firstAccessToken,
+        );
+        const secondSession = await Session.getSessionWithoutRequestResponse(
+          secondAccessToken,
+        );
+        const firstSessionHandle = firstSession.getHandle();
+        const secondSessionHandle = secondSession.getHandle();
+
+        await expect(
+          Session.getAllSessionHandlesForUser("signout-user", true, "public"),
+        ).resolves.toEqual(
+          expect.arrayContaining([firstSessionHandle, secondSessionHandle]),
+        );
+
+        const signOutRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/signout`,
+          {
+            method: "POST",
+            headers: getAuthedHeaders(firstAccessToken),
+          },
+        );
+
+        expect(signOutRes.status).toBe(200);
+        await expect(signOutRes.json()).resolves.toEqual({ status: "OK" });
+        await expect(
+          Session.getSessionInformation(firstSessionHandle),
+        ).resolves.toBeUndefined();
+        await expect(
+          Session.getSessionInformation(secondSessionHandle),
+        ).resolves.toBeUndefined();
+        await expect(
+          Session.getAllSessionHandlesForUser("signout-user", true, "public"),
+        ).resolves.toEqual([]);
+      });
+
+      it("rejects without session", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/signout`,
+          {
+            method: "POST",
+          },
+        );
+        const body = await res.json();
+        expect(body.status).not.toBe("OK");
+      });
+    });
+
     describe("GET /user/meta", () => {
       it("gets compatibility user meta", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);

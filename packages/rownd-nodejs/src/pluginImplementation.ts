@@ -374,6 +374,25 @@ export function handleDeleteUser() {
   };
 }
 
+export function handleSignOut() {
+  return async (
+    _req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    maybeSession: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const session = requireSession(maybeSession);
+    await Session.revokeAllSessionsForUser(
+      session.getUserId(),
+      true,
+      session.getTenantId(),
+      userContext,
+    );
+
+    return { status: "OK" as const };
+  };
+}
+
 export function handleGetUserMeta() {
   return async (
     _req: SuperTokensRequest,

@@ -21,6 +21,7 @@ import {
   handleGetUserMeta,
   handleGuestLogin,
   handleMigrate,
+  handleSignOut,
   handleUpdateUser,
   handleUpdateUserField,
   handleUpdateUserMeta,
@@ -99,6 +100,15 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate`,
                 method: "post" as const,
                 handler: withRequestHandler(handleMigrate(routeHandlerDeps)),
+              },
+              {
+                path: `${apiBasePath}${HANDLE_BASE_PATH}/signout`,
+                method: "post" as const,
+                verifySessionOptions: {
+                  sessionRequired: true,
+                  checkDatabase: true,
+                },
+                handler: withRequestHandler(handleSignOut()),
               },
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user`,
