@@ -11,6 +11,7 @@ import { createClient } from "./telemetry/createTelemetryClient";
 import {
   setRowndClient,
   setPluginConfig,
+  buildRowndSessionClaims,
   completePendingEmailVerification,
   RowndIsAnonymousClaim,
   handleDeleteUser,
@@ -23,6 +24,7 @@ import {
   handleUpdateUser,
   handleUpdateUserField,
   handleUpdateUserMeta,
+  shouldLinkRowndAccounts,
 } from "./pluginImplementation";
 
 export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
@@ -143,6 +145,32 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           };
         },
         overrideMap: {
+          accountlinking: {
+            recipeInitRequired: true,
+            config: (config) => {
+              const originalShouldDoAutomaticAccountLinking =
+                config.shouldDoAutomaticAccountLinking;
+
+              return {
+                ...config,
+                shouldDoAutomaticAccountLinking: async (...input) => {
+                  const rowndLinkingDecision = shouldLinkRowndAccounts(input);
+                  if (rowndLinkingDecision) {
+                    return rowndLinkingDecision;
+                  }
+
+                  if (originalShouldDoAutomaticAccountLinking) {
+                    return originalShouldDoAutomaticAccountLinking(...input);
+                  }
+
+                  return {
+                    shouldAutomaticallyLink: false,
+                    shouldRequireVerification: false,
+                  };
+                },
+              };
+            },
+          },
           session: {
             recipeInitRequired: true,
             functions: (originalImplementation) => ({
@@ -150,6 +178,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               createNewSession: async (input) => {
                 input.accessTokenPayload = {
                   ...input.accessTokenPayload,
+                  ...(await buildRowndSessionClaims(input.userId)),
                   ...(await RowndIsAnonymousClaim.build(
                     input.userId,
                     input.recipeUserId,

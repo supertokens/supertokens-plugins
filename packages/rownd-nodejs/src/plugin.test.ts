@@ -1,4 +1,5 @@
 import express from "express";
+import { randomUUID } from "node:crypto";
 import {
   describe,
   it,
@@ -43,6 +44,8 @@ import {
   mapRowndUserToSuperTokens,
   DEFAULT_PRIMARY_COLOR,
   RowndIsAnonymousClaim,
+  shouldLinkRowndAccounts,
+  buildRowndSessionClaims,
 } from "./pluginImplementation";
 
 let testPORT = 30001;
@@ -59,9 +62,11 @@ vi.mock("@rownd/node", () => ({
 describe("rownd-nodejs plugin", () => {
   let server: Server | undefined;
   let container: StartedTestContainer;
+  let importContainer: StartedTestContainer;
   let postgresContainer: StartedTestContainer;
   let network: StartedNetwork;
   let coreConnectionURI: string;
+  let importCoreConnectionURI: string;
 
   beforeAll(async () => {
     network = await new Network().start();
@@ -79,12 +84,22 @@ describe("rownd-nodejs plugin", () => {
       )
       .start();
 
-    container = await new GenericContainer("supertokens/supertokens-postgresql")
+    importContainer = await new GenericContainer(
+      "supertokens/supertokens-postgresql",
+    )
       .withNetwork(network)
       .withEnvironment({
         POSTGRESQL_CONNECTION_URI:
           "postgresql://supertokens:somepassword@postgres:5432/supertokens",
       })
+      .withExposedPorts(3567)
+      .withWaitStrategy(Wait.forHttp("/hello", 3567))
+      .start();
+
+    const importMappedPort = importContainer.getMappedPort(3567);
+    importCoreConnectionURI = `http://${importContainer.getHost()}:${importMappedPort}`;
+
+    container = await new GenericContainer("supertokens/supertokens-postgresql")
       .withExposedPorts(3567)
       .withWaitStrategy(Wait.forHttp("/hello", 3567))
       .start();
@@ -96,6 +111,9 @@ describe("rownd-nodejs plugin", () => {
   afterAll(async () => {
     if (container) {
       await container.stop();
+    }
+    if (importContainer) {
+      await importContainer.stop();
     }
     if (postgresContainer) {
       await postgresContainer.stop();
@@ -111,12 +129,28 @@ describe("rownd-nodejs plugin", () => {
     }
     resetST();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   beforeEach(() => {
     resetST();
     vi.clearAllMocks();
     vi.restoreAllMocks();
+  });
+
+  describe("shouldLinkRowndAccounts", () => {
+    it("only enables account linking when SuperTokens provides a session", () => {
+      expect(
+        shouldLinkRowndAccounts([undefined, undefined, undefined] as any),
+      ).toBeUndefined();
+
+      expect(
+        shouldLinkRowndAccounts([undefined, undefined, {}] as any),
+      ).toEqual({
+        shouldAutomaticallyLink: true,
+        shouldRequireVerification: false,
+      });
+    });
   });
 
   describe("mapRowndUserToSuperTokens", () => {
@@ -309,10 +343,13 @@ describe("rownd-nodejs plugin", () => {
   describe("endpoints", () => {
     describe("POST /migrate", () => {
       it("migrate user successfully", async () => {
+        const telemetryEvents: unknown[] = [];
         const telemetryClient: RowndTelemetryClient = {
-          recordEvent: vi.fn(),
+          recordEvent: async (event) => {
+            telemetryEvents.push(event);
+          },
         };
-        const { server: s, port } = await setup(coreConnectionURI, {
+        const { server: s, port } = await setup(importCoreConnectionURI, {
           telemetry: {
             provider: "custom",
             factory: () => telemetryClient,
@@ -368,7 +405,7 @@ describe("rownd-nodejs plugin", () => {
             }),
           }),
         );
-        expect(telemetryClient.recordEvent).toHaveBeenCalledWith(
+        expect(telemetryEvents).toContainEqual(
           expect.objectContaining({
             outcome: "success",
             rowndUserId: rowndUser.app_user_id,
@@ -378,9 +415,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("migrate user with custom metadata successfully", async () => {
-        const { server: s, port } = await setup(coreConnectionURI, undefined, {
-          enableEmailVerification: true,
-        });
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
@@ -420,7 +455,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("migrate a passwordles auth user", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
@@ -449,7 +484,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("migrates a user with no login methods as guest", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
 
@@ -506,7 +541,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("migrate a google auth user", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
@@ -540,7 +575,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("error if the auth header is missing", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const res = await fetch(
@@ -557,7 +592,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("error if rownd token validation fails", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockRejectedValue(
@@ -577,10 +612,13 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("error if rownd user info fetch fails", async () => {
+        const telemetryEvents: unknown[] = [];
         const telemetryClient: RowndTelemetryClient = {
-          recordEvent: vi.fn(),
+          recordEvent: async (event) => {
+            telemetryEvents.push(event);
+          },
         };
-        const { server: s, port } = await setup(coreConnectionURI, {
+        const { server: s, port } = await setup(importCoreConnectionURI, {
           telemetry: {
             provider: "custom",
             factory: () => telemetryClient,
@@ -605,7 +643,7 @@ describe("rownd-nodejs plugin", () => {
         const body = await res.json();
         expect(body.status).toBe("ERROR");
         expect(body.message).toBe("Migration failed");
-        expect(telemetryClient.recordEvent).toHaveBeenCalledWith(
+        expect(telemetryEvents).toContainEqual(
           expect.objectContaining({
             outcome: "error",
             rowndUserId: "rownd-user-fetch-fail",
@@ -617,12 +655,14 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("telemetry failure does not affect response", async () => {
+        let telemetryAttempts = 0;
         const telemetryClient: RowndTelemetryClient = {
-          recordEvent: vi.fn(async () => {
+          recordEvent: async () => {
+            telemetryAttempts += 1;
             throw new Error("Telemetry down");
-          }),
+          },
         };
-        const { server: s, port } = await setup(coreConnectionURI, {
+        const { server: s, port } = await setup(importCoreConnectionURI, {
           telemetry: {
             provider: "custom",
             factory: () => telemetryClient,
@@ -651,11 +691,11 @@ describe("rownd-nodejs plugin", () => {
           },
         );
         expect(await res.json()).toEqual({ status: "OK" });
-        expect(telemetryClient.recordEvent).toHaveBeenCalled();
+        expect(telemetryAttempts).toBe(1);
       });
 
       it("prevent creation of duplicate users", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
@@ -688,7 +728,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("error if user not found in rownd", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
@@ -711,7 +751,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("error if Bulk Import API fails (500)", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
@@ -749,7 +789,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("error if Bulk Import API returns malformed JSON", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
@@ -793,7 +833,7 @@ describe("rownd-nodejs plugin", () => {
 
     describe("session migration", () => {
       it("migrate session successfully", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
@@ -835,7 +875,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("adds is_anonymous claim for anonymous Rownd sessions", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
@@ -872,7 +912,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("create user and then migrate their session", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
@@ -899,7 +939,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("error if the auth header is missing", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const res = await fetch(
@@ -913,7 +953,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("error if rownd token validation fails", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockRejectedValue(
@@ -930,7 +970,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("error if rownd user info fetch fails", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
@@ -1235,7 +1275,7 @@ describe("rownd-nodejs plugin", () => {
         expect(guestLogin?.thirdParty?.userId).toMatch(/^guest_[a-f0-9-]{36}$/);
       });
 
-      it("should create a guest user and a session with anonymous auth_level", async () => {
+      it("should create an anonymous guest user with guest auth_level", async () => {
         const { server: s, port } = await setup(coreConnectionURI);
         server = s;
         testPORT = port;
@@ -1264,13 +1304,14 @@ describe("rownd-nodejs plugin", () => {
           accessToken!,
         );
         const accessTokenPayload = session!.getAccessTokenPayload();
-        expect(accessTokenPayload["auth_level"]).toBe("anonymous");
+        expect(accessTokenPayload["auth_level"]).toBe("guest");
+        expect(accessTokenPayload["anonymous_id"]).toMatch(/^anon_/);
       });
     });
 
     describe("GET /user", () => {
       it("gets compatibility user payload", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const accessToken = await createSessionForUser("compat-user-1");
@@ -1314,7 +1355,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("returns empty strings for missing schema fields", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const accessToken = await createSessionForUser("empty-schema-user");
@@ -1349,7 +1390,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("gets compatibility user payload for a non-migrated user", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
 
@@ -1422,7 +1463,7 @@ describe("rownd-nodejs plugin", () => {
 
     describe("PUT /user", () => {
       it("updates compatibility user data", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const accessToken = await createSessionForUser("compat-user-2");
@@ -1459,7 +1500,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("rejects updates to app-owned user data fields", async () => {
-        const { server: s, port } = await setup(coreConnectionURI, {
+        const { server: s, port } = await setup(importCoreConnectionURI, {
           schema: {
             employee_id: {
               display_name: "Employee ID",
@@ -1568,15 +1609,265 @@ describe("rownd-nodejs plugin", () => {
         );
         expect(
           (metadata.metadata as any).original_rownd_user.verified_data.email,
-        ).toBe(
-          "new-email-update@example.com",
+        ).toBe("new-email-update@example.com");
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
+          [],
+        );
+
+        const updatedUser = await SuperTokens.getUser(userId);
+        const passwordlessMethods = updatedUser?.loginMethods.filter(
+          (method) => method.recipeId === "passwordless" && method.email,
+        );
+        expect(passwordlessMethods).toHaveLength(1);
+        const passwordlessMethod = passwordlessMethods?.[0];
+        expect(passwordlessMethod?.email).toBe("new-email-update@example.com");
+        expect(passwordlessMethod?.recipeUserId.getAsString()).toBe(
+          recipeUserId.getAsString(),
+        );
+      });
+
+      it("converts a guest into a passwordless primary user after email verification", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const guestSession = await createGuestSession();
+        const verifiedEmail = "guest-primary@example.com";
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(guestSession.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ data: { email: verifiedEmail } }),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.data.email).not.toBe(verifiedEmail);
+        expect(body.verified_data.email).toBeUndefined();
+
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            guestSession.recipeUserId,
+            verifiedEmail,
+          );
+        expect(tokenResponse.status).toBe("OK");
+
+        const verifyRes = await verifyEmailToken(
+          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+        );
+        expect(verifyRes.status).toBe(200);
+        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+
+        const passwordlessResult = await Passwordless.signInUp({
+          email: verifiedEmail,
+          tenantId: "public",
+        });
+        const linkedUser = await SuperTokens.getUser(
+          passwordlessResult.user.id,
+        );
+        expect(linkedUser?.isPrimaryUser).toBe(true);
+        expect(linkedUser?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email: verifiedEmail,
+            }),
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: expect.objectContaining({ id: "guest" }),
+            }),
+          ]),
+        );
+
+        const passwordlessMetadata = await UserMetadata.getUserMetadata(
+          passwordlessResult.user.id,
         );
         expect(
-          (metadata.metadata as any).rownd_pending_verification,
+          (passwordlessMetadata.metadata as any).rownd_pending_verification,
         ).toEqual([]);
       });
 
-      it("sends verification for the new email even if the current email is verified", async () => {
+      it("links a guest into an existing passwordless primary for the verified email", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const existingPasswordless = await Passwordless.signInUp({
+          email: "existing-primary@example.com",
+          tenantId: "public",
+        });
+        const guestSession = await createGuestSession();
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(guestSession.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: { email: "existing-primary@example.com" },
+            }),
+          },
+        );
+        expect(res.status).toBe(200);
+
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            guestSession.recipeUserId,
+            "existing-primary@example.com",
+          );
+        expect(tokenResponse.status).toBe("OK");
+
+        const verifyRes = await verifyEmailToken(
+          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+        );
+        expect(verifyRes.status).toBe(200);
+        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+
+        const linkedUser = await SuperTokens.getUser(
+          existingPasswordless.user.id,
+        );
+        expect(linkedUser?.isPrimaryUser).toBe(true);
+        expect(linkedUser?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email: "existing-primary@example.com",
+            }),
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: expect.objectContaining({ id: "guest" }),
+            }),
+          ]),
+        );
+
+        const metadata = await UserMetadata.getUserMetadata(
+          existingPasswordless.user.id,
+        );
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
+          [],
+        );
+      });
+
+      it("does not add a passwordless email method for users that already have real auth", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const thirdPartyUser = await createThirdPartySessionForUser(
+          "thirdparty-email-user@example.com",
+        );
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(thirdPartyUser.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: {
+                email: "thirdparty-updated@example.com",
+              },
+            }),
+          },
+        );
+
+        expect(res.status).toBe(200);
+
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            thirdPartyUser.recipeUserId,
+            "thirdparty-updated@example.com",
+          );
+        expect(tokenResponse.status).toBe("OK");
+
+        const verifyRes = await fetch(
+          `http://localhost:${testPORT}/auth/user/email/verify`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              method: "token",
+              token:
+                tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+            }),
+          },
+        );
+        expect(verifyRes.status).toBe(200);
+        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+
+        const updatedUser = await SuperTokens.getUser(thirdPartyUser.userId);
+        expect(
+          updatedUser?.loginMethods.some(
+            (method) =>
+              method.recipeId === "thirdparty" &&
+              method.thirdParty?.id === "google",
+          ),
+        ).toBe(true);
+        expect(
+          updatedUser?.loginMethods.some(
+            (method) =>
+              method.recipeId === "passwordless" &&
+              method.email === "thirdparty-updated@example.com",
+          ),
+        ).toBe(false);
+        expect(updatedUser?.loginMethods).toHaveLength(1);
+        expect(updatedUser?.isPrimaryUser).not.toBe(true);
+
+        const metadata = await UserMetadata.getUserMetadata(
+          thirdPartyUser.userId,
+        );
+        expect((metadata.metadata as any).original_rownd_user.data.email).toBe(
+          "thirdparty-updated@example.com",
+        );
+      });
+
+      it("keeps anonymous_id while marking linked passwordless users verified", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const guestSession = await createGuestSession("anonymous");
+        const passwordlessResult = await Passwordless.signInUp({
+          email: "linked@example.com",
+          tenantId: "public",
+        });
+
+        const primaryResult = await AccountLinking.createPrimaryUser(
+          passwordlessResult.recipeUserId,
+        );
+        expect(primaryResult.status).toBe("OK");
+        const linkResult = await AccountLinking.linkAccounts(
+          guestSession.recipeUserId,
+          passwordlessResult.user.id,
+          undefined,
+        );
+        expect(linkResult.status).toBe("OK");
+
+        await expect(
+          buildRowndSessionClaims(passwordlessResult.user.id),
+        ).resolves.toEqual({
+          auth_level: "verified",
+          anonymous_id: `anon_${passwordlessResult.user.id}`,
+        });
+      });
+
+      it("stores pending verification for a new email even if the current email is verified", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
         });
@@ -1587,10 +1878,6 @@ describe("rownd-nodejs plugin", () => {
           await createPasswordlessSessionForUser(
             "email-verified-current@example.com",
           );
-        const sendEmailSpy = vi.spyOn(
-          EmailVerification,
-          "sendEmailVerificationEmail",
-        );
 
         const res = await fetch(
           `http://localhost:${testPORT}/auth/plugin/rownd/user`,
@@ -1609,17 +1896,28 @@ describe("rownd-nodejs plugin", () => {
         );
 
         expect(res.status).toBe(200);
-        expect(sendEmailSpy).toHaveBeenCalledTimes(1);
-        const [tenantIdArg, userIdArg, recipeUserIdArg, emailArg, userContext] =
-          sendEmailSpy.mock.calls[0]!;
-        expect(tenantIdArg).toBe("public");
-        expect(userIdArg).toBe(userId);
-        expect(recipeUserIdArg.getAsString()).toBe(recipeUserId.getAsString());
-        expect(emailArg).toBe("email-new-target@example.com");
-        expect(userContext).toEqual(
+        const body = await res.json();
+        expect(body.data.email).toBe("email-verified-current@example.com");
+        expect(body.verified_data.email).toBe(
+          "email-verified-current@example.com",
+        );
+
+        const metadata = await UserMetadata.getUserMetadata(userId);
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual([
           expect.objectContaining({
-            rowndPendingVerificationId: expect.any(String),
+            field: "email",
+            value: "email-new-target@example.com",
           }),
+        ]);
+
+        const updatedUser = await SuperTokens.getUser(userId);
+        const passwordlessMethod = updatedUser?.loginMethods.find(
+          (method) =>
+            method.recipeId === "passwordless" &&
+            method.recipeUserId.getAsString() === recipeUserId.getAsString(),
+        );
+        expect(passwordlessMethod?.email).toBe(
+          "email-verified-current@example.com",
         );
       });
 
@@ -1633,19 +1931,39 @@ describe("rownd-nodejs plugin", () => {
           await createPasswordlessSessionForUser(
             "email-replace-pending@example.com",
           );
-        const revokeSpy = vi.spyOn(
-          EmailVerification,
-          "revokeEmailVerificationTokens",
+
+        const oldUpdateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: {
+                email: "old-pending-email@example.com",
+              },
+            }),
+          },
         );
+        expect(oldUpdateRes.status).toBe(200);
+
+        const oldTokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            recipeUserId,
+            "old-pending-email@example.com",
+          );
+        expect(oldTokenResponse.status).toBe("OK");
+
+        const initialMetadata = await UserMetadata.getUserMetadata(userId);
+        const [oldEmailVerification] = (initialMetadata.metadata as any)
+          .rownd_pending_verification;
 
         await UserMetadata.updateUserMetadata(userId, {
           rownd_pending_verification: [
-            {
-              id: "old-email-verification",
-              field: "email",
-              value: "old-pending-email@example.com",
-              created_at: "2026-01-01T00:00:00.000Z",
-            },
+            oldEmailVerification,
             {
               id: "future-phone-verification",
               field: "phone_number",
@@ -1672,12 +1990,12 @@ describe("rownd-nodejs plugin", () => {
         );
 
         expect(res.status).toBe(200);
-        expect(revokeSpy).toHaveBeenCalledTimes(1);
-        const [tenantIdArg, recipeUserIdArg, emailArg] =
-          revokeSpy.mock.calls[0]!;
-        expect(tenantIdArg).toBe("public");
-        expect(recipeUserIdArg.getAsString()).toBe(recipeUserId.getAsString());
-        expect(emailArg).toBe("old-pending-email@example.com");
+
+        const oldVerifyRes = await verifyEmailToken(
+          oldTokenResponse.status === "OK" ? oldTokenResponse.token : "unused",
+        );
+        const oldVerifyBody = await oldVerifyRes.json();
+        expect(oldVerifyBody.status).not.toBe("OK");
 
         const metadata = await UserMetadata.getUserMetadata(userId);
         expect((metadata.metadata as any).rownd_pending_verification).toEqual([
@@ -1694,7 +2012,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("preserves metadata structure after update", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const accessToken = await createSessionForUser(
@@ -1745,7 +2063,7 @@ describe("rownd-nodejs plugin", () => {
 
     describe("DELETE /user", () => {
       it("deletes the compatibility user", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const accessToken = await createSessionForUser("compat-user-5");
@@ -1766,7 +2084,7 @@ describe("rownd-nodejs plugin", () => {
 
     describe("GET /user/meta", () => {
       it("gets compatibility user meta", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const accessToken = await createSessionForUser("compat-user-3");
@@ -1787,7 +2105,7 @@ describe("rownd-nodejs plugin", () => {
 
     describe("PUT /user/meta", () => {
       it("updates compatibility user meta", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const accessToken = await createSessionForUser("compat-user-3-put");
@@ -1839,7 +2157,7 @@ describe("rownd-nodejs plugin", () => {
 
     describe("GET /user/field", () => {
       it("gets compatibility user fields", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const accessToken = await createSessionForUser("compat-user-4-get");
@@ -1870,7 +2188,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("returns 400 when field is missing", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const accessToken = await createSessionForUser(
@@ -1893,7 +2211,7 @@ describe("rownd-nodejs plugin", () => {
 
     describe("PUT /user/field", () => {
       it("updates compatibility user fields", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const accessToken = await createSessionForUser("compat-user-4");
@@ -1919,7 +2237,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("rejects updates to unknown or app-owned fields", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const accessToken = await createSessionForUser(
@@ -1985,7 +2303,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("returns 400 when field is missing", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         const accessToken = await createSessionForUser(
@@ -2080,6 +2398,98 @@ describe("rownd-nodejs plugin", () => {
         accessToken: session.getAccessToken(),
         userId: user.id,
         recipeUserId: recipeUserId!,
+      };
+    }
+
+    async function createGuestSession(
+      authLevel: "guest" | "anonymous" = "guest",
+    ) {
+      const res = await fetch(
+        `http://localhost:${testPORT}/auth/plugin/rownd/guest`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            rid: "session",
+            "fdi-version": "1.18",
+          },
+          body: JSON.stringify({ auth_level: authLevel }),
+        },
+      );
+
+      expect(res.status).toBe(200);
+      const accessToken = res.headers.get("st-access-token");
+      expect(accessToken).toBeTruthy();
+
+      const session = await Session.getSessionWithoutRequestResponse(
+        accessToken!,
+      );
+      expect(session).toBeDefined();
+
+      const accessTokenPayload = session!.getAccessTokenPayload();
+      return {
+        accessToken: accessToken!,
+        userId: accessTokenPayload["app_user_id"] as string,
+        recipeUserId: session!.getRecipeUserId(),
+      };
+    }
+
+    async function verifyEmailToken(token: string) {
+      return fetch(`http://localhost:${testPORT}/auth/user/email/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          method: "token",
+          token,
+        }),
+      });
+    }
+
+    async function createThirdPartySessionForUser(email: string) {
+      const signInUpResponse = await ThirdParty.manuallyCreateOrUpdateUser(
+        "public",
+        "google",
+        `google-${randomUUID()}`,
+        email,
+        true,
+      );
+      expect(signInUpResponse.status).toBe("OK");
+      if (signInUpResponse.status !== "OK") {
+        throw new Error("failed to create thirdparty user");
+      }
+
+      const user = signInUpResponse.user;
+      await UserMetadata.updateUserMetadata(user.id, {
+        created: "2026-01-01T00:00:00.000Z",
+        original_rownd_user: {
+          state: "enabled",
+          auth_level: "verified",
+          data: {
+            user_id: user.id,
+            email,
+          },
+          verified_data: {
+            email,
+          },
+          attributes: {},
+          meta: {
+            created: "2026-01-01T00:00:00.000Z",
+          },
+        },
+      });
+
+      const session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        signInUpResponse.recipeUserId,
+        {},
+        {},
+        true,
+      );
+
+      return {
+        accessToken: session.getAccessToken(),
+        userId: user.id,
+        recipeUserId: signInUpResponse.recipeUserId,
       };
     }
 

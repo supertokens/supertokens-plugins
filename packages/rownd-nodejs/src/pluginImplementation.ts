@@ -1,6 +1,8 @@
 import { randomUUID } from "crypto";
 import SuperTokens from "supertokens-node";
+import AccountLinking from "supertokens-node/recipe/accountlinking";
 import EmailVerification from "supertokens-node/recipe/emailverification";
+import Passwordless from "supertokens-node/recipe/passwordless";
 import Session from "supertokens-node/recipe/session";
 import { BooleanClaim } from "supertokens-node/recipe/session/claims";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
@@ -727,9 +729,42 @@ export const RowndIsAnonymousClaim = new BooleanClaim({
   key: "is_anonymous",
   fetchValue: async (userId) => {
     const user = await SuperTokens.getUser(userId);
-    return isAnonymousOrGuestUser(user);
+    const effectiveAuthLevel = getEffectiveAuthLevel(user);
+    return effectiveAuthLevel === GUEST_AUTH_METHOD_ID;
   },
 });
+
+export async function buildRowndSessionClaims(userId: string) {
+  const user = await SuperTokens.getUser(userId);
+
+  return {
+    auth_level: getEffectiveAuthLevel(user),
+    ...(hasAnonymousLoginMethod(user)
+      ? { anonymous_id: `anon_${userId}` }
+      : {}),
+  };
+}
+
+export function shouldLinkRowndAccounts(
+  input: Parameters<
+    NonNullable<
+      NonNullable<
+        Parameters<typeof AccountLinking.init>[0]
+      >["shouldDoAutomaticAccountLinking"]
+    >
+  >,
+) {
+  const [, , session] = input;
+
+  if (!session) {
+    return undefined;
+  }
+
+  return {
+    shouldAutomaticallyLink: true,
+    shouldRequireVerification: false,
+  };
+}
 
 export type RowndVerifiableField = string;
 
@@ -870,10 +905,15 @@ export async function getUserById(
     verifiedData.phone_number = data.phone_number;
   }
 
-  const authLevel =
-    getGuestAuthLevel(stUser) ||
-    originalRowndUser?.auth_level ||
-    (Object.keys(verifiedData).length > 0 ? "verified" : "unverified");
+  if (hasAnonymousLoginMethod(stUser)) {
+    data.anonymous_id = `anon_${stUser.id}`;
+  }
+
+  const authLevel = getEffectiveAuthLevel(
+    stUser,
+    originalRowndUser?.auth_level,
+    verifiedData,
+  );
 
   for (const [key, field] of Object.entries(schema)) {
     if (data[key] === undefined && field.type === "string") {
@@ -1014,7 +1054,7 @@ export async function startPendingEmailVerification(input: {
 }
 
 export async function completePendingEmailVerification(input: {
-  recipeUserId: { getAsString: () => string };
+  recipeUserId: Parameters<typeof AccountLinking.createPrimaryUser>[0];
   email: string;
   userContext?: JsonRecord;
 }) {
@@ -1033,6 +1073,72 @@ export async function completePendingEmailVerification(input: {
 
   if (!pendingVerification) {
     return;
+  }
+
+  let metadataUserId = userId;
+  const passwordlessEmailMethod = getPasswordlessEmailLoginMethod(user);
+  if (passwordlessEmailMethod) {
+    const updateResult = await Passwordless.updateUser({
+      recipeUserId: passwordlessEmailMethod.recipeUserId,
+      email: input.email,
+      userContext: input.userContext,
+    });
+
+    if (updateResult.status !== "OK") {
+      throw new Error(
+        `Failed to update verified email method: ${updateResult.status}`,
+      );
+    }
+  } else if (hasOnlyGuestLoginMethods(user)) {
+    const isPasswordlessSignUpAllowed = await AccountLinking.isSignUpAllowed(
+      PUBLIC_TENANT_ID,
+      {
+        recipeId: "passwordless",
+        email: input.email,
+      },
+      true,
+      undefined,
+      input.userContext,
+    );
+
+    if (!isPasswordlessSignUpAllowed) {
+      throw new Error("Passwordless sign up is not allowed for this email");
+    }
+
+    const passwordlessUser = await Passwordless.signInUp({
+      email: input.email,
+      tenantId: PUBLIC_TENANT_ID,
+      userContext: input.userContext,
+    });
+
+    const primaryUserResult = await AccountLinking.createPrimaryUser(
+      passwordlessUser.recipeUserId,
+      input.userContext,
+    );
+
+    const primaryUserId =
+      primaryUserResult.status === "OK"
+        ? primaryUserResult.user.id
+        : primaryUserResult.status ===
+            "RECIPE_USER_ID_ALREADY_LINKED_WITH_PRIMARY_USER_ID_ERROR"
+          ? primaryUserResult.primaryUserId
+          : passwordlessUser.user.id;
+
+    if (userId !== primaryUserId) {
+      const linkResult = await AccountLinking.linkAccounts(
+        input.recipeUserId,
+        primaryUserId,
+        input.userContext,
+      );
+
+      if (linkResult.status !== "OK") {
+        throw new Error(
+          `Failed to link verified email method: ${linkResult.status}`,
+        );
+      }
+    }
+
+    metadataUserId = primaryUserId;
   }
 
   const updatedMetadata: RowndMetadata = {
@@ -1057,7 +1163,7 @@ export async function completePendingEmailVerification(input: {
     ),
   };
 
-  await UserMetadata.updateUserMetadata(userId, updatedMetadata);
+  await UserMetadata.updateUserMetadata(metadataUserId, updatedMetadata);
 }
 
 export async function updateUserMetadata(
@@ -1108,22 +1214,89 @@ function getThirdPartyUserId(method: RowndLoginMethod) {
 function getGuestAuthLevel(
   user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
 ) {
-  const method = user?.loginMethods.find((loginMethod: RowndLoginMethod) => {
-    const thirdPartyId = getThirdPartyId(loginMethod);
-    return (
-      loginMethod.recipeId === "thirdparty" &&
-      (thirdPartyId === GUEST_AUTH_METHOD_ID ||
-        thirdPartyId === ANONYMOUS_AUTH_METHOD_ID)
-    );
-  }) as RowndLoginMethod | undefined;
+  const guestMethod = user?.loginMethods.find(isGuestLoginMethod) as
+    | RowndLoginMethod
+    | undefined;
 
-  return method ? getThirdPartyId(method) : undefined;
+  return guestMethod ? GUEST_AUTH_METHOD_ID : undefined;
 }
 
-function isAnonymousOrGuestUser(
+function hasAnonymousLoginMethod(
   user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
 ) {
-  return getGuestAuthLevel(user) !== undefined;
+  return !!user?.loginMethods.some((loginMethod: RowndLoginMethod) => {
+    return (
+      loginMethod.recipeId === "thirdparty" &&
+      getThirdPartyId(loginMethod) === ANONYMOUS_AUTH_METHOD_ID
+    );
+  });
+}
+
+function getPasswordlessEmailLoginMethod(
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+) {
+  return user?.loginMethods.find((method) => {
+    return method.recipeId === "passwordless" && !!method.email;
+  });
+}
+
+function hasOnlyGuestLoginMethods(
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+) {
+  return (
+    !!user?.loginMethods.length && user.loginMethods.every(isGuestLoginMethod)
+  );
+}
+
+function isGuestLoginMethod(method: RowndLoginMethod) {
+  const thirdPartyId = getThirdPartyId(method);
+  return (
+    method.recipeId === "thirdparty" &&
+    (thirdPartyId === GUEST_AUTH_METHOD_ID ||
+      thirdPartyId === ANONYMOUS_AUTH_METHOD_ID)
+  );
+}
+
+function hasVerifiedRealLoginMethod(
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+) {
+  return !!user?.loginMethods.some((method: RowndLoginMethod) => {
+    if (isGuestLoginMethod(method)) {
+      return false;
+    }
+
+    if (method.recipeId === "passwordless") {
+      return !!(method.email || method.phoneNumber);
+    }
+
+    if (method.recipeId === "thirdparty") {
+      return !!getThirdPartyUserId(method) && method.verified === true;
+    }
+
+    if (method.recipeId === "emailpassword") {
+      return !!method.email && method.verified === true;
+    }
+
+    return method.verified === true;
+  });
+}
+
+export function getEffectiveAuthLevel(
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+  originalAuthLevel?: string,
+  verifiedData?: JsonRecord,
+) {
+  if (hasVerifiedRealLoginMethod(user)) {
+    return "verified";
+  }
+
+  return (
+    getGuestAuthLevel(user) ||
+    originalAuthLevel ||
+    (verifiedData && Object.keys(verifiedData).length > 0
+      ? "verified"
+      : "unverified")
+  );
 }
 
 export function canUpdateUserDataField(field: string) {
