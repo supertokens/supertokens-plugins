@@ -140,17 +140,89 @@ describe("rownd-nodejs plugin", () => {
   });
 
   describe("shouldLinkRowndAccounts", () => {
-    it("only enables account linking when SuperTokens provides a session", () => {
-      expect(
+    it("does not enable account linking without a session", async () => {
+      await expect(
         shouldLinkRowndAccounts([undefined, undefined, undefined] as any),
-      ).toBeUndefined();
+      ).resolves.toBeUndefined();
+    });
 
-      expect(
-        shouldLinkRowndAccounts([undefined, undefined, {}] as any),
-      ).toEqual({
+    it("links guest users without requiring verification", async () => {
+      const { server: s, port } = await setup(coreConnectionURI);
+      server = s;
+      testPORT = port;
+      const guestUser = await ThirdParty.manuallyCreateOrUpdateUser(
+        "public",
+        "guest",
+        "guest-link-user",
+        "guest-link-user@anonymous.local",
+        false,
+      );
+      expect(guestUser.status).toBe("OK");
+      if (guestUser.status !== "OK") {
+        throw new Error("failed to create guest user");
+      }
+      const session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        guestUser.recipeUserId,
+        {},
+        {},
+        true,
+      );
+
+      await expect(
+        shouldLinkRowndAccounts([
+          { recipeId: "passwordless", email: "guest-upgrade@example.com" },
+          undefined,
+          session,
+        ] as any),
+      ).resolves.toEqual({
         shouldAutomaticallyLink: true,
         shouldRequireVerification: false,
       });
+    });
+
+    it("links real auth methods only when authentication identity matches", async () => {
+      const { server: s, port } = await setup(coreConnectionURI);
+      server = s;
+      testPORT = port;
+      const passwordlessUser = await Passwordless.signInUp({
+        tenantId: "public",
+        email: "link-target@example.com",
+      });
+      const session = await Session.createNewSessionWithoutRequestResponse(
+        "public",
+        passwordlessUser.recipeUserId,
+        {},
+        {},
+        true,
+      );
+
+      await expect(
+        shouldLinkRowndAccounts([
+          {
+            recipeId: "thirdparty",
+            email: "link-target@example.com",
+            thirdParty: { id: "google", userId: "google-link-target" },
+          },
+          undefined,
+          session,
+        ] as any),
+      ).resolves.toEqual({
+        shouldAutomaticallyLink: true,
+        shouldRequireVerification: true,
+      });
+
+      await expect(
+        shouldLinkRowndAccounts([
+          {
+            recipeId: "thirdparty",
+            email: "attacker@example.com",
+            thirdParty: { id: "google", userId: "google-attacker" },
+          },
+          undefined,
+          session,
+        ] as any),
+      ).resolves.toBeUndefined();
     });
   });
 
@@ -2146,6 +2218,43 @@ describe("rownd-nodejs plugin", () => {
         });
       });
 
+      it("rejects updates to internal metadata fields", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser("compat-user-meta-safe");
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/meta`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              meta: {
+                original_rownd_user: { data: { user_id: "attacker" } },
+              },
+            }),
+          },
+        );
+
+        expect(updateRes.status).toBe(403);
+        await expect(updateRes.json()).resolves.toEqual({
+          status: "ERROR",
+          code: 403,
+          message: "field is not writable: original_rownd_user",
+        });
+
+        const metadata = await UserMetadata.getUserMetadata(
+          "compat-user-meta-safe",
+        );
+        expect((metadata.metadata as any).original_rownd_user.data.user_id).toBe(
+          "compat-user-meta-safe",
+        );
+      });
+
       it("rejects without session", async () => {
         const { server: s, port } = await setup(coreConnectionURI);
         server = s;
@@ -2193,6 +2302,51 @@ describe("rownd-nodejs plugin", () => {
         await expect(getRes.json()).resolves.toEqual({
           status: "OK",
           value: "Lovelace",
+        });
+      });
+
+      it("returns auth-derived identity fields instead of metadata values", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          schema: {
+            ...DEFAULT_ROWND_SCHEMA,
+            email: {
+              display_name: "Email",
+              type: "string",
+              user_visible: true,
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+        const { accessToken, userId } = await createPasswordlessSessionForUser(
+          "auth-email@example.com",
+        );
+
+        await UserMetadata.updateUserMetadata(userId, {
+          email: "metadata-email@example.com",
+          original_rownd_user: {
+            state: "enabled",
+            auth_level: "verified",
+            data: {
+              user_id: userId,
+              email: "original-rownd-email@example.com",
+            },
+            verified_data: {},
+            attributes: {},
+            meta: {},
+          },
+        });
+
+        const getRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/field?field=email`,
+          {
+            headers: getAuthedHeaders(accessToken),
+          },
+        );
+        expect(getRes.status).toBe(200);
+        await expect(getRes.json()).resolves.toEqual({
+          status: "OK",
+          value: "auth-email@example.com",
         });
       });
 

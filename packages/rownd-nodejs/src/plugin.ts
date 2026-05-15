@@ -158,9 +158,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                          originalImplementation,
-                          builder,
-                        )
+                        originalImplementation,
+                        builder,
+                      )
                       : originalImplementation;
 
                     return {
@@ -170,9 +170,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                           ...input,
                           urlWithLinkCode: input.urlWithLinkCode
                             ? rewriteLinkPath(
-                                input.urlWithLinkCode,
-                                "account/login",
-                              )
+                              input.urlWithLinkCode,
+                              "account/login",
+                            )
                             : input.urlWithLinkCode,
                         });
                       },
@@ -191,7 +191,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               return {
                 ...config,
                 shouldDoAutomaticAccountLinking: async (...input) => {
-                  const rowndLinkingDecision = shouldLinkRowndAccounts(input);
+                  const rowndLinkingDecision =
+                    await shouldLinkRowndAccounts(input);
                   if (rowndLinkingDecision) {
                     return rowndLinkingDecision;
                   }
@@ -242,9 +243,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                          originalImplementation,
-                          builder,
-                        )
+                        originalImplementation,
+                        builder,
+                      )
                       : originalImplementation;
 
                     return {

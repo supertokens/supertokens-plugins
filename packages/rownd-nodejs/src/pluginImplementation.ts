@@ -402,6 +402,18 @@ export function handleUpdateUserMeta() {
   ) => {
     const session = requireSession(maybeSession);
     const payload = parseUpdateMetaBody(await getJsonBody(req));
+    const internalField = Object.keys(payload.meta ?? {}).find(
+      isInternalMetadataField,
+    );
+
+    if (internalField) {
+      return {
+        status: "ERROR" as const,
+        code: 403,
+        message: `field is not writable: ${internalField}`,
+      };
+    }
+
     return {
       status: "OK" as const,
       ...(await updateUserMetadata(session.getUserId(), payload.meta ?? {})),
@@ -421,10 +433,10 @@ export function handleGetUserField() {
       return missingFieldResponse();
     }
 
-    const metadata = await getUserMetadata(session.getUserId());
+    const user = await getUserById(session.getUserId());
     return {
       status: "OK" as const,
-      value: metadata[field],
+      value: user.data[field],
     };
   };
 }
@@ -770,7 +782,7 @@ export async function buildRowndSessionClaims(userId: string) {
   };
 }
 
-export function shouldLinkRowndAccounts(
+export async function shouldLinkRowndAccounts(
   input: Parameters<
     NonNullable<
       NonNullable<
@@ -779,16 +791,33 @@ export function shouldLinkRowndAccounts(
     >
   >,
 ) {
-  const [, , session] = input;
+  const [newAccountInfo, , session] = input;
 
   if (!session) {
     return undefined;
   }
 
-  return {
-    shouldAutomaticallyLink: true,
-    shouldRequireVerification: false,
-  };
+  const currentUser = await SuperTokens.getUser(session.getUserId());
+
+  if (hasOnlyGuestLoginMethods(currentUser)) {
+    return {
+      shouldAutomaticallyLink: true,
+      shouldRequireVerification: false,
+    };
+  }
+
+  if (!currentUser || isGuestAccountInfo(newAccountInfo)) {
+    return undefined;
+  }
+
+  if (doesAccountInfoMatchAuthMethod(currentUser, newAccountInfo)) {
+    return {
+      shouldAutomaticallyLink: true,
+      shouldRequireVerification: true,
+    };
+  }
+
+  return undefined;
 }
 
 export type RowndVerifiableField = string;
@@ -870,7 +899,11 @@ export async function getUserById(
   const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;
   for (const key of Object.keys(schema)) {
     dataFieldKeys.add(key);
-    if (!isInternalMetadataField(key) && metadata[key] !== undefined) {
+    if (
+      !isInternalMetadataField(key) &&
+      !isIdentityField(key) &&
+      metadata[key] !== undefined
+    ) {
       data[key] = metadata[key];
     }
   }
@@ -1170,18 +1203,18 @@ export async function completePendingEmailVerification(input: {
     ...metadata,
     ...(metadata.original_rownd_user
       ? {
-          original_rownd_user: {
-            ...metadata.original_rownd_user,
-            data: {
-              ...metadata.original_rownd_user.data,
-              email: input.email,
-            },
-            verified_data: {
-              ...metadata.original_rownd_user.verified_data,
-              email: input.email,
-            },
+        original_rownd_user: {
+          ...metadata.original_rownd_user,
+          data: {
+            ...metadata.original_rownd_user.data,
+            email: input.email,
           },
-        }
+          verified_data: {
+            ...metadata.original_rownd_user.verified_data,
+            email: input.email,
+          },
+        },
+      }
       : {}),
     rownd_pending_verification: pendingVerifications.filter(
       (verification) => verification !== pendingVerification,
@@ -1280,6 +1313,53 @@ function isGuestLoginMethod(method: RowndLoginMethod) {
     (thirdPartyId === GUEST_AUTH_METHOD_ID ||
       thirdPartyId === ANONYMOUS_AUTH_METHOD_ID)
   );
+}
+
+function isGuestAccountInfo(input?: {
+  recipeId: string;
+  thirdParty?: { id: string };
+}) {
+  return (
+    input?.recipeId === "thirdparty" &&
+    (input.thirdParty?.id === GUEST_AUTH_METHOD_ID ||
+      input.thirdParty?.id === ANONYMOUS_AUTH_METHOD_ID)
+  );
+}
+
+function doesAccountInfoMatchAuthMethod(
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+  accountInfo: {
+    recipeId: string;
+    email?: string;
+    phoneNumber?: string;
+    thirdParty?: { id: string; userId: string };
+  },
+) {
+  if (!user) {
+    return false;
+  }
+
+  const normalizedEmail = accountInfo.email?.toLowerCase();
+  if (normalizedEmail) {
+    return user.loginMethods.some((method: RowndLoginMethod) => {
+      if (isGuestLoginMethod(method) || !method.email) {
+        return false;
+      }
+
+      return method.email.toLowerCase() === normalizedEmail;
+    });
+  }
+
+  if (accountInfo.phoneNumber) {
+    return user.loginMethods.some((method: RowndLoginMethod) => {
+      return (
+        !isGuestLoginMethod(method) &&
+        method.phoneNumber === accountInfo.phoneNumber
+      );
+    });
+  }
+
+  return false;
 }
 
 function hasVerifiedRealLoginMethod(
@@ -1386,15 +1466,15 @@ function buildSignInMethodsConfig(
       .map(([key, val]) => {
         return val
           ? [
-              key,
-              {
-                enabled: true,
-                display_name:
+            key,
+            {
+              enabled: true,
+              display_name:
                   getStringMethodProperty(val, "displayName") ?? key,
-                icon_light_url: getStringMethodProperty(val, "iconLightUrl"),
-                icon_dark_url: getStringMethodProperty(val, "iconDarkUrl"),
-              },
-            ]
+              icon_light_url: getStringMethodProperty(val, "iconLightUrl"),
+              icon_dark_url: getStringMethodProperty(val, "iconDarkUrl"),
+            },
+          ]
           : [key, undefined];
       })
       .filter(([, v]) => v !== undefined),
@@ -1432,27 +1512,27 @@ function buildSignInMethodsConfig(
       enabled: !!anonymousMethod,
       ...(getStringMethodProperty(anonymousMethod, "displayName") !== undefined
         ? {
-            display_name: getStringMethodProperty(
-              anonymousMethod,
-              "displayName",
-            ),
-          }
+          display_name: getStringMethodProperty(
+            anonymousMethod,
+            "displayName",
+          ),
+        }
         : {}),
       ...(getStringMethodProperty(anonymousMethod, "iconLightUrl") !== undefined
         ? {
-            icon_light_url: getStringMethodProperty(
-              anonymousMethod,
-              "iconLightUrl",
-            ),
-          }
+          icon_light_url: getStringMethodProperty(
+            anonymousMethod,
+            "iconLightUrl",
+          ),
+        }
         : {}),
       ...(getStringMethodProperty(anonymousMethod, "iconDarkUrl") !== undefined
         ? {
-            icon_dark_url: getStringMethodProperty(
-              anonymousMethod,
-              "iconDarkUrl",
-            ),
-          }
+          icon_dark_url: getStringMethodProperty(
+            anonymousMethod,
+            "iconDarkUrl",
+          ),
+        }
         : {}),
     },
     ...customProviders,
@@ -1632,50 +1712,50 @@ export function buildAppConfig(
         custom_content: {
           ...(app.customContent?.signInModal
             ? {
-                sign_in_modal: {
-                  ...(app.customContent.signInModal.title
-                    ? { title: app.customContent.signInModal.title }
-                    : {}),
-                  ...(app.customContent.signInModal.subtitle
-                    ? { subtitle: app.customContent.signInModal.subtitle }
-                    : {}),
-                  ...(app.customContent.signInModal.signInTitle
-                    ? {
-                        sign_in_title:
+              sign_in_modal: {
+                ...(app.customContent.signInModal.title
+                  ? { title: app.customContent.signInModal.title }
+                  : {}),
+                ...(app.customContent.signInModal.subtitle
+                  ? { subtitle: app.customContent.signInModal.subtitle }
+                  : {}),
+                ...(app.customContent.signInModal.signInTitle
+                  ? {
+                    sign_in_title:
                           app.customContent.signInModal.signInTitle,
-                      }
-                    : {}),
-                  ...(app.customContent.signInModal.signUpTitle
-                    ? {
-                        sign_up_title:
+                  }
+                  : {}),
+                ...(app.customContent.signInModal.signUpTitle
+                  ? {
+                    sign_up_title:
                           app.customContent.signInModal.signUpTitle,
-                      }
-                    : {}),
-                  ...(app.customContent.signInModal.signInSubtitle
-                    ? {
-                        sign_in_subtitle:
+                  }
+                  : {}),
+                ...(app.customContent.signInModal.signInSubtitle
+                  ? {
+                    sign_in_subtitle:
                           app.customContent.signInModal.signInSubtitle,
-                      }
-                    : {}),
-                  ...(app.customContent.signInModal.signUpSubtitle
-                    ? {
-                        sign_up_subtitle:
+                  }
+                  : {}),
+                ...(app.customContent.signInModal.signUpSubtitle
+                  ? {
+                    sign_up_subtitle:
                           app.customContent.signInModal.signUpSubtitle,
-                      }
-                    : {}),
-                },
-              }
+                  }
+                  : {}),
+              },
+            }
             : {}),
           ...(app.customContent?.profileModal
             ? { profile_modal: app.customContent.profileModal }
             : {}),
           ...(app.customContent?.signInFailureModal
             ? {
-                sign_in_failure_modal: {
-                  failure_message:
+              sign_in_failure_modal: {
+                failure_message:
                     app.customContent.signInFailureModal.failureMessage,
-                },
-              }
+              },
+            }
             : {}),
         },
         profile: {
