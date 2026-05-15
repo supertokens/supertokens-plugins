@@ -40,6 +40,31 @@ type JsonRecord = JSONObject;
 type JsonValue = JsonRecord[string];
 type TelemetryClient = ReturnType<typeof createClient>;
 
+export function rewriteLinkPath(
+  inputUrl: string,
+  targetPath: string,
+  searchParams?: Record<string, string>,
+) {
+  try {
+    const url = new URL(inputUrl);
+    url.pathname = `/${targetPath.replace(/^\//, "")}`;
+    for (const [key, value] of Object.entries(searchParams ?? {})) {
+      url.searchParams.set(key, value);
+    }
+    return url.toString();
+  } catch {
+    const [path = inputUrl, query = ""] = inputUrl
+      .replace(/auth\/verify[^?]*/, targetPath)
+      .split("?");
+    const params = new URLSearchParams(query);
+    for (const [key, value] of Object.entries(searchParams ?? {})) {
+      params.set(key, value);
+    }
+    const queryString = params.toString();
+    return queryString ? `${path}?${queryString}` : path;
+  }
+}
+
 export type RowndRouteHandlerDeps = {
   pluginConfig: RowndPluginNormalisedConfig;
   stConfig: SuperTokensPublicConfig;

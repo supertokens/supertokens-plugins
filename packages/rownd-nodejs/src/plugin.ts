@@ -25,6 +25,7 @@ import {
   handleUpdateUserField,
   handleUpdateUserMeta,
   shouldLinkRowndAccounts,
+  rewriteLinkPath,
 } from "./pluginImplementation";
 
 export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
@@ -147,21 +148,36 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         overrideMap: {
           passwordless: {
             config: (config) => {
+              const originalEmailDeliveryOverride =
+                config.emailDelivery?.override;
+
               return {
                 ...config,
                 emailDelivery: {
-                  override: (originalImplementation) => ({
-                    ...originalImplementation,
-                    sendEmail: async function (input) {
-                      return originalImplementation.sendEmail({
-                        ...input,
-                        urlWithLinkCode: input.urlWithLinkCode?.replace(
-                          "auth/verify",
-                          "account/login",
-                        ),
-                      });
-                    },
-                  }),
+                  ...config.emailDelivery,
+                  override: (originalImplementation, builder) => {
+                    const implementation = originalEmailDeliveryOverride
+                      ? originalEmailDeliveryOverride(
+                          originalImplementation,
+                          builder,
+                        )
+                      : originalImplementation;
+
+                    return {
+                      ...implementation,
+                      sendEmail: async function (input) {
+                        return implementation.sendEmail({
+                          ...input,
+                          urlWithLinkCode: input.urlWithLinkCode
+                            ? rewriteLinkPath(
+                                input.urlWithLinkCode,
+                                "account/login",
+                              )
+                            : input.urlWithLinkCode,
+                        });
+                      },
+                    };
+                  },
                 },
               };
             },
@@ -215,6 +231,38 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           },
           emailverification: {
             recipeInitRequired: true,
+            config: (config) => {
+              const originalEmailDeliveryOverride =
+                config.emailDelivery?.override;
+
+              return {
+                ...config,
+                emailDelivery: {
+                  ...config.emailDelivery,
+                  override: (originalImplementation, builder) => {
+                    const implementation = originalEmailDeliveryOverride
+                      ? originalEmailDeliveryOverride(
+                          originalImplementation,
+                          builder,
+                        )
+                      : originalImplementation;
+
+                    return {
+                      ...implementation,
+                      sendEmail: async (input) => {
+                        return implementation.sendEmail({
+                          ...input,
+                          emailVerifyLink: rewriteLinkPath(
+                            input.emailVerifyLink,
+                            "account/verify-email",
+                          ),
+                        });
+                      },
+                    };
+                  },
+                },
+              };
+            },
             apis: (originalImplementation: EmailVerificationAPIInterface) => ({
               ...originalImplementation,
               verifyEmailPOST: async (

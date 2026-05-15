@@ -39,7 +39,8 @@ import { Network, StartedNetwork } from "testcontainers";
 
 import { init } from "./plugin";
 import { RowndPluginConfig, RowndTelemetryClient } from "./types";
-import { ROWND_PLUGIN_ERROR_MESSAGES, DEFAULT_ROWND_SCHEMA } from "./errors";
+import { ROWND_PLUGIN_ERROR_MESSAGES } from "./errors";
+import { DEFAULT_ROWND_SCHEMA } from "./constants";
 import {
   mapRowndUserToSuperTokens,
   DEFAULT_PRIMARY_COLOR,
@@ -1868,8 +1869,10 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("stores pending verification for a new email even if the current email is verified", async () => {
+        const emailVerificationLinks: string[] = [];
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
+          emailVerificationLinks,
         });
         server = s;
         testPORT = port;
@@ -1896,6 +1899,12 @@ describe("rownd-nodejs plugin", () => {
         );
 
         expect(res.status).toBe(200);
+        expect(emailVerificationLinks).toHaveLength(1);
+        const verificationUrl = new URL(emailVerificationLinks[0]);
+        expect(verificationUrl.pathname).toBe("/account/verify-email");
+        expect(verificationUrl.searchParams.get("token")).toBeTruthy();
+        expect(verificationUrl.searchParams.get("tenantId")).toBe("public");
+
         const body = await res.json();
         expect(body.data.email).toBe("email-verified-current@example.com");
         expect(body.verified_data.email).toBe(
@@ -2538,6 +2547,7 @@ async function setup(
   config?: Partial<RowndPluginConfig>,
   options?: {
     enableEmailVerification?: boolean;
+    emailVerificationLinks?: string[];
   },
 ): Promise<{ server: Server; port: number }> {
   const app = express();
@@ -2576,7 +2586,11 @@ async function setup(
                   emailDelivery: {
                     override: (originalImplementation) => ({
                       ...originalImplementation,
-                      sendEmail: async () => {},
+                      sendEmail: async (input) => {
+                        options?.emailVerificationLinks?.push(
+                          input.emailVerifyLink,
+                        );
+                      },
                     }),
                   },
                 }),

@@ -9,7 +9,11 @@ import Session from "supertokens-node/recipe/session";
 import { verifySession } from "supertokens-node/recipe/session/framework/express";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
-import { errorHandler, middleware, type SessionRequest } from "supertokens-node/framework/express";
+import {
+  errorHandler,
+  middleware,
+  type SessionRequest,
+} from "supertokens-node/framework/express";
 import RowndMigrationPlugin from "@supertokens-plugins/rownd-nodejs";
 
 const port = Number(process.env.PORT ?? 3001);
@@ -41,20 +45,18 @@ SuperTokens.init({
     apiBasePath,
   },
   recipeList: [
-    AccountLinking.init({
-      shouldDoAutomaticAccountLinking: async () => ({
-        shouldAutomaticallyLink: true,
-        shouldRequireVerification: true,
-      }),
-    }),
+    AccountLinking.init({}),
     Session.init(),
     UserMetadata.init(),
     Passwordless.init({
-      contactMethod: "EMAIL_OR_PHONE",
+      contactMethod: "EMAIL",
       flowType: "MAGIC_LINK",
     }),
     EmailVerification.init({
-      mode: process.env.EMAIL_VERIFICATION_MODE === "REQUIRED" ? "REQUIRED" : "OPTIONAL",
+      mode:
+        process.env.EMAIL_VERIFICATION_MODE === "REQUIRED"
+          ? "REQUIRED"
+          : "OPTIONAL",
     }),
     ThirdParty.init({
       signInAndUpFeature: {
