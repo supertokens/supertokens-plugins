@@ -145,6 +145,27 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           };
         },
         overrideMap: {
+          passwordless: {
+            config: (config) => {
+              return {
+                ...config,
+                emailDelivery: {
+                  override: (originalImplementation) => ({
+                    ...originalImplementation,
+                    sendEmail: async function (input) {
+                      return originalImplementation.sendEmail({
+                        ...input,
+                        urlWithLinkCode: input.urlWithLinkCode?.replace(
+                          "auth/verify",
+                          "account/login",
+                        ),
+                      });
+                    },
+                  }),
+                },
+              };
+            },
+          },
           accountlinking: {
             recipeInitRequired: true,
             config: (config) => {
