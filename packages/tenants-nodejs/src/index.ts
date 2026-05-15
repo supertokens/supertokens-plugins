@@ -11,6 +11,7 @@ export type {
   SendPluginEmail,
   GetUserIdsInTenantWithRole,
   GetAppUrl,
+  AssignRoleToUserInTenant,
 } from "./types";
 
 // Export email services for user configuration
