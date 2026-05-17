@@ -9,9 +9,9 @@
     "directory": "packages/profile-details-nodejs"
   },
   "scripts": {
-    "build": "vite build && npm run pretty",
-    "pretty": "npx pretty-quick .",
-    "pretty-check": "npx pretty-quick --check .",
+    "build": "vite build",
+    "pretty": "prettier --write .",
+    "pretty-check": "prettier --check .",
     "test": "TEST_MODE=testing vitest run --pool=forks"
   },
   "keywords": [
@@ -30,7 +30,6 @@
     "@supertokens-plugins/profile-details-shared": "*",
     "express": "^5.1.0",
     "prettier": "3.6.2",
-    "pretty-quick": "^3.1.1",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   },
