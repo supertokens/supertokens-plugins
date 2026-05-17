@@ -70,7 +70,8 @@ export async function getEmailFromSession(
 
   const authMethod = loginMethods.find(
     (method: any) =>
-      (method.recipeId === "passwordless" && typeof method.email === "string") ||
+      (method.recipeId === "passwordless" &&
+        typeof method.email === "string") ||
       (method.recipeId === "thirdparty" &&
         method.verified === true &&
         typeof method.email === "string"),
@@ -100,10 +101,6 @@ export async function listTickets(
       }),
     });
 
-    if (!response.ok) {
-      throw new SquadUpHttpError(response.status, response.statusText);
-    }
-
     const body = (await response.json()) as { attendees?: SquadUpAttendee[] };
 
     return {
@@ -114,13 +111,6 @@ export async function listTickets(
       ),
     };
   } catch (err) {
-    if (err instanceof SquadUpHttpError && err.status === 404) {
-      return {
-        status: "OK",
-        events: [],
-      };
-    }
-
     logDebugMessage(
       `Failed to list SquadUp tickets: ${(err as Error).message}`,
     );
@@ -165,7 +155,7 @@ export async function parsePageSize(
   req: SuperTokensRequest,
   defaultPageSize: number,
 ): Promise<number | SquadUpErrorResponse> {
-  const rawPageSize = await req.getKeyValueFromQuery("pageSize");
+  const rawPageSize = req.getKeyValueFromQuery("pageSize");
   if (!rawPageSize) {
     return defaultPageSize;
   }
@@ -179,13 +169,4 @@ export async function parsePageSize(
   }
 
   return pageSize;
-}
-
-class SquadUpHttpError extends Error {
-  constructor(
-    readonly status: number,
-    statusText: string,
-  ) {
-    super(`SquadUp request failed with status ${status}: ${statusText}`);
-  }
 }

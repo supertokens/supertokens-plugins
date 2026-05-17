@@ -142,20 +142,6 @@ describe("squadup-nodejs plugin", () => {
     });
   });
 
-  it("returns empty events when SquadUp returns 404", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(new Response("", { status: 404 })),
-    );
-
-    await expect(
-      listTickets(baseConfig, "missing@example.com"),
-    ).resolves.toEqual({
-      status: "OK",
-      events: [],
-    });
-  });
-
   it("returns ERROR for non-404 SquadUp failures", async () => {
     vi.stubGlobal(
       "fetch",
