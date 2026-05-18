@@ -332,6 +332,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         telemetry: config.telemetry,
         schema: config.schema,
         appConfig: config.appConfig,
+        subBrands: config.subBrands,
       };
     },
   );

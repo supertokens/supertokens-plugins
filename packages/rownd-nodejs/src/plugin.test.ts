@@ -347,35 +347,37 @@ describe("rownd-nodejs plugin", () => {
       });
     });
 
-    it("adds tenant ids to imported login methods when provided", () => {
+    it("preserves Rownd app variants in imported user metadata", () => {
       expect(
-        mapRowndUserToSuperTokens(
-          {
-            data: {
-              user_id: "rownd-tenant-aware",
-              email: "tenant-aware@example.com",
-            },
-            verified_data: {},
-          } as any,
-          ["public", "variant_123"],
-        ),
+        mapRowndUserToSuperTokens({
+          data: {
+            user_id: "rownd-variant-user",
+            email: "variant-user@example.com",
+          },
+          verified_data: {},
+          attributes: {
+            "rownd:app_variants": ["variant_123"],
+          },
+        } as any),
       ).toEqual({
-        externalUserId: "rownd-tenant-aware",
+        externalUserId: "rownd-variant-user",
         loginMethods: [
           {
             recipeId: "passwordless",
-            email: "tenant-aware@example.com",
+            email: "variant-user@example.com",
             isVerified: false,
-            tenantIds: ["public", "variant_123"],
           },
         ],
         userMetadata: {
           original_rownd_user: {
             data: {
-              user_id: "rownd-tenant-aware",
-              email: "tenant-aware@example.com",
+              user_id: "rownd-variant-user",
+              email: "variant-user@example.com",
             },
             verified_data: {},
+            attributes: {
+              "rownd:app_variants": ["variant_123"],
+            },
           },
         },
       });
@@ -1166,6 +1168,100 @@ describe("rownd-nodejs plugin", () => {
         expect(body.config.hub.customizations.rounded_corners).toBe(false);
         expect(body.config.hub.customizations.dark_mode).toBe("dark");
         expect(body.config.hub.auth.show_app_icon).toBe(true);
+      });
+
+      it("returns sub-brand app config when app_variant_id is provided", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: {
+            id: "app_xyz",
+            name: "Base App",
+            branding: { primaryColor: "#111111" },
+            signInMethods: [{ method: "email" }],
+          },
+          subBrands: {
+            variant_123: {
+              id: "app_xyz",
+              name: "Variant App",
+              branding: { primaryColor: "#222222" },
+              signInMethods: [{ method: "phone" }],
+              variant: {
+                id: "variant_123",
+                name: "Variant App",
+                config: { customizations: { primary_color: "#222222" } },
+              },
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config?app_variant_id=variant_123`,
+        );
+        const body = await res.json();
+
+        expect(body.status).toBe("OK");
+        expect(body.config_type).toBe("variant");
+        expect(body.id).toBe("app_xyz");
+        expect(body.name).toBe("Variant App");
+        expect(body.variant.id).toBe("variant_123");
+        expect(body.config.customizations.primary_color).toBe("#222222");
+        expect(body.config.hub.auth.sign_in_methods.email.enabled).toBe(false);
+        expect(body.config.hub.auth.sign_in_methods.phone.enabled).toBe(true);
+      });
+
+      it("returns base app config when no sub-brand query param is provided", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: {
+            id: "app_xyz",
+            name: "Base App",
+            branding: { primaryColor: "#111111" },
+          },
+          subBrands: {
+            variant_123: {
+              id: "app_xyz",
+              name: "Variant App",
+              branding: { primaryColor: "#222222" },
+              variant: { id: "variant_123", name: "Variant App" },
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const body = await res.json();
+
+        expect(body.status).toBe("OK");
+        expect(body.config_type).toBe("app");
+        expect(body.name).toBe("Base App");
+        expect(body.variant).toBeUndefined();
+        expect(body.config.customizations.primary_color).toBe("#111111");
+      });
+
+      it("returns an error for unknown sub-brand app variant", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          subBrands: {
+            variant_123: {
+              id: "app_xyz",
+              name: "Variant App",
+              variant: { id: "variant_123", name: "Variant App" },
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config?sub_brand_id=missing_variant`,
+        );
+        const body = await res.json();
+
+        expect(res.status).toBe(400);
+        expect(body.status).toBe("ERROR");
+        expect(body.message).toContain("missing_variant");
       });
 
       it("returns legal fields from plugin config", async () => {
@@ -2170,12 +2266,10 @@ describe("rownd-nodejs plugin", () => {
         testPORT = port;
         const firstAccessToken = await createSessionForUser("signout-user");
         const secondAccessToken = await createSessionForUser("signout-user");
-        const firstSession = await Session.getSessionWithoutRequestResponse(
-          firstAccessToken,
-        );
-        const secondSession = await Session.getSessionWithoutRequestResponse(
-          secondAccessToken,
-        );
+        const firstSession =
+          await Session.getSessionWithoutRequestResponse(firstAccessToken);
+        const secondSession =
+          await Session.getSessionWithoutRequestResponse(secondAccessToken);
         const firstSessionHandle = firstSession.getHandle();
         const secondSessionHandle = secondSession.getHandle();
 
@@ -2309,9 +2403,9 @@ describe("rownd-nodejs plugin", () => {
         const metadata = await UserMetadata.getUserMetadata(
           "compat-user-meta-safe",
         );
-        expect((metadata.metadata as any).original_rownd_user.data.user_id).toBe(
-          "compat-user-meta-safe",
-        );
+        expect(
+          (metadata.metadata as any).original_rownd_user.data.user_id,
+        ).toBe("compat-user-meta-safe");
       });
 
       it("rejects without session", async () => {

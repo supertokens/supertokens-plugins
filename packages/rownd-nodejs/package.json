@@ -13,8 +13,8 @@
   "scripts": {
     "build": "tsup",
     "bulk-import": "tsx scripts/bulkMigrate.ts",
-    "associate-users": "tsx scripts/associateUsers.ts",
     "setup-core-instance": "tsx scripts/setupCoreInstance.ts",
+    "migrate-local-then-managed": "tsx scripts/migrateLocalThenManaged.ts",
     "diff-users": "tsx scripts/diffUsers.ts",
     "generate-config": "tsx scripts/generateAppConfig.ts",
     "lint": "eslint ./src --ext .ts",

@@ -492,6 +492,14 @@ export type RowndAppConfigInput = {
   signInMethods?: RowndSignInMethod[];
 };
 
+export type RowndSubBrandConfigInput = RowndAppConfigInput & {
+  variant: {
+    id: string;
+    name?: string;
+    config?: JSONObject;
+  };
+};
+
 export interface RowndPluginConfig {
   rowndAppKey: string;
   rowndAppSecret: string;
@@ -501,6 +509,8 @@ export interface RowndPluginConfig {
   schema?: RowndSchema;
   // Optional app configuration served by GET /plugin/rownd/app-config.
   appConfig?: RowndAppConfigInput;
+  // Optional sub-brand/app-variant app configs keyed by Rownd application variant ID.
+  subBrands?: Record<string, RowndSubBrandConfigInput>;
 }
 
 export type RowndTelemetryEvent =
@@ -588,6 +598,7 @@ export interface RowndPluginNormalisedConfig {
   telemetry?: RowndTelemetryConfig;
   schema?: RowndSchema;
   appConfig?: RowndAppConfigInput;
+  subBrands?: Record<string, RowndSubBrandConfigInput>;
 }
 
 export interface SuperTokensUserImport {

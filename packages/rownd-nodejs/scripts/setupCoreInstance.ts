@@ -4,13 +4,11 @@ import {
   formatZodError,
   type BulkMigrateConfig,
 } from "./scriptUtils";
-import { getTenantIdsForOidcClients } from "./rowndTenantMapping";
 
 export async function provisionSuperTokensInfrastructure(
   config: BulkMigrateConfig,
   oidcClients: RowndOidcClient[],
 ) {
-  const generatedTenantIds = getTenantIdsForOidcClients(oidcClients);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
@@ -26,7 +24,7 @@ export async function provisionSuperTokensInfrastructure(
 
       const oauthRes = await fetch(
         new URL(
-          `/recipe/oauth/clients`,
+          "/recipe/oauth/clients",
           config.supertokens.connectionURI,
         ).toString(),
         {
@@ -65,30 +63,6 @@ export async function provisionSuperTokensInfrastructure(
       }
     }
   }
-
-  for (const tenantId of generatedTenantIds) {
-    console.log(`Provisioning SuperTokens Tenant: ${tenantId}`);
-
-    const tenantRes = await fetch(
-      new URL(
-        `/recipe/multitenancy/tenant/v2`,
-        config.supertokens.connectionURI,
-      ).toString(),
-      {
-        method: "PUT",
-        headers,
-        body: JSON.stringify({ tenantId }),
-      },
-    );
-
-    if (!tenantRes.ok) {
-      throw new Error(
-        `Failed to create tenant ${tenantId}: ${tenantRes.status} ${await tenantRes.text()}`,
-      );
-    }
-  }
-
-  return generatedTenantIds;
 }
 
 const RowndOidcClientSchema = z.object({
@@ -146,13 +120,15 @@ export async function runCli() {
   console.log("Successfully provisioned SuperTokens infrastructure.");
 }
 
-runCli().catch((error: unknown) => {
-  if (error instanceof z.ZodError) {
-    console.error(formatZodError(error));
-  } else {
-    console.error(
-      error instanceof Error ? error.message : "Provisioning failed",
-    );
-  }
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  runCli().catch((error: unknown) => {
+    if (error instanceof z.ZodError) {
+      console.error(formatZodError(error));
+    } else {
+      console.error(
+        error instanceof Error ? error.message : "Provisioning failed",
+      );
+    }
+    process.exitCode = 1;
+  });
+}

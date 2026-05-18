@@ -6,6 +6,7 @@ import {
   RowndAuthConfig,
   RowndPluginConfig,
   RowndSchema,
+  RowndSubBrandConfigInput,
   RowndSignInMethod,
 } from "../src/types";
 
@@ -36,6 +37,12 @@ type RowndSchemaExportField = {
   user_visible: boolean;
   read_only?: boolean;
   show_empty?: boolean;
+};
+
+type RowndVariant = {
+  id: string;
+  name?: string;
+  config?: RowndConfigObject;
 };
 
 function convertRowndConfigToPluginConfig(
@@ -91,27 +98,27 @@ function convertRowndConfigToPluginConfig(
     customContent: {
       signInModal: isRecord(customContent.sign_in_modal)
         ? {
-            title: getString(customContent.sign_in_modal.title),
-            subtitle: getString(customContent.sign_in_modal.subtitle),
-            signInTitle: getString(customContent.sign_in_modal.sign_in_title),
-            signUpTitle: getString(customContent.sign_in_modal.sign_up_title),
-            signInSubtitle: getString(
-              customContent.sign_in_modal.sign_in_subtitle,
-            ),
-            signUpSubtitle: getString(
-              customContent.sign_in_modal.sign_up_subtitle,
-            ),
-          }
+          title: getString(customContent.sign_in_modal.title),
+          subtitle: getString(customContent.sign_in_modal.subtitle),
+          signInTitle: getString(customContent.sign_in_modal.sign_in_title),
+          signUpTitle: getString(customContent.sign_in_modal.sign_up_title),
+          signInSubtitle: getString(
+            customContent.sign_in_modal.sign_in_subtitle,
+          ),
+          signUpSubtitle: getString(
+            customContent.sign_in_modal.sign_up_subtitle,
+          ),
+        }
         : undefined,
       profileModal: isRecord(customContent.profile_modal)
         ? { title: getString(customContent.profile_modal.title) }
         : undefined,
       signInFailureModal: isRecord(customContent.sign_in_failure_modal)
         ? {
-            failureMessage: getString(
-              customContent.sign_in_failure_modal.failure_message,
-            ),
-          }
+          failureMessage: getString(
+            customContent.sign_in_failure_modal.failure_message,
+          ),
+        }
         : undefined,
     },
     profile: {
@@ -147,23 +154,23 @@ function convertRowndConfigToPluginConfig(
             scopes: value.scopes,
             oneTap: value.one_tap
               ? {
-                  browser: value.one_tap.browser
-                    ? {
-                        autoPrompt: value.one_tap.browser.auto_prompt,
-                        delay: value.one_tap.browser.delay,
-                      }
-                    : undefined,
-                  mobileApp: value.one_tap.mobile_app
-                    ? {
-                        autoPrompt: value.one_tap.mobile_app.auto_prompt,
-                        delay: value.one_tap.mobile_app.delay,
-                      }
-                    : undefined,
-                }
+                browser: value.one_tap.browser
+                  ? {
+                    autoPrompt: value.one_tap.browser.auto_prompt,
+                    delay: value.one_tap.browser.delay,
+                  }
+                  : undefined,
+                mobileApp: value.one_tap.mobile_app
+                  ? {
+                    autoPrompt: value.one_tap.mobile_app.auto_prompt,
+                    delay: value.one_tap.mobile_app.delay,
+                  }
+                  : undefined,
+              }
               : undefined,
           });
           instructions.push(
-            `Google sign-in was enabled. Please ensure you configure the "google" provider in your SuperTokens ThirdParty recipe. You will need to manually provide the Google 'clientSecret' as Rownd cannot export it.`,
+            "Google sign-in was enabled. Please ensure you configure the \"google\" provider in your SuperTokens ThirdParty recipe. You will need to manually provide the Google 'clientSecret' as Rownd cannot export it.",
           );
         } else if (key === "apple") {
           result.push({
@@ -171,7 +178,7 @@ function convertRowndConfigToPluginConfig(
             clientId: value.client_id,
           });
           instructions.push(
-            `Apple sign-in was enabled. Please ensure you configure the "apple" provider in your SuperTokens ThirdParty recipe. You will need to manually provide the Apple 'clientSecret' (or private key) as Rownd cannot export it.`,
+            "Apple sign-in was enabled. Please ensure you configure the \"apple\" provider in your SuperTokens ThirdParty recipe. You will need to manually provide the Apple 'clientSecret' (or private key) as Rownd cannot export it.",
           );
         } else if (key === "email" || key === "phone") {
           result.push({ method: key as "email" | "phone" });
@@ -214,9 +221,16 @@ function convertRowndConfigToPluginConfig(
         show_empty: field.show_empty,
       };
       // Drop undefined properties
-      Object.keys(cleanSchema[key]).forEach(
-        (k) => cleanSchema[key][k] === undefined && delete cleanSchema[key][k],
-      );
+      const schemaField = cleanSchema[key];
+      if (schemaField) {
+        for (const fieldKey of Object.keys(schemaField) as Array<
+          keyof RowndSchemaExportField
+        >) {
+          if (schemaField[fieldKey] === undefined) {
+            delete schemaField[fieldKey];
+          }
+        }
+      }
     }
   }
 
@@ -230,6 +244,88 @@ function convertRowndConfigToPluginConfig(
     appConfig: cleanAppConfig,
     ...(instructions.length > 0 ? { _instructions: instructions } : {}),
   };
+}
+
+function mergeRowndAppWithVariant(
+  rowndApp: RowndConfigObject,
+  variant: RowndVariant,
+): RowndConfigObject {
+  return deepMerge(rowndApp, {
+    name: variant.name,
+    config: variant.config,
+  });
+}
+
+function deepMerge<T extends RowndConfigObject>(
+  base: T,
+  overlay: RowndConfigObject,
+): T {
+  const result: RowndConfigObject = { ...base };
+
+  for (const [key, value] of Object.entries(overlay)) {
+    if (value === undefined) {
+      continue;
+    }
+
+    const existingValue = result[key];
+    if (isRecord(existingValue) && isRecord(value)) {
+      result[key] = deepMerge(existingValue, value);
+    } else {
+      result[key] = value;
+    }
+  }
+
+  return result as T;
+}
+
+async function fetchRowndVariants(
+  config: Awaited<ReturnType<typeof loadConfig>>,
+) {
+  const url = new URL(
+    `/api/applications/${config.rownd.appId}/variants`,
+    "https://app.rownd.io",
+  );
+
+  console.log(`Fetching Rownd sub-brands for app_id: ${config.rownd.appId}...`);
+
+  const response = await fetchWithRetry({
+    url: url.toString(),
+    requestInit: {
+      headers: {
+        "x-rownd-app-key": config.rownd.appKey,
+        "x-rownd-app-secret": config.rownd.appSecret,
+      },
+    },
+    retryConfig: config.retry,
+    operation: "Fetching Rownd sub-brands",
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Rownd variants API error: ${response.status} ${await response.text()}`,
+    );
+  }
+
+  const rawVariants = await response.json();
+  const variants = Array.isArray(rawVariants)
+    ? rawVariants
+    : isRecord(rawVariants) && Array.isArray(rawVariants.results)
+      ? rawVariants.results
+      : [];
+
+  return variants.flatMap((variant): RowndVariant[] => {
+    if (!isRecord(variant) || typeof variant.id !== "string") {
+      return [];
+    }
+
+    return [
+      {
+        id: variant.id,
+        name: getString(variant.name),
+        config: getObject(variant.config),
+      },
+    ];
+  });
 }
 
 function getObject(value: unknown): RowndConfigObject {
@@ -317,7 +413,7 @@ async function run() {
   }
 
   const rawConfig = await response.json();
-  if (!rawConfig.app) {
+  if (!isRecord(rawConfig) || !isRecord(rawConfig.app)) {
     throw new Error("Rownd API response is missing the 'app' property.");
   }
 
@@ -325,6 +421,44 @@ async function run() {
     appKey: config.rownd.appKey,
     appSecret: config.rownd.appSecret,
   });
+
+  const variants = await fetchRowndVariants(config);
+  const subBrands: Record<string, RowndSubBrandConfigInput> = {};
+  for (const variant of variants) {
+    const variantPluginConfig = convertRowndConfigToPluginConfig(
+      mergeRowndAppWithVariant(rawConfig.app, variant),
+      {
+        appKey: config.rownd.appKey,
+        appSecret: config.rownd.appSecret,
+      },
+    );
+
+    if (!variantPluginConfig.appConfig) {
+      continue;
+    }
+
+    subBrands[variant.id] = {
+      ...variantPluginConfig.appConfig,
+      variant: {
+        id: variant.id,
+        name: variant.name,
+        config: variant.config as RowndSubBrandConfigInput["variant"]["config"],
+      },
+    };
+
+    if (variantPluginConfig._instructions) {
+      pluginConfig._instructions = [
+        ...(pluginConfig._instructions ?? []),
+        ...variantPluginConfig._instructions.map(
+          (instruction) => `Sub-brand ${variant.id}: ${instruction}`,
+        ),
+      ];
+    }
+  }
+
+  if (Object.keys(subBrands).length > 0) {
+    pluginConfig.subBrands = subBrands;
+  }
 
   if (pluginConfig._instructions) {
     console.warn("\n=== IMPORTANT INSTRUCTIONS ===");

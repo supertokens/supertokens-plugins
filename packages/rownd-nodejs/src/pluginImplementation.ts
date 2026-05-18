@@ -15,6 +15,7 @@ import {
   RowndPluginNormalisedConfig,
   RowndSignInMethod,
   RowndSchemaField,
+  RowndSubBrandConfigInput,
 } from "./types";
 import { RowndPluginError } from "./errors";
 import {
@@ -112,10 +113,34 @@ export async function parseRequest(req: SuperTokensRequest): Promise<{
 }
 
 export function handleGetAppConfig(deps: RowndRouteHandlerDeps) {
-  return async () => ({
-    status: "OK" as const,
-    ...buildAppConfig(deps.pluginConfig, deps.stConfig),
-  });
+  return async (req: SuperTokensRequest) => {
+    const subBrandId = getRequestedSubBrandId(req);
+    const appConfig = buildAppConfig(
+      deps.pluginConfig,
+      deps.stConfig,
+      subBrandId,
+    );
+
+    if (!appConfig) {
+      return {
+        status: "ERROR" as const,
+        message: `Unknown Rownd sub-brand/app variant: ${subBrandId}`,
+      };
+    }
+
+    return {
+      status: "OK" as const,
+      ...appConfig,
+    };
+  };
+}
+
+function getRequestedSubBrandId(req: SuperTokensRequest) {
+  return (
+    req.getKeyValueFromQuery("app_variant_id") ??
+    req.getKeyValueFromQuery("variant_id") ??
+    req.getKeyValueFromQuery("sub_brand_id")
+  );
 }
 
 export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
@@ -590,7 +615,6 @@ function getErrorMessage(error: unknown) {
 
 export function mapRowndUserToSuperTokens(
   rowndUser: RowndUser,
-  tenantIds?: string[],
 ): SuperTokensUserImport {
   const loginMethods: SuperTokensUserImport["loginMethods"] = [];
   const rowndUserData = rowndUser.data || {};
@@ -610,7 +634,6 @@ export function mapRowndUserToSuperTokens(
       thirdPartyUserId: rowndUserData.google_id,
       email: rowndUserData.email,
       isVerified: !!rowndUserVerifiedData.google_id,
-      ...(tenantIds ? { tenantIds } : {}),
     });
   }
 
@@ -625,7 +648,6 @@ export function mapRowndUserToSuperTokens(
       thirdPartyUserId: rowndUserData.apple_id,
       email: rowndUserData.email,
       isVerified: !!rowndUserVerifiedData.apple_id,
-      ...(tenantIds ? { tenantIds } : {}),
     });
   }
 
@@ -634,7 +656,6 @@ export function mapRowndUserToSuperTokens(
       recipeId: "passwordless",
       phoneNumber: rowndUserData.phone_number,
       isVerified: !!rowndUserVerifiedData.phone_number,
-      ...(tenantIds ? { tenantIds } : {}),
     });
   }
 
@@ -649,7 +670,6 @@ export function mapRowndUserToSuperTokens(
       recipeId: "passwordless",
       email: rowndUserData.email,
       isVerified: !!rowndUserVerifiedData.email,
-      ...(tenantIds ? { tenantIds } : {}),
     });
   }
 
@@ -666,7 +686,6 @@ export function mapRowndUserToSuperTokens(
       thirdPartyUserId: rowndUserData.user_id,
       email: `${rowndUserData.user_id}@anonymous.local`,
       isVerified: false,
-      ...(tenantIds ? { tenantIds } : {}),
     });
   }
 
@@ -1616,15 +1635,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function getSubBrandVariant(app: unknown) {
+  if (isRecord(app) && isRecord(app.variant) && typeof app.variant.id === "string") {
+    return app.variant as RowndSubBrandConfigInput["variant"];
+  }
+
+  return undefined;
+}
+
 export function buildAppConfig(
   config: RowndPluginNormalisedConfig,
   stConfig: SuperTokensPublicConfig,
+  subBrandId?: string,
 ) {
   const userSchema = config.schema ?? DEFAULT_ROWND_SCHEMA;
-  const app = config.appConfig ?? {};
+  const app = subBrandId
+    ? config.subBrands?.[subBrandId]
+    : (config.appConfig ?? {});
+
+  if (!app) {
+    return undefined;
+  }
+
   const branding = app.branding ?? {};
   const auth = app.auth ?? {};
   const signInMethods = buildSignInMethodsConfig(app.signInMethods);
+  const variant = getSubBrandVariant(app);
 
   const finalSchema: Record<string, RowndSchemaField> = { ...userSchema };
 
@@ -1662,6 +1698,8 @@ export function buildAppConfig(
     id: app.id ?? "",
     name: app.name ?? stConfig.appInfo.appName,
     icon: app.icon ?? "",
+    config_type: subBrandId ? "variant" : "app",
+    ...(variant ? { variant } : {}),
     schema: Object.fromEntries(
       Object.entries(finalSchema).map(([key, field]) => [
         key,

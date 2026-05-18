@@ -3,7 +3,6 @@ import { z } from "zod";
 
 import { type RowndUser, type SuperTokensUserImport } from "../src/types";
 import { mapRowndUserToSuperTokens } from "../src/pluginImplementation";
-import { getTenantIdsForRowndUser } from "./rowndTenantMapping";
 import {
   loadConfig,
   formatZodError,
@@ -36,7 +35,7 @@ async function loadCheckpoint(checkpointFile: string) {
     const checkpoint = await fs.readFile(checkpointFile, "utf8");
     return CheckpointSchema.parse(JSON.parse(checkpoint));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    if ((error as { code?: string }).code === "ENOENT") {
       return null;
     }
 
@@ -65,7 +64,7 @@ async function loadFailedMappings(filePath: string): Promise<FailedMapping[]> {
 
     return parsed as FailedMapping[];
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    if ((error as { code?: string }).code === "ENOENT") {
       return [];
     }
 
@@ -125,48 +124,6 @@ export async function stageUsersForImport(config: {
   }
 }
 
-async function ensureTenantsExist(config: {
-  tenantIds: string[];
-  supertokens: Pick<SuperTokensTargetConfig, "connectionURI" | "apiKey">;
-  retry: RetryConfig;
-}) {
-  const tenantIds = [...new Set(config.tenantIds.filter((tenantId) => tenantId !== "public"))];
-
-  if (tenantIds.length === 0) {
-    return;
-  }
-
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-
-  if (config.supertokens.apiKey) {
-    headers["api-key"] = config.supertokens.apiKey;
-  }
-
-  for (const tenantId of tenantIds) {
-    const response = await fetchWithRetry({
-      url: new URL(
-        `/recipe/multitenancy/tenant/v2`,
-        config.supertokens.connectionURI,
-      ).toString(),
-      requestInit: {
-        method: "PUT",
-        headers,
-        body: JSON.stringify({ tenantId }),
-      },
-      retryConfig: config.retry,
-      operation: `Ensuring tenant ${tenantId}`,
-    });
-
-    if (!response.ok) {
-      throw new Error(
-        `Failed to create tenant ${tenantId}: ${response.status} ${await response.text()}`,
-      );
-    }
-  }
-}
-
 async function importUsersBatch(
   config: BulkMigrateConfig,
   users: Array<{ rowndUserId: string; user: SuperTokensUserImport }>,
@@ -178,13 +135,6 @@ async function importUsersBatch(
     index += config.supertokens.batchSize
   ) {
     const batch = users.slice(index, index + config.supertokens.batchSize);
-    await ensureTenantsExist({
-      tenantIds: batch.flatMap((entry) =>
-        entry.user.loginMethods.flatMap((loginMethod) => loginMethod.tenantIds ?? []),
-      ),
-      supertokens: config.supertokens,
-      retry: config.retry,
-    });
     console.log(
       `Importing batch ${Math.floor(totalImportedBeforeBatch / config.supertokens.batchSize) + 1} (${batch.length} users)`,
     );
@@ -249,10 +199,9 @@ export async function migrateRowndUsersToSuperTokens(
 
     for (const { rowndUser, rowndUserId } of pageUsers) {
       try {
-        const tenantIds = getTenantIdsForRowndUser(rowndUser);
         mappedUsers.push({
           rowndUserId,
-          user: mapRowndUserToSuperTokens(rowndUser, tenantIds),
+          user: mapRowndUserToSuperTokens(rowndUser),
         });
       } catch (error) {
         const errorMessage =
@@ -309,13 +258,15 @@ export async function runCli() {
   }
 }
 
-runCli().catch((error: unknown) => {
-  if (error instanceof z.ZodError) {
-    console.error(formatZodError(error));
-  } else {
-    console.error(
-      error instanceof Error ? error.message : "Bulk migration failed",
-    );
-  }
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  runCli().catch((error: unknown) => {
+    if (error instanceof z.ZodError) {
+      console.error(formatZodError(error));
+    } else {
+      console.error(
+        error instanceof Error ? error.message : "Bulk migration failed",
+      );
+    }
+    process.exitCode = 1;
+  });
+}
