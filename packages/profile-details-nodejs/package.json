@@ -30,6 +30,7 @@
     "@supertokens-plugins/profile-details-shared": "*",
     "express": "^5.1.0",
     "prettier": "3.6.2",
+    "testcontainers": "^10.7.1",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   },

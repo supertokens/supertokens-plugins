@@ -1,6 +1,8 @@
 import express from "express";
 import crypto from "node:crypto";
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { Server } from "http";
+import { describe, it, expect, afterEach, beforeEach, beforeAll, afterAll } from "vitest";
+import { GenericContainer, StartedTestContainer, Wait } from "testcontainers";
 
 import SuperTokens from "supertokens-node/lib/build/index";
 import Session from "supertokens-node/lib/build/recipe/session/index";
@@ -29,8 +31,36 @@ import { BASE_FORM_SECTIONS } from "@supertokens-plugins/profile-details-shared"
 const testPORT = parseInt(process.env.PORT || "3000");
 const testEmail = "user@test.com";
 const testPW = "test";
+let server: Server | undefined;
+let container: StartedTestContainer;
+let coreConnectionURI: string;
 
 describe("profile-details-nodejs", () => {
+  beforeAll(async () => {
+    container = await new GenericContainer("supertokens/supertokens-postgresql")
+      .withExposedPorts(3567)
+      .withWaitStrategy(Wait.forHttp("/hello", 3567))
+      .start();
+
+    const mappedPort = container.getMappedPort(3567);
+    coreConnectionURI = `http://${container.getHost()}:${mappedPort}`;
+  }, 120000);
+
+  afterAll(async () => {
+    if (server) {
+      await closeServer();
+    }
+    if (container) {
+      await container.stop();
+    }
+  });
+
+  afterEach(async () => {
+    if (server) {
+      await closeServer();
+    }
+  });
+
   describe("API Endpoints", () => {
     afterEach(() => {
       resetST();
@@ -364,20 +394,21 @@ function resetST() {
   SuperTokensRaw.reset();
 }
 
+async function closeServer() {
+  await new Promise((resolve) => server!.close(resolve));
+  server = undefined;
+}
+
 async function setup(pluginConfig?: SuperTokensPluginProfileDetailsConfig) {
   let appId;
   let isNewApp = false;
-  const coreBaseURL = process.env.CORE_BASE_URL || `http://localhost:3567`;
   if (appId === undefined) {
     isNewApp = true;
     appId = crypto.randomUUID();
     const headers = {
       "Content-Type": "application/json",
     };
-    if (process.env.CORE_API_KEY) {
-      headers["api-key"] = process.env.CORE_API_KEY;
-    }
-    await fetch(`${coreBaseURL}/recipe/multitenancy/app/v2`, {
+    await fetch(`${coreConnectionURI}/recipe/multitenancy/app/v2`, {
       method: "PUT",
       headers,
       body: JSON.stringify({
@@ -389,8 +420,7 @@ async function setup(pluginConfig?: SuperTokensPluginProfileDetailsConfig) {
 
   SuperTokens.init({
     supertokens: {
-      connectionURI: `${coreBaseURL}/appid-${appId}`,
-      apiKey: process.env.CORE_API_KEY,
+      connectionURI: `${coreConnectionURI}/appid-${appId}`,
     },
     appInfo: {
       appName: "Test App",
@@ -412,8 +442,8 @@ async function setup(pluginConfig?: SuperTokensPluginProfileDetailsConfig) {
   });
   app.use(errorHandler());
 
-  await new Promise<void>((resolve) => {
-    app.listen(testPORT, () => resolve());
+  server = await new Promise<Server>((resolve) => {
+    const listeningServer = app.listen(testPORT, () => resolve(listeningServer));
   });
 
   let user;
