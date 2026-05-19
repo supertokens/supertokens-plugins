@@ -1,5 +1,7 @@
 import { SuperTokensPlugin } from "supertokens-node/types";
 import type { APIInterface as EmailVerificationAPIInterface } from "supertokens-node/recipe/emailverification";
+import type { APIInterface as PasswordlessAPIInterface } from "supertokens-node/recipe/passwordless";
+import type { APIInterface as ThirdPartyAPIInterface } from "supertokens-node/recipe/thirdparty";
 import { createPluginInitFunction } from "@shared/js";
 import { withRequestHandler } from "@shared/nodejs";
 import { createInstance } from "@rownd/node";
@@ -27,6 +29,9 @@ import {
   handleUpdateUserMeta,
   shouldLinkRowndAccounts,
   rewriteLinkPath,
+  getRequestedAppVariantIdFromRequest,
+  recordRowndAppVariantForUser,
+  assertRowndAppVariantIsConfigured,
 } from "./pluginImplementation";
 
 export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
@@ -191,6 +196,72 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 },
               };
             },
+            apis: (originalImplementation: PasswordlessAPIInterface) => ({
+              ...originalImplementation,
+              consumeCodePOST: async (
+                input: Parameters<
+                  NonNullable<PasswordlessAPIInterface["consumeCodePOST"]>
+                >[0],
+              ) => {
+                if (originalImplementation.consumeCodePOST === undefined) {
+                  throw new Error("Passwordless consumeCodePOST is unavailable");
+                }
+
+                const appVariantId = getRequestedAppVariantIdFromRequest(
+                  input.options.req,
+                );
+                assertRowndAppVariantIsConfigured(appVariantId);
+                const response = await originalImplementation.consumeCodePOST({
+                  ...input,
+                  userContext: appVariantId
+                    ? { ...input.userContext, rowndAppVariantId: appVariantId }
+                    : input.userContext,
+                });
+
+                if (response.status === "OK") {
+                  await recordRowndAppVariantForUser(
+                    response.user.id,
+                    appVariantId,
+                  );
+                }
+
+                return response;
+              },
+            }),
+          },
+          thirdparty: {
+            apis: (originalImplementation: ThirdPartyAPIInterface) => ({
+              ...originalImplementation,
+              signInUpPOST: async (
+                input: Parameters<
+                  NonNullable<ThirdPartyAPIInterface["signInUpPOST"]>
+                >[0],
+              ) => {
+                if (originalImplementation.signInUpPOST === undefined) {
+                  throw new Error("ThirdParty signInUpPOST is unavailable");
+                }
+
+                const appVariantId = getRequestedAppVariantIdFromRequest(
+                  input.options.req,
+                );
+                assertRowndAppVariantIsConfigured(appVariantId);
+                const response = await originalImplementation.signInUpPOST({
+                  ...input,
+                  userContext: appVariantId
+                    ? { ...input.userContext, rowndAppVariantId: appVariantId }
+                    : input.userContext,
+                });
+
+                if (response.status === "OK") {
+                  await recordRowndAppVariantForUser(
+                    response.user.id,
+                    appVariantId,
+                  );
+                }
+
+                return response;
+              },
+            }),
           },
           accountlinking: {
             recipeInitRequired: true,

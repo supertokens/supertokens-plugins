@@ -47,6 +47,7 @@ import {
   RowndIsAnonymousClaim,
   shouldLinkRowndAccounts,
   buildRowndSessionClaims,
+  recordRowndAppVariantForUser,
 } from "./pluginImplementation";
 
 let testPORT = 30001;
@@ -412,6 +413,171 @@ describe("rownd-nodejs plugin", () => {
           }),
         ]),
       );
+    });
+  });
+
+  describe("recipe API overrides", () => {
+    it("records app variant membership after passwordless code consumption", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        subBrands: {
+          variant_123: {
+            id: "app_xyz",
+            name: "Variant App",
+            variant: { id: "variant_123", name: "Variant App" },
+          },
+        },
+      };
+      const { server: s, port } = await setup(coreConnectionURI, pluginConfig);
+      server = s;
+      testPORT = port;
+
+      const signInUpResult = await Passwordless.signInUp({
+        email: "passwordless-variant@example.com",
+        tenantId: "public",
+      });
+      const originalConsumeCodePOST = vi.fn().mockResolvedValue({
+        status: "OK",
+        user: signInUpResult.user,
+      });
+      const passwordlessApis = (init(pluginConfig) as any).overrideMap
+        .passwordless.apis({
+          consumeCodePOST: originalConsumeCodePOST,
+        });
+
+      await passwordlessApis.consumeCodePOST({
+        options: { req: makeVariantRequest("variant_123") },
+        userContext: {},
+      });
+
+      expect(originalConsumeCodePOST).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userContext: { rowndAppVariantId: "variant_123" },
+        }),
+      );
+      const metadata = await getUserMetadata(signInUpResult.user.id);
+      expect(
+        (metadata.metadata as any).original_rownd_user.attributes[
+          "rownd:app_variants"
+        ],
+      ).toEqual(["variant_123"]);
+    });
+
+    it("rejects passwordless code consumption for unknown app variants", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        subBrands: {
+          variant_123: {
+            id: "app_xyz",
+            name: "Variant App",
+            variant: { id: "variant_123", name: "Variant App" },
+          },
+        },
+      };
+      const { server: s, port } = await setup(coreConnectionURI, pluginConfig);
+      server = s;
+      testPORT = port;
+
+      const originalConsumeCodePOST = vi.fn();
+      const passwordlessApis = (init(pluginConfig) as any).overrideMap
+        .passwordless.apis({
+          consumeCodePOST: originalConsumeCodePOST,
+        });
+
+      await expect(
+        passwordlessApis.consumeCodePOST({
+          options: { req: makeVariantRequest("missing_variant") },
+          userContext: {},
+        }),
+      ).rejects.toThrow("Unknown Rownd app variant: missing_variant");
+      expect(originalConsumeCodePOST).not.toHaveBeenCalled();
+    });
+
+    it("records app variant membership after third-party sign in", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        subBrands: {
+          variant_123: {
+            id: "app_xyz",
+            name: "Variant App",
+            variant: { id: "variant_123", name: "Variant App" },
+          },
+        },
+      };
+      const { server: s, port } = await setup(coreConnectionURI, pluginConfig);
+      server = s;
+      testPORT = port;
+
+      const signInUpResult = await ThirdParty.manuallyCreateOrUpdateUser(
+        "public",
+        "google",
+        `google-${randomUUID()}`,
+        "thirdparty-variant@example.com",
+        true,
+      );
+      expect(signInUpResult.status).toBe("OK");
+      if (signInUpResult.status !== "OK") {
+        throw new Error("failed to create thirdparty user");
+      }
+      const originalSignInUpPOST = vi.fn().mockResolvedValue({
+        status: "OK",
+        user: signInUpResult.user,
+      });
+      const thirdPartyApis = (init(pluginConfig) as any).overrideMap
+        .thirdparty.apis({
+          signInUpPOST: originalSignInUpPOST,
+        });
+
+      await thirdPartyApis.signInUpPOST({
+        options: { req: makeVariantRequest("variant_123") },
+        userContext: {},
+      });
+
+      expect(originalSignInUpPOST).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userContext: { rowndAppVariantId: "variant_123" },
+        }),
+      );
+      const metadata = await getUserMetadata(signInUpResult.user.id);
+      expect(
+        (metadata.metadata as any).original_rownd_user.attributes[
+          "rownd:app_variants"
+        ],
+      ).toEqual(["variant_123"]);
+    });
+
+    it("rejects third-party sign in for unknown app variants", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        subBrands: {
+          variant_123: {
+            id: "app_xyz",
+            name: "Variant App",
+            variant: { id: "variant_123", name: "Variant App" },
+          },
+        },
+      };
+      const { server: s, port } = await setup(coreConnectionURI, pluginConfig);
+      server = s;
+      testPORT = port;
+
+      const originalSignInUpPOST = vi.fn();
+      const thirdPartyApis = (init(pluginConfig) as any).overrideMap
+        .thirdparty.apis({
+          signInUpPOST: originalSignInUpPOST,
+        });
+
+      await expect(
+        thirdPartyApis.signInUpPOST({
+          options: { req: makeVariantRequest("missing_variant") },
+          userContext: {},
+        }),
+      ).rejects.toThrow("Unknown Rownd app variant: missing_variant");
+      expect(originalSignInUpPOST).not.toHaveBeenCalled();
     });
   });
 
@@ -1074,21 +1240,23 @@ describe("rownd-nodejs plugin", () => {
         );
         expect(res.status).toBe(200);
         const body = await res.json();
+        const app = body.app;
         expect(body.status).toBe("OK");
-        expect(body.id).toBe("");
-        expect(body.name).toBe("Test App");
+        expect(body.config_type).toBe("app");
+        expect(app.id).toBe("");
+        expect(app.name).toBe("Test App");
 
-        expect(body.config.hub.auth.sign_in_methods.email.enabled).toBe(false);
-        expect(body.config.hub.auth.sign_in_methods.google.enabled).toBe(false);
-        expect(body.config.customizations.primary_color).toBe(
+        expect(app.config.hub.auth.sign_in_methods.email.enabled).toBe(false);
+        expect(app.config.hub.auth.sign_in_methods.google.enabled).toBe(false);
+        expect(app.config.customizations.primary_color).toBe(
           DEFAULT_PRIMARY_COLOR,
         );
-        expect(body.config.hub.customizations.rounded_corners).toBe(true);
-        expect(body.config.hub.customizations.dark_mode).toBe("auto");
+        expect(app.config.hub.customizations.rounded_corners).toBe(true);
+        expect(app.config.hub.customizations.dark_mode).toBe("auto");
 
         // Auth fields should NOT be in schema if methods are disabled
-        expect(body.schema.email).toBeUndefined();
-        expect(body.schema.google_id).toBeUndefined();
+        expect(app.schema.email).toBeUndefined();
+        expect(app.schema.google_id).toBeUndefined();
       });
 
       it("does not require authentication", async () => {
@@ -1125,7 +1293,7 @@ describe("rownd-nodejs plugin", () => {
           `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
         );
         const body = await res.json();
-        const methods = body.config.hub.auth.sign_in_methods;
+        const methods = body.app.config.hub.auth.sign_in_methods;
 
         expect(methods.email.enabled).toBe(true);
         expect(methods.phone.enabled).toBe(true);
@@ -1160,14 +1328,15 @@ describe("rownd-nodejs plugin", () => {
           `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
         );
         const body = await res.json();
+        const app = body.app;
 
-        expect(body.id).toBe("app_xyz");
-        expect(body.name).toBe("Acme App");
-        expect(body.icon).toBe("https://cdn.acme.com/icon.png");
-        expect(body.config.customizations.primary_color).toBe("#ff0000");
-        expect(body.config.hub.customizations.rounded_corners).toBe(false);
-        expect(body.config.hub.customizations.dark_mode).toBe("dark");
-        expect(body.config.hub.auth.show_app_icon).toBe(true);
+        expect(app.id).toBe("app_xyz");
+        expect(app.name).toBe("Acme App");
+        expect(app.icon).toBe("https://cdn.acme.com/icon.png");
+        expect(app.config.customizations.primary_color).toBe("#ff0000");
+        expect(app.config.hub.customizations.rounded_corners).toBe(false);
+        expect(app.config.hub.customizations.dark_mode).toBe("dark");
+        expect(app.config.hub.auth.show_app_icon).toBe(true);
       });
 
       it("returns sub-brand app config when app_variant_id is provided", async () => {
@@ -1183,7 +1352,6 @@ describe("rownd-nodejs plugin", () => {
               id: "app_xyz",
               name: "Variant App",
               branding: { primaryColor: "#222222" },
-              signInMethods: [{ method: "phone" }],
               variant: {
                 id: "variant_123",
                 name: "Variant App",
@@ -1199,15 +1367,19 @@ describe("rownd-nodejs plugin", () => {
           `http://localhost:${testPORT}/auth/plugin/rownd/app-config?app_variant_id=variant_123`,
         );
         const body = await res.json();
+        const app = body.app;
 
         expect(body.status).toBe("OK");
         expect(body.config_type).toBe("variant");
-        expect(body.id).toBe("app_xyz");
-        expect(body.name).toBe("Variant App");
+        expect(app.id).toBe("app_xyz");
+        expect(app.name).toBe("Variant App");
         expect(body.variant.id).toBe("variant_123");
-        expect(body.config.customizations.primary_color).toBe("#222222");
-        expect(body.config.hub.auth.sign_in_methods.email.enabled).toBe(false);
-        expect(body.config.hub.auth.sign_in_methods.phone.enabled).toBe(true);
+        expect(body.variant.config).toEqual({
+          customizations: { primary_color: "#222222" },
+        });
+        expect(app.config.customizations.primary_color).toBe("#222222");
+        expect(app.config.hub.auth.sign_in_methods.email.enabled).toBe(true);
+        expect(app.config.hub.auth.sign_in_methods.phone.enabled).toBe(false);
       });
 
       it("returns base app config when no sub-brand query param is provided", async () => {
@@ -1233,12 +1405,13 @@ describe("rownd-nodejs plugin", () => {
           `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
         );
         const body = await res.json();
+        const app = body.app;
 
         expect(body.status).toBe("OK");
         expect(body.config_type).toBe("app");
-        expect(body.name).toBe("Base App");
+        expect(app.name).toBe("Base App");
         expect(body.variant).toBeUndefined();
-        expect(body.config.customizations.primary_color).toBe("#111111");
+        expect(app.config.customizations.primary_color).toBe("#111111");
       });
 
       it("returns an error for unknown sub-brand app variant", async () => {
@@ -1255,13 +1428,74 @@ describe("rownd-nodejs plugin", () => {
         testPORT = port;
 
         const res = await fetch(
-          `http://localhost:${testPORT}/auth/plugin/rownd/app-config?sub_brand_id=missing_variant`,
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config?app_variant_id=missing_variant`,
         );
         const body = await res.json();
 
         expect(res.status).toBe(400);
         expect(body.status).toBe("ERROR");
         expect(body.message).toContain("missing_variant");
+      });
+
+      it("records app variant membership in user metadata", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          subBrands: {
+            variant_123: {
+              id: "app_xyz",
+              name: "Variant App",
+              variant: { id: "variant_123", name: "Variant App" },
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const signInUpResult = await Passwordless.signInUp({
+          email: "variant-member@example.com",
+          tenantId: "public",
+        });
+
+        await recordRowndAppVariantForUser(
+          signInUpResult.user.id,
+          "variant_123",
+        );
+        await recordRowndAppVariantForUser(
+          signInUpResult.user.id,
+          "variant_123",
+        );
+
+        const metadata = await getUserMetadata(signInUpResult.user.id);
+        expect(
+          (metadata.metadata as any).original_rownd_user.attributes[
+            "rownd:app_variants"
+          ],
+        ).toEqual(["variant_123"]);
+      });
+
+      it("rejects unknown app variants", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          subBrands: {
+            variant_123: {
+              id: "app_xyz",
+              name: "Variant App",
+              variant: { id: "variant_123", name: "Variant App" },
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const signInUpResult = await Passwordless.signInUp({
+          email: "unknown-variant-member@example.com",
+          tenantId: "public",
+        });
+
+        await expect(
+          recordRowndAppVariantForUser(
+            signInUpResult.user.id,
+            "missing_variant",
+          ),
+        ).rejects.toThrow("Unknown Rownd app variant: missing_variant");
       });
 
       it("returns legal fields from plugin config", async () => {
@@ -1282,7 +1516,7 @@ describe("rownd-nodejs plugin", () => {
           `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
         );
         const body = await res.json();
-        const legal = body.config.hub.legal;
+        const legal = body.app.config.hub.legal;
 
         expect(legal.company_name).toBe("Acme Corp");
         expect(legal.privacy_policy_url).toBe("https://acme.com/privacy");
@@ -1310,12 +1544,12 @@ describe("rownd-nodejs plugin", () => {
         );
         const body = await res.json();
 
-        expect(body.schema.employee_id).toBeDefined();
-        expect(body.schema.employee_id.display_name).toBe("Employee ID");
-        expect(body.schema.employee_id.read_only).toBe(true);
-        expect(body.schema.employee_id.owned_by).toBe("app");
+        expect(body.app.schema.employee_id).toBeDefined();
+        expect(body.app.schema.employee_id.display_name).toBe("Employee ID");
+        expect(body.app.schema.employee_id.read_only).toBe(true);
+        expect(body.app.schema.employee_id.owned_by).toBe("app");
         // Fields not in userSchema and not injected via auth should not appear
-        expect(body.schema.email).toBeUndefined();
+        expect(body.app.schema.email).toBeUndefined();
       });
 
       it("fills in defaults for optional schema fields", async () => {
@@ -1335,7 +1569,7 @@ describe("rownd-nodejs plugin", () => {
           `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
         );
         const body = await res.json();
-        const field = body.schema.nickname;
+        const field = body.app.schema.nickname;
 
         expect(field.owned_by).toBe("user");
         expect(field.read_only).toBe(false);
@@ -1354,8 +1588,8 @@ describe("rownd-nodejs plugin", () => {
         );
         const body = await res.json();
 
-        expect(body.schema.first_name).toBeDefined();
-        expect(body.schema.last_name).toBeDefined();
+        expect(body.app.schema.first_name).toBeDefined();
+        expect(body.app.schema.last_name).toBeDefined();
       });
 
       it("custom OAuth2 provider appears in sign_in_methods", async () => {
@@ -1377,7 +1611,7 @@ describe("rownd-nodejs plugin", () => {
           `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
         );
         const body = await res.json();
-        const methods = body.config.hub.auth.sign_in_methods;
+        const methods = body.app.config.hub.auth.sign_in_methods;
 
         expect(methods.github).toBeDefined();
         expect(methods.github.enabled).toBe(true);
@@ -2833,6 +3067,13 @@ function resetST() {
   MultitenancyRaw.reset();
   SuperTokensRaw.reset();
   Querier.reset();
+}
+
+function makeVariantRequest(appVariantId: string) {
+  return {
+    getKeyValueFromQuery: (key: string) =>
+      key === "app_variant_id" ? appVariantId : undefined,
+  };
 }
 
 async function getMigratedUserByRowndUserId(rowndUserId: string) {

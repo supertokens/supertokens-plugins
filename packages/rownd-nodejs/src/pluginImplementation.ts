@@ -114,17 +114,17 @@ export async function parseRequest(req: SuperTokensRequest): Promise<{
 
 export function handleGetAppConfig(deps: RowndRouteHandlerDeps) {
   return async (req: SuperTokensRequest) => {
-    const subBrandId = getRequestedSubBrandId(req);
+    const appVariantId = getRequestedAppVariantIdFromRequest(req);
     const appConfig = buildAppConfig(
       deps.pluginConfig,
       deps.stConfig,
-      subBrandId,
+      appVariantId,
     );
 
     if (!appConfig) {
       return {
         status: "ERROR" as const,
-        message: `Unknown Rownd sub-brand/app variant: ${subBrandId}`,
+        message: `Unknown Rownd app variant: ${appVariantId}`,
       };
     }
 
@@ -133,14 +133,6 @@ export function handleGetAppConfig(deps: RowndRouteHandlerDeps) {
       ...appConfig,
     };
   };
-}
-
-function getRequestedSubBrandId(req: SuperTokensRequest) {
-  return (
-    req.getKeyValueFromQuery("app_variant_id") ??
-    req.getKeyValueFromQuery("variant_id") ??
-    req.getKeyValueFromQuery("sub_brand_id")
-  );
 }
 
 export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
@@ -239,6 +231,8 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       }
 
       const parsed = await parseRequest(req);
+      const appVariantId = getRequestedAppVariantIdFromRequest(req);
+      assertRowndAppVariantIsConfigured(appVariantId);
       rowndUserId = await validateRowndToken(parsed.token);
       user = await SuperTokens.getUser(rowndUserId, userContext);
 
@@ -278,6 +272,10 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         logDebugMessage(
           `User already migrated. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
         );
+      }
+
+      if (superTokensUserId) {
+        await recordRowndAppVariantForUser(superTokensUserId, appVariantId);
       }
 
       if (!recipeUserId) {
@@ -783,6 +781,71 @@ function isIdentityField(field: string) {
 
 function isInternalMetadataField(field: string) {
   return INTERNAL_METADATA_FIELDS.has(field);
+}
+
+function getStringList(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.filter((entry): entry is string => typeof entry === "string");
+  }
+
+  return typeof value === "string" ? [value] : [];
+}
+
+export function getRequestedAppVariantIdFromRequest(
+  req: Pick<SuperTokensRequest, "getKeyValueFromQuery">,
+) {
+  return req.getKeyValueFromQuery("app_variant_id");
+}
+
+export function assertRowndAppVariantIsConfigured(appVariantId?: string) {
+  if (!appVariantId) {
+    return;
+  }
+
+  if (pluginConfig?.subBrands && !pluginConfig.subBrands[appVariantId]) {
+    throw new Error(`Unknown Rownd app variant: ${appVariantId}`);
+  }
+}
+
+export async function recordRowndAppVariantForUser(
+  userId: string,
+  appVariantId?: string,
+) {
+  if (!appVariantId) {
+    return;
+  }
+
+  assertRowndAppVariantIsConfigured(appVariantId);
+
+  const metadata = await getUserMetadata(userId);
+  const originalRowndUser: JsonRecord = isJsonRecord(metadata.original_rownd_user)
+    ? metadata.original_rownd_user
+    : {};
+  const attributes: JsonRecord = isJsonRecord(originalRowndUser.attributes)
+    ? originalRowndUser.attributes
+    : {};
+  const appVariants = getStringList(attributes["rownd:app_variants"]);
+
+  if (appVariants.includes(appVariantId)) {
+    return;
+  }
+
+  await UserMetadata.updateUserMetadata(userId, {
+    ...metadata,
+    original_rownd_user: {
+      ...originalRowndUser,
+      data: isJsonRecord(originalRowndUser.data)
+        ? originalRowndUser.data
+        : { user_id: userId },
+      verified_data: isJsonRecord(originalRowndUser.verified_data)
+        ? originalRowndUser.verified_data
+        : {},
+      attributes: {
+        ...attributes,
+        "rownd:app_variants": [...appVariants, appVariantId],
+      },
+    },
+  });
 }
 
 export function buildRowndUserMetadata(rowndUser: RowndUser): JSONObject {
@@ -1643,15 +1706,37 @@ function getSubBrandVariant(app: unknown) {
   return undefined;
 }
 
+function mergeConfigInput<T extends Record<string, unknown>>(
+  base: T,
+  override: Record<string, unknown>,
+): T {
+  const result: Record<string, unknown> = { ...base };
+
+  for (const [key, value] of Object.entries(override)) {
+    if (value === undefined) {
+      continue;
+    }
+
+    const existing = result[key];
+    result[key] = isRecord(existing) && isRecord(value)
+      ? mergeConfigInput(existing, value)
+      : value;
+  }
+
+  return result as T;
+}
+
 export function buildAppConfig(
   config: RowndPluginNormalisedConfig,
   stConfig: SuperTokensPublicConfig,
-  subBrandId?: string,
+  appVariantId?: string,
 ) {
   const userSchema = config.schema ?? DEFAULT_ROWND_SCHEMA;
-  const app = subBrandId
-    ? config.subBrands?.[subBrandId]
-    : (config.appConfig ?? {});
+  const baseApp = config.appConfig ?? {};
+  const subBrand = appVariantId ? config.subBrands?.[appVariantId] : undefined;
+  const app = appVariantId
+    ? subBrand && mergeConfigInput(baseApp, subBrand as unknown as Record<string, unknown>)
+    : baseApp;
 
   if (!app) {
     return undefined;
@@ -1695,142 +1780,144 @@ export function buildAppConfig(
   }
 
   return {
-    id: app.id ?? "",
-    name: app.name ?? stConfig.appInfo.appName,
-    icon: app.icon ?? "",
-    config_type: subBrandId ? "variant" : "app",
+    config_type: appVariantId ? "variant" : "app",
     ...(variant ? { variant } : {}),
-    schema: Object.fromEntries(
-      Object.entries(finalSchema).map(([key, field]) => [
-        key,
-        normalizeSchemaField(key, field),
-      ]),
-    ),
-    config: {
-      customizations: {
-        primary_color: branding.primaryColor ?? DEFAULT_PRIMARY_COLOR,
-        ...(branding.logo ? { logo: branding.logo } : {}),
-        ...(branding.logoDarkMode
-          ? { logo_dark_mode: branding.logoDarkMode }
-          : {}),
-      },
-      hub: {
+    app: {
+      id: app.id ?? "",
+      name: app.name ?? stConfig.appInfo.appName,
+      icon: app.icon ?? "",
+      schema: Object.fromEntries(
+        Object.entries(finalSchema).map(([key, field]) => [
+          key,
+          normalizeSchemaField(key, field),
+        ]),
+      ),
+      config: {
         customizations: {
-          rounded_corners: branding.roundedCorners ?? true,
-          ...(branding.containerBorderRadius !== undefined
-            ? { container_border_radius: branding.containerBorderRadius }
-            : {}),
-          ...(branding.placement !== undefined
-            ? { placement: branding.placement }
-            : {}),
-          ...(branding.primaryColorDarkMode !== undefined
-            ? { primary_color_dark_mode: branding.primaryColorDarkMode }
-            : {}),
-          visual_swoops: branding.visualSwoops ?? true,
-          blur_background: branding.blurBackground ?? true,
-          dark_mode: branding.darkMode ?? "auto",
-        },
-        ...(branding.customStyles
-          ? { custom_styles: branding.customStyles }
-          : {}),
-        auth: {
-          email: { from_address: "no-reply@rownd.io", image: "" },
-          sign_in_methods: signInMethods,
-          additional_fields: auth.additionalFields ?? [],
-          ...(auth.rememberSignInMethod !== undefined
-            ? { remember_sign_in_method: auth.rememberSignInMethod }
-            : {}),
-          ...(auth.useExplicitSignUpFlow !== undefined
-            ? { use_explicit_sign_up_flow: auth.useExplicitSignUpFlow }
-            : {}),
-          ...(auth.primarySignUpMethod
-            ? { primary_sign_up_method: auth.primarySignUpMethod }
-            : {}),
-          ...(auth.preferredMethod
-            ? { preferred_method: auth.preferredMethod }
-            : {}),
-          ...(auth.order ? { order: auth.order } : {}),
-          show_app_icon: branding.showAppIcon ?? false,
-        },
-        legal: {
-          ...(app.legal?.companyName
-            ? { company_name: app.legal.companyName }
-            : {}),
-          ...(app.legal?.privacyPolicyUrl
-            ? { privacy_policy_url: app.legal.privacyPolicyUrl }
-            : {}),
-          ...(app.legal?.termsConditionsUrl
-            ? { terms_conditions_url: app.legal.termsConditionsUrl }
-            : {}),
-          ...(app.legal?.supportEmail
-            ? { support_email: app.legal.supportEmail }
+          primary_color: branding.primaryColor ?? DEFAULT_PRIMARY_COLOR,
+          ...(branding.logo ? { logo: branding.logo } : {}),
+          ...(branding.logoDarkMode
+            ? { logo_dark_mode: branding.logoDarkMode }
             : {}),
         },
-        custom_content: {
-          ...(app.customContent?.signInModal
-            ? {
-              sign_in_modal: {
-                ...(app.customContent.signInModal.title
-                  ? { title: app.customContent.signInModal.title }
-                  : {}),
-                ...(app.customContent.signInModal.subtitle
-                  ? { subtitle: app.customContent.signInModal.subtitle }
-                  : {}),
-                ...(app.customContent.signInModal.signInTitle
-                  ? {
-                    sign_in_title:
-                          app.customContent.signInModal.signInTitle,
-                  }
-                  : {}),
-                ...(app.customContent.signInModal.signUpTitle
-                  ? {
-                    sign_up_title:
-                          app.customContent.signInModal.signUpTitle,
-                  }
-                  : {}),
-                ...(app.customContent.signInModal.signInSubtitle
-                  ? {
-                    sign_in_subtitle:
-                          app.customContent.signInModal.signInSubtitle,
-                  }
-                  : {}),
-                ...(app.customContent.signInModal.signUpSubtitle
-                  ? {
-                    sign_up_subtitle:
-                          app.customContent.signInModal.signUpSubtitle,
-                  }
-                  : {}),
-              },
-            }
+        hub: {
+          customizations: {
+            rounded_corners: branding.roundedCorners ?? true,
+            ...(branding.containerBorderRadius !== undefined
+              ? { container_border_radius: branding.containerBorderRadius }
+              : {}),
+            ...(branding.placement !== undefined
+              ? { placement: branding.placement }
+              : {}),
+            ...(branding.primaryColorDarkMode !== undefined
+              ? { primary_color_dark_mode: branding.primaryColorDarkMode }
+              : {}),
+            visual_swoops: branding.visualSwoops ?? true,
+            blur_background: branding.blurBackground ?? true,
+            dark_mode: branding.darkMode ?? "auto",
+          },
+          ...(branding.customStyles
+            ? { custom_styles: branding.customStyles }
             : {}),
-          ...(app.customContent?.profileModal
-            ? { profile_modal: app.customContent.profileModal }
-            : {}),
-          ...(app.customContent?.signInFailureModal
-            ? {
-              sign_in_failure_modal: {
-                failure_message:
-                    app.customContent.signInFailureModal.failureMessage,
-              },
-            }
-            : {}),
-        },
-        profile: {
-          ...(app.profile?.accountInformation
-            ? { account_information: app.profile.accountInformation }
-            : {}),
-          ...(app.profile?.personalInformation
-            ? { personal_information: app.profile.personalInformation }
-            : {}),
-          ...(app.profile?.preferences
-            ? { preferences: app.profile.preferences }
-            : {}),
-          ...(app.profile?.signOutButton
-            ? { sign_out_button: app.profile.signOutButton }
-            : {}),
-          ...(app.profile?.deleteAccountButton
-            ? { delete_account_button: app.profile.deleteAccountButton }
-            : {}),
+          auth: {
+            email: { from_address: "no-reply@rownd.io", image: "" },
+            sign_in_methods: signInMethods,
+            additional_fields: auth.additionalFields ?? [],
+            ...(auth.rememberSignInMethod !== undefined
+              ? { remember_sign_in_method: auth.rememberSignInMethod }
+              : {}),
+            ...(auth.useExplicitSignUpFlow !== undefined
+              ? { use_explicit_sign_up_flow: auth.useExplicitSignUpFlow }
+              : {}),
+            ...(auth.primarySignUpMethod
+              ? { primary_sign_up_method: auth.primarySignUpMethod }
+              : {}),
+            ...(auth.preferredMethod
+              ? { preferred_method: auth.preferredMethod }
+              : {}),
+            ...(auth.order ? { order: auth.order } : {}),
+            show_app_icon: branding.showAppIcon ?? false,
+          },
+          legal: {
+            ...(app.legal?.companyName
+              ? { company_name: app.legal.companyName }
+              : {}),
+            ...(app.legal?.privacyPolicyUrl
+              ? { privacy_policy_url: app.legal.privacyPolicyUrl }
+              : {}),
+            ...(app.legal?.termsConditionsUrl
+              ? { terms_conditions_url: app.legal.termsConditionsUrl }
+              : {}),
+            ...(app.legal?.supportEmail
+              ? { support_email: app.legal.supportEmail }
+              : {}),
+          },
+          custom_content: {
+            ...(app.customContent?.signInModal
+              ? {
+                sign_in_modal: {
+                  ...(app.customContent.signInModal.title
+                    ? { title: app.customContent.signInModal.title }
+                    : {}),
+                  ...(app.customContent.signInModal.subtitle
+                    ? { subtitle: app.customContent.signInModal.subtitle }
+                    : {}),
+                  ...(app.customContent.signInModal.signInTitle
+                    ? {
+                      sign_in_title:
+                            app.customContent.signInModal.signInTitle,
+                    }
+                    : {}),
+                  ...(app.customContent.signInModal.signUpTitle
+                    ? {
+                      sign_up_title:
+                            app.customContent.signInModal.signUpTitle,
+                    }
+                    : {}),
+                  ...(app.customContent.signInModal.signInSubtitle
+                    ? {
+                      sign_in_subtitle:
+                            app.customContent.signInModal.signInSubtitle,
+                    }
+                    : {}),
+                  ...(app.customContent.signInModal.signUpSubtitle
+                    ? {
+                      sign_up_subtitle:
+                            app.customContent.signInModal.signUpSubtitle,
+                    }
+                    : {}),
+                },
+              }
+              : {}),
+            ...(app.customContent?.profileModal
+              ? { profile_modal: app.customContent.profileModal }
+              : {}),
+            ...(app.customContent?.signInFailureModal
+              ? {
+                sign_in_failure_modal: {
+                  failure_message:
+                      app.customContent.signInFailureModal.failureMessage,
+                },
+              }
+              : {}),
+          },
+          profile: {
+            ...(app.profile?.accountInformation
+              ? { account_information: app.profile.accountInformation }
+              : {}),
+            ...(app.profile?.personalInformation
+              ? { personal_information: app.profile.personalInformation }
+              : {}),
+            ...(app.profile?.preferences
+              ? { preferences: app.profile.preferences }
+              : {}),
+            ...(app.profile?.signOutButton
+              ? { sign_out_button: app.profile.signOutButton }
+              : {}),
+            ...(app.profile?.deleteAccountButton
+              ? { delete_account_button: app.profile.deleteAccountButton }
+              : {}),
+          },
         },
       },
     },
