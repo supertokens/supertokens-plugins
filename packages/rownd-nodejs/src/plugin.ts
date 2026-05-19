@@ -30,6 +30,7 @@ import {
   shouldLinkRowndAccounts,
   rewriteLinkPath,
   getRequestedAppVariantIdFromRequest,
+  getRequestedDisplayContextFromRequest,
   recordRowndAppVariantForUser,
   assertRowndAppVariantIsConfigured,
 } from "./pluginImplementation";
@@ -57,10 +58,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         const appVariantId = input?.userContext?.rowndAppVariantId as
           | string
           | undefined;
+        const displayContext = input?.userContext?.rowndDisplayContext as
+          | string
+          | undefined;
         const bootstrapParams = {
           appKey: pluginConfig.rowndAppKey,
           ...(hubBootstrapParams ?? {}),
           ...(typeof appVariantId === "string" ? { appVariantId } : {}),
+          ...(typeof displayContext === "string" ? { displayContext } : {}),
         };
 
         return {
@@ -223,6 +228,29 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
             },
             apis: (originalImplementation: PasswordlessAPIInterface) => ({
               ...originalImplementation,
+              createCodePOST: async (
+                input: Parameters<
+                  NonNullable<PasswordlessAPIInterface["createCodePOST"]>
+                >[0],
+              ) => {
+                if (originalImplementation.createCodePOST === undefined) {
+                  throw new Error("Passwordless createCodePOST is unavailable");
+                }
+
+                const displayContext = getRequestedDisplayContextFromRequest(
+                  input.options.req,
+                );
+
+                return originalImplementation.createCodePOST({
+                  ...input,
+                  userContext: displayContext
+                    ? {
+                        ...input.userContext,
+                        rowndDisplayContext: displayContext,
+                      }
+                    : input.userContext,
+                });
+              },
               consumeCodePOST: async (
                 input: Parameters<
                   NonNullable<PasswordlessAPIInterface["consumeCodePOST"]>

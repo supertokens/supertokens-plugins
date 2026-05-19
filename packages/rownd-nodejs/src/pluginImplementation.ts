@@ -349,6 +349,10 @@ export function handleUpdateUser() {
     const session = requireSession(maybeSession);
     const payload = parseUpdateUserBody(await getJsonBody(req));
     const inputData = payload.data ?? {};
+    const requestUserContext = {
+      ...userContext,
+      ...payload.context,
+    };
     const { email, ...dataWithoutEmail } = inputData;
     const hasEmailUpdate =
       hasOwn(inputData, "email") && typeof email === "string";
@@ -373,7 +377,7 @@ export function handleUpdateUser() {
           tenantId: session.getTenantId(),
           email,
           pendingVerificationId: randomUUID(),
-          userContext,
+          userContext: requestUserContext,
         })),
       };
     }
@@ -550,12 +554,18 @@ function parseGuestBody(value: unknown) {
   };
 }
 
-function parseUpdateUserBody(value: unknown): { data?: JsonRecord } {
+function parseUpdateUserBody(value: unknown): {
+  data?: JsonRecord;
+  context?: JsonRecord;
+} {
   if (!isJsonRecord(value) || !isJsonRecord(value.data)) {
     return {};
   }
 
-  return { data: value.data };
+  return {
+    data: value.data,
+    ...(isJsonRecord(value.context) ? { context: value.context } : {}),
+  };
 }
 
 function parseUpdateMetaBody(value: unknown): { meta?: JsonRecord } {
@@ -795,6 +805,17 @@ export function getRequestedAppVariantIdFromRequest(
   req: Pick<SuperTokensRequest, "getKeyValueFromQuery">,
 ) {
   return req.getKeyValueFromQuery("app_variant_id");
+}
+
+export function getRequestedDisplayContextFromRequest(
+  req: Pick<SuperTokensRequest, "getKeyValueFromQuery">,
+) {
+  const displayContext = req.getKeyValueFromQuery("rownd_display_context");
+  return displayContext === "browser" ||
+    displayContext === "mobile_app" ||
+    displayContext === "customer_web_view"
+    ? displayContext
+    : undefined;
 }
 
 export function assertRowndAppVariantIsConfigured(appVariantId?: string) {

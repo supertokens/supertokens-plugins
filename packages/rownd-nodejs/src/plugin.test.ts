@@ -436,7 +436,10 @@ describe("rownd-nodejs plugin", () => {
       await emailDelivery.sendEmail({
         urlWithLinkCode:
           "https://hub.example.com/auth/verify?preAuthSessionId=pid&linkCode=abc",
-        userContext: { rowndAppVariantId: "variant_123" },
+        userContext: {
+          rowndAppVariantId: "variant_123",
+          rowndDisplayContext: "mobile_app",
+        },
       });
 
       const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
@@ -450,6 +453,9 @@ describe("rownd-nodejs plugin", () => {
       );
       expect(rewrittenUrl.searchParams.get("apiBasePath")).toBe("/auth");
       expect(rewrittenUrl.searchParams.get("appVariantId")).toBe("variant_123");
+      expect(rewrittenUrl.searchParams.get("displayContext")).toBe(
+        "mobile_app",
+      );
     });
 
     it("adds hub bootstrap params to email verification links", async () => {
@@ -471,7 +477,7 @@ describe("rownd-nodejs plugin", () => {
 
       await emailDelivery.sendEmail({
         emailVerifyLink: "https://hub.example.com/auth/verify?token=token_123",
-        userContext: {},
+        userContext: { rowndDisplayContext: "mobile_app" },
       });
 
       const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].emailVerifyLink);
@@ -483,6 +489,9 @@ describe("rownd-nodejs plugin", () => {
         "https://api.example.com",
       );
       expect(rewrittenUrl.searchParams.get("apiBasePath")).toBe("/auth");
+      expect(rewrittenUrl.searchParams.get("displayContext")).toBe(
+        "mobile_app",
+      );
     });
 
     it("records app variant membership after passwordless code consumption", async () => {
@@ -2368,6 +2377,9 @@ describe("rownd-nodejs plugin", () => {
               data: {
                 email: "email-new-target@example.com",
               },
+              context: {
+                rowndDisplayContext: "mobile_app",
+              },
             }),
           },
         );
@@ -2378,6 +2390,9 @@ describe("rownd-nodejs plugin", () => {
         expect(verificationUrl.pathname).toBe("/account/verify-email");
         expect(verificationUrl.searchParams.get("token")).toBeTruthy();
         expect(verificationUrl.searchParams.get("tenantId")).toBe("public");
+        expect(verificationUrl.searchParams.get("displayContext")).toBe(
+          "mobile_app",
+        );
 
         const body = await res.json();
         expect(body.data.email).toBe("email-verified-current@example.com");
