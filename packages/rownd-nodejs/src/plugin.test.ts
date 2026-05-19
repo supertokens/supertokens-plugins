@@ -417,6 +417,74 @@ describe("rownd-nodejs plugin", () => {
   });
 
   describe("recipe API overrides", () => {
+    it("adds hub bootstrap params to passwordless magic links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid&linkCode=abc",
+        userContext: { rowndAppVariantId: "variant_123" },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.origin).toBe("https://hub.example.com");
+      expect(rewrittenUrl.pathname).toBe("/account/login");
+      expect(rewrittenUrl.searchParams.get("preAuthSessionId")).toBe("pid");
+      expect(rewrittenUrl.searchParams.get("linkCode")).toBe("abc");
+      expect(rewrittenUrl.searchParams.get("appKey")).toBe("test-key");
+      expect(rewrittenUrl.searchParams.get("apiDomain")).toBe(
+        "https://api.example.com",
+      );
+      expect(rewrittenUrl.searchParams.get("apiBasePath")).toBe("/auth");
+      expect(rewrittenUrl.searchParams.get("appVariantId")).toBe("variant_123");
+    });
+
+    it("adds hub bootstrap params to email verification links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const emailVerificationConfig =
+        plugin.overrideMap.emailverification.config({});
+      const emailDelivery = emailVerificationConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        emailVerifyLink: "https://hub.example.com/auth/verify?token=token_123",
+        userContext: {},
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].emailVerifyLink);
+      expect(rewrittenUrl.origin).toBe("https://hub.example.com");
+      expect(rewrittenUrl.pathname).toBe("/account/verify-email");
+      expect(rewrittenUrl.searchParams.get("token")).toBe("token_123");
+      expect(rewrittenUrl.searchParams.get("appKey")).toBe("test-key");
+      expect(rewrittenUrl.searchParams.get("apiDomain")).toBe(
+        "https://api.example.com",
+      );
+      expect(rewrittenUrl.searchParams.get("apiBasePath")).toBe("/auth");
+    });
+
     it("records app variant membership after passwordless code consumption", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
@@ -441,10 +509,11 @@ describe("rownd-nodejs plugin", () => {
         status: "OK",
         user: signInUpResult.user,
       });
-      const passwordlessApis = (init(pluginConfig) as any).overrideMap
-        .passwordless.apis({
-          consumeCodePOST: originalConsumeCodePOST,
-        });
+      const passwordlessApis = (
+        init(pluginConfig) as any
+      ).overrideMap.passwordless.apis({
+        consumeCodePOST: originalConsumeCodePOST,
+      });
 
       await passwordlessApis.consumeCodePOST({
         options: { req: makeVariantRequest("variant_123") },
@@ -481,10 +550,11 @@ describe("rownd-nodejs plugin", () => {
       testPORT = port;
 
       const originalConsumeCodePOST = vi.fn();
-      const passwordlessApis = (init(pluginConfig) as any).overrideMap
-        .passwordless.apis({
-          consumeCodePOST: originalConsumeCodePOST,
-        });
+      const passwordlessApis = (
+        init(pluginConfig) as any
+      ).overrideMap.passwordless.apis({
+        consumeCodePOST: originalConsumeCodePOST,
+      });
 
       await expect(
         passwordlessApis.consumeCodePOST({
@@ -526,10 +596,11 @@ describe("rownd-nodejs plugin", () => {
         status: "OK",
         user: signInUpResult.user,
       });
-      const thirdPartyApis = (init(pluginConfig) as any).overrideMap
-        .thirdparty.apis({
-          signInUpPOST: originalSignInUpPOST,
-        });
+      const thirdPartyApis = (
+        init(pluginConfig) as any
+      ).overrideMap.thirdparty.apis({
+        signInUpPOST: originalSignInUpPOST,
+      });
 
       await thirdPartyApis.signInUpPOST({
         options: { req: makeVariantRequest("variant_123") },
@@ -566,10 +637,11 @@ describe("rownd-nodejs plugin", () => {
       testPORT = port;
 
       const originalSignInUpPOST = vi.fn();
-      const thirdPartyApis = (init(pluginConfig) as any).overrideMap
-        .thirdparty.apis({
-          signInUpPOST: originalSignInUpPOST,
-        });
+      const thirdPartyApis = (
+        init(pluginConfig) as any
+      ).overrideMap.thirdparty.apis({
+        signInUpPOST: originalSignInUpPOST,
+      });
 
       await expect(
         thirdPartyApis.signInUpPOST({
@@ -3073,6 +3145,20 @@ function makeVariantRequest(appVariantId: string) {
   return {
     getKeyValueFromQuery: (key: string) =>
       key === "app_variant_id" ? appVariantId : undefined,
+  };
+}
+
+function makePublicConfig(apiDomain: string, apiBasePath: string) {
+  return {
+    appInfo: {
+      apiDomain: {
+        getAsStringDangerous: () => apiDomain,
+      },
+      apiBasePath: {
+        getAsStringDangerous: () => apiBasePath,
+      },
+      appName: "Test App",
+    },
   };
 }
 

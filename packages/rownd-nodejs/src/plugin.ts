@@ -47,6 +47,29 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         app_secret: pluginConfig.rowndAppSecret,
       });
       const telemetryClient = createClient(pluginConfig.telemetry);
+      let hubBootstrapParams: Record<string, string> | undefined;
+
+      const addHubBootstrapParams = <T extends Record<string, any>>(
+        input: T,
+        linkKey: keyof T,
+        targetPath: string,
+      ) => {
+        const appVariantId = input?.userContext?.rowndAppVariantId as
+          | string
+          | undefined;
+        const bootstrapParams = {
+          appKey: pluginConfig.rowndAppKey,
+          ...(hubBootstrapParams ?? {}),
+          ...(typeof appVariantId === "string" ? { appVariantId } : {}),
+        };
+
+        return {
+          ...input,
+          [linkKey]: input[linkKey]
+            ? rewriteLinkPath(input[linkKey], targetPath, bootstrapParams)
+            : input[linkKey],
+        };
+      };
 
       setRowndClient(rowndClient);
       setPluginConfig(pluginConfig);
@@ -80,6 +103,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         routeHandlers(stConfig) {
           const apiBasePath =
             stConfig.appInfo.apiBasePath.getAsStringDangerous();
+          hubBootstrapParams = {
+            apiDomain: stConfig.appInfo.apiDomain.getAsStringDangerous(),
+            apiBasePath,
+          };
           const routeHandlerDeps = {
             pluginConfig,
             stConfig,
@@ -173,22 +200,20 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                        originalImplementation,
-                        builder,
-                      )
+                          originalImplementation,
+                          builder,
+                        )
                       : originalImplementation;
 
                     return {
                       ...implementation,
                       sendEmail: async function (input) {
                         return implementation.sendEmail({
-                          ...input,
-                          urlWithLinkCode: input.urlWithLinkCode
-                            ? rewriteLinkPath(
-                              input.urlWithLinkCode,
-                              "account/login",
-                            )
-                            : input.urlWithLinkCode,
+                          ...addHubBootstrapParams(
+                            input,
+                            "urlWithLinkCode",
+                            "account/login",
+                          ),
                         });
                       },
                     };
@@ -204,7 +229,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 >[0],
               ) => {
                 if (originalImplementation.consumeCodePOST === undefined) {
-                  throw new Error("Passwordless consumeCodePOST is unavailable");
+                  throw new Error(
+                    "Passwordless consumeCodePOST is unavailable",
+                  );
                 }
 
                 const appVariantId = getRequestedAppVariantIdFromRequest(
@@ -324,18 +351,18 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                        originalImplementation,
-                        builder,
-                      )
+                          originalImplementation,
+                          builder,
+                        )
                       : originalImplementation;
 
                     return {
                       ...implementation,
                       sendEmail: async (input) => {
                         return implementation.sendEmail({
-                          ...input,
-                          emailVerifyLink: rewriteLinkPath(
-                            input.emailVerifyLink,
+                          ...addHubBootstrapParams(
+                            input,
+                            "emailVerifyLink",
                             "account/verify-email",
                           ),
                         });
