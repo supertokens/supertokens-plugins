@@ -648,6 +648,8 @@ export type RowndSchemaField = {
   owned_by?: string;
   read_only?: boolean;
   show_empty?: boolean;
+  include_in_session_claims?: boolean;
+  session_claim_name?: string;
 };
 
 export type RowndSchema = Record<string, RowndSchemaField>;

@@ -1257,6 +1257,103 @@ describe("rownd-nodejs plugin", () => {
         ]);
       });
 
+      it("adds configured Rownd data fields to migrated session claims", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI, {
+          schema: {
+            employee_id: {
+              display_name: "Employee ID",
+              type: "string",
+              user_visible: false,
+              include_in_session_claims: true,
+              session_claim_name: "employee_id_claim",
+            },
+            plan: {
+              display_name: "Plan",
+              type: "string",
+              user_visible: false,
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-session-claims",
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-session-claims",
+          data: {
+            user_id: "rownd-session-claims",
+            email: "session-claims@example.com",
+            employee_id: "emp_123",
+            plan: "enterprise",
+          },
+          verified_data: { email: true },
+        });
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer some-token",
+              rid: "session",
+              "fdi-version": "1.18",
+            },
+          },
+        );
+
+        expect(await res.json()).toEqual({ status: "OK" });
+        const accessToken = res.headers.get("st-access-token");
+        expect(accessToken).toBeTruthy();
+        const session = await Session.getSessionWithoutRequestResponse(
+          accessToken!,
+        );
+        const accessTokenPayload = session!.getAccessTokenPayload();
+        expect(accessTokenPayload.employee_id_claim).toBe("emp_123");
+        expect(accessTokenPayload.employee_id).toBeUndefined();
+        expect(accessTokenPayload.plan).toBeUndefined();
+      });
+
+      it("uses metadata fallback for configured session claim fields", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          schema: {
+            account_tier: {
+              display_name: "Account tier",
+              type: "string",
+              user_visible: false,
+              include_in_session_claims: true,
+            },
+            missing_field: {
+              display_name: "Missing field",
+              type: "string",
+              user_visible: false,
+              include_in_session_claims: true,
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+        const signInUpResponse = await Passwordless.signInUp({
+          email: "metadata-claims@example.com",
+          tenantId: "public",
+        });
+
+        await UserMetadata.updateUserMetadata(signInUpResponse.user.id, {
+          account_tier: "gold",
+          original_rownd_user: {
+            data: {
+              user_id: signInUpResponse.user.id,
+              email: "metadata-claims@example.com",
+            },
+            verified_data: { email: true },
+          },
+        });
+
+        const claims = await buildRowndSessionClaims(signInUpResponse.user.id);
+        expect(claims).toMatchObject({ account_tier: "gold" });
+        expect(claims).not.toHaveProperty("missing_field");
+      });
+
       it("adds is_anonymous claim for anonymous Rownd sessions", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
@@ -1451,6 +1548,46 @@ describe("rownd-nodejs plugin", () => {
         expect(methods.google.one_tap.browser.delay).toBe(3000);
         expect(methods.apple.enabled).toBe(true);
         expect(methods.apple.client_id).toBe("com.example.app");
+      });
+
+      it("returns platform-specific auth order from plugin config", async () => {
+        const authOrder = {
+          default: [
+            { name: "email", type: "input" as const },
+            { name: "google", type: "button" as const },
+          ],
+          ios: [
+            { name: "apple", type: "button" as const },
+            { name: "google", type: "button" as const, hidden: true },
+            { name: "email", type: "input" as const },
+          ],
+          android: [
+            { name: "google", type: "button" as const },
+            { name: "apple", type: "button" as const, hidden: true },
+            { name: "email", type: "input" as const },
+          ],
+        };
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: {
+            signInMethods: [
+              { method: "email" },
+              { method: "google" },
+              { method: "apple" },
+            ],
+            auth: {
+              order: authOrder,
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const body = await res.json();
+
+        expect(body.app.config.hub.auth.order).toEqual(authOrder);
       });
 
       it("returns branding fields from plugin config", async () => {

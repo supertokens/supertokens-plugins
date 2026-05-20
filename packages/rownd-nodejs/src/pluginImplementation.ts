@@ -933,9 +933,11 @@ export async function buildRowndSessionClaims(
   const anonymousId = getAnonymousId(userId, user, metadata);
   const isVerifiedUser = authLevel !== "unverified";
   const audience = buildRowndAudience(currentPayload, appVariantId);
+  const configuredClaims = buildConfiguredSessionClaims(metadata);
 
   return {
     ...audience,
+    ...configuredClaims,
     app_user_id: appUserId,
     auth_level: authLevel,
     is_verified_user: isVerifiedUser,
@@ -945,6 +947,28 @@ export async function buildRowndSessionClaims(
     [ROWND_JWT_CLAIMS.IsAnonymous]: isAnonymous,
     ...(anonymousId ? { anonymous_id: anonymousId } : {}),
   };
+}
+
+function buildConfiguredSessionClaims(metadata?: RowndMetadata): JsonRecord {
+  if (!metadata) {
+    return {};
+  }
+
+  const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;
+  const claims: JsonRecord = {};
+
+  for (const [key, field] of Object.entries(schema)) {
+    if (field.include_in_session_claims !== true) {
+      continue;
+    }
+
+    const value = metadata.original_rownd_user?.data?.[key] ?? metadata[key];
+    if (value !== undefined) {
+      claims[field.session_claim_name || key] = value as JsonValue;
+    }
+  }
+
+  return claims;
 }
 
 function getRowndAppUserId(

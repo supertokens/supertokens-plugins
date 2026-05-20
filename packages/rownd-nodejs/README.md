@@ -44,6 +44,26 @@ SuperTokens.init({
 });
 ```
 
+### Session Claim Fields
+
+Schema fields can be copied into the SuperTokens access-token payload by setting `include_in_session_claims: true`. Use `session_claim_name` when the claim name should differ from the Rownd data field name.
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  schema: {
+    employee_id: {
+      display_name: "Employee ID",
+      type: "string",
+      user_visible: false,
+      include_in_session_claims: true,
+      session_claim_name: "employee_id_claim",
+    },
+  },
+});
+```
+
 ## API Endpoint
 
 The plugin exposes a single endpoint:

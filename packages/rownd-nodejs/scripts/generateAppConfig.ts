@@ -37,6 +37,13 @@ type RowndSchemaExportField = {
   user_visible: boolean;
   read_only?: boolean;
   show_empty?: boolean;
+  include_in_session_claims?: boolean;
+  session_claim_name?: string;
+};
+
+type RowndCustomClaimConfig = {
+  source?: "user_profile" | "static_value";
+  value?: string | number | boolean;
 };
 
 type RowndVariant = {
@@ -45,7 +52,7 @@ type RowndVariant = {
   config?: RowndConfigObject;
 };
 
-function convertRowndConfigToPluginConfig(
+export function convertRowndConfigToPluginConfig(
   rowndApp: RowndConfigObject,
   creds: { appKey: string; appSecret: string },
 ): RowndPluginConfig & { _instructions?: string[] } {
@@ -61,11 +68,6 @@ function convertRowndConfigToPluginConfig(
   const instructions: string[] = [];
 
   const authTokens = getObject(getObject(config.auth).access_tokens);
-  if (authTokens.custom_claims) {
-    instructions.push(
-      "Custom claims were found in your Rownd configuration. Please follow the SuperTokens documentation to add custom claims to your access token payload: https://supertokens.com/docs/additional-verification/session-verification/claim-validation#1-add-custom-claims-to-the-access-token-payload",
-    );
-  }
 
   const appConfig: RowndAppConfigInput = {
     id: getString(rowndApp.id),
@@ -231,6 +233,38 @@ function convertRowndConfigToPluginConfig(
           }
         }
       }
+    }
+  }
+
+  const customClaims = getObject(authTokens.custom_claims);
+  for (const [claimName, claimConfig] of Object.entries(
+    customClaims as Record<string, RowndCustomClaimConfig>,
+  )) {
+    if (claimConfig.source !== "user_profile") {
+      instructions.push(
+        `Custom claim '${claimName}' uses source '${claimConfig.source ?? "unknown"}'. Please configure this claim manually in SuperTokens.`,
+      );
+      continue;
+    }
+
+    if (typeof claimConfig.value !== "string") {
+      instructions.push(
+        `Custom claim '${claimName}' references a non-string user profile field. Please configure this claim manually in SuperTokens.`,
+      );
+      continue;
+    }
+
+    const schemaField = cleanSchema[claimConfig.value];
+    if (!schemaField) {
+      instructions.push(
+        `Custom claim '${claimName}' references user profile field '${claimConfig.value}', but that field was not found in the exported Rownd schema. Please configure this claim manually in SuperTokens.`,
+      );
+      continue;
+    }
+
+    schemaField.include_in_session_claims = true;
+    if (claimName !== claimConfig.value) {
+      schemaField.session_claim_name = claimName;
     }
   }
 
@@ -474,7 +508,9 @@ async function run() {
   console.log(`Successfully generated config and saved to ${outputPath}`);
 }
 
-run().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  run().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
