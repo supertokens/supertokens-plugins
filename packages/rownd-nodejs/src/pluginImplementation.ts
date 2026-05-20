@@ -23,6 +23,7 @@ import {
   DEFAULT_ROWND_SCHEMA,
   GUEST_AUTH_METHOD_ID,
   PUBLIC_TENANT_ID,
+  ROWND_JWT_CLAIMS,
 } from "./constants";
 import type {
   JSONObject,
@@ -147,16 +148,22 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
 
     try {
       const body = parseGuestBody(await getJsonBody(req));
+      const appVariantId = getRequestedAppVariantIdFromRequest(req);
+      assertRowndAppVariantIsConfigured(appVariantId);
       const thirdPartyId =
         body.authLevel === ANONYMOUS_AUTH_METHOD_ID
           ? ANONYMOUS_AUTH_METHOD_ID
           : GUEST_AUTH_METHOD_ID;
+      const thirdPartyUserId =
+        thirdPartyId === ANONYMOUS_AUTH_METHOD_ID
+          ? `anon_${randomUUID()}`
+          : guestId;
 
       const response = await ThirdParty.manuallyCreateOrUpdateUser(
         PUBLIC_TENANT_ID,
         thirdPartyId,
-        guestId,
-        `${guestId}@anonymous.local`,
+        thirdPartyUserId,
+        `${thirdPartyUserId}@anonymous.local`,
         false,
         undefined,
         userContext,
@@ -174,7 +181,8 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
         PUBLIC_TENANT_ID,
         response.recipeUserId,
         {
-          auth_level: thirdPartyId,
+          ...buildRowndAudience({}, appVariantId),
+          auth_level: GUEST_AUTH_METHOD_ID,
           is_anonymous: true,
           app_user_id: response.user.id,
         },
@@ -287,7 +295,9 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         res,
         PUBLIC_TENANT_ID,
         recipeUserId,
-        {},
+        {
+          ...buildRowndAudience({}, appVariantId),
+        },
         {},
         userContext,
       );
@@ -818,6 +828,15 @@ export function getRequestedDisplayContextFromRequest(
     : undefined;
 }
 
+export function getRequestedRedirectToPathFromRequest(
+  req: Pick<SuperTokensRequest, "getKeyValueFromQuery">,
+) {
+  const redirectToPath = req.getKeyValueFromQuery("rownd_redirect_to_path");
+  return typeof redirectToPath === "string" && redirectToPath.length > 0
+    ? redirectToPath
+    : undefined;
+}
+
 export function assertRowndAppVariantIsConfigured(appVariantId?: string) {
   if (!appVariantId) {
     return;
@@ -893,15 +912,95 @@ export const RowndIsAnonymousClaim = new BooleanClaim({
   },
 });
 
-export async function buildRowndSessionClaims(userId: string) {
+export async function buildRowndSessionClaims(
+  userId: string,
+  currentPayload: JsonRecord = {},
+  appVariantId?: string,
+) {
   const user = await SuperTokens.getUser(userId);
+  const metadata = user ? await getUserMetadata(user.id) : undefined;
+  const originalRowndUser = metadata?.original_rownd_user;
+  const verifiedData = originalRowndUser?.verified_data as
+    | JsonRecord
+    | undefined;
+  const authLevel = getEffectiveAuthLevel(
+    user,
+    originalRowndUser?.auth_level,
+    verifiedData,
+  );
+  const appUserId = getRowndAppUserId(userId, user, currentPayload, metadata);
+  const isAnonymous = authLevel === GUEST_AUTH_METHOD_ID;
+  const anonymousId = getAnonymousId(userId, user, metadata);
+  const isVerifiedUser = authLevel !== "unverified";
+  const audience = buildRowndAudience(currentPayload, appVariantId);
 
   return {
-    auth_level: getEffectiveAuthLevel(user),
-    ...(hasAnonymousLoginMethod(user)
-      ? { anonymous_id: `anon_${userId}` }
-      : {}),
+    ...audience,
+    app_user_id: appUserId,
+    auth_level: authLevel,
+    is_verified_user: isVerifiedUser,
+    [ROWND_JWT_CLAIMS.AppUserId]: appUserId,
+    [ROWND_JWT_CLAIMS.AuthLevel]: authLevel,
+    [ROWND_JWT_CLAIMS.IsVerifiedUser]: isVerifiedUser,
+    [ROWND_JWT_CLAIMS.IsAnonymous]: isAnonymous,
+    ...(anonymousId ? { anonymous_id: anonymousId } : {}),
   };
+}
+
+function getRowndAppUserId(
+  userId: string,
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+  currentPayload: JsonRecord,
+  metadata?: RowndMetadata,
+) {
+  const originalUserId = metadata?.original_rownd_user?.data?.user_id;
+  if (typeof originalUserId === "string") {
+    return originalUserId;
+  }
+
+  if (typeof currentPayload.app_user_id === "string") {
+    return currentPayload.app_user_id;
+  }
+
+  return user?.id || userId;
+}
+
+function buildRowndAudience(currentPayload: JsonRecord, appVariantId?: string) {
+  const audience = getStringList(currentPayload.aud);
+  const appId = pluginConfig?.appConfig?.id;
+
+  if (appId) {
+    audience.push(`app:${appId}`);
+  }
+
+  if (appVariantId) {
+    audience.push(`app_variant:${appVariantId}`);
+  }
+
+  return audience.length > 0 ? { aud: [...new Set(audience)] } : {};
+}
+
+function getAnonymousId(
+  userId: string,
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+  metadata?: RowndMetadata,
+) {
+  const originalAnonymousId = metadata?.original_rownd_user?.data?.anonymous_id;
+  if (typeof originalAnonymousId === "string") {
+    return originalAnonymousId;
+  }
+
+  const anonymousMethod = user?.loginMethods.find((loginMethod) => {
+    return (
+      loginMethod.recipeId === "thirdparty" &&
+      getThirdPartyId(loginMethod as RowndLoginMethod) === ANONYMOUS_AUTH_METHOD_ID
+    );
+  }) as RowndLoginMethod | undefined;
+  const thirdPartyUserId = anonymousMethod
+    ? getThirdPartyUserId(anonymousMethod)
+    : undefined;
+
+  return thirdPartyUserId || (hasAnonymousLoginMethod(user) ? `anon_${userId}` : undefined);
 }
 
 export async function shouldLinkRowndAccounts(
@@ -1085,8 +1184,9 @@ export async function getUserById(
     verifiedData.phone_number = data.phone_number;
   }
 
-  if (hasAnonymousLoginMethod(stUser)) {
-    data.anonymous_id = `anon_${stUser.id}`;
+  const anonymousId = getAnonymousId(stUser.id, stUser, metadata);
+  if (anonymousId && data.anonymous_id === undefined) {
+    data.anonymous_id = anonymousId;
   }
 
   const authLevel = getEffectiveAuthLevel(

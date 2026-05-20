@@ -40,7 +40,7 @@ import { Network, StartedNetwork } from "testcontainers";
 import { init } from "./plugin";
 import { RowndPluginConfig, RowndTelemetryClient } from "./types";
 import { ROWND_PLUGIN_ERROR_MESSAGES } from "./errors";
-import { DEFAULT_ROWND_SCHEMA } from "./constants";
+import { DEFAULT_ROWND_SCHEMA, ROWND_JWT_CLAIMS } from "./constants";
 import {
   mapRowndUserToSuperTokens,
   DEFAULT_PRIMARY_COLOR,
@@ -439,6 +439,7 @@ describe("rownd-nodejs plugin", () => {
         userContext: {
           rowndAppVariantId: "variant_123",
           rowndDisplayContext: "mobile_app",
+          rowndRedirectToPath: "/profile.html",
         },
       });
 
@@ -453,6 +454,48 @@ describe("rownd-nodejs plugin", () => {
       );
       expect(rewrittenUrl.searchParams.get("apiBasePath")).toBe("/auth");
       expect(rewrittenUrl.searchParams.get("appVariantId")).toBe("variant_123");
+      expect(rewrittenUrl.searchParams.get("displayContext")).toBe(
+        "mobile_app",
+      );
+      expect(rewrittenUrl.searchParams.get("redirectToPath")).toBe(
+        "/profile.html",
+      );
+    });
+
+    it("adds hub bootstrap params to passwordless SMS magic links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendSms = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const smsDelivery = passwordlessConfig.smsDelivery.override({
+        sendSms,
+      });
+
+      await smsDelivery.sendSms({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid&linkCode=abc",
+        userContext: {
+          rowndDisplayContext: "mobile_app",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendSms.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.origin).toBe("https://hub.example.com");
+      expect(rewrittenUrl.pathname).toBe("/account/login");
+      expect(rewrittenUrl.searchParams.get("preAuthSessionId")).toBe("pid");
+      expect(rewrittenUrl.searchParams.get("linkCode")).toBe("abc");
+      expect(rewrittenUrl.searchParams.get("appKey")).toBe("test-key");
+      expect(rewrittenUrl.searchParams.get("apiDomain")).toBe(
+        "https://api.example.com",
+      );
+      expect(rewrittenUrl.searchParams.get("apiBasePath")).toBe("/auth");
       expect(rewrittenUrl.searchParams.get("displayContext")).toBe(
         "mobile_app",
       );
@@ -1155,7 +1198,9 @@ describe("rownd-nodejs plugin", () => {
 
     describe("session migration", () => {
       it("migrate session successfully", async () => {
-        const { server: s, port } = await setup(importCoreConnectionURI);
+        const { server: s, port } = await setup(importCoreConnectionURI, {
+          appConfig: { id: "app_session_test" },
+        });
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
@@ -1168,7 +1213,7 @@ describe("rownd-nodejs plugin", () => {
         });
 
         const res = await fetch(
-          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate?app_variant_id=variant_session_test`,
           {
             method: "POST",
             headers: {
@@ -1194,6 +1239,22 @@ describe("rownd-nodejs plugin", () => {
         await expect(
           session?.getClaimValue(RowndIsAnonymousClaim),
         ).resolves.toBe(false);
+        const accessTokenPayload = session!.getAccessTokenPayload();
+        expect(accessTokenPayload["app_user_id"]).toBe("rownd-session-1");
+        expect(accessTokenPayload["auth_level"]).toBe("verified");
+        expect(accessTokenPayload["is_verified_user"]).toBe(true);
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AppUserId]).toBe(
+          "rownd-session-1",
+        );
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe(
+          "verified",
+        );
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(true);
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(false);
+        expect(accessTokenPayload["aud"]).toEqual([
+          "app:app_session_test",
+          "app_variant:variant_session_test",
+        ]);
       });
 
       it("adds is_anonymous claim for anonymous Rownd sessions", async () => {
@@ -1231,6 +1292,10 @@ describe("rownd-nodejs plugin", () => {
         await expect(
           session?.getClaimValue(RowndIsAnonymousClaim),
         ).resolves.toBe(true);
+        const accessTokenPayload = session!.getAccessTokenPayload();
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("guest");
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(true);
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(true);
       });
 
       it("create user and then migrate their session", async () => {
@@ -1747,6 +1812,11 @@ describe("rownd-nodejs plugin", () => {
         );
         const accessTokenPayload = session!.getAccessTokenPayload();
         expect(accessTokenPayload["auth_level"]).toBe("guest");
+        expect(accessTokenPayload["is_verified_user"]).toBe(true);
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AppUserId]).toBe(stUser?.id);
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("guest");
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(true);
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(true);
         await expect(
           session?.getClaimValue(RowndIsAnonymousClaim),
         ).resolves.toBe(true);
@@ -1759,7 +1829,7 @@ describe("rownd-nodejs plugin", () => {
         expect(guestLogin?.thirdParty?.userId).toMatch(/^guest_[a-f0-9-]{36}$/);
       });
 
-      it("should create an anonymous guest user with guest auth_level", async () => {
+      it("should use the anonymous provider while exposing guest auth_level", async () => {
         const { server: s, port } = await setup(coreConnectionURI);
         server = s;
         testPORT = port;
@@ -1789,7 +1859,19 @@ describe("rownd-nodejs plugin", () => {
         );
         const accessTokenPayload = session!.getAccessTokenPayload();
         expect(accessTokenPayload["auth_level"]).toBe("guest");
+        expect(accessTokenPayload["auth_level"]).not.toBe("anonymous");
         expect(accessTokenPayload["anonymous_id"]).toMatch(/^anon_/);
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("guest");
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(true);
+
+        const stUser = await SuperTokens.getUser(session!.getUserId());
+        const anonymousLogin = stUser?.loginMethods.find(
+          (m) =>
+            m.recipeId === "thirdparty" &&
+            m.thirdParty?.id === "anonymous",
+        );
+        expect(anonymousLogin).toBeDefined();
+        expect(anonymousLogin?.thirdParty?.userId).toMatch(/^anon_/);
       });
     });
 
@@ -2345,9 +2427,15 @@ describe("rownd-nodejs plugin", () => {
 
         await expect(
           buildRowndSessionClaims(passwordlessResult.user.id),
-        ).resolves.toEqual({
+        ).resolves.toMatchObject({
+          app_user_id: passwordlessResult.user.id,
           auth_level: "verified",
-          anonymous_id: `anon_${passwordlessResult.user.id}`,
+          is_verified_user: true,
+          anonymous_id: expect.stringMatching(/^anon_/),
+          [ROWND_JWT_CLAIMS.AppUserId]: passwordlessResult.user.id,
+          [ROWND_JWT_CLAIMS.AuthLevel]: "verified",
+          [ROWND_JWT_CLAIMS.IsVerifiedUser]: true,
+          [ROWND_JWT_CLAIMS.IsAnonymous]: false,
         });
       });
 

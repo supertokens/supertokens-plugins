@@ -9,6 +9,16 @@ export const PUBLIC_TENANT_ID = "public";
 export const GUEST_AUTH_METHOD_ID = "guest";
 export const ANONYMOUS_AUTH_METHOD_ID = "anonymous";
 
+export const ROWND_JWT_CLAIMS = {
+  AppUserId: "https://auth.rownd.io/app_user_id",
+  IsVerifiedUser: "https://auth.rownd.io/is_verified_user",
+  IsAnonymous: "https://auth.rownd.io/is_anonymous",
+  IssuedOffline: "https://auth.rownd.io/issued_offline",
+  JwtType: "https://auth.rownd.io/jwt_type",
+  PlatformJwt: "https://auth.rownd.io/platform_jwt",
+  AuthLevel: "https://auth.rownd.io/auth_level",
+} as const;
+
 export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
   zip_code: {
     display_name: "Zip code",

@@ -31,6 +31,7 @@ import {
   rewriteLinkPath,
   getRequestedAppVariantIdFromRequest,
   getRequestedDisplayContextFromRequest,
+  getRequestedRedirectToPathFromRequest,
   recordRowndAppVariantForUser,
   assertRowndAppVariantIsConfigured,
 } from "./pluginImplementation";
@@ -61,11 +62,15 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         const displayContext = input?.userContext?.rowndDisplayContext as
           | string
           | undefined;
+        const redirectToPath = input?.userContext?.rowndRedirectToPath as
+          | string
+          | undefined;
         const bootstrapParams = {
           appKey: pluginConfig.rowndAppKey,
           ...(hubBootstrapParams ?? {}),
           ...(typeof appVariantId === "string" ? { appVariantId } : {}),
           ...(typeof displayContext === "string" ? { displayContext } : {}),
+          ...(typeof redirectToPath === "string" ? { redirectToPath } : {}),
         };
 
         return {
@@ -139,6 +144,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 handler: withRequestHandler(handleMigrate(routeHandlerDeps)),
               },
               {
+                path: `${apiBasePath}/plugin/migrate-session`,
+                method: "post" as const,
+                handler: withRequestHandler(handleMigrate(routeHandlerDeps)),
+              },
+              {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/signout`,
                 method: "post" as const,
                 verifySessionOptions: {
@@ -197,6 +207,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
             config: (config) => {
               const originalEmailDeliveryOverride =
                 config.emailDelivery?.override;
+              const originalSmsDeliveryOverride = config.smsDelivery?.override;
 
               return {
                 ...config,
@@ -205,15 +216,39 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                          originalImplementation,
-                          builder,
-                        )
+                        originalImplementation,
+                        builder,
+                      )
                       : originalImplementation;
 
                     return {
                       ...implementation,
                       sendEmail: async function (input) {
                         return implementation.sendEmail({
+                          ...addHubBootstrapParams(
+                            input,
+                            "urlWithLinkCode",
+                            "account/login",
+                          ),
+                        });
+                      },
+                    };
+                  },
+                },
+                smsDelivery: {
+                  ...config.smsDelivery,
+                  override: (originalImplementation, builder) => {
+                    const implementation = originalSmsDeliveryOverride
+                      ? originalSmsDeliveryOverride(
+                        originalImplementation,
+                        builder,
+                      )
+                      : originalImplementation;
+
+                    return {
+                      ...implementation,
+                      sendSms: async function (input) {
+                        return implementation.sendSms({
                           ...addHubBootstrapParams(
                             input,
                             "urlWithLinkCode",
@@ -240,14 +275,22 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const displayContext = getRequestedDisplayContextFromRequest(
                   input.options.req,
                 );
+                const redirectToPath = getRequestedRedirectToPathFromRequest(
+                  input.options.req,
+                );
 
                 return originalImplementation.createCodePOST({
                   ...input,
-                  userContext: displayContext
+                  userContext: displayContext || redirectToPath
                     ? {
-                        ...input.userContext,
-                        rowndDisplayContext: displayContext,
-                      }
+                      ...input.userContext,
+                      ...(displayContext
+                        ? { rowndDisplayContext: displayContext }
+                        : {}),
+                      ...(redirectToPath
+                        ? { rowndRedirectToPath: redirectToPath }
+                        : {}),
+                    }
                     : input.userContext,
                 });
               },
@@ -352,7 +395,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               createNewSession: async (input) => {
                 input.accessTokenPayload = {
                   ...input.accessTokenPayload,
-                  ...(await buildRowndSessionClaims(input.userId)),
+                  ...(await buildRowndSessionClaims(
+                    input.userId,
+                    input.accessTokenPayload,
+                  )),
                   ...(await RowndIsAnonymousClaim.build(
                     input.userId,
                     input.recipeUserId,
@@ -379,9 +425,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                          originalImplementation,
-                          builder,
-                        )
+                        originalImplementation,
+                        builder,
+                      )
                       : originalImplementation;
 
                     return {
