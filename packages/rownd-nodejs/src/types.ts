@@ -49,6 +49,11 @@ export type RowndSignInMethod =
        */
       scopes?: string[];
       /**
+       * Enables Rownd's faster Google sign-in prompt for supported email domains.
+       * @default "enabled"
+       */
+      signInFasterWithGoogle?: "enabled" | "disabled";
+      /**
        * Google One Tap prompt settings.
        * @default autoPrompt false and 7000ms delay per platform.
        */
@@ -85,6 +90,11 @@ export type RowndSignInMethod =
        * @default Disabled when omitted.
        */
       method: "anonymous";
+      /**
+       * Anonymous sign-in mode. "instant" emits Rownd instant-user config instead of the guest button.
+       * @default "guest"
+       */
+      type?: "guest" | "instant";
       /**
        * Button label for anonymous sign-in.
        * @default "Continue as a guest"
@@ -148,6 +158,11 @@ export type RowndBranding = {
    */
   logoDarkMode?: string;
   /**
+   * Raw Rownd animation asset/config overrides.
+   * @default undefined
+   */
+  animations?: JSONObject;
+  /**
    * Whether hub controls use rounded corners.
    * @default true
    */
@@ -163,6 +178,26 @@ export type RowndBranding = {
    */
   placement?: string;
   /**
+   * Hub-specific primary color override.
+   * @default primaryColor
+   */
+  hubPrimaryColor?: string;
+  /**
+   * Hub background color override.
+   * @default undefined
+   */
+  backgroundColor?: string;
+  /**
+   * Hub font family override.
+   * @default undefined
+   */
+  fontFamily?: string;
+  /**
+   * Hides Rownd verification icons in hub UI.
+   * @default false
+   */
+  hideVerificationIcons?: boolean;
+  /**
    * Whether decorative swoops are shown on sign-in and wallet screens.
    * @default true
    */
@@ -172,6 +207,26 @@ export type RowndBranding = {
    * @default true
    */
   blurBackground?: boolean;
+  /**
+   * Opacity applied to the modal background blur.
+   * @default undefined
+   */
+  blurBackgroundOpacity?: number;
+  /**
+   * Horizontal launcher offset in pixels.
+   * @default undefined
+   */
+  offsetX?: number;
+  /**
+   * Vertical launcher offset in pixels.
+   * @default undefined
+   */
+  offsetY?: number;
+  /**
+   * Raw CSS variable/property overrides consumed by Rownd hub.
+   * @default undefined
+   */
+  propertyOverrides?: JSONObject;
   /**
    * Hub color mode.
    * @default "auto"
@@ -188,6 +243,16 @@ export type RowndBranding = {
    */
   customStyles?: {
     /** CSS text injected into a style tag. */
+    content: string;
+  }[];
+  /**
+   * Raw script snippets injected into the hub document.
+   * @default []
+   */
+  customScripts?: {
+    /** Script MIME type. */
+    type?: string;
+    /** Script text injected into a script tag. */
     content: string;
   }[];
 };
@@ -411,6 +476,14 @@ export type RowndProfileConfig = {
      */
     enabled?: boolean;
   };
+  /**
+   * Shows the add sign-in methods action in the profile modal.
+   * @default true
+   */
+  addSignInMethodsButton?: {
+    /** Whether the button is visible. */
+    enabled?: boolean;
+  };
 };
 
 export type RowndCustomContent = {
@@ -449,6 +522,16 @@ export type RowndCustomContent = {
      * @default Rownd hub built-in sign-up subtitle.
      */
     signUpSubtitle?: string;
+    /**
+     * Explicit sign-in CTA text.
+     * @default Rownd hub built-in sign-in button text.
+     */
+    signInButton?: string;
+    /**
+     * Explicit sign-up CTA text.
+     * @default Rownd hub built-in sign-up button text.
+     */
+    signUpButton?: string;
   };
   /**
    * Profile modal text overrides.
@@ -488,6 +571,19 @@ export type RowndCustomContent = {
      */
     failureMessage?: string;
   };
+  /**
+   * No-account modal text overrides.
+   * @default Rownd hub built-in copy.
+   */
+  noAccountMessage?: {
+    /** No-account modal title. */
+    title?: string;
+  };
+  /**
+   * Raw mobile custom content config consumed by Rownd hub.
+   * @default undefined
+   */
+  mobile?: JSONObject;
 };
 
 export type RowndAppConfigInput = {
@@ -521,6 +617,26 @@ export type RowndAppConfigInput = {
    * @default undefined
    */
   capabilities?: JSONObject;
+  /**
+   * Browser/web app config from Rownd.
+   * @default undefined
+   */
+  web?: JSONObject;
+  /**
+   * Bottom sheet config from Rownd.
+   * @default undefined
+   */
+  bottomSheet?: JSONObject;
+  /**
+   * Rownd profile storage version metadata.
+   * @default undefined
+   */
+  profileStorageVersion?: string;
+  /**
+   * Allowed web origins metadata from Rownd hub config.
+   * @default undefined
+   */
+  allowedWebOrigins?: string[];
   /**
    * Legal links and support contact shown in hub flows.
    * @default Defaults documented in RowndLegal.

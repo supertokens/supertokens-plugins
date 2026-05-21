@@ -1738,6 +1738,7 @@ function buildSignInMethodsConfig(
   const googleMethod = methods.google;
   const appleMethod = methods.apple;
   const anonymousMethod = methods.anonymous;
+  const anonymousType = getAnonymousType(anonymousMethod);
   const googleOneTap = getOneTapConfig(googleMethod);
 
   return {
@@ -1748,6 +1749,9 @@ function buildSignInMethodsConfig(
       client_id: getStringMethodProperty(googleMethod, "clientId") ?? "",
       ios_client_id: getStringMethodProperty(googleMethod, "iosClientId") ?? "",
       scopes: getStringArrayMethodProperty(googleMethod, "scopes") ?? [],
+      ...(getSignInFasterWithGoogle(googleMethod)
+        ? { sign_in_faster_with_google: getSignInFasterWithGoogle(googleMethod) }
+        : {}),
       one_tap: {
         browser: {
           auto_prompt: googleOneTap?.browser?.autoPrompt ?? false,
@@ -1764,8 +1768,10 @@ function buildSignInMethodsConfig(
       client_id: getStringMethodProperty(appleMethod, "clientId") ?? "",
     },
     anonymous: {
-      enabled: !!anonymousMethod,
-      ...(getStringMethodProperty(anonymousMethod, "displayName") !== undefined
+      enabled: !!anonymousMethod && anonymousType !== "instant",
+      ...(anonymousMethod && anonymousType !== "instant" ? { type: anonymousType } : {}),
+      ...(anonymousType !== "instant" &&
+          getStringMethodProperty(anonymousMethod, "displayName") !== undefined
         ? {
           display_name: getStringMethodProperty(
             anonymousMethod,
@@ -1773,7 +1779,8 @@ function buildSignInMethodsConfig(
           ),
         }
         : {}),
-      ...(getStringMethodProperty(anonymousMethod, "iconLightUrl") !== undefined
+      ...(anonymousType !== "instant" &&
+          getStringMethodProperty(anonymousMethod, "iconLightUrl") !== undefined
         ? {
           icon_light_url: getStringMethodProperty(
             anonymousMethod,
@@ -1781,7 +1788,8 @@ function buildSignInMethodsConfig(
           ),
         }
         : {}),
-      ...(getStringMethodProperty(anonymousMethod, "iconDarkUrl") !== undefined
+      ...(anonymousType !== "instant" &&
+          getStringMethodProperty(anonymousMethod, "iconDarkUrl") !== undefined
         ? {
           icon_dark_url: getStringMethodProperty(
             anonymousMethod,
@@ -1792,6 +1800,22 @@ function buildSignInMethodsConfig(
     },
     ...customProviders,
   };
+}
+
+function isInstantAnonymousMethod(methods: RowndSignInMethod[] | undefined) {
+  return (methods ?? []).some(
+    (method) => method.method === "anonymous" && getAnonymousType(method) === "instant",
+  );
+}
+
+function getAnonymousType(method: RowndSignInMethod | undefined) {
+  const type = getStringMethodProperty(method, "type");
+  return type === "instant" ? "instant" : "guest";
+}
+
+function getSignInFasterWithGoogle(method: RowndSignInMethod | undefined) {
+  const value = getStringMethodProperty(method, "signInFasterWithGoogle");
+  return value === "enabled" || value === "disabled" ? value : undefined;
 }
 
 function getMethodProperty(
@@ -1951,14 +1975,23 @@ export function buildAppConfig(
       ),
       config: {
         ...(app.capabilities ? { capabilities: app.capabilities } : {}),
+        ...(app.web ? { web: app.web } : {}),
+        ...(app.bottomSheet ? { bottom_sheet: app.bottomSheet } : {}),
+        ...(app.profileStorageVersion
+          ? { profile_storage_version: app.profileStorageVersion }
+          : {}),
         customizations: {
           primary_color: branding.primaryColor ?? DEFAULT_PRIMARY_COLOR,
           ...(branding.logo ? { logo: branding.logo } : {}),
           ...(branding.logoDarkMode
             ? { logo_dark_mode: branding.logoDarkMode }
             : {}),
+          ...(branding.animations ? { animations: branding.animations } : {}),
         },
         hub: {
+          ...(app.allowedWebOrigins
+            ? { allowed_web_origins: app.allowedWebOrigins }
+            : {}),
           customizations: {
             rounded_corners: branding.roundedCorners ?? true,
             ...(branding.containerBorderRadius !== undefined
@@ -1967,13 +2000,36 @@ export function buildAppConfig(
             ...(branding.placement !== undefined
               ? { placement: branding.placement }
               : {}),
+            ...(branding.hubPrimaryColor !== undefined
+              ? { primary_color: branding.hubPrimaryColor }
+              : {}),
             ...(branding.primaryColorDarkMode !== undefined
               ? { primary_color_dark_mode: branding.primaryColorDarkMode }
               : {}),
+            ...(branding.backgroundColor !== undefined
+              ? { background_color: branding.backgroundColor }
+              : {}),
+            ...(branding.fontFamily !== undefined
+              ? { font_family: branding.fontFamily }
+              : {}),
+            ...(branding.hideVerificationIcons !== undefined
+              ? { hide_verification_icons: branding.hideVerificationIcons }
+              : {}),
             visual_swoops: branding.visualSwoops ?? true,
             blur_background: branding.blurBackground ?? true,
+            ...(branding.blurBackgroundOpacity !== undefined
+              ? { blur_background_opacity: branding.blurBackgroundOpacity }
+              : {}),
+            ...(branding.offsetX !== undefined ? { offset_x: branding.offsetX } : {}),
+            ...(branding.offsetY !== undefined ? { offset_y: branding.offsetY } : {}),
+            ...(branding.propertyOverrides
+              ? { property_overrides: branding.propertyOverrides }
+              : {}),
             dark_mode: branding.darkMode ?? "auto",
           },
+          ...(branding.customScripts
+            ? { custom_scripts: branding.customScripts }
+            : {}),
           ...(branding.customStyles
             ? { custom_styles: branding.customStyles }
             : {}),
@@ -1998,6 +2054,9 @@ export function buildAppConfig(
               ? { preferred_method: auth.preferredMethod }
               : {}),
             ...(auth.order ? { order: auth.order } : {}),
+            ...(isInstantAnonymousMethod(app.signInMethods)
+              ? { instant_user: { enabled: true } }
+              : {}),
             show_app_icon: branding.showAppIcon ?? false,
           },
           legal: {
@@ -2048,6 +2107,18 @@ export function buildAppConfig(
                             app.customContent.signInModal.signUpSubtitle,
                     }
                     : {}),
+                  ...(app.customContent.signInModal.signInButton
+                    ? {
+                      sign_in_button:
+                            app.customContent.signInModal.signInButton,
+                    }
+                    : {}),
+                  ...(app.customContent.signInModal.signUpButton
+                    ? {
+                      sign_up_button:
+                            app.customContent.signInModal.signUpButton,
+                    }
+                    : {}),
                 },
               }
               : {}),
@@ -2074,6 +2145,12 @@ export function buildAppConfig(
                 },
               }
               : {}),
+            ...(app.customContent?.noAccountMessage
+              ? { no_account_message: app.customContent.noAccountMessage }
+              : {}),
+            ...(app.customContent?.mobile
+              ? { mobile: app.customContent.mobile }
+              : {}),
           },
           profile: {
             ...(app.profile?.accountInformation
@@ -2090,6 +2167,9 @@ export function buildAppConfig(
               : {}),
             ...(app.profile?.deleteAccountButton
               ? { delete_account_button: app.profile.deleteAccountButton }
+              : {}),
+            ...(app.profile?.addSignInMethodsButton
+              ? { add_sign_in_methods_button: app.profile.addSignInMethodsButton }
               : {}),
           },
         },

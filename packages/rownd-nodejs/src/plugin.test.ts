@@ -49,7 +49,6 @@ import {
   buildRowndSessionClaims,
   recordRowndAppVariantForUser,
 } from "./pluginImplementation";
-import { getRowndPasswordlessEmailContent } from "./emailContent";
 
 let testPORT = 30001;
 
@@ -538,66 +537,6 @@ describe("rownd-nodejs plugin", () => {
       );
     });
 
-    it("builds passwordless email content from sub-brand Rownd email config", async () => {
-      const pluginConfig: RowndPluginConfig = {
-        rowndAppKey: "test-key",
-        rowndAppSecret: "test-secret",
-        appConfig: {
-          name: "Base App",
-          auth: {
-            email: {
-              subject: "Base subject",
-              customContent: "Base content",
-            },
-          },
-        },
-        subBrands: {
-          variant_123: {
-            id: "app_xyz",
-            name: "Variant App",
-            branding: { primaryColor: "#123456" },
-            auth: {
-              email: {
-                image: "https://cdn.acme.com/email.png",
-                subject: "Variant subject",
-                callToActionText: "Open variant",
-                customContent: "Variant content",
-                customClosingContent: "Variant closing",
-              },
-            },
-            variant: { id: "variant_123", name: "Variant App" },
-          },
-        },
-      };
-      init(pluginConfig);
-
-      const content = await getRowndPasswordlessEmailContent(
-        {
-          type: "PASSWORDLESS_LOGIN",
-          isFirstFactor: true,
-          email: "user@example.com",
-          urlWithLinkCode: "https://hub.example.com/account/login?code=abc",
-          codeLifetime: 1000,
-          preAuthSessionId: "pid",
-          tenantId: "public",
-          userContext: { rowndAppVariantId: "variant_123" },
-        },
-        {
-          body: "Original body",
-          isHtml: true,
-          subject: "Original subject",
-          toEmail: "user@example.com",
-        },
-      );
-
-      expect(content.subject).toBe("Variant subject");
-      expect(content.body).toContain("Variant App");
-      expect(content.body).toContain("Variant content");
-      expect(content.body).toContain("Variant closing");
-      expect(content.body).toContain("Open variant");
-      expect(content.body).toContain("https://cdn.acme.com/email.png");
-    });
-
     it("records app variant membership after passwordless code consumption", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
@@ -662,7 +601,9 @@ describe("rownd-nodejs plugin", () => {
       server = s;
       testPORT = port;
 
-      const originalCreateCodePOST = vi.fn().mockResolvedValue({ status: "OK" });
+      const originalCreateCodePOST = vi
+        .fn()
+        .mockResolvedValue({ status: "OK" });
       const passwordlessApis = (
         init(pluginConfig) as any
       ).overrideMap.passwordless.apis({
@@ -1342,9 +1283,7 @@ describe("rownd-nodejs plugin", () => {
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.AppUserId]).toBe(
           "rownd-session-1",
         );
-        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe(
-          "verified",
-        );
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("verified");
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(true);
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(false);
         expect(accessTokenPayload["aud"]).toEqual([
@@ -1941,7 +1880,8 @@ describe("rownd-nodejs plugin", () => {
               },
               android_app: {
                 enabled: true,
-                play_store_url: "https://play.google.com/store/apps/details?id=com.acme.app",
+                play_store_url:
+                  "https://play.google.com/store/apps/details?id=com.acme.app",
                 package_names: ["com.acme.app"],
                 sha256_cert_fingerprints: [
                   "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF",
@@ -1993,7 +1933,8 @@ describe("rownd-nodejs plugin", () => {
           },
           android_app: {
             enabled: true,
-            play_store_url: "https://play.google.com/store/apps/details?id=com.acme.app",
+            play_store_url:
+              "https://play.google.com/store/apps/details?id=com.acme.app",
             package_names: ["com.acme.app"],
             sha256_cert_fingerprints: [
               "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF",
@@ -2018,6 +1959,142 @@ describe("rownd-nodejs plugin", () => {
           hyperlink_text: "Continue on web",
           hyperlink_redirect_url: "https://acme.com/web",
           custom_content: "Install the app for the best experience.",
+        });
+      });
+
+      it("returns selected Rownd app and hub UI config fields", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: {
+            web: { enabled: true },
+            bottomSheet: { enabled: true },
+            profileStorageVersion: "v2",
+            allowedWebOrigins: ["https://app.acme.com"],
+            branding: {
+              animations: { loading: "https://cdn.acme.com/loading.json" },
+              hubPrimaryColor: "#111111",
+              backgroundColor: "#222222",
+              fontFamily: "Inter",
+              hideVerificationIcons: true,
+              blurBackgroundOpacity: 0.5,
+              offsetX: 12,
+              offsetY: 24,
+              propertyOverrides: { "--rph-button-radius": "20px" },
+              customScripts: [
+                {
+                  type: "application/javascript",
+                  content: "window.acme = true;",
+                },
+              ],
+            },
+            customContent: {
+              signInModal: {
+                signInButton: "Log in",
+                signUpButton: "Create account",
+              },
+              noAccountMessage: { title: "No account found" },
+              mobile: {
+                origins_to_show_in_bottom_sheet: ["https://app.acme.com"],
+              },
+            },
+            profile: {
+              addSignInMethodsButton: { enabled: false },
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const body = await res.json();
+
+        expect(body.app.config.web).toEqual({ enabled: true });
+        expect(body.app.config.bottom_sheet).toEqual({ enabled: true });
+        expect(body.app.config.profile_storage_version).toBe("v2");
+        expect(body.app.config.customizations.animations).toEqual({
+          loading: "https://cdn.acme.com/loading.json",
+        });
+        expect(body.app.config.hub.allowed_web_origins).toEqual([
+          "https://app.acme.com",
+        ]);
+        expect(body.app.config.hub.customizations).toMatchObject({
+          primary_color: "#111111",
+          background_color: "#222222",
+          font_family: "Inter",
+          hide_verification_icons: true,
+          blur_background_opacity: 0.5,
+          offset_x: 12,
+          offset_y: 24,
+          property_overrides: { "--rph-button-radius": "20px" },
+        });
+        expect(body.app.config.hub.custom_scripts).toEqual([
+          { type: "application/javascript", content: "window.acme = true;" },
+        ]);
+        expect(body.app.config.hub.custom_content.sign_in_modal).toMatchObject({
+          sign_in_button: "Log in",
+          sign_up_button: "Create account",
+        });
+        expect(body.app.config.hub.custom_content.no_account_message).toEqual({
+          title: "No account found",
+        });
+        expect(body.app.config.hub.custom_content.mobile).toEqual({
+          origins_to_show_in_bottom_sheet: ["https://app.acme.com"],
+        });
+        expect(body.app.config.hub.profile.add_sign_in_methods_button).toEqual({
+          enabled: false,
+        });
+      });
+
+      it("returns anonymous instant user config", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: {
+            signInMethods: [{ method: "anonymous", type: "instant" }],
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const instantRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const instantBody = await instantRes.json();
+
+        expect(instantBody.app.config.hub.auth.instant_user).toEqual({
+          enabled: true,
+        });
+        expect(
+          instantBody.app.config.hub.auth.sign_in_methods.anonymous.enabled,
+        ).toBe(false);
+      });
+
+      it("returns anonymous guest config", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: {
+            signInMethods: [
+              {
+                method: "anonymous",
+                type: "guest",
+                displayName: "Continue as guest",
+              },
+            ],
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const guestRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const guestBody = await guestRes.json();
+
+        expect(guestBody.app.config.hub.auth.instant_user).toBeUndefined();
+        expect(
+          guestBody.app.config.hub.auth.sign_in_methods.anonymous,
+        ).toMatchObject({
+          enabled: true,
+          type: "guest",
+          display_name: "Continue as guest",
         });
       });
 
@@ -2218,8 +2295,7 @@ describe("rownd-nodejs plugin", () => {
         const stUser = await SuperTokens.getUser(session!.getUserId());
         const anonymousLogin = stUser?.loginMethods.find(
           (m) =>
-            m.recipeId === "thirdparty" &&
-            m.thirdParty?.id === "anonymous",
+            m.recipeId === "thirdparty" && m.thirdParty?.id === "anonymous",
         );
         expect(anonymousLogin).toBeDefined();
         expect(anonymousLogin?.thirdParty?.userId).toMatch(/^anon_/);

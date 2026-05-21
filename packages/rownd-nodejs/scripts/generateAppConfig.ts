@@ -18,9 +18,11 @@ import {
 type RowndConfigObject = Record<string, unknown>;
 type RowndSignInMethodConfig = {
   enabled?: boolean;
+  type?: string;
   client_id?: string;
   ios_client_id?: string;
   scopes?: string[];
+  sign_in_faster_with_google?: string;
   one_tap?: {
     browser?: {
       auto_prompt?: boolean;
@@ -111,18 +113,36 @@ export function convertRowndConfigToPluginConfig(
       ),
       logo: getString(customizations.logo),
       logoDarkMode: getString(customizations.logo_dark_mode),
+      animations: getOptionalObject(customizations.animations),
       roundedCorners: getBoolean(hubCustomizations.rounded_corners),
       containerBorderRadius: getNumber(
         hubCustomizations.container_border_radius,
       ),
       placement: getString(hubCustomizations.placement),
+      hubPrimaryColor: getString(hubCustomizations.primary_color),
+      backgroundColor: getString(hubCustomizations.background_color),
+      fontFamily: getString(hubCustomizations.font_family),
+      hideVerificationIcons: getBoolean(
+        hubCustomizations.hide_verification_icons,
+      ),
       visualSwoops: getBoolean(hubCustomizations.visual_swoops),
       blurBackground: getBoolean(hubCustomizations.blur_background),
+      blurBackgroundOpacity: getNumber(
+        hubCustomizations.blur_background_opacity,
+      ),
+      offsetX: getNumber(hubCustomizations.offset_x),
+      offsetY: getNumber(hubCustomizations.offset_y),
+      propertyOverrides: getOptionalObject(hubCustomizations.property_overrides),
       darkMode: parseDarkMode(hubCustomizations.dark_mode),
       showAppIcon: getBoolean(hubAuth.show_app_icon),
+      customScripts: parseCustomScripts(hub.custom_scripts),
       customStyles: parseCustomStyles(hub.custom_styles),
     },
     capabilities: getOptionalObject(config.capabilities),
+    web: getOptionalObject(config.web),
+    bottomSheet: getOptionalObject(config.bottom_sheet),
+    profileStorageVersion: getString(config.profile_storage_version),
+    allowedWebOrigins: parseStringArray(hub.allowed_web_origins),
     legal: {
       companyName: getString(legal.company_name),
       privacyPolicyUrl: getString(legal.privacy_policy_url),
@@ -142,6 +162,8 @@ export function convertRowndConfigToPluginConfig(
           signUpSubtitle: getString(
             customContent.sign_in_modal.sign_up_subtitle,
           ),
+          signInButton: getString(customContent.sign_in_modal.sign_in_button),
+          signUpButton: getString(customContent.sign_in_modal.sign_up_button),
         }
         : undefined,
       profileModal: isRecord(customContent.profile_modal)
@@ -160,6 +182,10 @@ export function convertRowndConfigToPluginConfig(
           ),
         }
         : undefined,
+      noAccountMessage: isRecord(customContent.no_account_message)
+        ? { title: getString(customContent.no_account_message.title) }
+        : undefined,
+      mobile: getOptionalObject(customContent.mobile),
     },
     profile: {
       accountInformation: getObject(profile.account_information),
@@ -167,6 +193,7 @@ export function convertRowndConfigToPluginConfig(
       preferences: getObject(profile.preferences),
       signOutButton: getObject(profile.sign_out_button),
       deleteAccountButton: getObject(profile.delete_account_button),
+      addSignInMethodsButton: getObject(profile.add_sign_in_methods_button),
     },
     auth: {
       additionalFields: parseAdditionalFields(hubAuth.additional_fields),
@@ -184,6 +211,7 @@ export function convertRowndConfigToPluginConfig(
         string,
         RowndSignInMethodConfig
       >;
+      const instantUser = getObject(hubAuth.instant_user);
       const result: RowndSignInMethod[] = [];
 
       for (const [key, value] of Object.entries(methods)) {
@@ -195,6 +223,9 @@ export function convertRowndConfigToPluginConfig(
             clientId: value.client_id,
             iosClientId: value.ios_client_id,
             scopes: value.scopes,
+            signInFasterWithGoogle: parseSignInFasterWithGoogle(
+              value.sign_in_faster_with_google,
+            ),
             oneTap: value.one_tap
               ? {
                 browser: value.one_tap.browser
@@ -231,6 +262,7 @@ export function convertRowndConfigToPluginConfig(
         } else if (key === "anonymous") {
           result.push({
             method: "anonymous",
+            type: parseAnonymousType(value.type) ?? "guest",
             displayName: value.display_name,
             iconLightUrl: value.icon_light_url,
             iconDarkUrl: value.icon_dark_url,
@@ -246,6 +278,12 @@ export function convertRowndConfigToPluginConfig(
             `Custom provider '${key}' was enabled. Please ensure you configure this provider in your SuperTokens ThirdParty recipe. You will need to manually provide the 'clientSecret' as Rownd cannot export it.`,
           );
         }
+      }
+      if (!methods.anonymous?.enabled && getBoolean(instantUser.enabled)) {
+        result.push({
+          method: "anonymous",
+          type: "instant",
+        });
       }
       return result;
     })(),
@@ -447,6 +485,23 @@ function parseCustomStyles(value: unknown) {
   });
 }
 
+function parseCustomScripts(value: unknown) {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  return value.flatMap((entry) => {
+    if (!isRecord(entry) || typeof entry.content !== "string") {
+      return [];
+    }
+
+    return [{
+      content: entry.content,
+      type: getString(entry.type),
+    }];
+  });
+}
+
 function parseStringArray(value: unknown) {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
@@ -494,6 +549,14 @@ function parseAdditionalFields(
 
 function parseAuthOrder(value: unknown): RowndAuthConfig["order"] {
   return isRecord(value) ? (value as RowndAuthConfig["order"]) : undefined;
+}
+
+function parseAnonymousType(value: unknown) {
+  return value === "guest" || value === "instant" ? value : undefined;
+}
+
+function parseSignInFasterWithGoogle(value: unknown) {
+  return value === "enabled" || value === "disabled" ? value : undefined;
 }
 
 function isRecord(value: unknown): value is RowndConfigObject {
