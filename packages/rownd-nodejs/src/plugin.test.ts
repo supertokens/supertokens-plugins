@@ -49,6 +49,7 @@ import {
   buildRowndSessionClaims,
   recordRowndAppVariantForUser,
 } from "./pluginImplementation";
+import { getRowndPasswordlessEmailContent } from "./emailContent";
 
 let testPORT = 30001;
 
@@ -537,6 +538,66 @@ describe("rownd-nodejs plugin", () => {
       );
     });
 
+    it("builds passwordless email content from sub-brand Rownd email config", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        appConfig: {
+          name: "Base App",
+          auth: {
+            email: {
+              subject: "Base subject",
+              customContent: "Base content",
+            },
+          },
+        },
+        subBrands: {
+          variant_123: {
+            id: "app_xyz",
+            name: "Variant App",
+            branding: { primaryColor: "#123456" },
+            auth: {
+              email: {
+                image: "https://cdn.acme.com/email.png",
+                subject: "Variant subject",
+                callToActionText: "Open variant",
+                customContent: "Variant content",
+                customClosingContent: "Variant closing",
+              },
+            },
+            variant: { id: "variant_123", name: "Variant App" },
+          },
+        },
+      };
+      init(pluginConfig);
+
+      const content = await getRowndPasswordlessEmailContent(
+        {
+          type: "PASSWORDLESS_LOGIN",
+          isFirstFactor: true,
+          email: "user@example.com",
+          urlWithLinkCode: "https://hub.example.com/account/login?code=abc",
+          codeLifetime: 1000,
+          preAuthSessionId: "pid",
+          tenantId: "public",
+          userContext: { rowndAppVariantId: "variant_123" },
+        },
+        {
+          body: "Original body",
+          isHtml: true,
+          subject: "Original subject",
+          toEmail: "user@example.com",
+        },
+      );
+
+      expect(content.subject).toBe("Variant subject");
+      expect(content.body).toContain("Variant App");
+      expect(content.body).toContain("Variant content");
+      expect(content.body).toContain("Variant closing");
+      expect(content.body).toContain("Open variant");
+      expect(content.body).toContain("https://cdn.acme.com/email.png");
+    });
+
     it("records app variant membership after passwordless code consumption", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
@@ -583,6 +644,41 @@ describe("rownd-nodejs plugin", () => {
           "rownd:app_variants"
         ],
       ).toEqual(["variant_123"]);
+    });
+
+    it("adds app variant context before passwordless email creation", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        subBrands: {
+          variant_123: {
+            id: "app_xyz",
+            name: "Variant App",
+            variant: { id: "variant_123", name: "Variant App" },
+          },
+        },
+      };
+      const { server: s, port } = await setup(coreConnectionURI, pluginConfig);
+      server = s;
+      testPORT = port;
+
+      const originalCreateCodePOST = vi.fn().mockResolvedValue({ status: "OK" });
+      const passwordlessApis = (
+        init(pluginConfig) as any
+      ).overrideMap.passwordless.apis({
+        createCodePOST: originalCreateCodePOST,
+      });
+
+      await passwordlessApis.createCodePOST({
+        options: { req: makeVariantRequest("variant_123") },
+        userContext: {},
+      });
+
+      expect(originalCreateCodePOST).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userContext: { rowndAppVariantId: "variant_123" },
+        }),
+      );
     });
 
     it("rejects passwordless code consumption for unknown app variants", async () => {
@@ -1829,6 +1925,99 @@ describe("rownd-nodejs plugin", () => {
         expect(body.app.config.hub.custom_content.verification_modal).toEqual({
           title: "Verify your account",
           subtitle: "Enter the code we sent you",
+        });
+      });
+
+      it("returns auth email, mobile, and verification fields from plugin config", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: {
+            userVerificationFields: ["email", "employee_id"],
+            capabilities: {
+              ios_app: {
+                enabled: true,
+                app_store_url: "https://apps.apple.com/app/acme",
+                team_id: "TEAM123",
+                bundle_ids: ["com.acme.app"],
+              },
+              android_app: {
+                enabled: true,
+                play_store_url: "https://play.google.com/store/apps/details?id=com.acme.app",
+                package_names: ["com.acme.app"],
+                sha256_cert_fingerprints: [
+                  "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF",
+                ],
+              },
+              web_app: { enabled: true },
+            },
+            auth: {
+              allowUnverifiedUsers: true,
+              email: {
+                fromAddress: "Acme <login@acme.com>",
+                image: "https://cdn.acme.com/email.png",
+                subject: "Sign in to Acme",
+                callToActionText: "Continue",
+                verifyTemplate: "postmark-template",
+                customContent: "Use this link to continue.",
+                customClosingContent: "Thanks, Acme",
+              },
+              mobile: {
+                title: "Get Acme",
+                image: "https://cdn.acme.com/mobile.png",
+                callToActionText: "Download",
+                hyperlinkText: "Continue on web",
+                hyperlinkRedirectUrl: "https://acme.com/web",
+                customContent: "Install the app for the best experience.",
+              },
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const body = await res.json();
+        const auth = body.app.config.hub.auth;
+
+        expect(body.app.user_verification_fields).toEqual([
+          "email",
+          "employee_id",
+        ]);
+        expect(body.app.config.capabilities).toEqual({
+          ios_app: {
+            enabled: true,
+            app_store_url: "https://apps.apple.com/app/acme",
+            team_id: "TEAM123",
+            bundle_ids: ["com.acme.app"],
+          },
+          android_app: {
+            enabled: true,
+            play_store_url: "https://play.google.com/store/apps/details?id=com.acme.app",
+            package_names: ["com.acme.app"],
+            sha256_cert_fingerprints: [
+              "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF",
+            ],
+          },
+          web_app: { enabled: true },
+        });
+        expect(auth.allow_unverified_users).toBe(true);
+        expect(auth.email).toEqual({
+          from_address: "Acme <login@acme.com>",
+          image: "https://cdn.acme.com/email.png",
+          subject: "Sign in to Acme",
+          call_to_action_text: "Continue",
+          verify_template: "postmark-template",
+          custom_content: "Use this link to continue.",
+          custom_closing_content: "Thanks, Acme",
+        });
+        expect(auth.mobile).toEqual({
+          title: "Get Acme",
+          image: "https://cdn.acme.com/mobile.png",
+          call_to_action_text: "Download",
+          hyperlink_text: "Continue on web",
+          hyperlink_redirect_url: "https://acme.com/web",
+          custom_content: "Install the app for the best experience.",
         });
       });
 

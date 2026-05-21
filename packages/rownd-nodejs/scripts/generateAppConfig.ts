@@ -103,6 +103,7 @@ export function convertRowndConfigToPluginConfig(
     id: getString(rowndApp.id),
     name: getString(rowndApp.name),
     icon: getString(rowndApp.icon),
+    userVerificationFields: parseStringArray(rowndApp.user_verification_fields),
     branding: {
       primaryColor: getString(customizations.primary_color),
       primaryColorDarkMode: getString(
@@ -121,6 +122,7 @@ export function convertRowndConfigToPluginConfig(
       showAppIcon: getBoolean(hubAuth.show_app_icon),
       customStyles: parseCustomStyles(hub.custom_styles),
     },
+    capabilities: getOptionalObject(config.capabilities),
     legal: {
       companyName: getString(legal.company_name),
       privacyPolicyUrl: getString(legal.privacy_policy_url),
@@ -170,6 +172,9 @@ export function convertRowndConfigToPluginConfig(
       additionalFields: parseAdditionalFields(hubAuth.additional_fields),
       rememberSignInMethod: getBoolean(hubAuth.remember_sign_in_method),
       useExplicitSignUpFlow: getBoolean(hubAuth.use_explicit_sign_up_flow),
+      allowUnverifiedUsers: getBoolean(hubAuth.allow_unverified_users),
+      email: parseAuthEmailConfig(hubAuth.email),
+      mobile: parseAuthMobileConfig(hubAuth.mobile),
       primarySignUpMethod: getString(hubAuth.primary_sign_up_method),
       preferredMethod: getString(hubAuth.preferred_method),
       order: parseAuthOrder(hubAuth.order),
@@ -406,6 +411,10 @@ function getObject(value: unknown): RowndConfigObject {
   return isRecord(value) ? value : {};
 }
 
+function getOptionalObject(value: unknown): RowndConfigObject | undefined {
+  return isRecord(value) ? value : undefined;
+}
+
 function getString(value: unknown) {
   return typeof value === "string" ? value : undefined;
 }
@@ -436,6 +445,43 @@ function parseCustomStyles(value: unknown) {
 
     return [{ content: entry.content }];
   });
+}
+
+function parseStringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : undefined;
+}
+
+function parseAuthEmailConfig(value: unknown): RowndAuthConfig["email"] {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  return {
+    fromAddress: getString(value.from_address),
+    image: getString(value.image),
+    subject: getString(value.subject),
+    callToActionText: getString(value.call_to_action_text),
+    verifyTemplate: getString(value.verify_template),
+    customContent: getString(value.custom_content),
+    customClosingContent: getString(value.custom_closing_content),
+  };
+}
+
+function parseAuthMobileConfig(value: unknown): RowndAuthConfig["mobile"] {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  return {
+    title: getString(value.title),
+    image: getString(value.image),
+    callToActionText: getString(value.call_to_action_text),
+    hyperlinkText: getString(value.hyperlink_text),
+    hyperlinkRedirectUrl: getString(value.hyperlink_redirect_url),
+    customContent: getString(value.custom_content),
+  };
 }
 
 function parseAdditionalFields(

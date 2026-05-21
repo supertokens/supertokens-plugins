@@ -13,6 +13,7 @@ import {
   SuperTokensUserImport,
   IRowndClient,
   RowndPluginNormalisedConfig,
+  RowndAuthConfig,
   RowndSignInMethod,
   RowndSchemaField,
   RowndSubBrandConfigInput,
@@ -357,6 +358,8 @@ export function handleUpdateUser() {
     userContext: SuperTokensUserContext,
   ) => {
     const session = requireSession(maybeSession);
+    const appVariantId = getRequestedAppVariantIdFromRequest(req);
+    assertRowndAppVariantIsConfigured(appVariantId);
     const payload = parseUpdateUserBody(await getJsonBody(req));
     const inputData = payload.data ?? {};
     const requestUserContext = {
@@ -387,7 +390,9 @@ export function handleUpdateUser() {
           tenantId: session.getTenantId(),
           email,
           pendingVerificationId: randomUUID(),
-          userContext: requestUserContext,
+          userContext: appVariantId
+            ? { ...requestUserContext, rowndAppVariantId: appVariantId }
+            : requestUserContext,
         })),
       };
     }
@@ -505,6 +510,8 @@ export function handleUpdateUserField() {
     userContext: SuperTokensUserContext,
   ) => {
     const session = requireSession(maybeSession);
+    const appVariantId = getRequestedAppVariantIdFromRequest(req);
+    assertRowndAppVariantIsConfigured(appVariantId);
     const field = req.getKeyValueFromQuery("field");
     if (!field) {
       return missingFieldResponse();
@@ -520,7 +527,9 @@ export function handleUpdateUserField() {
           tenantId: session.getTenantId(),
           email: payload.value,
           pendingVerificationId: randomUUID(),
-          userContext,
+          userContext: appVariantId
+            ? { ...userContext, rowndAppVariantId: appVariantId }
+            : userContext,
         })),
       };
     }
@@ -1931,6 +1940,9 @@ export function buildAppConfig(
       id: app.id ?? "",
       name: app.name ?? stConfig.appInfo.appName,
       icon: app.icon ?? "",
+      ...(app.userVerificationFields
+        ? { user_verification_fields: app.userVerificationFields }
+        : {}),
       schema: Object.fromEntries(
         Object.entries(finalSchema).map(([key, field]) => [
           key,
@@ -1938,6 +1950,7 @@ export function buildAppConfig(
         ]),
       ),
       config: {
+        ...(app.capabilities ? { capabilities: app.capabilities } : {}),
         customizations: {
           primary_color: branding.primaryColor ?? DEFAULT_PRIMARY_COLOR,
           ...(branding.logo ? { logo: branding.logo } : {}),
@@ -1965,7 +1978,8 @@ export function buildAppConfig(
             ? { custom_styles: branding.customStyles }
             : {}),
           auth: {
-            email: { from_address: "no-reply@rownd.io", image: "" },
+            email: buildAuthEmailConfig(auth.email),
+            ...(auth.mobile ? { mobile: buildAuthMobileConfig(auth.mobile) } : {}),
             sign_in_methods: signInMethods,
             additional_fields: auth.additionalFields ?? [],
             ...(auth.rememberSignInMethod !== undefined
@@ -1973,6 +1987,9 @@ export function buildAppConfig(
               : {}),
             ...(auth.useExplicitSignUpFlow !== undefined
               ? { use_explicit_sign_up_flow: auth.useExplicitSignUpFlow }
+              : {}),
+            ...(auth.allowUnverifiedUsers !== undefined
+              ? { allow_unverified_users: auth.allowUnverifiedUsers }
               : {}),
             ...(auth.primarySignUpMethod
               ? { primary_sign_up_method: auth.primarySignUpMethod }
@@ -2078,5 +2095,44 @@ export function buildAppConfig(
         },
       },
     },
+  };
+}
+
+function buildAuthEmailConfig(authEmail?: RowndAuthConfig["email"]) {
+  return {
+    from_address: authEmail?.fromAddress ?? "no-reply@rownd.io",
+    image: authEmail?.image ?? "",
+    ...(authEmail?.subject ? { subject: authEmail.subject } : {}),
+    ...(authEmail?.callToActionText
+      ? { call_to_action_text: authEmail.callToActionText }
+      : {}),
+    ...(authEmail?.verifyTemplate
+      ? { verify_template: authEmail.verifyTemplate }
+      : {}),
+    ...(authEmail?.customContent
+      ? { custom_content: authEmail.customContent }
+      : {}),
+    ...(authEmail?.customClosingContent
+      ? { custom_closing_content: authEmail.customClosingContent }
+      : {}),
+  };
+}
+
+function buildAuthMobileConfig(authMobile: RowndAuthConfig["mobile"]) {
+  return {
+    ...(authMobile?.title ? { title: authMobile.title } : {}),
+    ...(authMobile?.image ? { image: authMobile.image } : {}),
+    ...(authMobile?.callToActionText
+      ? { call_to_action_text: authMobile.callToActionText }
+      : {}),
+    ...(authMobile?.hyperlinkText
+      ? { hyperlink_text: authMobile.hyperlinkText }
+      : {}),
+    ...(authMobile?.hyperlinkRedirectUrl
+      ? { hyperlink_redirect_url: authMobile.hyperlinkRedirectUrl }
+      : {}),
+    ...(authMobile?.customContent
+      ? { custom_content: authMobile.customContent }
+      : {}),
   };
 }

@@ -227,6 +227,36 @@ export type RowndAuthConfig = {
    */
   useExplicitSignUpFlow?: boolean;
   /**
+   * Allows new users to authenticate before completing verification.
+   * @default false
+   */
+  allowUnverifiedUsers?: boolean;
+  /**
+   * Verification email customization.
+   * @default Rownd/SuperTokens email defaults.
+   */
+  email?: {
+    fromAddress?: string;
+    image?: string;
+    subject?: string;
+    callToActionText?: string;
+    verifyTemplate?: string;
+    customContent?: string;
+    customClosingContent?: string;
+  };
+  /**
+   * Mobile app install/interstitial customization for magic links.
+   * @default Rownd hub built-in mobile copy.
+   */
+  mobile?: {
+    title?: string;
+    image?: string;
+    callToActionText?: string;
+    hyperlinkText?: string;
+    hyperlinkRedirectUrl?: string;
+    customContent?: string;
+  };
+  /**
    * Method to use first for explicit sign-up.
    * @default The only visible ordered method, when there is exactly one.
    */
@@ -477,10 +507,20 @@ export type RowndAppConfigInput = {
    */
   icon?: string;
   /**
+   * User profile fields that can verify a user.
+   * @default Rownd hub defaults.
+   */
+  userVerificationFields?: string[];
+  /**
    * Visual customization for the hub UI.
    * @default Defaults documented in RowndBranding.
    */
   branding?: RowndBranding;
+  /**
+   * Native/web app capability metadata from Rownd.
+   * @default undefined
+   */
+  capabilities?: JSONObject;
   /**
    * Legal links and support contact shown in hub flows.
    * @default Defaults documented in RowndLegal.

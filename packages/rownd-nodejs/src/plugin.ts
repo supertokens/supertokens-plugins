@@ -278,12 +278,19 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const redirectToPath = getRequestedRedirectToPathFromRequest(
                   input.options.req,
                 );
+                const appVariantId = getRequestedAppVariantIdFromRequest(
+                  input.options.req,
+                );
+                assertRowndAppVariantIsConfigured(appVariantId);
 
                 return originalImplementation.createCodePOST({
                   ...input,
-                  userContext: displayContext || redirectToPath
+                  userContext: displayContext || redirectToPath || appVariantId
                     ? {
                       ...input.userContext,
+                      ...(appVariantId
+                        ? { rowndAppVariantId: appVariantId }
+                        : {}),
                       ...(displayContext
                         ? { rowndDisplayContext: displayContext }
                         : {}),
