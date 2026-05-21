@@ -2,8 +2,18 @@ import { z } from "zod";
 import {
   loadConfig,
   formatZodError,
+  hasHelpArg,
+  parseRequiredConfigArg,
   type BulkMigrateConfig,
 } from "./scriptUtils";
+
+function printHelp() {
+  console.log(`Usage: rownd-nodejs setup-core --config <path>
+
+Options:
+  -c, --config <path>  Path to the bulk migration config file
+  -h, --help           Show this help message`);
+}
 
 export async function provisionSuperTokensInfrastructure(
   config: BulkMigrateConfig,
@@ -114,7 +124,13 @@ export async function fetchRowndOidcClients(
 }
 
 export async function runCli() {
-  const config = await loadConfig();
+  const args = process.argv.slice(2);
+  if (hasHelpArg(args)) {
+    printHelp();
+    return;
+  }
+
+  const config = await loadConfig(parseRequiredConfigArg(args));
   const oidcClients = await fetchRowndOidcClients(config);
   await provisionSuperTokensInfrastructure(config, oidcClients);
   console.log("Successfully provisioned SuperTokens infrastructure.");

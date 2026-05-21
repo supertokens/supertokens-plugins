@@ -1,6 +1,11 @@
 import * as fs from "node:fs/promises";
 import { resolve } from "node:path";
-import { loadConfig, fetchWithRetry } from "./scriptUtils";
+import {
+  loadConfig,
+  fetchWithRetry,
+  hasHelpArg,
+  parseRequiredConfigArg,
+} from "./scriptUtils";
 import {
   RowndAppConfigInput,
   RowndAuthConfig,
@@ -35,11 +40,36 @@ type RowndSchemaExportField = {
   display_name: string;
   type: string;
   user_visible: boolean;
+  owned_by?: string;
   read_only?: boolean;
   show_empty?: boolean;
   include_in_session_claims?: boolean;
   session_claim_name?: string;
 };
+
+function printHelp() {
+  console.log(`Usage: rownd-nodejs generate-plugin-config --config <path> [options]
+
+Options:
+  -c, --config <path>  Path to the bulk migration config file
+  -o, --output <path>  Destination path for generated plugin config
+  --raw-output <path>  Also write the raw Rownd app config response to this path
+  --include-sub-brands Fetch and include Rownd sub-brands. Requires rownd.bearerToken.
+  -h, --help           Show this help message`);
+}
+
+function getRowndApiAuthHeaders(
+  config: Awaited<ReturnType<typeof loadConfig>>,
+): Record<string, string> {
+  if (config.rownd.bearerToken) {
+    return { Authorization: `Bearer ${config.rownd.bearerToken}` };
+  }
+
+  return {
+    "x-rownd-app-key": config.rownd.appKey,
+    "x-rownd-app-secret": config.rownd.appSecret,
+  };
+}
 
 type RowndCustomClaimConfig = {
   source?: "user_profile" | "static_value";
@@ -114,6 +144,12 @@ export function convertRowndConfigToPluginConfig(
         : undefined,
       profileModal: isRecord(customContent.profile_modal)
         ? { title: getString(customContent.profile_modal.title) }
+        : undefined,
+      verificationModal: isRecord(customContent.verification_modal)
+        ? {
+          title: getString(customContent.verification_modal.title),
+          subtitle: getString(customContent.verification_modal.subtitle),
+        }
         : undefined,
       signInFailureModal: isRecord(customContent.sign_in_failure_modal)
         ? {
@@ -219,6 +255,7 @@ export function convertRowndConfigToPluginConfig(
         display_name: field.display_name,
         type: field.type,
         user_visible: field.user_visible,
+        owned_by: field.owned_by,
         read_only: field.read_only,
         show_empty: field.show_empty,
       };
@@ -325,16 +362,19 @@ async function fetchRowndVariants(
   const response = await fetchWithRetry({
     url: url.toString(),
     requestInit: {
-      headers: {
-        "x-rownd-app-key": config.rownd.appKey,
-        "x-rownd-app-secret": config.rownd.appSecret,
-      },
+      headers: getRowndApiAuthHeaders(config),
     },
     retryConfig: config.retry,
     operation: "Fetching Rownd sub-brands",
   });
 
   if (!response.ok) {
+    if (response.status === 401 && !config.rownd.bearerToken) {
+      throw new Error(
+        "Rownd variants API returned 401. Add rownd.bearerToken to config.yaml; this endpoint requires Rownd API bearer authorization.",
+      );
+    }
+
     throw new Error(
       `Rownd variants API error: ${response.status} ${await response.text()}`,
     );
@@ -415,7 +455,13 @@ function isRecord(value: unknown): value is RowndConfigObject {
 }
 
 async function run() {
-  const config = await loadConfig();
+  const args = process.argv.slice(2);
+  if (hasHelpArg(args)) {
+    printHelp();
+    return;
+  }
+
+  const config = await loadConfig(parseRequiredConfigArg(args));
 
   if (!config.rownd.appId || !config.rownd.appKey || !config.rownd.appSecret) {
     throw new Error(
@@ -451,42 +497,56 @@ async function run() {
     throw new Error("Rownd API response is missing the 'app' property.");
   }
 
+  const rawOutputPath = parseRawOutputArg(args);
+  if (rawOutputPath) {
+    const resolvedRawOutputPath = resolve(rawOutputPath);
+    await fs.writeFile(
+      resolvedRawOutputPath,
+      JSON.stringify(rawConfig, null, 2),
+      "utf8",
+    );
+    console.log(`Successfully saved raw Rownd config to ${resolvedRawOutputPath}`);
+  }
+
   const pluginConfig = convertRowndConfigToPluginConfig(rawConfig.app, {
     appKey: config.rownd.appKey,
     appSecret: config.rownd.appSecret,
   });
 
-  const variants = await fetchRowndVariants(config);
   const subBrands: Record<string, RowndSubBrandConfigInput> = {};
-  for (const variant of variants) {
-    const variantPluginConfig = convertRowndConfigToPluginConfig(
-      mergeRowndAppWithVariant(rawConfig.app, variant),
-      {
-        appKey: config.rownd.appKey,
-        appSecret: config.rownd.appSecret,
-      },
-    );
 
-    if (!variantPluginConfig.appConfig) {
-      continue;
-    }
+  if (hasIncludeSubBrandsArg(args)) {
+    const variants = await fetchRowndVariants(config);
+    for (const variant of variants) {
+      const variantPluginConfig = convertRowndConfigToPluginConfig(
+        mergeRowndAppWithVariant(rawConfig.app, variant),
+        {
+          appKey: config.rownd.appKey,
+          appSecret: config.rownd.appSecret,
+        },
+      );
 
-    subBrands[variant.id] = {
-      ...variantPluginConfig.appConfig,
-      variant: {
-        id: variant.id,
-        name: variant.name,
-        config: variant.config as RowndSubBrandConfigInput["variant"]["config"],
-      },
-    };
+      if (!variantPluginConfig.appConfig) {
+        continue;
+      }
 
-    if (variantPluginConfig._instructions) {
-      pluginConfig._instructions = [
-        ...(pluginConfig._instructions ?? []),
-        ...variantPluginConfig._instructions.map(
-          (instruction) => `Sub-brand ${variant.id}: ${instruction}`,
-        ),
-      ];
+      subBrands[variant.id] = {
+        ...variantPluginConfig.appConfig,
+        variant: {
+          id: variant.id,
+          name: variant.name,
+          config: variant.config as RowndSubBrandConfigInput["variant"]["config"],
+        },
+      };
+
+      if (variantPluginConfig._instructions) {
+        pluginConfig._instructions = [
+          ...(pluginConfig._instructions ?? []),
+          ...variantPluginConfig._instructions.map(
+            (instruction) => `Sub-brand ${variant.id}: ${instruction}`,
+          ),
+        ];
+      }
     }
   }
 
@@ -502,10 +562,46 @@ async function run() {
 
   delete pluginConfig._instructions;
 
-  const outputPath = resolve(process.cwd(), "rownd-plugin-config.json");
+  const outputPath = resolve(parseOutputArg(args));
   await fs.writeFile(outputPath, JSON.stringify(pluginConfig, null, 2), "utf8");
 
   console.log(`Successfully generated config and saved to ${outputPath}`);
+}
+
+function parseOutputArg(args: string[]) {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--output" || arg === "-o") {
+      const value = args[i + 1];
+      if (!value) {
+        throw new Error(`Missing value for ${arg}`);
+      }
+
+      return value;
+    }
+  }
+
+  return "rownd-plugin-config.json";
+}
+
+function parseRawOutputArg(args: string[]) {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--raw-output") {
+      const value = args[i + 1];
+      if (!value) {
+        throw new Error(`Missing value for ${arg}`);
+      }
+
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function hasIncludeSubBrandsArg(args: string[]) {
+  return args.includes("--include-sub-brands");
 }
 
 if (require.main === module) {

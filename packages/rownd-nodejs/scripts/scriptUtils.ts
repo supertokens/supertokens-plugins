@@ -5,9 +5,7 @@ import { z } from "zod";
 
 import { type RowndUser } from "../src/types";
 
-const DEFAULT_CONFIG_FILE_NAME = "config.yaml";
 const SCRIPT_DIR = __dirname;
-const DEFAULT_CONFIG_FILE_PATH = resolve(SCRIPT_DIR, DEFAULT_CONFIG_FILE_NAME);
 
 export type RetryConfig = {
   maxAttempts: number;
@@ -23,6 +21,7 @@ export type RowndSourceConfig = {
   appId: string;
   appKey: string;
   appSecret: string;
+  bearerToken?: string;
   pageSize: number;
 };
 
@@ -69,6 +68,7 @@ const ConfigSchema = z.object({
     appId: z.string(),
     appKey: z.string(),
     appSecret: z.string(),
+    bearerToken: z.string().optional(),
     pageSize: z.number().int().positive(),
   }),
   supertokens: z.object({
@@ -184,12 +184,30 @@ export function parseConfig(
   };
 }
 
-export async function loadConfig(
-  configFilePath: string = DEFAULT_CONFIG_FILE_PATH,
-) {
+export async function loadConfig(configFilePath: string) {
   const configFile = await fs.readFile(configFilePath, "utf8");
 
   return parseConfig(parseYaml(configFile), dirname(configFilePath));
+}
+
+export function parseRequiredConfigArg(args: string[]) {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--config" || arg === "-c") {
+      const value = args[i + 1];
+      if (!value) {
+        throw new Error(`Missing value for ${arg}`);
+      }
+
+      return resolve(value);
+    }
+  }
+
+  throw new Error("Missing required --config <path>");
+}
+
+export function hasHelpArg(args: string[]) {
+  return args.includes("--help") || args.includes("-h");
 }
 
 function parseRowndUser(parsed: RowndUserRecord) {

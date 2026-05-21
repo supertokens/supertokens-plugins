@@ -1807,6 +1807,31 @@ describe("rownd-nodejs plugin", () => {
         expect(legal.support_email).toBe("support@acme.com");
       });
 
+      it("returns verification modal custom content from plugin config", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: {
+            customContent: {
+              verificationModal: {
+                title: "Verify your account",
+                subtitle: "Enter the code we sent you",
+              },
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+        );
+        const body = await res.json();
+
+        expect(body.app.config.hub.custom_content.verification_modal).toEqual({
+          title: "Verify your account",
+          subtitle: "Enter the code we sent you",
+        });
+      });
+
       it("returns operator-provided schema in response", async () => {
         const { server: s, port } = await setup(coreConnectionURI, {
           schema: {

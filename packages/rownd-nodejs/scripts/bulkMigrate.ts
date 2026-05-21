@@ -8,10 +8,20 @@ import {
   formatZodError,
   fetchRowndUsersPage,
   fetchWithRetry,
+  hasHelpArg,
+  parseRequiredConfigArg,
   type BulkMigrateConfig,
   type RetryConfig,
   type SuperTokensTargetConfig,
 } from "./scriptUtils";
+
+function printHelp() {
+  console.log(`Usage: rownd-nodejs bulk-migrate --config <path>
+
+Options:
+  -c, --config <path>  Path to the bulk migration config file
+  -h, --help           Show this help message`);
+}
 
 type Checkpoint = {
   cursor?: string;
@@ -248,7 +258,13 @@ export async function migrateRowndUsersToSuperTokens(
 }
 
 export async function runCli() {
-  const config = await loadConfig();
+  const args = process.argv.slice(2);
+  if (hasHelpArg(args)) {
+    printHelp();
+    return;
+  }
+
+  const config = await loadConfig(parseRequiredConfigArg(args));
   const result = await migrateRowndUsersToSuperTokens(config);
   console.log(`Migrated ${result.totalImported} users`);
   if (result.totalSkipped > 0) {

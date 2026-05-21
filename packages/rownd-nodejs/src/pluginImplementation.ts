@@ -2037,6 +2037,18 @@ export function buildAppConfig(
             ...(app.customContent?.profileModal
               ? { profile_modal: app.customContent.profileModal }
               : {}),
+            ...(app.customContent?.verificationModal
+              ? {
+                verification_modal: {
+                  ...(app.customContent.verificationModal.title
+                    ? { title: app.customContent.verificationModal.title }
+                    : {}),
+                  ...(app.customContent.verificationModal.subtitle
+                    ? { subtitle: app.customContent.verificationModal.subtitle }
+                    : {}),
+                },
+              }
+              : {}),
             ...(app.customContent?.signInFailureModal
               ? {
                 sign_in_failure_modal: {

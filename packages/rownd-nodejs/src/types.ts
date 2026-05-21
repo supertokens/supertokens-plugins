@@ -432,6 +432,22 @@ export type RowndCustomContent = {
     title?: string;
   };
   /**
+   * Verification modal text overrides.
+   * @default Rownd hub built-in verification copy.
+   */
+  verificationModal?: {
+    /**
+     * Verification modal title.
+     * @default Rownd hub built-in verification title.
+     */
+    title?: string;
+    /**
+     * Verification modal subtitle.
+     * @default Rownd hub built-in verification subtitle.
+     */
+    subtitle?: string;
+  };
+  /**
    * Sign-in failure modal text overrides.
    * @default Rownd hub built-in error copy.
    */
