@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 import pytest
 from supertokens_python.recipe.accountlinking.types import AccountInfoWithRecipeId
@@ -50,7 +50,7 @@ class CapturingDelivery:
 async def test_passwordless_email_delivery_rewrites_magic_link():
     original = CapturingDelivery()
     override = plugin.RowndEmailDeliveryOverride(
-        original, make_config(), "url_with_link_code", "account/login"
+        cast(Any, original), make_config(), "url_with_link_code", "account/login"
     )
     template_vars = SimpleNamespace(
         url_with_link_code="https://api.example.com/auth/verify?preAuthSessionId=preauth"
@@ -66,10 +66,10 @@ async def test_passwordless_email_delivery_rewrites_magic_link():
 
 async def test_passwordless_sms_delivery_rewrites_magic_link():
     original = CapturingDelivery()
-    override = plugin.RowndSMSDeliveryOverride(original, make_config())
+    override = plugin.RowndSMSDeliveryOverride(cast(Any, original), make_config())
     template_vars = SimpleNamespace(url_with_link_code="/auth/verify?linkCode=code")
 
-    await override.send_sms(template_vars, {"rowndDisplayContext": "mobile_app"})
+    await override.send_sms(cast(Any, template_vars), {"rowndDisplayContext": "mobile_app"})
 
     assert original.template_vars.url_with_link_code == (
         "/account/login?linkCode=code&appKey=app-key&apiBasePath=%2Fauth&displayContext=mobile_app"
@@ -79,7 +79,7 @@ async def test_passwordless_sms_delivery_rewrites_magic_link():
 async def test_emailverification_delivery_rewrites_verify_link():
     original = CapturingDelivery()
     override = plugin.RowndEmailDeliveryOverride(
-        original, make_config(), "email_verify_link", "account/verify-email"
+        cast(Any, original), make_config(), "email_verify_link", "account/verify-email"
     )
     template_vars = SimpleNamespace(email_verify_link="/auth/verify?token=token")
 
@@ -107,7 +107,7 @@ async def test_passwordless_create_code_adds_rownd_context():
         return SimpleNamespace(status="OK")
 
     original = SimpleNamespace(create_code_post=create_code_post, consume_code_post=None)
-    overridden = plugin._passwordless_api_override(make_config())(original)
+    overridden = plugin._passwordless_api_override(make_config())(cast(Any, original))
 
     await overridden.create_code_post(
         "user@example.com",
@@ -115,7 +115,7 @@ async def test_passwordless_create_code_adds_rownd_context():
         None,
         None,
         "public",
-        SimpleNamespace(
+        cast(Any, SimpleNamespace(
             request=FakeRequest(
                 {
                     "app_variant_id": "variant_123",
@@ -123,7 +123,7 @@ async def test_passwordless_create_code_adds_rownd_context():
                     "rownd_redirect_to_path": "/dashboard",
                 }
             )
-        ),
+        )),
         {"existing": "value"},
     )
 
@@ -133,6 +133,58 @@ async def test_passwordless_create_code_adds_rownd_context():
         "rowndDisplayContext": "mobile_app",
         "rowndRedirectToPath": "/dashboard",
     }
+
+
+async def test_passwordless_create_code_rejects_unknown_app_variant():
+    called = False
+
+    async def create_code_post(
+        email: Optional[str],
+        phone_number: Optional[str],
+        session_: Any,
+        should_try_linking_with_session_user: Optional[bool],
+        tenant_id: str,
+        api_options: Any,
+        user_context: Dict[str, Any],
+    ):
+        nonlocal called
+        called = True
+        return SimpleNamespace(status="OK")
+
+    config = make_config()
+    config.sub_brands = {"known": {"id": "app"}}
+    original = SimpleNamespace(create_code_post=create_code_post, consume_code_post=None)
+    overridden = plugin._passwordless_api_override(config)(cast(Any, original))
+
+    with pytest.raises(Exception, match="Unknown Rownd app variant: missing"):
+        await overridden.create_code_post(
+            "user@example.com",
+            None,
+            None,
+            None,
+            "public",
+            cast(Any, SimpleNamespace(request=FakeRequest({"app_variant_id": "missing"}))),
+            {},
+        )
+
+    assert called is False
+
+
+async def test_plugin_routes_use_explicit_api_base_path():
+    rownd_plugin = plugin.init(
+        RowndPluginConfig(
+            rownd_app_key="app-key",
+            rownd_app_secret="secret",
+            api_base_path="/api/auth",
+        )
+    )
+
+    route_handlers = cast(Any, rownd_plugin.route_handlers)
+    result = route_handlers(cast(Any, None), [], "0.31.3")
+    paths = {handler.path for handler in result.route_handlers}
+
+    assert "/api/auth/plugin/rownd/app-config" in paths
+    assert "/api/auth/plugin/migrate-session" in paths
 
 
 async def test_passwordless_consume_records_app_variant(monkeypatch: pytest.MonkeyPatch):
@@ -157,7 +209,7 @@ async def test_passwordless_consume_records_app_variant(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(plugin, "record_rownd_app_variant_for_user", record_variant)
     original = SimpleNamespace(create_code_post=None, consume_code_post=consume_code_post)
-    overridden = plugin._passwordless_api_override(make_config())(original)
+    overridden = plugin._passwordless_api_override(make_config())(cast(Any, original))
 
     await overridden.consume_code_post(
         "preauth",
@@ -167,7 +219,7 @@ async def test_passwordless_consume_records_app_variant(monkeypatch: pytest.Monk
         None,
         None,
         "public",
-        SimpleNamespace(request=FakeRequest({"app_variant_id": "variant_123"})),
+        cast(Any, SimpleNamespace(request=FakeRequest({"app_variant_id": "variant_123"}))),
         {},
     )
 
@@ -191,7 +243,7 @@ async def test_passwordless_consume_rejects_unknown_app_variant():
     config = make_config()
     config.sub_brands = {"known": {"id": "app"}}
     original = SimpleNamespace(create_code_post=None, consume_code_post=consume_code_post)
-    overridden = plugin._passwordless_api_override(config)(original)
+    overridden = plugin._passwordless_api_override(config)(cast(Any, original))
 
     with pytest.raises(Exception, match="Unknown Rownd app variant: missing"):
         await overridden.consume_code_post(
@@ -202,7 +254,7 @@ async def test_passwordless_consume_rejects_unknown_app_variant():
             None,
             None,
             "public",
-            SimpleNamespace(request=FakeRequest({"app_variant_id": "missing"})),
+            cast(Any, SimpleNamespace(request=FakeRequest({"app_variant_id": "missing"}))),
             {},
         )
 
@@ -228,16 +280,16 @@ async def test_thirdparty_sign_in_records_app_variant(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(plugin, "record_rownd_app_variant_for_user", record_variant)
     original = SimpleNamespace(sign_in_up_post=sign_in_up_post)
-    overridden = plugin._thirdparty_api_override(make_config())(original)
+    overridden = plugin._thirdparty_api_override(make_config())(cast(Any, original))
 
     await overridden.sign_in_up_post(
-        None,
+        cast(Any, None),
         None,
         None,
         None,
         None,
         "public",
-        SimpleNamespace(request=FakeRequest({"app_variant_id": "variant_123"})),
+        cast(Any, SimpleNamespace(request=FakeRequest({"app_variant_id": "variant_123"}))),
         {},
     )
 
@@ -260,17 +312,17 @@ async def test_thirdparty_sign_in_rejects_unknown_app_variant():
     config = make_config()
     config.sub_brands = {"known": {"id": "app"}}
     original = SimpleNamespace(sign_in_up_post=sign_in_up_post)
-    overridden = plugin._thirdparty_api_override(config)(original)
+    overridden = plugin._thirdparty_api_override(config)(cast(Any, original))
 
     with pytest.raises(Exception, match="Unknown Rownd app variant: missing"):
         await overridden.sign_in_up_post(
-            None,
+            cast(Any, None),
             None,
             None,
             None,
             None,
             "public",
-            SimpleNamespace(request=FakeRequest({"app_variant_id": "missing"})),
+            cast(Any, SimpleNamespace(request=FakeRequest({"app_variant_id": "missing"}))),
             {},
         )
 
@@ -300,9 +352,9 @@ async def test_emailverification_verify_completes_pending_email(monkeypatch: pyt
         plugin, "complete_pending_email_verification", complete_pending_email_verification
     )
     original = SimpleNamespace(email_verify_post=email_verify_post)
-    overridden = plugin._emailverification_api_override()(original)
+    overridden = plugin._emailverification_api_override()(cast(Any, original))
 
-    await overridden.email_verify_post("token", None, "public", None, {"source": "test"})
+    await overridden.email_verify_post("token", None, "public", cast(Any, None), {"source": "test"})
 
     assert completed == [("recipe-user", "verified@example.com", {"source": "test"})]
 
@@ -322,7 +374,7 @@ async def test_accountlinking_links_guest_session_without_verification(
 
     monkeypatch.setattr("supertokens_python.asyncio.get_user", get_user)
     original_config = SimpleNamespace(should_do_automatic_account_linking=None)
-    overridden = plugin._accountlinking_config_override()(original_config)
+    overridden = cast(Any, plugin._accountlinking_config_override()(cast(Any, original_config)))
 
     result = await overridden.should_do_automatic_account_linking(
         AccountInfoWithRecipeId(recipe_id="passwordless", email="user@example.com"),
@@ -352,7 +404,7 @@ async def test_accountlinking_links_matching_real_session_with_verification(
 
     monkeypatch.setattr("supertokens_python.asyncio.get_user", get_user)
     original_config = SimpleNamespace(should_do_automatic_account_linking=None)
-    overridden = plugin._accountlinking_config_override()(original_config)
+    overridden = cast(Any, plugin._accountlinking_config_override()(cast(Any, original_config)))
 
     result = await overridden.should_do_automatic_account_linking(
         AccountInfoWithRecipeId(recipe_id="passwordless", email="USER@example.com"),

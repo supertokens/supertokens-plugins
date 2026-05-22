@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict
-
 import httpx
 
-from .types import RowndPluginConfig, RowndPluginError
+from .types import JsonDict, RowndPluginConfig, RowndPluginError
 
 
 class RowndClient:
@@ -12,13 +10,13 @@ class RowndClient:
         self.config = config
 
     async def validate_token(self, token: str) -> str:
-        data = await self._request("POST", "/hub/auth/token/validate", json={"token": token})
+        data = await self._request("POST", "/hub/auth/token/validate", {"token": token})
         user_id = data.get("user_id") or data.get("userId")
         if not isinstance(user_id, str) or not user_id:
             raise RowndPluginError("Invalid token")
         return user_id
 
-    async def fetch_user_info(self, user_id: str) -> Dict[str, Any]:
+    async def fetch_user_info(self, user_id: str) -> JsonDict:
         data = await self._request(
             "GET",
             "/me/applications/%s/users/%s" % (self.config.rownd_app_key, user_id),
@@ -27,9 +25,8 @@ class RowndClient:
             raise RowndPluginError("User not found in Rownd")
         return data
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> Dict[str, Any]:
-        headers = kwargs.pop("headers", {})
-        headers.update(
+    async def _request(self, method: str, path: str, json: JsonDict | None = None) -> JsonDict:
+        headers = (
             {
                 "x-rownd-app-key": self.config.rownd_app_key,
                 "x-rownd-app-secret": self.config.rownd_app_secret,
@@ -40,7 +37,10 @@ class RowndClient:
                 method,
                 self.config.rownd_api_base_url.rstrip("/") + path,
                 headers=headers,
-                **kwargs,
+                json=json,
             )
             res.raise_for_status()
-            return res.json()
+            data = res.json()
+            if not isinstance(data, dict):
+                raise RowndPluginError("Invalid Rownd response")
+            return data

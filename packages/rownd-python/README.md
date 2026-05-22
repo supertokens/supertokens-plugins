@@ -4,6 +4,20 @@ Rownd migration plugin for `supertokens_python`.
 
 This package is managed by Turborepo through `package.json`, but published as a Python package named `supertokens-rownd`.
 
+## Installation
+
+Until this package is published to PyPI, install it from the `rownd-python` branch:
+
+```bash
+pip install "supertokens-rownd @ git+https://github.com/supertokens/supertokens-plugins.git@rownd-python#subdirectory=packages/rownd-python"
+```
+
+With `uv`:
+
+```bash
+uv add "supertokens-rownd @ git+https://github.com/supertokens/supertokens-plugins.git@rownd-python#subdirectory=packages/rownd-python"
+```
+
 ## Local Development
 
 ```bash
@@ -59,7 +73,9 @@ init(
             RowndMigrationPlugin(
                 rownd_app_key="rownd_app_key",
                 rownd_app_secret="rownd_app_secret",
+                # Must match InputAppInfo.api_base_path.
                 api_base_path="/auth",
+                # Should match InputAppInfo.api_domain.
                 api_domain="https://api.example.com",
                 app_name="My App",
             )
@@ -88,3 +104,7 @@ The plugin registers these routes below `api_base_path`:
 ## Notes
 
 The Python SDK plugin API does not currently pass `app_info` into plugin route construction. Configure `api_base_path`, `api_domain`, and `app_name` on the Rownd plugin so it can register routes and rewrite Rownd hub links consistently.
+
+`api_base_path` must match `InputAppInfo.api_base_path`. If these differ, Rownd plugin routes are mounted at the Rownd plugin value, not the SuperTokens app value.
+
+`api_domain` should match `InputAppInfo.api_domain`. This value is added to rewritten Rownd hub links so browser and mobile flows can call back to the correct API domain.

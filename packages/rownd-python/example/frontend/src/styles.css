@@ -1,0 +1,124 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #f6f7fb;
+  color: #111827;
+}
+
+main {
+  width: min(960px, calc(100% - 32px));
+  margin: 32px auto;
+  display: grid;
+  gap: 16px;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid #dbe1ea;
+  border-radius: 16px;
+  padding: 20px;
+  box-shadow: 0 10px 30px rgba(17, 24, 39, 0.06);
+}
+
+.hero {
+  display: grid;
+  gap: 8px;
+}
+
+.hero h1,
+.hero h2 {
+  margin: 0;
+}
+
+.status-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.status-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.status-row span:last-child {
+  word-break: break-word;
+}
+
+.label {
+  font-weight: 600;
+}
+
+.controls {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.prompt-parent {
+  min-height: 44px;
+  margin-top: 12px;
+}
+
+#iframe-scenario {
+  margin-top: 12px;
+}
+
+.iframe-shell {
+  width: 100%;
+  min-height: 720px;
+  border: 1px solid #dbe1ea;
+  border-radius: 16px;
+  background: #f8fafc;
+}
+
+button {
+  font: inherit;
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 16px;
+  background: #111827;
+  color: #fff;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: #e5e7eb;
+  color: #111827;
+}
+
+pre {
+  margin: 0;
+  min-height: 56px;
+  padding: 14px;
+  border-radius: 12px;
+  overflow: auto;
+  background: #0f172a;
+  color: #e2e8f0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 640px) {
+  main {
+    width: min(100%, calc(100% - 20px));
+    margin: 16px auto;
+  }
+
+  .card {
+    padding: 16px;
+  }
+
+  button {
+    width: 100%;
+  }
+}

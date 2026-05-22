@@ -412,7 +412,11 @@ async def test_legacy_session_migration_adds_configured_claims(
     assert payload["employee_id_claim"] == "emp-123"
     assert payload["app_user_id"] == "py-session-user"
     assert payload[ROWND_JWT_CLAIMS["app_user_id"]] == "py-session-user"
-    assert payload["aud"] in ("app:app_123", ["app:app_123"])
+    assert "aud" not in payload
+
+    user_res = client.get("/auth/plugin/rownd/user", headers=auth_headers(access_token))
+    assert user_res.status_code == 200
+    assert user_res.json()["status"] == "OK"
 
 
 async def test_legacy_session_migration_uses_metadata_fallback_for_claims(

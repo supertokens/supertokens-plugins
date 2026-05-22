@@ -1,4 +1,15 @@
-from supertokens_rownd.plugin_implementation import add_hub_bootstrap_params, map_rownd_user_to_supertokens
+from types import SimpleNamespace
+
+import pytest
+
+import supertokens_rownd.plugin_implementation as impl
+from supertokens_rownd.plugin_implementation import (
+    add_hub_bootstrap_params,
+    as_json_dict,
+    build_app_config,
+    get_rownd_compat_user,
+    map_rownd_user_to_supertokens,
+)
 from supertokens_rownd.types import RowndPluginConfig, RowndPluginError
 
 
@@ -57,8 +68,9 @@ def test_maps_email_passwordless_user():
     assert mapped["loginMethods"] == [
         {"recipeId": "passwordless", "email": "a@example.com", "isVerified": True}
     ]
-    assert mapped["userMetadata"]["first_name"] == "Ada"
-    assert mapped["userMetadata"]["source"] == "rownd"
+    user_metadata = as_json_dict(mapped["userMetadata"])
+    assert user_metadata["first_name"] == "Ada"
+    assert user_metadata["source"] == "rownd"
 
 
 def test_maps_guest_user():
@@ -108,7 +120,9 @@ def test_preserves_rownd_app_variants_in_metadata():
         }
     )
 
-    assert mapped["userMetadata"]["original_rownd_user"]["attributes"] == {
+    user_metadata = as_json_dict(mapped["userMetadata"])
+    original_rownd_user = as_json_dict(user_metadata["original_rownd_user"])
+    assert original_rownd_user["attributes"] == {
         "rownd:app_variants": ["variant_123"]
     }
 
@@ -168,3 +182,79 @@ def test_adds_hub_bootstrap_params_to_relative_link():
     )
 
     assert link == "/account/verify-email?linkCode=abc&appKey=app-key&apiBasePath=%2Fauth"
+
+
+def test_google_sign_in_method_matches_node_config_shape():
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        app_config={
+            "signInMethods": [
+                {
+                    "method": "google",
+                    "clientId": "google-client-id",
+                    "signInFasterWithGoogle": "enabled",
+                    "oneTap": {
+                        "browser": {"autoPrompt": True},
+                        "mobileApp": {"delay": 3000},
+                    },
+                }
+            ]
+        },
+    )
+
+    body = build_app_config(config, None)
+    assert body is not None
+    app = as_json_dict(body.get("app"))
+    app_config = as_json_dict(app.get("config"))
+    hub = as_json_dict(app_config.get("hub"))
+    auth = as_json_dict(hub.get("auth"))
+    sign_in_methods = as_json_dict(auth.get("sign_in_methods"))
+    google = as_json_dict(sign_in_methods.get("google"))
+
+    assert google["client_id"] == "google-client-id"
+    assert google["sign_in_faster_with_google"] == "enabled"
+    assert google["one_tap"] == {
+        "browser": {"auto_prompt": True, "delay": 7000},
+        "mobile_app": {"auto_prompt": False, "delay": 3000},
+    }
+
+
+@pytest.mark.asyncio
+async def test_rownd_compat_user_uses_last_used_for_last_sign_in_method(monkeypatch: pytest.MonkeyPatch):
+    async def get_user_metadata(user_id: str):
+        return {}
+
+    async def get_user(user_id: str, user_context=None):
+        return SimpleNamespace(
+            id=user_id,
+            time_joined=1000,
+            login_methods=[
+                SimpleNamespace(
+                    recipe_id="passwordless",
+                    email="user@example.com",
+                    phone_number=None,
+                    time_joined=2000,
+                    last_used=5000,
+                ),
+                SimpleNamespace(
+                    recipe_id="thirdparty",
+                    email="user@example.com",
+                    phone_number=None,
+                    third_party=SimpleNamespace(id="google", user_id="google-123"),
+                    verified=True,
+                    time_joined=3000,
+                    last_used=4000,
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)
+    monkeypatch.setattr(impl, "get_user", get_user)
+
+    user = await get_rownd_compat_user("st-user")
+    meta = as_json_dict(user.get("meta"))
+
+    assert meta["first_sign_in_method"] == "email"
+    assert meta["last_sign_in_method"] == "email"
+    assert meta["last_sign_in"] == "1970-01-01T00:00:05Z"
