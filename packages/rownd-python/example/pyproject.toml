@@ -12,4 +12,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-supertokens-rownd = { path = "..", editable = true }
+supertokens-rownd = { git = "https://github.com/supertokens/supertokens-plugins.git", subdirectory = "packages/rownd-python", rev = "rownd-python" }

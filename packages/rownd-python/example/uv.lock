@@ -2611,7 +2611,7 @@ requires-dist = [
     { name = "fastapi" },
     { name = "python-dotenv" },
     { name = "supertokens-python", extras = ["fastapi"], specifier = ">=0.31.3" },
-    { name = "supertokens-rownd", editable = "../" },
+    { name = "supertokens-rownd", git = "https://github.com/supertokens/supertokens-plugins.git?subdirectory=packages%2Frownd-python&rev=rownd-python" },
     { name = "uvicorn" },
 ]
 
@@ -2731,31 +2731,12 @@ fastapi = [
 [[package]]
 name = "supertokens-rownd"
 version = "0.1.0"
-source = { editable = "../" }
+source = { git = "https://github.com/supertokens/supertokens-plugins.git?subdirectory=packages%2Frownd-python&rev=rownd-python#f186e3a29af4c0f4faf52050689b0249d552b6a2" }
 dependencies = [
     { name = "httpx" },
     { name = "supertokens-python" },
     { name = "typing-extensions", version = "4.13.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
     { name = "typing-extensions", version = "4.15.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.15.0,<1.0.0" },
-    { name = "supertokens-python", specifier = ">=0.31.3" },
-    { name = "typing-extensions", specifier = ">=4.1.1,<5.0.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "build" },
-    { name = "fastapi" },
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-    { name = "testcontainers" },
-    { name = "uvicorn" },
 ]
 
 [[package]]
