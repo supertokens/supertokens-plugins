@@ -46,7 +46,7 @@ import RowndMigrationPlugin from "@supertokens-plugins/rownd-nodejs";
 SuperTokens.init({
   supertokens: {
     connectionURI: "<SUPERTOKENS_CONNECTION_URI>",
-    apiKey: "<SUPERTOKENS_API_KEY>", // Optional
+    apiKey: "<SUPERTOKENS_API_KEY>",
   },
   appInfo: {
     appName: "APP_NAME",

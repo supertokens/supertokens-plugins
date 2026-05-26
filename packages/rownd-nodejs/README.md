@@ -64,6 +64,19 @@ RowndMigrationPlugin.init({
 });
 ```
 
+### Mobile Deep Links
+
+Set `mobileDeepLinkBaseUrl` to rewrite mobile-context account links to a native deep link target. The value must be an absolute URL base, such as a custom scheme or HTTPS universal/app link domain.
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  mobileDeepLinkBaseUrl: "customDomain://",
+  // or: mobileDeepLinkBaseUrl: "https://links.example.com",
+});
+```
+
 ## API Endpoint
 
 The plugin exposes a single endpoint:

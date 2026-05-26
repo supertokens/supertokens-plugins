@@ -462,6 +462,125 @@ describe("rownd-nodejs plugin", () => {
       );
     });
 
+    it("uses mobile deep link base URL with custom scheme for passwordless magic links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        mobileDeepLinkBaseUrl: "rowndsupertokens://",
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid&tenantId=public#abc",
+        userContext: {
+          rowndDisplayContext: "mobile_app",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.protocol).toBe("rowndsupertokens:");
+      expect(rewrittenUrl.host).toBe("account");
+      expect(rewrittenUrl.pathname).toBe("/login");
+      expect(rewrittenUrl.searchParams.get("preAuthSessionId")).toBe("pid");
+      expect(rewrittenUrl.searchParams.get("tenantId")).toBe("public");
+      expect(rewrittenUrl.searchParams.get("appKey")).toBe("test-key");
+      expect(rewrittenUrl.searchParams.get("apiDomain")).toBe(
+        "https://api.example.com",
+      );
+      expect(rewrittenUrl.searchParams.get("apiBasePath")).toBe("/auth");
+      expect(rewrittenUrl.searchParams.get("displayContext")).toBe(
+        "mobile_app",
+      );
+      expect(rewrittenUrl.hash).toBe("#abc");
+    });
+
+    it("uses mobile deep link base URL with HTTPS URL for passwordless magic links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        mobileDeepLinkBaseUrl: "https://links.example.com",
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid&tenantId=public#abc",
+        userContext: {
+          rowndDisplayContext: "mobile_app",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.origin).toBe("https://links.example.com");
+      expect(rewrittenUrl.pathname).toBe("/account/login");
+      expect(rewrittenUrl.searchParams.get("preAuthSessionId")).toBe("pid");
+      expect(rewrittenUrl.searchParams.get("tenantId")).toBe("public");
+      expect(rewrittenUrl.searchParams.get("appKey")).toBe("test-key");
+      expect(rewrittenUrl.searchParams.get("displayContext")).toBe(
+        "mobile_app",
+      );
+      expect(rewrittenUrl.hash).toBe("#abc");
+    });
+
+    it("rejects invalid mobile deep link base URL", () => {
+      expect(() =>
+        init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+          mobileDeepLinkBaseUrl: "rowndsupertokens",
+        }),
+      ).toThrow("Invalid mobileDeepLinkBaseUrl in plugin config");
+    });
+
+    it("keeps hub links for browser flows when mobile deep link base URL is configured", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        mobileDeepLinkBaseUrl: "rowndsupertokens://",
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid#abc",
+        userContext: {
+          rowndDisplayContext: "browser",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.origin).toBe("https://hub.example.com");
+      expect(rewrittenUrl.pathname).toBe("/account/login");
+    });
+
     it("adds hub bootstrap params to passwordless SMS magic links", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
@@ -527,6 +646,46 @@ describe("rownd-nodejs plugin", () => {
       expect(rewrittenUrl.origin).toBe("https://hub.example.com");
       expect(rewrittenUrl.pathname).toBe("/account/verify-email");
       expect(rewrittenUrl.searchParams.get("token")).toBe("token_123");
+      expect(rewrittenUrl.searchParams.get("appKey")).toBe("test-key");
+      expect(rewrittenUrl.searchParams.get("apiDomain")).toBe(
+        "https://api.example.com",
+      );
+      expect(rewrittenUrl.searchParams.get("apiBasePath")).toBe("/auth");
+      expect(rewrittenUrl.searchParams.get("displayContext")).toBe(
+        "mobile_app",
+      );
+    });
+
+    it("uses mobile deep link base URL for mobile email verification links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        mobileDeepLinkBaseUrl: "rowndsupertokens://",
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const emailVerificationConfig =
+        plugin.overrideMap.emailverification.config({});
+      const emailDelivery = emailVerificationConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        emailVerifyLink:
+          "https://hub.example.com/auth/verify-email?token=token_123&tenantId=public",
+        userContext: { rowndDisplayContext: "mobile_app" },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].emailVerifyLink);
+      expect(rewrittenUrl.protocol).toBe("rowndsupertokens:");
+      expect(rewrittenUrl.host).toBe("account");
+      expect(rewrittenUrl.pathname).toBe("/verify-email");
+      expect(rewrittenUrl.searchParams.get("token")).toBe("token_123");
+      expect(rewrittenUrl.searchParams.get("tenantId")).toBe("public");
       expect(rewrittenUrl.searchParams.get("appKey")).toBe("test-key");
       expect(rewrittenUrl.searchParams.get("apiDomain")).toBe(
         "https://api.example.com",

@@ -676,6 +676,7 @@ export interface RowndPluginConfig {
   rowndAppKey: string;
   rowndAppSecret: string;
   enableDebugLogs?: boolean;
+  mobileDeepLinkBaseUrl?: string;
   telemetry?: RowndTelemetryConfig;
   // Optional field schema override. If omitted, DEFAULT_ROWND_SCHEMA is used.
   schema?: RowndSchema;
@@ -767,6 +768,7 @@ export interface RowndPluginNormalisedConfig {
   rowndAppKey: string;
   rowndAppSecret: string;
   enableDebugLogs?: boolean;
+  mobileDeepLinkBaseUrl?: string;
   telemetry?: RowndTelemetryConfig;
   schema?: RowndSchema;
   appConfig?: RowndAppConfigInput;

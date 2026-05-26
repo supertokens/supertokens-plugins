@@ -68,6 +68,37 @@ export function rewriteLinkPath(
   }
 }
 
+export function rewriteLinkToMobileDeepLink(
+  inputUrl: string,
+  targetPath: string,
+  baseUrl: string,
+  searchParams?: Record<string, string>,
+) {
+  const normalizedBaseUrl = baseUrl.endsWith("://")
+    ? baseUrl
+    : baseUrl.replace(/\/+$/, "") + "/";
+  const targetUrl = new URL(
+    `${normalizedBaseUrl}${targetPath.replace(/^\//, "")}`,
+  );
+
+  try {
+    const sourceUrl = new URL(inputUrl);
+    targetUrl.search = sourceUrl.search;
+    targetUrl.hash = sourceUrl.hash;
+  } catch {
+    const [, query = ""] = inputUrl.split("?");
+    targetUrl.search = query ? `?${query.split("#")[0]}` : "";
+    const hash = inputUrl.split("#")[1];
+    targetUrl.hash = hash ? `#${hash}` : "";
+  }
+
+  for (const [key, value] of Object.entries(searchParams ?? {})) {
+    targetUrl.searchParams.set(key, value);
+  }
+
+  return targetUrl.toString();
+}
+
 export type RowndRouteHandlerDeps = {
   pluginConfig: RowndPluginNormalisedConfig;
   stConfig: SuperTokensPublicConfig;

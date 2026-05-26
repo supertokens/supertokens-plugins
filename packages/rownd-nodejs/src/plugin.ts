@@ -34,6 +34,7 @@ import {
   getRequestedRedirectToPathFromRequest,
   recordRowndAppVariantForUser,
   assertRowndAppVariantIsConfigured,
+  rewriteLinkToMobileDeepLink,
 } from "./pluginImplementation";
 
 export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
@@ -73,11 +74,21 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           ...(typeof redirectToPath === "string" ? { redirectToPath } : {}),
         };
 
+        const rewrittenLink = input[linkKey]
+          ? displayContext === "mobile_app" &&
+            pluginConfig.mobileDeepLinkBaseUrl
+            ? rewriteLinkToMobileDeepLink(
+                input[linkKey],
+                targetPath,
+                pluginConfig.mobileDeepLinkBaseUrl,
+                bootstrapParams,
+              )
+            : rewriteLinkPath(input[linkKey], targetPath, bootstrapParams)
+          : input[linkKey];
+
         return {
           ...input,
-          [linkKey]: input[linkKey]
-            ? rewriteLinkPath(input[linkKey], targetPath, bootstrapParams)
-            : input[linkKey],
+          [linkKey]: rewrittenLink,
         };
       };
 
@@ -216,9 +227,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                        originalImplementation,
-                        builder,
-                      )
+                          originalImplementation,
+                          builder,
+                        )
                       : originalImplementation;
 
                     return {
@@ -240,9 +251,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalSmsDeliveryOverride
                       ? originalSmsDeliveryOverride(
-                        originalImplementation,
-                        builder,
-                      )
+                          originalImplementation,
+                          builder,
+                        )
                       : originalImplementation;
 
                     return {
@@ -285,20 +296,21 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
 
                 return originalImplementation.createCodePOST({
                   ...input,
-                  userContext: displayContext || redirectToPath || appVariantId
-                    ? {
-                      ...input.userContext,
-                      ...(appVariantId
-                        ? { rowndAppVariantId: appVariantId }
-                        : {}),
-                      ...(displayContext
-                        ? { rowndDisplayContext: displayContext }
-                        : {}),
-                      ...(redirectToPath
-                        ? { rowndRedirectToPath: redirectToPath }
-                        : {}),
-                    }
-                    : input.userContext,
+                  userContext:
+                    displayContext || redirectToPath || appVariantId
+                      ? {
+                          ...input.userContext,
+                          ...(appVariantId
+                            ? { rowndAppVariantId: appVariantId }
+                            : {}),
+                          ...(displayContext
+                            ? { rowndDisplayContext: displayContext }
+                            : {}),
+                          ...(redirectToPath
+                            ? { rowndRedirectToPath: redirectToPath }
+                            : {}),
+                        }
+                      : input.userContext,
                 });
               },
               consumeCodePOST: async (
@@ -432,9 +444,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                        originalImplementation,
-                        builder,
-                      )
+                          originalImplementation,
+                          builder,
+                        )
                       : originalImplementation;
 
                     return {
@@ -504,10 +516,23 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           );
         }
       }
+      if (config.mobileDeepLinkBaseUrl !== undefined) {
+        try {
+          if (
+            !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(config.mobileDeepLinkBaseUrl)
+          ) {
+            throw new Error();
+          }
+          new URL(config.mobileDeepLinkBaseUrl);
+        } catch {
+          throw new Error("Invalid mobileDeepLinkBaseUrl in plugin config");
+        }
+      }
       return {
         rowndAppKey: config.rowndAppKey,
         rowndAppSecret: config.rowndAppSecret,
         enableDebugLogs: config.enableDebugLogs,
+        mobileDeepLinkBaseUrl: config.mobileDeepLinkBaseUrl,
         telemetry: config.telemetry,
         schema: config.schema,
         appConfig: config.appConfig,
