@@ -2,29 +2,31 @@
 
 This guide explains how to use Rownd-compatible frontend APIs with SuperTokens-backed auth.
 
-The hosted Hub is `https://rownd-hub.supertokens.com`. The React/Next SDKs inject that Hub, pass it your SuperTokens backend config, and keep the public Rownd APIs such as `RowndProvider`, `useRownd()`, `requestSignIn()`, `SignedIn`, `SignedOut`, and `RequireSignIn`.
+The hosted Hub is `https://rownd-hub.supertokens.com`. The SDKs load that Hub, pass it your SuperTokens backend config, and keep the public Rownd APIs such as `RowndProvider`, `useRownd()`, `requestSignIn()`, `SignedIn`, `SignedOut`, and `RequireSignIn`.
 
 ## Architecture
 
 ```text
-React or Next app
-  -> injects https://rownd-hub.supertokens.com/static/scripts/rph.js
+React, Next, iOS, or Android app
+  -> loads https://rownd-hub.supertokens.com
   -> passes appKey and supertokens.appInfo to the Hub
   -> Hub calls {apiDomain}{apiBasePath}/plugin/rownd/*
   -> rownd-nodejs plugin uses SuperTokens recipes for users and sessions
 ```
 
+Web SDKs inject `https://rownd-hub.supertokens.com/static/scripts/rph.js`. Mobile SDKs open the same Hub inside native SDK-managed UI.
+
 Default `apiBasePath` is `/auth`, so plugin endpoints usually live under `/auth/plugin/rownd/*`.
 
 ## Backend
 
-Install packages:
+### Step 1: Install packages
 
 ```bash
 npm install supertokens-node @supertokens-plugins/rownd-nodejs@0.3.0-beta.0
 ```
 
-Set environment variables:
+### Step 2: Set environment variables
 
 ```bash
 SUPERTOKENS_CONNECTION_URI=http://localhost:3567
@@ -41,7 +43,9 @@ APPLE_PRIVATE_KEY=...
 APPLE_TEAM_ID=...
 ```
 
-Initialize SuperTokens:
+### Step 3: Initialize SuperTokens
+
+Add this before your server starts listening:
 
 ```ts
 import SuperTokens from "supertokens-node";
@@ -167,21 +171,6 @@ SuperTokens.init({
             deleteAccountButton: { enabled: true },
           },
         },
-        // Optional Rownd-style user field schema. Controls profile updates and optional session claims.
-        schema: {
-          employee_id: {
-            // Label shown in Rownd-compatible profile UI.
-            display_name: "Employee ID",
-            // Field type used for validation.
-            type: "string",
-            // False means users cannot edit this from the Hub.
-            user_visible: false,
-            // Copies the value into the SuperTokens access-token payload.
-            include_in_session_claims: true,
-            // Claim name to use instead of the field key.
-            session_claim_name: "employee_id",
-          },
-        },
       }),
     ],
   },
@@ -189,6 +178,8 @@ SuperTokens.init({
 ```
 
 ### CORS
+
+### Step 4: Add CORS and middleware
 
 Install SuperTokens middleware after CORS handling:
 
@@ -232,13 +223,13 @@ If your `apiDomain` already includes a path because of a proxy, include that pat
 
 ## React App
 
-Install:
+### Step 1: Install the React SDK
 
 ```bash
 npm install @supertokens/rownd-react@0.1.0-beta.2
 ```
 
-Wrap your app:
+### Step 2: Wrap your app
 
 ```tsx
 import React from "react";
@@ -279,7 +270,9 @@ apiBasePath must match your backend SuperTokens config
 User-facing APIs stay Rownd-compatible
 ```
 
-Use the Rownd APIs as before:
+### Step 3: Use the Rownd APIs
+
+Use the same Rownd-facing APIs as before:
 
 ```tsx
 import {
@@ -329,18 +322,20 @@ export function AuthControls() {
 
 ## Next.js App
 
-Install:
+### Step 1: Install the Next.js SDK
 
 ```bash
 npm install @supertokens/rownd-nextjs@0.1.0-beta.2
 ```
 
-Set app inputs:
+### Step 2: Set app inputs
 
 ```bash
 ROWND_APP_KEY=...
 API_DOMAIN=https://api.example.com
 ```
+
+### Step 3: Create shared config
 
 Create a shared Rownd config file:
 
@@ -363,6 +358,8 @@ export const rowndServerConfig: RowndServerConfig = {
   },
 };
 ```
+
+### Step 4: Add the provider
 
 Add the provider in `app/layout.tsx`:
 
@@ -397,6 +394,8 @@ export default function RootLayout({
 }
 ```
 
+### Step 5: Add middleware
+
 Add `middleware.ts`:
 
 ```ts
@@ -418,7 +417,7 @@ export const config = {
 };
 ```
 
-Use server helpers:
+### Step 6: Use server helpers
 
 ```tsx
 import { cookies } from "next/headers";
@@ -450,6 +449,140 @@ Package changes from @rownd/next to @supertokens/rownd-nextjs
 Server validation uses SuperTokens JWKS instead of Rownd OAuth discovery
 Server user loading uses /plugin/rownd/user
 Middleware must include /api/rownd-token-callback
+```
+
+## Mobile SDKs
+
+The iOS and Android SDKs use the same hosted Hub and backend plugin endpoints as the web SDKs. Configure each mobile app with:
+
+- `appKey`: same value as `RowndMigrationPlugin.init({ rowndAppKey })`
+- `apiDomain`: public backend origin that hosts SuperTokens and the Rownd plugin
+- `apiBasePath`: must match backend `appInfo.apiBasePath`, usually `/auth`
+
+### iOS
+
+#### Step 1: Add the package
+
+Add the SuperTokens Rownd iOS SDK as a Swift Package dependency to your iOS app target:
+
+```text
+https://github.com/supertokens/supertokens-rownd-ios
+```
+
+Select version `0.0.1-beta.0`.
+
+#### Step 2: Configure the SDK
+
+Configure Rownd during app launch:
+
+```swift
+import UIKit
+import Rownd
+
+func application(
+    _ application: UIApplication,
+    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+) -> Bool {
+    Task {
+        await Rownd.configure(
+            launchOptions: launchOptions,
+            appKey: "<ROWND_APP_KEY>",
+            supertokens: RowndSuperTokensConfig(
+                appName: "My App",
+                apiDomain: "https://api.example.com",
+                apiBasePath: "/auth"
+            )
+        )
+    }
+
+    return true
+}
+```
+
+For app extensions or widgets, configure an app group and set `Rownd.config.appGroupPrefix` before calling `Rownd.configure()`.
+
+#### Step 3: Use the SDK APIs
+
+Use the SDK APIs as before:
+
+```swift
+Rownd.requestSignIn()
+Rownd.requestSignIn(with: .email)
+Rownd.requestSignIn(with: .anonymous)
+Rownd.manageAccount()
+Rownd.signOut()
+
+let accessToken = try await Rownd.getAccessToken(throwIfMissing: true)
+```
+
+### Android
+
+#### Step 1: Add the SDK source
+
+Until a Maven artifact is published, add the SuperTokens Rownd Android SDK from source:
+
+```text
+https://github.com/supertokens/supertokens-rownd-android
+```
+
+Check out tag `0.0.1-beta.0`.
+
+Check out the SDK repository next to your app repository, include it as a composite build, and substitute the SDK module dependency:
+
+```gradle
+// settings.gradle
+includeBuild("../supertokens-rownd-android") {
+    dependencySubstitution {
+        substitute module("io.rownd:android") using project(":android")
+    }
+}
+```
+
+```gradle
+// app/build.gradle
+dependencies {
+    implementation "io.rownd:android:0.0.0-local"
+}
+```
+
+The version in `app/build.gradle` is ignored while the composite build substitution is active. If the SDK repo is not checked out next to your app repo, adjust the relative path in `includeBuild(...)`.
+
+#### Step 2: Configure the SDK
+
+Configure Rownd in your `Application` class:
+
+```kotlin
+import android.app.Application
+import io.rownd.android.Rownd
+import io.rownd.android.RowndConfigureOptions
+
+class MyApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+
+        Rownd.configure(
+            this,
+            RowndConfigureOptions(
+                appKey = "<ROWND_APP_KEY>",
+                apiDomain = "https://api.example.com",
+                apiBasePath = "/auth",
+            )
+        )
+    }
+}
+```
+
+#### Step 3: Use the SDK APIs
+
+Use the SDK APIs as before:
+
+```kotlin
+Rownd.requestSignIn()
+Rownd.requestSignIn(RowndSignInHint.Guest)
+Rownd.manageAccount()
+Rownd.signOut()
+
+val accessToken = Rownd.getAccessToken()
 ```
 
 ## Migration
