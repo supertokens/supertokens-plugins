@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/rownd-nodejs",
-  "version": "0.2.1",
+  "version": "0.3.0-beta.1",
   "description": "Rownd User Migration Plugin for SuperTokens",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -14,8 +14,6 @@
   "scripts": {
     "build": "rm -rf dist && tsup",
     "cli": "npm run build && node dist/cli.js",
-    "migrate-local-then-managed": "tsx scripts/migrateLocalThenManaged.ts",
-    "diff-users": "tsx scripts/diffUsers.ts",
     "lint": "eslint ./src --ext .ts",
     "test": "TEST_MODE=testing vitest run --pool=forks"
   },
