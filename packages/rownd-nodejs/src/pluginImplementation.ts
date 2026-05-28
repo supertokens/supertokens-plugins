@@ -1340,14 +1340,32 @@ export async function startPendingEmailVerification(input: {
 }) {
   const metadata = await getUserMetadata(input.userId);
   const currentEmail = (await getUserById(input.userId)).data.email;
-  if (currentEmail === input.email) {
-    return getUserById(input.userId);
-  }
-
   const pendingVerifications = getPendingVerifications(metadata);
   const pendingEmailVerifications = pendingVerifications.filter(
     (pendingVerification) => pendingVerification.field === "email",
   );
+
+  if (currentEmail === input.email) {
+    for (const pendingVerification of pendingEmailVerifications) {
+      await EmailVerification.revokeEmailVerificationTokens(
+        input.tenantId,
+        input.recipeUserId,
+        pendingVerification.value,
+        input.userContext,
+      );
+    }
+
+    if (pendingEmailVerifications.length > 0) {
+      await UserMetadata.updateUserMetadata(input.userId, {
+        ...metadata,
+        rownd_pending_verification: pendingVerifications.filter(
+          (pendingVerification) => pendingVerification.field !== "email",
+        ),
+      });
+    }
+
+    return getUserById(input.userId);
+  }
 
   for (const pendingVerification of pendingEmailVerifications) {
     await EmailVerification.revokeEmailVerificationTokens(
@@ -1410,9 +1428,10 @@ export async function completePendingEmailVerification(input: {
   const metadata = await getUserMetadata(userId);
   const pendingVerifications = getPendingVerifications(metadata);
   const pendingVerification = pendingVerifications.find(
-    (pendingVerification) =>
-      pendingVerification.field === "email" &&
-      pendingVerification.value === input.email,
+    (pendingVerification) => isMatchingPendingEmailVerification(
+      pendingVerification,
+      input.email,
+    ),
   );
 
   if (!pendingVerification) {
@@ -1485,29 +1504,44 @@ export async function completePendingEmailVerification(input: {
     metadataUserId = primaryUserId;
   }
 
+  const targetMetadata =
+    metadataUserId === userId ? metadata : await getUserMetadata(metadataUserId);
+  const originalRowndUser =
+    targetMetadata.original_rownd_user ?? metadata.original_rownd_user;
+  const targetPendingVerifications = getPendingVerifications(targetMetadata);
   const updatedMetadata: RowndMetadata = {
-    ...metadata,
-    ...(metadata.original_rownd_user
+    ...targetMetadata,
+    ...(originalRowndUser
       ? {
         original_rownd_user: {
-          ...metadata.original_rownd_user,
+          ...originalRowndUser,
           data: {
-            ...metadata.original_rownd_user.data,
+            ...originalRowndUser.data,
             email: input.email,
           },
           verified_data: {
-            ...metadata.original_rownd_user.verified_data,
+            ...originalRowndUser.verified_data,
             email: input.email,
           },
         },
       }
       : {}),
-    rownd_pending_verification: pendingVerifications.filter(
-      (verification) => verification !== pendingVerification,
+    rownd_pending_verification: targetPendingVerifications.filter(
+      (verification) => !isMatchingPendingEmailVerification(
+        verification,
+        input.email,
+      ),
     ),
   };
 
   await UserMetadata.updateUserMetadata(metadataUserId, updatedMetadata);
+}
+
+function isMatchingPendingEmailVerification(
+  verification: RowndPendingVerification,
+  email: string,
+) {
+  return verification.field === "email" && verification.value === email;
 }
 
 export async function updateUserMetadata(

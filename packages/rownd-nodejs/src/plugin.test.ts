@@ -47,6 +47,7 @@ import {
   RowndIsAnonymousClaim,
   shouldLinkRowndAccounts,
   buildRowndSessionClaims,
+  completePendingEmailVerification,
   recordRowndAppVariantForUser,
 } from "./pluginImplementation";
 
@@ -2778,6 +2779,74 @@ describe("rownd-nodejs plugin", () => {
         );
       });
 
+      it("clears pending email verification when updating back to the current email", async () => {
+        const emailVerificationLinks: string[] = [];
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+          emailVerificationLinks,
+        });
+        server = s;
+        testPORT = port;
+        const { accessToken, userId, recipeUserId } =
+          await createPasswordlessSessionForUser(
+            "email-reset-current@example.com",
+          );
+
+        const pendingRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: { email: "email-reset-pending@example.com" },
+            }),
+          },
+        );
+        expect(pendingRes.status).toBe(200);
+        expect(emailVerificationLinks).toHaveLength(1);
+        const staleToken = new URL(emailVerificationLinks[0]).searchParams.get(
+          "token",
+        );
+        expect(staleToken).toBeTruthy();
+
+        const resetRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: { email: "email-reset-current@example.com" },
+            }),
+          },
+        );
+        expect(resetRes.status).toBe(200);
+
+        const staleVerifyRes = await verifyEmailToken(staleToken || "unused");
+        const staleVerifyBody = await staleVerifyRes.json();
+        expect(staleVerifyBody.status).not.toBe("OK");
+
+        const metadata = await UserMetadata.getUserMetadata(userId);
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
+          [],
+        );
+
+        const updatedUser = await SuperTokens.getUser(userId);
+        const passwordlessMethod = updatedUser?.loginMethods.find(
+          (method) =>
+            method.recipeId === "passwordless" &&
+            method.recipeUserId.getAsString() === recipeUserId.getAsString(),
+        );
+        expect(passwordlessMethod?.email).toBe(
+          "email-reset-current@example.com",
+        );
+      });
+
       it("converts a guest into a passwordless primary user after email verification", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
@@ -2913,6 +2982,89 @@ describe("rownd-nodejs plugin", () => {
         );
       });
 
+      it("preserves existing primary metadata when linking a guest by verified email", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const existingPasswordless = await Passwordless.signInUp({
+          email: "existing-primary-metadata@example.com",
+          tenantId: "public",
+        });
+        await UserMetadata.updateUserMetadata(existingPasswordless.user.id, {
+          plan: "pro",
+          original_rownd_user: {
+            state: "enabled",
+            auth_level: "verified",
+            data: {
+              user_id: existingPasswordless.user.id,
+              email: "existing-primary-metadata@example.com",
+              first_name: "Existing",
+            },
+            verified_data: {
+              email: "existing-primary-metadata@example.com",
+            },
+            attributes: {
+              source: "primary",
+            },
+          },
+        });
+        const guestSession = await createGuestSession();
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(guestSession.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: { email: "existing-primary-metadata@example.com" },
+            }),
+          },
+        );
+        expect(res.status).toBe(200);
+
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            guestSession.recipeUserId,
+            "existing-primary-metadata@example.com",
+          );
+        expect(tokenResponse.status).toBe("OK");
+
+        const verifyRes = await verifyEmailToken(
+          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+        );
+        expect(verifyRes.status).toBe(200);
+        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+
+        const metadata = await UserMetadata.getUserMetadata(
+          existingPasswordless.user.id,
+        );
+        expect(metadata.metadata).toEqual(
+          expect.objectContaining({
+            plan: "pro",
+            original_rownd_user: expect.objectContaining({
+              data: expect.objectContaining({
+                user_id: existingPasswordless.user.id,
+                email: "existing-primary-metadata@example.com",
+                first_name: "Existing",
+              }),
+              verified_data: expect.objectContaining({
+                email: "existing-primary-metadata@example.com",
+              }),
+              attributes: expect.objectContaining({
+                source: "primary",
+              }),
+            }),
+            rownd_pending_verification: [],
+          }),
+        );
+      });
+
       it("does not add a passwordless email method for users that already have real auth", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
@@ -2988,6 +3140,60 @@ describe("rownd-nodejs plugin", () => {
         expect((metadata.metadata as any).original_rownd_user.data.email).toBe(
           "thirdparty-updated@example.com",
         );
+        expect(
+          (metadata.metadata as any).original_rownd_user.verified_data.email,
+        ).toBe("thirdparty-updated@example.com");
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
+          [],
+        );
+      });
+
+      it("removes duplicate matching pending email verifications on completion", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const { userId, recipeUserId } = await createPasswordlessSessionForUser(
+          "duplicate-pending-current@example.com",
+        );
+
+        await UserMetadata.updateUserMetadata(userId, {
+          rownd_pending_verification: [
+            {
+              id: "duplicate-email-1",
+              field: "email",
+              value: "duplicate-pending-target@example.com",
+              created_at: "2026-01-01T00:00:00.000Z",
+            },
+            {
+              id: "duplicate-email-2",
+              field: "email",
+              value: "duplicate-pending-target@example.com",
+              created_at: "2026-01-01T00:00:00.000Z",
+            },
+            {
+              id: "future-phone-verification",
+              field: "phone_number",
+              value: "+15555550123",
+              created_at: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        });
+
+        await completePendingEmailVerification({
+          recipeUserId,
+          email: "duplicate-pending-target@example.com",
+        });
+
+        const metadata = await UserMetadata.getUserMetadata(userId);
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual([
+          expect.objectContaining({
+            id: "future-phone-verification",
+            field: "phone_number",
+            value: "+15555550123",
+          }),
+        ]);
       });
 
       it("keeps anonymous_id while marking linked passwordless users verified", async () => {
