@@ -2612,6 +2612,125 @@ describe("rownd-nodejs plugin", () => {
           attributes: {},
         });
       });
+
+      it("uses latest session creation time for last sign-in timestamps", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const firstAccessToken = await createSessionForUser(
+          "latest-session-time-user",
+        );
+        const firstSession = await Session.getSessionWithoutRequestResponse(
+          firstAccessToken,
+        );
+        const stUser = await SuperTokens.getUser(firstSession.getUserId());
+        const recipeUserId = stUser?.loginMethods[0]?.recipeUserId;
+        expect(recipeUserId).toBeDefined();
+
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        const latestSession =
+          await Session.createNewSessionWithoutRequestResponse(
+            "public",
+            recipeUserId!,
+            {},
+            {},
+            true,
+          );
+        const latestSessionInfo = await Session.getSessionInformation(
+          latestSession.getHandle(),
+        );
+        expect(latestSessionInfo).toBeDefined();
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            headers: getAuthedHeaders(latestSession.getAccessToken()),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        const latestSessionCreatedAt = new Date(
+          latestSessionInfo!.timeCreated,
+        ).toISOString();
+        expect(body.status).toBe("OK");
+        expect(body.meta.last_sign_in).toBe(latestSessionCreatedAt);
+        expect(body.meta.last_active).toBe(latestSessionCreatedAt);
+      });
+
+      it("uses latest session recipe user id for last sign-in method", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const passwordlessResult = await Passwordless.signInUp({
+          email: "latest-session-method@example.com",
+          tenantId: "public",
+        });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const thirdPartyResult = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          "latest-session-method-google-id",
+          "latest-session-method@example.com",
+          true,
+        );
+        expect(thirdPartyResult.status).toBe("OK");
+        if (thirdPartyResult.status !== "OK") {
+          throw new Error("failed to create thirdparty user");
+        }
+
+        const primaryResult = await AccountLinking.createPrimaryUser(
+          passwordlessResult.recipeUserId,
+        );
+        const primaryUserId =
+          primaryResult.status === "OK"
+            ? primaryResult.user.id
+            : passwordlessResult.user.id;
+        const linkResult = await AccountLinking.linkAccounts(
+          thirdPartyResult.recipeUserId,
+          primaryUserId,
+        );
+        expect(linkResult.status).toBe("OK");
+
+        await UserMetadata.updateUserMetadata(primaryUserId, {
+          original_rownd_user: {
+            state: "enabled",
+            auth_level: "verified",
+            data: {
+              user_id: primaryUserId,
+              email: "latest-session-method@example.com",
+              google_id: "latest-session-method-google-id",
+            },
+            verified_data: {
+              email: "latest-session-method@example.com",
+              google_id: "latest-session-method-google-id",
+            },
+            attributes: {},
+          },
+        });
+
+        const latestSession =
+          await Session.createNewSessionWithoutRequestResponse(
+            "public",
+            passwordlessResult.recipeUserId,
+            {},
+            {},
+            true,
+          );
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            headers: getAuthedHeaders(latestSession.getAccessToken()),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.status).toBe("OK");
+        expect(body.meta.last_sign_in_method).toBe("email");
+      });
     });
 
     describe("PUT /user", () => {

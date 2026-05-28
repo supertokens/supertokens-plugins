@@ -1057,9 +1057,9 @@ function getAnonymousId(
   const anonymousMethod = user?.loginMethods.find((loginMethod) => {
     return (
       loginMethod.recipeId === "thirdparty" &&
-      getThirdPartyId(loginMethod as RowndLoginMethod) === ANONYMOUS_AUTH_METHOD_ID
+      getThirdPartyId(loginMethod) === ANONYMOUS_AUTH_METHOD_ID
     );
-  }) as RowndLoginMethod | undefined;
+  });
   const thirdPartyUserId = anonymousMethod
     ? getThirdPartyUserId(anonymousMethod)
     : undefined;
@@ -1197,13 +1197,7 @@ export async function getUserById(
     ...((originalRowndUser?.verified_data || {}) as JsonRecord),
   };
 
-  let lastUsedAt = stUser.timeJoined;
-
-  for (const method of stUser.loginMethods as RowndLoginMethod[]) {
-    if (typeof method.lastUsed === "number" && method.lastUsed > lastUsedAt) {
-      lastUsedAt = method.lastUsed;
-    }
-
+  for (const method of stUser.loginMethods) {
     if (method.recipeId === "passwordless") {
       if (method.email) {
         verifiedData.email = method.email;
@@ -1265,28 +1259,18 @@ export async function getUserById(
     }
   }
 
-  const mapMethod = (method: RowndLoginMethod) => {
-    if (method.recipeId === "thirdparty") {
-      if (getThirdPartyId(method) === "google") return "google";
-      if (getThirdPartyId(method) === "apple") return "apple";
-    } else if (method.recipeId === "passwordless") {
-      if (method.email) return "email";
-      if (method.phoneNumber) return "phone";
-    } else if (method.recipeId === "emailpassword") {
-      return "email";
-    }
-    return "email";
-  };
-
   const sortedByJoined = [...stUser.loginMethods].sort(
     (a, b) => a.timeJoined - b.timeJoined,
   );
-  const sortedByLastUsed = [
-    ...(stUser.loginMethods as RowndLoginMethod[]),
-  ].sort((a, b) => (b.lastUsed || b.timeJoined) - (a.lastUsed || a.timeJoined));
-
+  const latestSessionInfo = await getLatestSessionInfo(stUser.id);
   const firstMethod = sortedByJoined[0];
-  const lastMethod = sortedByLastUsed[0];
+  const latestSessionRecipeUserId = latestSessionInfo?.recipeUserId.getAsString();
+  const lastMethod = latestSessionRecipeUserId
+    ? stUser.loginMethods.find(
+      (method) => method.recipeUserId.getAsString() === latestSessionRecipeUserId,
+    )
+    : [...stUser.loginMethods].sort((a, b) => b.timeJoined - a.timeJoined)[0];
+  const lastSignInAt = latestSessionInfo?.timeCreated ?? stUser.timeJoined;
 
   const metadataMeta = Object.fromEntries(
     Object.entries(metadata).filter(
@@ -1298,8 +1282,8 @@ export async function getUserById(
     ...metadataMeta,
     created: new Date(stUser.timeJoined).toISOString(),
     first_sign_in: new Date(stUser.timeJoined).toISOString(),
-    last_sign_in: new Date(lastUsedAt).toISOString(),
-    last_active: new Date(lastUsedAt).toISOString(),
+    last_sign_in: new Date(lastSignInAt).toISOString(),
+    last_active: new Date(lastSignInAt).toISOString(),
     first_sign_in_method: firstMethod ? mapMethod(firstMethod) : "email",
     last_sign_in_method: lastMethod ? mapMethod(lastMethod) : "email",
   };
@@ -1315,6 +1299,32 @@ export async function getUserById(
     groups: (originalRowndUser?.groups || []) as JSONObject[],
     attributes: (originalRowndUser?.attributes || {}) as JsonRecord,
   };
+}
+
+async function getLatestSessionInfo(userId: string) {
+  const sessionHandles = await Session.getAllSessionHandlesForUser(
+    userId,
+    true,
+    PUBLIC_TENANT_ID,
+  );
+  const sessionInfos = await Promise.all(
+    sessionHandles.map((sessionHandle) =>
+      Session.getSessionInformation(sessionHandle),
+    ),
+  );
+
+  let latestSessionInfo: (typeof sessionInfos)[number];
+  for (const sessionInfo of sessionInfos) {
+    if (
+      sessionInfo &&
+      (!latestSessionInfo ||
+        sessionInfo.timeCreated > latestSessionInfo.timeCreated)
+    ) {
+      latestSessionInfo = sessionInfo;
+    }
+  }
+
+  return latestSessionInfo;
 }
 
 export async function updateUserData(userId: string, inputData: JsonRecord) {
@@ -1566,35 +1576,35 @@ export async function updateUserMetadata(
   };
 }
 
-type RowndLoginMethod = {
-  recipeId: string;
-  timeJoined: number;
-  lastUsed?: number;
-  email?: string;
-  phoneNumber?: string;
-  verified?: boolean;
-  thirdPartyId?: string;
-  thirdPartyUserId?: string;
-  thirdParty?: {
-    id?: string;
-    userId?: string;
-  };
-};
+type SuperTokensUser = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
+type SuperTokensLoginMethod = SuperTokensUser["loginMethods"][number];
 
-function getThirdPartyId(method: RowndLoginMethod) {
-  return method.thirdPartyId || method.thirdParty?.id;
+function mapMethod(method: SuperTokensLoginMethod) {
+  if (method.recipeId === "thirdparty") {
+    if (getThirdPartyId(method) === "google") return "google";
+    if (getThirdPartyId(method) === "apple") return "apple";
+  } else if (method.recipeId === "passwordless") {
+    if (method.email) return "email";
+    if (method.phoneNumber) return "phone";
+  } else if (method.recipeId === "emailpassword") {
+    return "email";
+  }
+
+  return "email";
 }
 
-function getThirdPartyUserId(method: RowndLoginMethod) {
-  return method.thirdPartyUserId || method.thirdParty?.userId;
+function getThirdPartyId(method: SuperTokensLoginMethod) {
+  return method.thirdParty?.id;
+}
+
+function getThirdPartyUserId(method: SuperTokensLoginMethod) {
+  return method.thirdParty?.userId;
 }
 
 function getGuestAuthLevel(
   user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
 ) {
-  const guestMethod = user?.loginMethods.find(isGuestLoginMethod) as
-    | RowndLoginMethod
-    | undefined;
+  const guestMethod = user?.loginMethods.find(isGuestLoginMethod);
 
   return guestMethod ? GUEST_AUTH_METHOD_ID : undefined;
 }
@@ -1602,7 +1612,7 @@ function getGuestAuthLevel(
 function hasAnonymousLoginMethod(
   user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
 ) {
-  return !!user?.loginMethods.some((loginMethod: RowndLoginMethod) => {
+  return !!user?.loginMethods.some((loginMethod) => {
     return (
       loginMethod.recipeId === "thirdparty" &&
       getThirdPartyId(loginMethod) === ANONYMOUS_AUTH_METHOD_ID
@@ -1626,7 +1636,7 @@ function hasOnlyGuestLoginMethods(
   );
 }
 
-function isGuestLoginMethod(method: RowndLoginMethod) {
+function isGuestLoginMethod(method: SuperTokensLoginMethod) {
   const thirdPartyId = getThirdPartyId(method);
   return (
     method.recipeId === "thirdparty" &&
@@ -1661,7 +1671,7 @@ function doesAccountInfoMatchAuthMethod(
 
   const normalizedEmail = accountInfo.email?.toLowerCase();
   if (normalizedEmail) {
-    return user.loginMethods.some((method: RowndLoginMethod) => {
+    return user.loginMethods.some((method) => {
       if (isGuestLoginMethod(method) || !method.email) {
         return false;
       }
@@ -1671,7 +1681,7 @@ function doesAccountInfoMatchAuthMethod(
   }
 
   if (accountInfo.phoneNumber) {
-    return user.loginMethods.some((method: RowndLoginMethod) => {
+    return user.loginMethods.some((method) => {
       return (
         !isGuestLoginMethod(method) &&
         method.phoneNumber === accountInfo.phoneNumber
@@ -1685,7 +1695,7 @@ function doesAccountInfoMatchAuthMethod(
 function hasVerifiedRealLoginMethod(
   user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
 ) {
-  return !!user?.loginMethods.some((method: RowndLoginMethod) => {
+  return !!user?.loginMethods.some((method) => {
     if (isGuestLoginMethod(method)) {
       return false;
     }
