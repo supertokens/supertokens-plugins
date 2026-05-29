@@ -465,11 +465,11 @@ describe("rownd-nodejs plugin", () => {
       );
     });
 
-    it("uses mobile deep link base URL with custom scheme for passwordless magic links", async () => {
+    it("uses mobile client domain with custom scheme for passwordless magic links", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
-        mobileDeepLinkBaseUrl: "rowndsupertokens://",
+        clientDomains: { mobile: "rowndsupertokens://" },
       };
       const plugin = init(pluginConfig) as any;
       plugin.routeHandlers(
@@ -507,11 +507,11 @@ describe("rownd-nodejs plugin", () => {
       expect(rewrittenUrl.hash).toBe("#abc");
     });
 
-    it("uses mobile deep link base URL with HTTPS URL for passwordless magic links", async () => {
+    it("uses mobile client domain with HTTPS URL for passwordless magic links", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
-        mobileDeepLinkBaseUrl: "https://links.example.com",
+        clientDomains: { mobile: "https://links.example.com" },
       };
       const plugin = init(pluginConfig) as any;
       plugin.routeHandlers(
@@ -544,21 +544,21 @@ describe("rownd-nodejs plugin", () => {
       expect(rewrittenUrl.hash).toBe("#abc");
     });
 
-    it("rejects invalid mobile deep link base URL", () => {
+    it("rejects invalid client domain URLs", () => {
       expect(() =>
         init({
           rowndAppKey: "test-key",
           rowndAppSecret: "test-secret",
-          mobileDeepLinkBaseUrl: "rowndsupertokens",
+          clientDomains: { mobile: "rowndsupertokens" },
         }),
-      ).toThrow("Invalid mobileDeepLinkBaseUrl in plugin config");
+      ).toThrow("Invalid clientDomains.mobile in plugin config");
     });
 
-    it("keeps hub links for browser flows when mobile deep link base URL is configured", async () => {
+    it("keeps hub links when the requested client domain is not configured", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
-        mobileDeepLinkBaseUrl: "rowndsupertokens://",
+        clientDomains: { mobile: "rowndsupertokens://" },
       };
       const plugin = init(pluginConfig) as any;
       plugin.routeHandlers(
@@ -582,6 +582,39 @@ describe("rownd-nodejs plugin", () => {
       const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
       expect(rewrittenUrl.origin).toBe("https://hub.example.com");
       expect(rewrittenUrl.pathname).toBe("/account/login");
+    });
+
+    it("uses a requested custom client domain for browser passwordless magic links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: { browser_local: "http://localhost:3000" },
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid#abc",
+        userContext: {
+          rowndDisplayContext: "browser",
+          rowndClientDomain: "browser_local",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.origin).toBe("http://localhost:3000");
+      expect(rewrittenUrl.pathname).toBe("/account/login");
+      expect(rewrittenUrl.searchParams.get("displayContext")).toBe("browser");
+      expect(rewrittenUrl.hash).toBe("#abc");
     });
 
     it("adds hub bootstrap params to passwordless SMS magic links", async () => {
@@ -659,11 +692,11 @@ describe("rownd-nodejs plugin", () => {
       );
     });
 
-    it("uses mobile deep link base URL for mobile email verification links", async () => {
+    it("uses mobile client domain for mobile email verification links", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
-        mobileDeepLinkBaseUrl: "rowndsupertokens://",
+        clientDomains: { mobile: "rowndsupertokens://" },
       };
       const plugin = init(pluginConfig) as any;
       plugin.routeHandlers(
@@ -697,6 +730,39 @@ describe("rownd-nodejs plugin", () => {
       expect(rewrittenUrl.searchParams.get("displayContext")).toBe(
         "mobile_app",
       );
+    });
+
+    it("uses a requested custom client domain for email verification links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: { browser_local: "http://localhost:3000" },
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const emailVerificationConfig =
+        plugin.overrideMap.emailverification.config({});
+      const emailDelivery = emailVerificationConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        emailVerifyLink: "https://hub.example.com/auth/verify?token=token_123",
+        userContext: {
+          rowndDisplayContext: "browser",
+          rowndClientDomain: "browser_local",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].emailVerifyLink);
+      expect(rewrittenUrl.origin).toBe("http://localhost:3000");
+      expect(rewrittenUrl.pathname).toBe("/account/verify-email");
+      expect(rewrittenUrl.searchParams.get("token")).toBe("token_123");
+      expect(rewrittenUrl.searchParams.get("displayContext")).toBe("browser");
     });
 
     it("records app variant membership after passwordless code consumption", async () => {
@@ -782,6 +848,71 @@ describe("rownd-nodejs plugin", () => {
           userContext: { rowndAppVariantId: "variant_123" },
         }),
       );
+    });
+
+    it("adds client domain context before passwordless code creation", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+      };
+      const originalCreateCodePOST = vi
+        .fn()
+        .mockResolvedValue({ status: "OK" });
+      const passwordlessApis = (
+        init(pluginConfig) as any
+      ).overrideMap.passwordless.apis({
+        createCodePOST: originalCreateCodePOST,
+      });
+
+      await passwordlessApis.createCodePOST({
+        options: {
+          req: makeRequest({
+            rownd_display_context: "browser",
+            rownd_client_domain: "browser_local",
+          }),
+        },
+        userContext: {},
+      });
+
+      expect(originalCreateCodePOST).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userContext: {
+            rowndDisplayContext: "browser",
+            rowndClientDomain: "browser_local",
+          },
+        }),
+      );
+    });
+
+    it("falls back when requested client domain is not configured", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: { browser: "https://app.example.com" },
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid#abc",
+        userContext: {
+          rowndDisplayContext: "browser",
+          rowndClientDomain: "missing_domain",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.origin).toBe("https://hub.example.com");
+      expect(rewrittenUrl.pathname).toBe("/account/login");
     });
 
     it("rejects passwordless code consumption for unknown app variants", async () => {
@@ -4158,9 +4289,12 @@ function resetST() {
 }
 
 function makeVariantRequest(appVariantId: string) {
+  return makeRequest({ app_variant_id: appVariantId });
+}
+
+function makeRequest(query: Record<string, string>) {
   return {
-    getKeyValueFromQuery: (key: string) =>
-      key === "app_variant_id" ? appVariantId : undefined,
+    getKeyValueFromQuery: (key: string) => query[key],
   };
 }
 

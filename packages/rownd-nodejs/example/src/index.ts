@@ -96,8 +96,9 @@ SuperTokens.init({
         enableDebugLogs: process.env.ROWND_ENABLE_DEBUG_LOGS === "true",
         ...(process.env.ROWND_MOBILE_DEEP_LINK_BASE_URL
           ? {
-              mobileDeepLinkBaseUrl:
-                process.env.ROWND_MOBILE_DEEP_LINK_BASE_URL,
+              clientDomains: {
+                mobile: process.env.ROWND_MOBILE_DEEP_LINK_BASE_URL,
+              },
             }
           : {}),
         appConfig: {

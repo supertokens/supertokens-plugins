@@ -31,7 +31,7 @@ export function rewriteLinkPath(
   }
 }
 
-export function rewriteLinkToMobileDeepLink(
+export function rewriteLinkToBaseUrl(
   inputUrl: string,
   targetPath: string,
   baseUrl: string,
@@ -174,6 +174,15 @@ export function getRequestedDisplayContextFromRequest(
     displayContext === "mobile_app" ||
     displayContext === "customer_web_view"
     ? displayContext
+    : undefined;
+}
+
+export function getRequestedClientDomainFromRequest(
+  req: Pick<SuperTokensRequest, "getKeyValueFromQuery">,
+) {
+  const clientDomain = req.getKeyValueFromQuery("rownd_client_domain");
+  return typeof clientDomain === "string" && clientDomain.length > 0
+    ? clientDomain
     : undefined;
 }
 

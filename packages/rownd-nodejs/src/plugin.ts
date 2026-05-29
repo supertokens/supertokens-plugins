@@ -27,10 +27,11 @@ import {
 } from "./supertokens-repository";
 import {
   getRequestedAppVariantIdFromRequest,
+  getRequestedClientDomainFromRequest,
   getRequestedDisplayContextFromRequest,
   getRequestedRedirectToPathFromRequest,
+  rewriteLinkToBaseUrl,
   rewriteLinkPath,
-  rewriteLinkToMobileDeepLink,
 } from "./utils";
 import {
   handleDeleteUser,
@@ -75,6 +76,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         const redirectToPath = input?.userContext?.rowndRedirectToPath as
           | string
           | undefined;
+        const clientDomain = input?.userContext?.rowndClientDomain as
+          | string
+          | undefined;
+        const clientDomainKey =
+          clientDomain ?? (displayContext === "mobile_app" ? "mobile" : "browser");
+        const clientBaseUrl = pluginConfig.clientDomains?.[clientDomainKey];
         const bootstrapParams = {
           appKey: pluginConfig.rowndAppKey,
           ...(hubBootstrapParams ?? {}),
@@ -84,14 +91,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         };
 
         const rewrittenLink = input[linkKey]
-          ? displayContext === "mobile_app" &&
-            pluginConfig.mobileDeepLinkBaseUrl
-            ? rewriteLinkToMobileDeepLink(
-                input[linkKey],
-                targetPath,
-                pluginConfig.mobileDeepLinkBaseUrl,
-                bootstrapParams,
-              )
+          ? clientBaseUrl
+            ? rewriteLinkToBaseUrl(
+              input[linkKey],
+              targetPath,
+              clientBaseUrl,
+              bootstrapParams,
+            )
             : rewriteLinkPath(input[linkKey], targetPath, bootstrapParams)
           : input[linkKey];
 
@@ -236,9 +242,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                          originalImplementation,
-                          builder,
-                        )
+                        originalImplementation,
+                        builder,
+                      )
                       : originalImplementation;
 
                     return {
@@ -260,9 +266,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalSmsDeliveryOverride
                       ? originalSmsDeliveryOverride(
-                          originalImplementation,
-                          builder,
-                        )
+                        originalImplementation,
+                        builder,
+                      )
                       : originalImplementation;
 
                     return {
@@ -303,6 +309,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 );
                 if (redirectToPath) {
                   input.userContext.rowndRedirectToPath = redirectToPath;
+                }
+                const clientDomain = getRequestedClientDomainFromRequest(
+                  input.options.req,
+                );
+                if (clientDomain) {
+                  input.userContext.rowndClientDomain = clientDomain;
                 }
                 const appVariantId = getRequestedAppVariantIdFromRequest(
                   input.options.req,
@@ -448,9 +460,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                          originalImplementation,
-                          builder,
-                        )
+                        originalImplementation,
+                        builder,
+                      )
                       : originalImplementation;
 
                     return {
@@ -520,23 +532,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           );
         }
       }
-      if (config.mobileDeepLinkBaseUrl !== undefined) {
-        try {
-          if (
-            !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(config.mobileDeepLinkBaseUrl)
-          ) {
-            throw new Error();
-          }
-          new URL(config.mobileDeepLinkBaseUrl);
-        } catch {
-          throw new Error("Invalid mobileDeepLinkBaseUrl in plugin config");
-        }
+      for (const [key, value] of Object.entries(config.clientDomains ?? {})) {
+        validateClientDomainUrl(key, value);
       }
       return {
         rowndAppKey: config.rowndAppKey,
         rowndAppSecret: config.rowndAppSecret,
         enableDebugLogs: config.enableDebugLogs,
-        mobileDeepLinkBaseUrl: config.mobileDeepLinkBaseUrl,
+        clientDomains: config.clientDomains,
         telemetry: config.telemetry,
         schema: config.schema,
         appConfig: config.appConfig,
@@ -544,3 +547,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
       };
     },
   );
+
+function validateClientDomainUrl(key: string, value: string) {
+  try {
+    if (typeof value !== "string" || !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) {
+      throw new Error();
+    }
+    new URL(value);
+  } catch {
+    throw new Error(`Invalid clientDomains.${key} in plugin config`);
+  }
+}

@@ -676,7 +676,7 @@ export interface RowndPluginConfig {
   rowndAppKey: string;
   rowndAppSecret: string;
   enableDebugLogs?: boolean;
-  mobileDeepLinkBaseUrl?: string;
+  clientDomains?: RowndClientDomains;
   telemetry?: RowndTelemetryConfig;
   // Optional field schema override. If omitted, DEFAULT_ROWND_SCHEMA is used.
   schema?: RowndSchema;
@@ -685,6 +685,11 @@ export interface RowndPluginConfig {
   // Optional sub-brand/app-variant app configs keyed by Rownd application variant ID.
   subBrands?: Record<string, RowndSubBrandConfigInput>;
 }
+
+export type RowndClientDomains = {
+  mobile?: string;
+  browser?: string;
+} & Record<string, string>;
 
 export type RowndTelemetryEvent =
   | {
@@ -768,7 +773,7 @@ export interface RowndPluginNormalisedConfig {
   rowndAppKey: string;
   rowndAppSecret: string;
   enableDebugLogs?: boolean;
-  mobileDeepLinkBaseUrl?: string;
+  clientDomains?: RowndClientDomains;
   telemetry?: RowndTelemetryConfig;
   schema?: RowndSchema;
   appConfig?: RowndAppConfigInput;
