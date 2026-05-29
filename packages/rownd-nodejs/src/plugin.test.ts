@@ -43,12 +43,15 @@ import { ROWND_PLUGIN_ERROR_MESSAGES } from "./errors";
 import { DEFAULT_ROWND_SCHEMA, ROWND_JWT_CLAIMS } from "./constants";
 import {
   mapRowndUserToSuperTokens,
-  DEFAULT_PRIMARY_COLOR,
-  RowndIsAnonymousClaim,
   shouldLinkRowndAccounts,
+} from "./rownd-compatibility";
+import { DEFAULT_PRIMARY_COLOR } from "./config";
+import {
+  RowndIsAnonymousClaim,
   buildRowndSessionClaims,
+  completePendingEmailVerification,
   recordRowndAppVariantForUser,
-} from "./pluginImplementation";
+} from "./supertokens-repository";
 
 let testPORT = 30001;
 
@@ -462,6 +465,158 @@ describe("rownd-nodejs plugin", () => {
       );
     });
 
+    it("uses mobile client domain with custom scheme for passwordless magic links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: { mobile: "rowndsupertokens://" },
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid&tenantId=public#abc",
+        userContext: {
+          rowndDisplayContext: "mobile_app",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.protocol).toBe("rowndsupertokens:");
+      expect(rewrittenUrl.host).toBe("account");
+      expect(rewrittenUrl.pathname).toBe("/login");
+      expect(rewrittenUrl.searchParams.get("preAuthSessionId")).toBe("pid");
+      expect(rewrittenUrl.searchParams.get("tenantId")).toBe("public");
+      expect(rewrittenUrl.searchParams.get("appKey")).toBe("test-key");
+      expect(rewrittenUrl.searchParams.get("apiDomain")).toBe(
+        "https://api.example.com",
+      );
+      expect(rewrittenUrl.searchParams.get("apiBasePath")).toBe("/auth");
+      expect(rewrittenUrl.searchParams.get("displayContext")).toBe(
+        "mobile_app",
+      );
+      expect(rewrittenUrl.hash).toBe("#abc");
+    });
+
+    it("uses mobile client domain with HTTPS URL for passwordless magic links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: { mobile: "https://links.example.com" },
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid&tenantId=public#abc",
+        userContext: {
+          rowndDisplayContext: "mobile_app",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.origin).toBe("https://links.example.com");
+      expect(rewrittenUrl.pathname).toBe("/account/login");
+      expect(rewrittenUrl.searchParams.get("preAuthSessionId")).toBe("pid");
+      expect(rewrittenUrl.searchParams.get("tenantId")).toBe("public");
+      expect(rewrittenUrl.searchParams.get("appKey")).toBe("test-key");
+      expect(rewrittenUrl.searchParams.get("displayContext")).toBe(
+        "mobile_app",
+      );
+      expect(rewrittenUrl.hash).toBe("#abc");
+    });
+
+    it("rejects invalid client domain URLs", () => {
+      expect(() =>
+        init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+          clientDomains: { mobile: "rowndsupertokens" },
+        }),
+      ).toThrow("Invalid clientDomains.mobile in plugin config");
+    });
+
+    it("keeps hub links when the requested client domain is not configured", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: { mobile: "rowndsupertokens://" },
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid#abc",
+        userContext: {
+          rowndDisplayContext: "browser",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.origin).toBe("https://hub.example.com");
+      expect(rewrittenUrl.pathname).toBe("/account/login");
+    });
+
+    it("uses a requested custom client domain for browser passwordless magic links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: { browser_local: "http://localhost:3000" },
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid#abc",
+        userContext: {
+          rowndDisplayContext: "browser",
+          rowndClientDomain: "browser_local",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.origin).toBe("http://localhost:3000");
+      expect(rewrittenUrl.pathname).toBe("/account/login");
+      expect(rewrittenUrl.searchParams.get("displayContext")).toBe("browser");
+      expect(rewrittenUrl.hash).toBe("#abc");
+    });
+
     it("adds hub bootstrap params to passwordless SMS magic links", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
@@ -535,6 +690,79 @@ describe("rownd-nodejs plugin", () => {
       expect(rewrittenUrl.searchParams.get("displayContext")).toBe(
         "mobile_app",
       );
+    });
+
+    it("uses mobile client domain for mobile email verification links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: { mobile: "rowndsupertokens://" },
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const emailVerificationConfig =
+        plugin.overrideMap.emailverification.config({});
+      const emailDelivery = emailVerificationConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        emailVerifyLink:
+          "https://hub.example.com/auth/verify-email?token=token_123&tenantId=public",
+        userContext: { rowndDisplayContext: "mobile_app" },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].emailVerifyLink);
+      expect(rewrittenUrl.protocol).toBe("rowndsupertokens:");
+      expect(rewrittenUrl.host).toBe("account");
+      expect(rewrittenUrl.pathname).toBe("/verify-email");
+      expect(rewrittenUrl.searchParams.get("token")).toBe("token_123");
+      expect(rewrittenUrl.searchParams.get("tenantId")).toBe("public");
+      expect(rewrittenUrl.searchParams.get("appKey")).toBe("test-key");
+      expect(rewrittenUrl.searchParams.get("apiDomain")).toBe(
+        "https://api.example.com",
+      );
+      expect(rewrittenUrl.searchParams.get("apiBasePath")).toBe("/auth");
+      expect(rewrittenUrl.searchParams.get("displayContext")).toBe(
+        "mobile_app",
+      );
+    });
+
+    it("uses a requested custom client domain for email verification links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: { browser_local: "http://localhost:3000" },
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const emailVerificationConfig =
+        plugin.overrideMap.emailverification.config({});
+      const emailDelivery = emailVerificationConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        emailVerifyLink: "https://hub.example.com/auth/verify?token=token_123",
+        userContext: {
+          rowndDisplayContext: "browser",
+          rowndClientDomain: "browser_local",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].emailVerifyLink);
+      expect(rewrittenUrl.origin).toBe("http://localhost:3000");
+      expect(rewrittenUrl.pathname).toBe("/account/verify-email");
+      expect(rewrittenUrl.searchParams.get("token")).toBe("token_123");
+      expect(rewrittenUrl.searchParams.get("displayContext")).toBe("browser");
     });
 
     it("records app variant membership after passwordless code consumption", async () => {
@@ -620,6 +848,71 @@ describe("rownd-nodejs plugin", () => {
           userContext: { rowndAppVariantId: "variant_123" },
         }),
       );
+    });
+
+    it("adds client domain context before passwordless code creation", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+      };
+      const originalCreateCodePOST = vi
+        .fn()
+        .mockResolvedValue({ status: "OK" });
+      const passwordlessApis = (
+        init(pluginConfig) as any
+      ).overrideMap.passwordless.apis({
+        createCodePOST: originalCreateCodePOST,
+      });
+
+      await passwordlessApis.createCodePOST({
+        options: {
+          req: makeRequest({
+            rownd_display_context: "browser",
+            rownd_client_domain: "browser_local",
+          }),
+        },
+        userContext: {},
+      });
+
+      expect(originalCreateCodePOST).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userContext: {
+            rowndDisplayContext: "browser",
+            rowndClientDomain: "browser_local",
+          },
+        }),
+      );
+    });
+
+    it("falls back when requested client domain is not configured", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: { browser: "https://app.example.com" },
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid#abc",
+        userContext: {
+          rowndDisplayContext: "browser",
+          rowndClientDomain: "missing_domain",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.origin).toBe("https://hub.example.com");
+      expect(rewrittenUrl.pathname).toBe("/account/login");
     });
 
     it("rejects passwordless code consumption for unknown app variants", async () => {
@@ -2452,6 +2745,125 @@ describe("rownd-nodejs plugin", () => {
           attributes: {},
         });
       });
+
+      it("uses latest session creation time for last sign-in timestamps", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const firstAccessToken = await createSessionForUser(
+          "latest-session-time-user",
+        );
+        const firstSession = await Session.getSessionWithoutRequestResponse(
+          firstAccessToken,
+        );
+        const stUser = await SuperTokens.getUser(firstSession.getUserId());
+        const recipeUserId = stUser?.loginMethods[0]?.recipeUserId;
+        expect(recipeUserId).toBeDefined();
+
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        const latestSession =
+          await Session.createNewSessionWithoutRequestResponse(
+            "public",
+            recipeUserId!,
+            {},
+            {},
+            true,
+          );
+        const latestSessionInfo = await Session.getSessionInformation(
+          latestSession.getHandle(),
+        );
+        expect(latestSessionInfo).toBeDefined();
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            headers: getAuthedHeaders(latestSession.getAccessToken()),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        const latestSessionCreatedAt = new Date(
+          latestSessionInfo!.timeCreated,
+        ).toISOString();
+        expect(body.status).toBe("OK");
+        expect(body.meta.last_sign_in).toBe(latestSessionCreatedAt);
+        expect(body.meta.last_active).toBe(latestSessionCreatedAt);
+      });
+
+      it("uses latest session recipe user id for last sign-in method", async () => {
+        const { server: s, port } = await setup(coreConnectionURI);
+        server = s;
+        testPORT = port;
+        const passwordlessResult = await Passwordless.signInUp({
+          email: "latest-session-method@example.com",
+          tenantId: "public",
+        });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const thirdPartyResult = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          "latest-session-method-google-id",
+          "latest-session-method@example.com",
+          true,
+        );
+        expect(thirdPartyResult.status).toBe("OK");
+        if (thirdPartyResult.status !== "OK") {
+          throw new Error("failed to create thirdparty user");
+        }
+
+        const primaryResult = await AccountLinking.createPrimaryUser(
+          passwordlessResult.recipeUserId,
+        );
+        const primaryUserId =
+          primaryResult.status === "OK"
+            ? primaryResult.user.id
+            : passwordlessResult.user.id;
+        const linkResult = await AccountLinking.linkAccounts(
+          thirdPartyResult.recipeUserId,
+          primaryUserId,
+        );
+        expect(linkResult.status).toBe("OK");
+
+        await UserMetadata.updateUserMetadata(primaryUserId, {
+          original_rownd_user: {
+            state: "enabled",
+            auth_level: "verified",
+            data: {
+              user_id: primaryUserId,
+              email: "latest-session-method@example.com",
+              google_id: "latest-session-method-google-id",
+            },
+            verified_data: {
+              email: "latest-session-method@example.com",
+              google_id: "latest-session-method-google-id",
+            },
+            attributes: {},
+          },
+        });
+
+        const latestSession =
+          await Session.createNewSessionWithoutRequestResponse(
+            "public",
+            passwordlessResult.recipeUserId,
+            {},
+            {},
+            true,
+          );
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            headers: getAuthedHeaders(latestSession.getAccessToken()),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.status).toBe("OK");
+        expect(body.meta.last_sign_in_method).toBe("email");
+      });
     });
 
     describe("PUT /user", () => {
@@ -2619,6 +3031,74 @@ describe("rownd-nodejs plugin", () => {
         );
       });
 
+      it("clears pending email verification when updating back to the current email", async () => {
+        const emailVerificationLinks: string[] = [];
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+          emailVerificationLinks,
+        });
+        server = s;
+        testPORT = port;
+        const { accessToken, userId, recipeUserId } =
+          await createPasswordlessSessionForUser(
+            "email-reset-current@example.com",
+          );
+
+        const pendingRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: { email: "email-reset-pending@example.com" },
+            }),
+          },
+        );
+        expect(pendingRes.status).toBe(200);
+        expect(emailVerificationLinks).toHaveLength(1);
+        const staleToken = new URL(emailVerificationLinks[0]).searchParams.get(
+          "token",
+        );
+        expect(staleToken).toBeTruthy();
+
+        const resetRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: { email: "email-reset-current@example.com" },
+            }),
+          },
+        );
+        expect(resetRes.status).toBe(200);
+
+        const staleVerifyRes = await verifyEmailToken(staleToken || "unused");
+        const staleVerifyBody = await staleVerifyRes.json();
+        expect(staleVerifyBody.status).not.toBe("OK");
+
+        const metadata = await UserMetadata.getUserMetadata(userId);
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
+          [],
+        );
+
+        const updatedUser = await SuperTokens.getUser(userId);
+        const passwordlessMethod = updatedUser?.loginMethods.find(
+          (method) =>
+            method.recipeId === "passwordless" &&
+            method.recipeUserId.getAsString() === recipeUserId.getAsString(),
+        );
+        expect(passwordlessMethod?.email).toBe(
+          "email-reset-current@example.com",
+        );
+      });
+
       it("converts a guest into a passwordless primary user after email verification", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
@@ -2754,6 +3234,89 @@ describe("rownd-nodejs plugin", () => {
         );
       });
 
+      it("preserves existing primary metadata when linking a guest by verified email", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const existingPasswordless = await Passwordless.signInUp({
+          email: "existing-primary-metadata@example.com",
+          tenantId: "public",
+        });
+        await UserMetadata.updateUserMetadata(existingPasswordless.user.id, {
+          plan: "pro",
+          original_rownd_user: {
+            state: "enabled",
+            auth_level: "verified",
+            data: {
+              user_id: existingPasswordless.user.id,
+              email: "existing-primary-metadata@example.com",
+              first_name: "Existing",
+            },
+            verified_data: {
+              email: "existing-primary-metadata@example.com",
+            },
+            attributes: {
+              source: "primary",
+            },
+          },
+        });
+        const guestSession = await createGuestSession();
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(guestSession.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: { email: "existing-primary-metadata@example.com" },
+            }),
+          },
+        );
+        expect(res.status).toBe(200);
+
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            guestSession.recipeUserId,
+            "existing-primary-metadata@example.com",
+          );
+        expect(tokenResponse.status).toBe("OK");
+
+        const verifyRes = await verifyEmailToken(
+          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+        );
+        expect(verifyRes.status).toBe(200);
+        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+
+        const metadata = await UserMetadata.getUserMetadata(
+          existingPasswordless.user.id,
+        );
+        expect(metadata.metadata).toEqual(
+          expect.objectContaining({
+            plan: "pro",
+            original_rownd_user: expect.objectContaining({
+              data: expect.objectContaining({
+                user_id: existingPasswordless.user.id,
+                email: "existing-primary-metadata@example.com",
+                first_name: "Existing",
+              }),
+              verified_data: expect.objectContaining({
+                email: "existing-primary-metadata@example.com",
+              }),
+              attributes: expect.objectContaining({
+                source: "primary",
+              }),
+            }),
+            rownd_pending_verification: [],
+          }),
+        );
+      });
+
       it("does not add a passwordless email method for users that already have real auth", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
@@ -2829,6 +3392,60 @@ describe("rownd-nodejs plugin", () => {
         expect((metadata.metadata as any).original_rownd_user.data.email).toBe(
           "thirdparty-updated@example.com",
         );
+        expect(
+          (metadata.metadata as any).original_rownd_user.verified_data.email,
+        ).toBe("thirdparty-updated@example.com");
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
+          [],
+        );
+      });
+
+      it("removes duplicate matching pending email verifications on completion", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const { userId, recipeUserId } = await createPasswordlessSessionForUser(
+          "duplicate-pending-current@example.com",
+        );
+
+        await UserMetadata.updateUserMetadata(userId, {
+          rownd_pending_verification: [
+            {
+              id: "duplicate-email-1",
+              field: "email",
+              value: "duplicate-pending-target@example.com",
+              created_at: "2026-01-01T00:00:00.000Z",
+            },
+            {
+              id: "duplicate-email-2",
+              field: "email",
+              value: "duplicate-pending-target@example.com",
+              created_at: "2026-01-01T00:00:00.000Z",
+            },
+            {
+              id: "future-phone-verification",
+              field: "phone_number",
+              value: "+15555550123",
+              created_at: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        });
+
+        await completePendingEmailVerification({
+          recipeUserId,
+          email: "duplicate-pending-target@example.com",
+        });
+
+        const metadata = await UserMetadata.getUserMetadata(userId);
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual([
+          expect.objectContaining({
+            id: "future-phone-verification",
+            field: "phone_number",
+            value: "+15555550123",
+          }),
+        ]);
       });
 
       it("keeps anonymous_id while marking linked passwordless users verified", async () => {
@@ -3672,9 +4289,12 @@ function resetST() {
 }
 
 function makeVariantRequest(appVariantId: string) {
+  return makeRequest({ app_variant_id: appVariantId });
+}
+
+function makeRequest(query: Record<string, string>) {
   return {
-    getKeyValueFromQuery: (key: string) =>
-      key === "app_variant_id" ? appVariantId : undefined,
+    getKeyValueFromQuery: (key: string) => query[key],
   };
 }
 

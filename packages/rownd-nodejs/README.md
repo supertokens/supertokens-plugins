@@ -64,6 +64,22 @@ RowndMigrationPlugin.init({
 });
 ```
 
+### Client Link Domains
+
+Set `clientDomains` to rewrite account links to different frontend URL bases. Values must be absolute URL bases, including custom schemes for native deep links. The plugin selects `mobile` for `mobile_app` display context and `browser` otherwise. Consumers can pass `rownd_client_domain` to select any custom key.
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  clientDomains: {
+    browser: "https://app.example.com",
+    mobile: "customDomain://",
+    browser_local: "http://localhost:3000",
+  },
+});
+```
+
 ## API Endpoint
 
 The plugin exposes a single endpoint:

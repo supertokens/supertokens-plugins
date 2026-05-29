@@ -5,4 +5,4 @@ export default { init };
 export * from "./types";
 export * from "./constants";
 export * from "./errors";
-export { setRowndClient, getRowndClient } from "./pluginImplementation";
+export { setRowndClient, getRowndClient } from "./rownd-repository";

@@ -1,12 +1,15 @@
 import { RowndSchema } from "./types";
 
 export const PLUGIN_ID = "supertokens-plugin-rownd";
+export const PLUGIN_VERSION = "0.3.0";
 
 export const PLUGIN_SDK_VERSION = ["23.0.0", "23.0.1", ">=23.0.1"];
 export const HANDLE_BASE_PATH = "/plugin/rownd";
 export const PUBLIC_TENANT_ID = "public";
 
+// When a user explicitly chooses to log in as a guest
 export const GUEST_AUTH_METHOD_ID = "guest";
+// When a user is automatically logged in as anonymous when they open the app
 export const ANONYMOUS_AUTH_METHOD_ID = "anonymous";
 
 export const ROWND_JWT_CLAIMS = {
@@ -41,3 +44,6 @@ export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
     user_visible: true,
   },
 };
+
+export const HUB_LOGIN_PAGE_PATH = "/account/login";
+export const HUB_VERIFY_EMAIL_PAGE_PATH = "/account/verify-email";

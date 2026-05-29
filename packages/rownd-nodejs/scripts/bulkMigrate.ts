@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import { z } from "zod";
 
 import { type RowndUser, type SuperTokensUserImport } from "../src/types";
-import { mapRowndUserToSuperTokens } from "../src/pluginImplementation";
+import { mapRowndUserToSuperTokens } from "../src/rownd-compatibility";
 import {
   loadConfig,
   formatZodError,

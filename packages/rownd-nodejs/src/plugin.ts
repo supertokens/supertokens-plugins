@@ -6,16 +6,34 @@ import { createPluginInitFunction } from "@shared/js";
 import { withRequestHandler } from "@shared/nodejs";
 import { createInstance } from "@rownd/node";
 import supertokens from "supertokens-node";
-import { HANDLE_BASE_PATH, PLUGIN_ID, PLUGIN_SDK_VERSION } from "./constants";
+import {
+  HANDLE_BASE_PATH,
+  HUB_VERIFY_EMAIL_PAGE_PATH,
+  HUB_LOGIN_PAGE_PATH,
+  PLUGIN_ID,
+  PLUGIN_SDK_VERSION,
+} from "./constants";
 import { RowndPluginConfig, RowndPluginNormalisedConfig } from "./types";
 import { enableDebugLogs, logDebugMessage } from "./logger";
 import { createClient } from "./telemetry/createTelemetryClient";
+import { assertRowndAppVariantIsConfigured, setPluginConfig } from "./config";
+import { shouldLinkRowndAccounts } from "./rownd-compatibility";
+import { setRowndClient } from "./rownd-repository";
 import {
-  setRowndClient,
-  setPluginConfig,
   buildRowndSessionClaims,
   completePendingEmailVerification,
+  recordRowndAppVariantForUser,
   RowndIsAnonymousClaim,
+} from "./supertokens-repository";
+import {
+  getRequestedAppVariantIdFromRequest,
+  getRequestedClientDomainFromRequest,
+  getRequestedDisplayContextFromRequest,
+  getRequestedRedirectToPathFromRequest,
+  rewriteLinkToBaseUrl,
+  rewriteLinkPath,
+} from "./utils";
+import {
   handleDeleteUser,
   handleGetAppConfig,
   handleGetUser,
@@ -27,13 +45,6 @@ import {
   handleUpdateUser,
   handleUpdateUserField,
   handleUpdateUserMeta,
-  shouldLinkRowndAccounts,
-  rewriteLinkPath,
-  getRequestedAppVariantIdFromRequest,
-  getRequestedDisplayContextFromRequest,
-  getRequestedRedirectToPathFromRequest,
-  recordRowndAppVariantForUser,
-  assertRowndAppVariantIsConfigured,
 } from "./pluginImplementation";
 
 export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
@@ -65,6 +76,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         const redirectToPath = input?.userContext?.rowndRedirectToPath as
           | string
           | undefined;
+        const clientDomain = input?.userContext?.rowndClientDomain as
+          | string
+          | undefined;
+        const clientDomainKey =
+          clientDomain ?? (displayContext === "mobile_app" ? "mobile" : "browser");
+        const clientBaseUrl = pluginConfig.clientDomains?.[clientDomainKey];
         const bootstrapParams = {
           appKey: pluginConfig.rowndAppKey,
           ...(hubBootstrapParams ?? {}),
@@ -73,11 +90,20 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           ...(typeof redirectToPath === "string" ? { redirectToPath } : {}),
         };
 
+        const rewrittenLink = input[linkKey]
+          ? clientBaseUrl
+            ? rewriteLinkToBaseUrl(
+              input[linkKey],
+              targetPath,
+              clientBaseUrl,
+              bootstrapParams,
+            )
+            : rewriteLinkPath(input[linkKey], targetPath, bootstrapParams)
+          : input[linkKey];
+
         return {
           ...input,
-          [linkKey]: input[linkKey]
-            ? rewriteLinkPath(input[linkKey], targetPath, bootstrapParams)
-            : input[linkKey],
+          [linkKey]: rewrittenLink,
         };
       };
 
@@ -224,13 +250,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     return {
                       ...implementation,
                       sendEmail: async function (input) {
-                        return implementation.sendEmail({
-                          ...addHubBootstrapParams(
+                        return implementation.sendEmail(
+                          addHubBootstrapParams(
                             input,
                             "urlWithLinkCode",
-                            "account/login",
+                            HUB_LOGIN_PAGE_PATH,
                           ),
-                        });
+                        );
                       },
                     };
                   },
@@ -248,13 +274,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     return {
                       ...implementation,
                       sendSms: async function (input) {
-                        return implementation.sendSms({
-                          ...addHubBootstrapParams(
+                        return implementation.sendSms(
+                          addHubBootstrapParams(
                             input,
                             "urlWithLinkCode",
-                            "account/login",
+                            HUB_LOGIN_PAGE_PATH,
                           ),
-                        });
+                        );
                       },
                     };
                   },
@@ -275,31 +301,30 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const displayContext = getRequestedDisplayContextFromRequest(
                   input.options.req,
                 );
+                if (displayContext) {
+                  input.userContext.rowndDisplayContext = displayContext;
+                }
                 const redirectToPath = getRequestedRedirectToPathFromRequest(
                   input.options.req,
                 );
+                if (redirectToPath) {
+                  input.userContext.rowndRedirectToPath = redirectToPath;
+                }
+                const clientDomain = getRequestedClientDomainFromRequest(
+                  input.options.req,
+                );
+                if (clientDomain) {
+                  input.userContext.rowndClientDomain = clientDomain;
+                }
                 const appVariantId = getRequestedAppVariantIdFromRequest(
                   input.options.req,
                 );
+                if (appVariantId) {
+                  input.userContext.rowndAppVariantId = appVariantId;
+                }
                 assertRowndAppVariantIsConfigured(appVariantId);
 
-                return originalImplementation.createCodePOST({
-                  ...input,
-                  userContext: displayContext || redirectToPath || appVariantId
-                    ? {
-                      ...input.userContext,
-                      ...(appVariantId
-                        ? { rowndAppVariantId: appVariantId }
-                        : {}),
-                      ...(displayContext
-                        ? { rowndDisplayContext: displayContext }
-                        : {}),
-                      ...(redirectToPath
-                        ? { rowndRedirectToPath: redirectToPath }
-                        : {}),
-                    }
-                    : input.userContext,
-                });
+                return originalImplementation.createCodePOST(input);
               },
               consumeCodePOST: async (
                 input: Parameters<
@@ -315,13 +340,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const appVariantId = getRequestedAppVariantIdFromRequest(
                   input.options.req,
                 );
+                if (appVariantId) {
+                  input.userContext.rowndAppVariantId = appVariantId;
+                }
                 assertRowndAppVariantIsConfigured(appVariantId);
-                const response = await originalImplementation.consumeCodePOST({
-                  ...input,
-                  userContext: appVariantId
-                    ? { ...input.userContext, rowndAppVariantId: appVariantId }
-                    : input.userContext,
-                });
+                const response =
+                  await originalImplementation.consumeCodePOST(input);
 
                 if (response.status === "OK") {
                   await recordRowndAppVariantForUser(
@@ -349,13 +373,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const appVariantId = getRequestedAppVariantIdFromRequest(
                   input.options.req,
                 );
+                if (appVariantId) {
+                  input.userContext.rowndAppVariantId = appVariantId;
+                }
                 assertRowndAppVariantIsConfigured(appVariantId);
-                const response = await originalImplementation.signInUpPOST({
-                  ...input,
-                  userContext: appVariantId
-                    ? { ...input.userContext, rowndAppVariantId: appVariantId }
-                    : input.userContext,
-                });
+                const response =
+                  await originalImplementation.signInUpPOST(input);
 
                 if (response.status === "OK") {
                   await recordRowndAppVariantForUser(
@@ -400,19 +423,24 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
             functions: (originalImplementation) => ({
               ...originalImplementation,
               createNewSession: async (input) => {
+                const [rowndSessionClaims, rowndIsAnonymousClaim] =
+                  await Promise.all([
+                    buildRowndSessionClaims(
+                      input.userId,
+                      input.accessTokenPayload,
+                    ),
+                    RowndIsAnonymousClaim.build(
+                      input.userId,
+                      input.recipeUserId,
+                      input.tenantId,
+                      input.accessTokenPayload,
+                      input.userContext,
+                    ),
+                  ]);
                 input.accessTokenPayload = {
                   ...input.accessTokenPayload,
-                  ...(await buildRowndSessionClaims(
-                    input.userId,
-                    input.accessTokenPayload,
-                  )),
-                  ...(await RowndIsAnonymousClaim.build(
-                    input.userId,
-                    input.recipeUserId,
-                    input.tenantId,
-                    input.accessTokenPayload,
-                    input.userContext,
-                  )),
+                  ...rowndSessionClaims,
+                  ...rowndIsAnonymousClaim,
                 };
 
                 return originalImplementation.createNewSession(input);
@@ -444,7 +472,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                           ...addHubBootstrapParams(
                             input,
                             "emailVerifyLink",
-                            "account/verify-email",
+                            HUB_VERIFY_EMAIL_PAGE_PATH,
                           ),
                         });
                       },
@@ -504,10 +532,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           );
         }
       }
+      for (const [key, value] of Object.entries(config.clientDomains ?? {})) {
+        validateClientDomainUrl(key, value);
+      }
       return {
         rowndAppKey: config.rowndAppKey,
         rowndAppSecret: config.rowndAppSecret,
         enableDebugLogs: config.enableDebugLogs,
+        clientDomains: config.clientDomains,
         telemetry: config.telemetry,
         schema: config.schema,
         appConfig: config.appConfig,
@@ -515,3 +547,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
       };
     },
   );
+
+function validateClientDomainUrl(key: string, value: string) {
+  try {
+    if (typeof value !== "string" || !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) {
+      throw new Error();
+    }
+    new URL(value);
+  } catch {
+    throw new Error(`Invalid clientDomains.${key} in plugin config`);
+  }
+}

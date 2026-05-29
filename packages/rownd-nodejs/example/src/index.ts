@@ -53,10 +53,7 @@ SuperTokens.init({
       flowType: "MAGIC_LINK",
     }),
     EmailVerification.init({
-      mode:
-        process.env.EMAIL_VERIFICATION_MODE === "REQUIRED"
-          ? "REQUIRED"
-          : "OPTIONAL",
+      mode: "REQUIRED",
     }),
     ThirdParty.init({
       signInAndUpFeature: {
@@ -78,7 +75,11 @@ SuperTokens.init({
               clients: [
                 {
                   clientId: requireEnv("APPLE_CLIENT_ID"),
-                  clientSecret: requireEnv("APPLE_CLIENT_SECRET"),
+                  additionalConfig: {
+                    teamId: requireEnv("APPLE_TEAM_ID"),
+                    keyId: requireEnv("APPLE_KEY_ID"),
+                    privateKey: requireEnv("APPLE_PRIVATE_KEY"),
+                  },
                 },
               ],
             },
@@ -93,6 +94,13 @@ SuperTokens.init({
         rowndAppKey: requireEnv("ROWND_APP_KEY"),
         rowndAppSecret: requireEnv("ROWND_APP_SECRET"),
         enableDebugLogs: process.env.ROWND_ENABLE_DEBUG_LOGS === "true",
+        ...(process.env.ROWND_MOBILE_DEEP_LINK_BASE_URL
+          ? {
+              clientDomains: {
+                mobile: process.env.ROWND_MOBILE_DEEP_LINK_BASE_URL,
+              },
+            }
+          : {}),
         appConfig: {
           id: process.env.ROWND_APP_KEY,
           name: process.env.APP_NAME ?? "Rownd SuperTokens Example",
