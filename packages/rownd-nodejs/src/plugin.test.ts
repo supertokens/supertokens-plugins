@@ -43,13 +43,15 @@ import { ROWND_PLUGIN_ERROR_MESSAGES } from "./errors";
 import { DEFAULT_ROWND_SCHEMA, ROWND_JWT_CLAIMS } from "./constants";
 import {
   mapRowndUserToSuperTokens,
-  DEFAULT_PRIMARY_COLOR,
-  RowndIsAnonymousClaim,
   shouldLinkRowndAccounts,
+} from "./rownd-compatibility";
+import { DEFAULT_PRIMARY_COLOR } from "./config";
+import {
+  RowndIsAnonymousClaim,
   buildRowndSessionClaims,
   completePendingEmailVerification,
   recordRowndAppVariantForUser,
-} from "./pluginImplementation";
+} from "./supertokens-repository";
 
 let testPORT = 30001;
 

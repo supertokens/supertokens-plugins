@@ -44,3 +44,6 @@ export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
     user_visible: true,
   },
 };
+
+export const HUB_LOGIN_PAGE_PATH = "/account/login";
+export const HUB_VERIFY_EMAIL_PAGE_PATH = "/account/verify-email";
