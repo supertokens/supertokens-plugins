@@ -220,12 +220,79 @@ def test_google_sign_in_method_matches_node_config_shape():
     }
 
 
+def test_anonymous_sign_in_method_matches_node_config_shape():
+    guest_config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        app_config={
+            "signInMethods": [
+                {
+                    "method": "anonymous",
+                    "displayName": "Continue as guest",
+                    "iconLightUrl": "https://cdn.example.com/light.svg",
+                    "iconDarkUrl": "https://cdn.example.com/dark.svg",
+                }
+            ]
+        },
+    )
+    instant_config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        app_config={"signInMethods": [{"method": "anonymous", "type": "instant"}]},
+    )
+
+    guest_body = build_app_config(guest_config, None)
+    instant_body = build_app_config(instant_config, None)
+    assert guest_body is not None
+    assert instant_body is not None
+    guest_app = as_json_dict(guest_body.get("app"))
+    guest_app_config = as_json_dict(guest_app.get("config"))
+    guest_hub = as_json_dict(guest_app_config.get("hub"))
+    guest_auth = as_json_dict(guest_hub.get("auth"))
+    guest_methods = as_json_dict(guest_auth.get("sign_in_methods"))
+    instant_app = as_json_dict(instant_body.get("app"))
+    instant_app_config = as_json_dict(instant_app.get("config"))
+    instant_hub = as_json_dict(instant_app_config.get("hub"))
+    instant_auth = as_json_dict(instant_hub.get("auth"))
+    instant_methods = as_json_dict(instant_auth.get("sign_in_methods"))
+
+    assert guest_methods["anonymous"] == {
+        "enabled": True,
+        "type": "guest",
+        "display_name": "Continue as guest",
+        "icon_light_url": "https://cdn.example.com/light.svg",
+        "icon_dark_url": "https://cdn.example.com/dark.svg",
+    }
+    assert instant_methods["anonymous"] == {"enabled": False}
+
+
+def test_custom_provider_omits_missing_optional_icons():
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        app_config={"signInMethods": [{"method": "github", "displayName": "GitHub"}]},
+    )
+
+    body = build_app_config(config, None)
+    assert body is not None
+    app = as_json_dict(body.get("app"))
+    app_config = as_json_dict(app.get("config"))
+    hub = as_json_dict(app_config.get("hub"))
+    auth = as_json_dict(hub.get("auth"))
+    methods = as_json_dict(auth.get("sign_in_methods"))
+    github = methods.get("github")
+
+    assert github == {"enabled": True, "display_name": "GitHub"}
+
+
 @pytest.mark.asyncio
-async def test_rownd_compat_user_uses_last_used_for_last_sign_in_method(monkeypatch: pytest.MonkeyPatch):
+async def test_rownd_compat_user_uses_latest_session_for_last_sign_in_method(monkeypatch: pytest.MonkeyPatch):
     async def get_user_metadata(user_id: str):
         return {}
 
     async def get_user(user_id: str, user_context=None):
+        passwordless_recipe_user_id = SimpleNamespace(get_as_string=lambda: "passwordless-recipe-user")
+        google_recipe_user_id = SimpleNamespace(get_as_string=lambda: "google-recipe-user")
         return SimpleNamespace(
             id=user_id,
             time_joined=1000,
@@ -234,6 +301,7 @@ async def test_rownd_compat_user_uses_last_used_for_last_sign_in_method(monkeypa
                     recipe_id="passwordless",
                     email="user@example.com",
                     phone_number=None,
+                    recipe_user_id=passwordless_recipe_user_id,
                     time_joined=2000,
                     last_used=5000,
                 ),
@@ -241,6 +309,7 @@ async def test_rownd_compat_user_uses_last_used_for_last_sign_in_method(monkeypa
                     recipe_id="thirdparty",
                     email="user@example.com",
                     phone_number=None,
+                    recipe_user_id=google_recipe_user_id,
                     third_party=SimpleNamespace(id="google", user_id="google-123"),
                     verified=True,
                     time_joined=3000,
@@ -249,12 +318,19 @@ async def test_rownd_compat_user_uses_last_used_for_last_sign_in_method(monkeypa
             ],
         )
 
+    async def get_latest_session_info(user_id: str):
+        return SimpleNamespace(
+            recipe_user_id=SimpleNamespace(get_as_string=lambda: "passwordless-recipe-user"),
+            time_created=6000,
+        )
+
     monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)
     monkeypatch.setattr(impl, "get_user", get_user)
+    monkeypatch.setattr(impl, "get_latest_session_info", get_latest_session_info)
 
     user = await get_rownd_compat_user("st-user")
     meta = as_json_dict(user.get("meta"))
 
     assert meta["first_sign_in_method"] == "email"
     assert meta["last_sign_in_method"] == "email"
-    assert meta["last_sign_in"] == "1970-01-01T00:00:05Z"
+    assert meta["last_sign_in"] == "1970-01-01T00:00:06Z"

@@ -68,6 +68,11 @@ def get_requested_display_context_from_request(request: BaseRequest) -> Optional
     return value if value in {"browser", "mobile_app", "customer_web_view"} else None
 
 
+def get_requested_client_domain_from_request(request: BaseRequest) -> Optional[str]:
+    value = request.get_query_param("rownd_client_domain")
+    return value if isinstance(value, str) and value else None
+
+
 def get_requested_redirect_to_path_from_request(request: BaseRequest) -> Optional[str]:
     return request.get_query_param("rownd_redirect_to_path") or None
 
@@ -91,6 +96,25 @@ def rewrite_link_path(
     return urlunparse(parsed._replace(path=path, query=urlencode(query)))
 
 
+def rewrite_link_to_base_url(
+    input_url: Optional[str], target_path: str, base_url: str, search_params: Dict[str, str]
+) -> Optional[str]:
+    if not input_url:
+        return input_url
+
+    normalized_base_url = base_url if base_url.endswith("://") else base_url.rstrip("/") + "/"
+    target = urlparse(normalized_base_url + target_path.lstrip("/"))
+    source = urlparse(input_url)
+    query = dict(parse_qsl(source.query, keep_blank_values=True))
+    query.update(search_params)
+    return urlunparse(
+        target._replace(
+            query=urlencode(query),
+            fragment=source.fragment,
+        )
+    )
+
+
 def add_hub_bootstrap_params(
     link: Optional[str],
     target_path: str,
@@ -111,6 +135,17 @@ def add_hub_bootstrap_params(
         params["displayContext"] = user_context["rowndDisplayContext"]
     if isinstance(user_context.get("rowndRedirectToPath"), str):
         params["redirectToPath"] = user_context["rowndRedirectToPath"]
+    client_domain = user_context.get("rowndClientDomain")
+    client_domain_key = (
+        client_domain
+        if isinstance(client_domain, str)
+        else "mobile"
+        if user_context.get("rowndDisplayContext") == "mobile_app"
+        else "browser"
+    )
+    client_base_url = config.client_domains.get(client_domain_key)
+    if client_base_url:
+        return rewrite_link_to_base_url(link, target_path, client_base_url, params)
     return rewrite_link_path(link, target_path, params)
 
 
@@ -271,9 +306,11 @@ async def handle_signout(session: Optional[SessionContainer], response: BaseResp
     return json_response(response, {"status": "OK"})
 
 
-async def handle_get_user(session: Optional[SessionContainer], response: BaseResponse) -> BaseResponse:
+async def handle_get_user(
+    config: RowndPluginConfig, session: Optional[SessionContainer], response: BaseResponse
+) -> BaseResponse:
     session = require_session(session)
-    return json_response(response, {"status": "OK", **(await get_rownd_compat_user(session.get_user_id()))})
+    return json_response(response, {"status": "OK", **(await get_rownd_compat_user(session.get_user_id(), config))})
 
 
 async def handle_update_user(
@@ -295,7 +332,7 @@ async def handle_update_user(
         code = permission_error.get("code")
         return json_response(response, permission_error, code if isinstance(code, int) else 400)
     if data_without_email:
-        await update_user_data(session.get_user_id(), data_without_email)
+        await update_user_data(config, session.get_user_id(), data_without_email)
     email = data.get("email")
     if isinstance(email, str):
         return json_response(
@@ -312,7 +349,7 @@ async def handle_update_user(
                 ),
             },
         )
-    return json_response(response, {"status": "OK", **(await get_rownd_compat_user(session.get_user_id()))})
+    return json_response(response, {"status": "OK", **(await get_rownd_compat_user(session.get_user_id(), config))})
 
 
 async def handle_delete_user(session: Optional[SessionContainer], response: BaseResponse) -> BaseResponse:
@@ -341,13 +378,13 @@ async def handle_update_user_meta(
 
 
 async def handle_get_user_field(
-    request: BaseRequest, response: BaseResponse, session: Optional[SessionContainer]
+    config: RowndPluginConfig, request: BaseRequest, response: BaseResponse, session: Optional[SessionContainer]
 ) -> BaseResponse:
     session = require_session(session)
     field_name = request.get_query_param("field")
     if not field_name:
         return json_response(response, missing_field_response(), 400)
-    user = await get_rownd_compat_user(session.get_user_id())
+    user = await get_rownd_compat_user(session.get_user_id(), config)
     return json_response(response, {"status": "OK", "value": as_json_dict(user.get("data")).get(field_name)})
 
 
@@ -387,7 +424,7 @@ async def handle_update_user_field(
         return json_response(response, permission_error, code if isinstance(code, int) else 400)
     return json_response(
         response,
-        {"status": "OK", **(await update_user_data(session.get_user_id(), {field_name: body.get("value")}))},
+        {"status": "OK", **(await update_user_data(config, session.get_user_id(), {field_name: body.get("value")}))},
     )
 
 
@@ -421,10 +458,10 @@ async def update_user_metadata(user_id: str, input_meta: JsonDict) -> JsonDict:
     return {"id": user_id, "meta": public_metadata(updated)}
 
 
-async def update_user_data(user_id: str, input_data: JsonDict) -> JsonDict:
+async def update_user_data(config: RowndPluginConfig, user_id: str, input_data: JsonDict) -> JsonDict:
     metadata = await get_user_metadata(user_id)
     await usermetadata_asyncio.update_user_metadata(user_id, {**metadata, **input_data})
-    return await get_rownd_compat_user(user_id)
+    return await get_rownd_compat_user(user_id, config)
 
 
 def public_metadata(metadata: JsonDict) -> JsonDict:
@@ -458,7 +495,7 @@ def missing_field_response() -> JsonDict:
     return {"status": "ERROR", "code": 400, "message": "field is required"}
 
 
-async def get_rownd_compat_user(user_id: str) -> JsonDict:
+async def get_rownd_compat_user(user_id: str, config: Optional[RowndPluginConfig] = None) -> JsonDict:
     metadata = await get_user_metadata(user_id)
     st_user = await get_user(user_id)
     if st_user is None:
@@ -475,14 +512,13 @@ async def get_rownd_compat_user(user_id: str) -> JsonDict:
             data[key] = value
             data_field_keys.add(key)
 
-    for key in DEFAULT_ROWND_SCHEMA.keys():
+    schema = config.schema if config is not None else DEFAULT_ROWND_SCHEMA
+    for key in schema.keys():
         data_field_keys.add(key)
         if not is_identity_field(key) and not is_internal_metadata_field(key) and key in metadata:
             data[key] = metadata[key]
 
-    last_used_at = st_user.time_joined
     for method in st_user.login_methods:
-        last_used_at = max(last_used_at, get_login_method_last_used(method))
         if method.recipe_id == "passwordless":
             if method.email:
                 verified_data["email"] = method.email
@@ -512,13 +548,33 @@ async def get_rownd_compat_user(user_id: str) -> JsonDict:
     if anonymous_id:
         data.setdefault("anonymous_id", anonymous_id)
 
-    for key, schema_field in DEFAULT_ROWND_SCHEMA.items():
+    for key, schema_field in schema.items():
         if data.get(key) is None and schema_field.get("type") == "string":
             data[key] = ""
 
     sorted_by_joined = sorted(st_user.login_methods, key=lambda method: method.time_joined)
     first_method = sorted_by_joined[0] if sorted_by_joined else None
-    last_method = max(st_user.login_methods, key=get_login_method_last_used) if st_user.login_methods else None
+    latest_session_info = await get_latest_session_info(st_user.id)
+    latest_recipe_user_id = None
+    if latest_session_info is not None:
+        recipe_user_id = getattr(latest_session_info, "recipe_user_id", None)
+        if recipe_user_id is not None:
+            latest_recipe_user_id = recipe_user_id.get_as_string()
+    last_method = (
+        next(
+            (
+                method
+                for method in st_user.login_methods
+                if method.recipe_user_id.get_as_string() == latest_recipe_user_id
+            ),
+            None,
+        )
+        if latest_recipe_user_id
+        else None
+    )
+    if last_method is None:
+        last_method = max(st_user.login_methods, key=lambda method: method.time_joined) if st_user.login_methods else None
+    last_sign_in_at = getattr(latest_session_info, "time_created", st_user.time_joined)
     metadata_meta = {
         key: value
         for key, value in metadata.items()
@@ -533,8 +589,8 @@ async def get_rownd_compat_user(user_id: str) -> JsonDict:
             **metadata_meta,
             "created": iso_from_ms(st_user.time_joined),
             "first_sign_in": iso_from_ms(st_user.time_joined),
-            "last_sign_in": iso_from_ms(last_used_at),
-            "last_active": iso_from_ms(last_used_at),
+            "last_sign_in": iso_from_ms(last_sign_in_at),
+            "last_active": iso_from_ms(last_sign_in_at),
             "first_sign_in_method": map_login_method(first_method),
             "last_sign_in_method": map_login_method(last_method),
         },
@@ -553,6 +609,25 @@ async def get_rownd_compat_user(user_id: str) -> JsonDict:
 
 def iso_from_ms(value: int) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(value / 1000))
+
+
+async def get_latest_session_info(user_id: str):
+    try:
+        handles = await session_asyncio.get_all_session_handles_for_user(
+            user_id,
+            fetch_sessions_for_linked_accounts=True,
+            tenant_id=PUBLIC_TENANT_ID,
+        )
+    except Exception:
+        return None
+    latest = None
+    for handle in handles:
+        session_info = await session_asyncio.get_session_information(handle)
+        if session_info is not None and (
+            latest is None or session_info.time_created > latest.time_created
+        ):
+            latest = session_info
+    return latest
 
 
 def get_third_party_info(method: LoginMethod) -> Tuple[Optional[str], Optional[str]]:
@@ -624,11 +699,6 @@ def map_login_method(method: Optional[LoginMethod]) -> str:
     if method.recipe_id == "passwordless":
         return "email" if method.email else "phone"
     return "email"
-
-
-def get_login_method_last_used(method: LoginMethod) -> int:
-    last_used = getattr(method, "last_used", None)
-    return last_used if isinstance(last_used, int) else method.time_joined
 
 
 async def build_rownd_session_claims(
@@ -808,16 +878,27 @@ async def start_pending_email_verification(
 ) -> JsonDict:
     user_id = session.get_user_id()
     metadata = await get_user_metadata(user_id)
-    current_email = as_json_dict((await get_rownd_compat_user(user_id)).get("data")).get("email")
-    if current_email == email:
-        return await get_rownd_compat_user(user_id)
-
+    current_email = as_json_dict((await get_rownd_compat_user(user_id, config)).get("data")).get("email")
     pending = as_json_list(metadata.get("rownd_pending_verification"))
-    for verification in [item for item in pending if item.get("field") == "email"]:
+    pending_email_verifications = [item for item in pending if item.get("field") == "email"]
+    for verification in pending_email_verifications:
         pending_email = verification.get("value")
         await emailverification_asyncio.revoke_email_verification_tokens(
             session.get_tenant_id(), session.get_recipe_user_id(), pending_email if isinstance(pending_email, str) else None, user_context
         )
+
+    if current_email == email:
+        if pending_email_verifications:
+            await usermetadata_asyncio.update_user_metadata(
+                user_id,
+                {
+                    **metadata,
+                    "rownd_pending_verification": [
+                        item for item in pending if item.get("field") != "email"
+                    ],
+                },
+            )
+        return await get_rownd_compat_user(user_id, config)
 
     pending_verification = {
         "id": str(uuid.uuid4()),
@@ -845,7 +926,7 @@ async def start_pending_email_verification(
     )
     if getattr(result, "status", None) == "EMAIL_ALREADY_VERIFIED_ERROR":
         await complete_pending_email_verification(session.get_recipe_user_id(), email, user_context)
-    return await get_rownd_compat_user(user_id)
+    return await get_rownd_compat_user(user_id, config)
 
 
 async def complete_pending_email_verification(
@@ -896,13 +977,19 @@ async def complete_pending_email_verification(
             raise RowndPluginError("Failed to link guest account: %s" % getattr(link_result, "status", "ERROR"))
         metadata_user_id = link_result.user.id
 
-    original = as_json_dict(metadata.get("original_rownd_user")) or {
+    target_metadata = metadata if metadata_user_id == user_id else await get_user_metadata(metadata_user_id)
+    original = as_json_dict(target_metadata.get("original_rownd_user")) or as_json_dict(metadata.get("original_rownd_user")) or {
         "data": {"user_id": metadata_user_id},
         "verified_data": {},
     }
+    target_pending = as_json_list(target_metadata.get("rownd_pending_verification"))
     updated = {
-        **metadata,
-        "rownd_pending_verification": [item for item in pending if item is not pending_verification],
+        **target_metadata,
+        "rownd_pending_verification": [
+            item
+            for item in target_pending
+            if not (item.get("field") == "email" and item.get("value") == email)
+        ],
     }
     updated["original_rownd_user"] = {
         **original,
@@ -1057,16 +1144,31 @@ def build_sign_in_methods_config(methods_array: List[JsonDict]) -> JsonDict:
     custom_providers = {}
     for key, value in methods.items():
         if key and key not in BUILTIN_SIGN_IN_METHOD_KEYS:
-            custom_providers[key] = {
+            display_name = value.get("displayName")
+            custom_provider: JsonDict = {
                 "enabled": True,
-                "display_name": value.get("displayName", key),
-                "icon_light_url": value.get("iconLightUrl"),
-                "icon_dark_url": value.get("iconDarkUrl"),
+                "display_name": display_name if isinstance(display_name, str) else key,
             }
+            if isinstance(value.get("iconLightUrl"), str):
+                custom_provider["icon_light_url"] = value["iconLightUrl"]
+            if isinstance(value.get("iconDarkUrl"), str):
+                custom_provider["icon_dark_url"] = value["iconDarkUrl"]
+            custom_providers[key] = custom_provider
     google = methods.get("google") or {}
     apple = methods.get("apple") or {}
     anonymous = methods.get("anonymous") or {}
     sign_in_faster_with_google = google.get("signInFasterWithGoogle")
+    anonymous_type = "instant" if anonymous.get("type") == "instant" else "guest"
+    anonymous_config: JsonDict = {"enabled": "anonymous" in methods and anonymous_type != "instant"}
+    if "anonymous" in methods and anonymous_type != "instant":
+        anonymous_config["type"] = anonymous_type
+        if isinstance(anonymous.get("displayName"), str):
+            anonymous_config["display_name"] = anonymous["displayName"]
+        if isinstance(anonymous.get("iconLightUrl"), str):
+            anonymous_config["icon_light_url"] = anonymous["iconLightUrl"]
+        if isinstance(anonymous.get("iconDarkUrl"), str):
+            anonymous_config["icon_dark_url"] = anonymous["iconDarkUrl"]
+    scopes = google.get("scopes")
     return {
         "email": {"enabled": "email" in methods},
         "phone": {"enabled": "phone" in methods},
@@ -1074,16 +1176,12 @@ def build_sign_in_methods_config(methods_array: List[JsonDict]) -> JsonDict:
             "enabled": "google" in methods,
             "client_id": google.get("clientId", ""),
             "ios_client_id": google.get("iosClientId", ""),
-            "scopes": google.get("scopes", []),
+            "scopes": scopes if isinstance(scopes, list) and all(isinstance(item, str) for item in scopes) else [],
             **({"sign_in_faster_with_google": sign_in_faster_with_google} if sign_in_faster_with_google in {"enabled", "disabled"} else {}),
             "one_tap": build_google_one_tap_config(google.get("oneTap")),
         },
         "apple": {"enabled": "apple" in methods, "client_id": apple.get("clientId", "")},
-        "anonymous": {
-            "enabled": "anonymous" in methods and anonymous.get("type") != "instant",
-            **({"type": anonymous["type"]} if anonymous.get("type") else {}),
-            "display_name": anonymous.get("displayName", "Continue as a guest"),
-        },
+        "anonymous": anonymous_config,
         **custom_providers,
     }
 

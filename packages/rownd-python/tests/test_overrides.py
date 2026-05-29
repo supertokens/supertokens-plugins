@@ -76,6 +76,47 @@ async def test_passwordless_sms_delivery_rewrites_magic_link():
     )
 
 
+async def test_delivery_rewrites_magic_link_to_configured_client_domain():
+    original = CapturingDelivery()
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        client_domains={"mobile": "myapp://", "browser": "https://app.example.com"},
+    )
+    override = plugin.RowndEmailDeliveryOverride(
+        cast(Any, original), config, "url_with_link_code", "account/login"
+    )
+    template_vars = SimpleNamespace(
+        url_with_link_code="https://api.example.com/auth/verify?preAuthSessionId=preauth#hash"
+    )
+
+    await override.send_email(template_vars, {"rowndDisplayContext": "mobile_app"})
+
+    assert original.template_vars.url_with_link_code == (
+        "myapp://account/login?preAuthSessionId=preauth&appKey=app-key&apiBasePath=%2Fauth"
+        "&displayContext=mobile_app#hash"
+    )
+
+
+async def test_delivery_uses_explicit_client_domain_key():
+    original = CapturingDelivery()
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        client_domains={"admin": "https://admin.example.com"},
+    )
+    override = plugin.RowndEmailDeliveryOverride(
+        cast(Any, original), config, "url_with_link_code", "account/login"
+    )
+    template_vars = SimpleNamespace(url_with_link_code="/auth/verify?linkCode=code")
+
+    await override.send_email(template_vars, {"rowndClientDomain": "admin"})
+
+    assert original.template_vars.url_with_link_code == (
+        "https://admin.example.com/account/login?linkCode=code&appKey=app-key&apiBasePath=%2Fauth"
+    )
+
+
 async def test_emailverification_delivery_rewrites_verify_link():
     original = CapturingDelivery()
     override = plugin.RowndEmailDeliveryOverride(
@@ -121,6 +162,7 @@ async def test_passwordless_create_code_adds_rownd_context():
                     "app_variant_id": "variant_123",
                     "rownd_display_context": "mobile_app",
                     "rownd_redirect_to_path": "/dashboard",
+                    "rownd_client_domain": "admin",
                 }
             )
         )),
@@ -132,7 +174,19 @@ async def test_passwordless_create_code_adds_rownd_context():
         "rowndAppVariantId": "variant_123",
         "rowndDisplayContext": "mobile_app",
         "rowndRedirectToPath": "/dashboard",
+        "rowndClientDomain": "admin",
     }
+
+
+async def test_init_rejects_invalid_client_domain():
+    with pytest.raises(ValueError, match="Invalid client_domains.browser"):
+        plugin.init(
+            RowndPluginConfig(
+                rownd_app_key="app-key",
+                rownd_app_secret="secret",
+                client_domains={"browser": "not-a-url"},
+            )
+        )
 
 
 async def test_passwordless_create_code_rejects_unknown_app_variant():

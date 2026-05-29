@@ -41,6 +41,7 @@ class RowndPluginKwargs(TypedDict, total=False):
     rownd_api_base_url: str
     enable_debug_logs: bool
     telemetry: Union[RowndTelemetryConfig, JsonDict, None]
+    client_domains: Dict[str, str]
     schema: RowndSchema
     app_config: JsonDict
     sub_brands: Dict[str, JsonDict]
@@ -59,6 +60,7 @@ class RowndPluginConfig:
     rownd_api_base_url: str = "https://api.rownd.io"
     enable_debug_logs: bool = False
     telemetry: Optional[Union[RowndTelemetryConfig, JsonDict]] = None
+    client_domains: Dict[str, str] = field(default_factory=dict)
     schema: RowndSchema = field(default_factory=lambda: dict(DEFAULT_ROWND_SCHEMA))
     app_config: JsonDict = field(default_factory=dict)
     sub_brands: Dict[str, JsonDict] = field(default_factory=dict)

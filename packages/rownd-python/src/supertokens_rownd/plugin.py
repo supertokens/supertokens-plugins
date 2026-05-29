@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Generic, Optional, TypeVar, cast
 from typing_extensions import Unpack
+from urllib.parse import urlparse
 
 from supertokens_python.framework.request import BaseRequest
 from supertokens_python.framework.response import BaseResponse
@@ -44,6 +46,7 @@ from .plugin_implementation import (
     complete_pending_email_verification,
     does_account_info_match_auth_method,
     get_requested_app_variant_id_from_request,
+    get_requested_client_domain_from_request,
     get_requested_display_context_from_request,
     get_requested_redirect_to_path_from_request,
     handle_app_config,
@@ -114,6 +117,7 @@ def init(config: Optional[RowndPluginConfig] = None, **kwargs: Unpack[RowndPlugi
         raise ValueError("Missing rownd_app_key or rownd_app_secret in plugin config")
 
     config.api_base_path = _normalise_path(config.api_base_path)
+    _validate_config(config)
     client = config.rownd_client or RowndClient(config)
     telemetry_client = create_telemetry_client(config)
 
@@ -143,7 +147,7 @@ def init(config: Optional[RowndPluginConfig] = None, **kwargs: Unpack[RowndPlugi
         return await handle_signout(session, response)
 
     async def get_user_handler(request: BaseRequest, response: BaseResponse, session: Optional[SessionContainer], user_context: UserContext) -> BaseResponse:
-        return await handle_get_user(session, response)
+        return await handle_get_user(config, session, response)
 
     async def update_user_handler(request: BaseRequest, response: BaseResponse, session: Optional[SessionContainer], user_context: UserContext) -> BaseResponse:
         return await handle_update_user(config, request, response, session, user_context)
@@ -158,7 +162,7 @@ def init(config: Optional[RowndPluginConfig] = None, **kwargs: Unpack[RowndPlugi
         return await handle_update_user_meta(request, response, session)
 
     async def get_user_field_handler(request: BaseRequest, response: BaseResponse, session: Optional[SessionContainer], user_context: UserContext) -> BaseResponse:
-        return await handle_get_user_field(request, response, session)
+        return await handle_get_user_field(config, request, response, session)
 
     async def update_user_field_handler(request: BaseRequest, response: BaseResponse, session: Optional[SessionContainer], user_context: UserContext) -> BaseResponse:
         return await handle_update_user_field(config, request, response, session, user_context)
@@ -267,12 +271,15 @@ def _passwordless_api_override(config: RowndPluginConfig):
             extra_context = {}
             display_context = get_requested_display_context_from_request(api_options.request)
             redirect_to_path = get_requested_redirect_to_path_from_request(api_options.request)
+            client_domain = get_requested_client_domain_from_request(api_options.request)
             if app_variant_id:
                 extra_context["rowndAppVariantId"] = app_variant_id
             if display_context:
                 extra_context["rowndDisplayContext"] = display_context
             if redirect_to_path:
                 extra_context["rowndRedirectToPath"] = redirect_to_path
+            if client_domain:
+                extra_context["rowndClientDomain"] = client_domain
             return await original_create_code_post(
                 email,
                 phone_number,
@@ -476,3 +483,27 @@ def _normalise_path(path: str) -> str:
     if not path.startswith("/"):
         path = "/" + path
     return path.rstrip("/") or "/"
+
+
+def _validate_config(config: RowndPluginConfig) -> None:
+    telemetry = config.telemetry
+    if isinstance(telemetry, dict):
+        provider = telemetry.get("provider")
+        if provider == "axiom" and (not telemetry.get("token") or not telemetry.get("dataset")):
+            raise ValueError("Missing telemetry axiom token or dataset in plugin config")
+        if provider == "custom" and not callable(telemetry.get("factory")):
+            raise ValueError("Missing telemetry custom factory function in plugin config")
+    elif telemetry is not None:
+        if telemetry.provider == "axiom" and (not telemetry.token or not telemetry.dataset):
+            raise ValueError("Missing telemetry axiom token or dataset in plugin config")
+        if telemetry.provider == "custom" and telemetry.factory is None:
+            raise ValueError("Missing telemetry custom factory function in plugin config")
+
+    for key, value in config.client_domains.items():
+        parsed = urlparse(value) if isinstance(value, str) else None
+        if (
+            parsed is None
+            or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value) is None
+            or (parsed.scheme in {"http", "https"} and not parsed.netloc)
+        ):
+            raise ValueError("Invalid client_domains.%s in plugin config" % key)
