@@ -21,10 +21,16 @@ export async function validateRowndToken(token: string): Promise<string> {
 }
 
 export async function fetchRowndUserInfo(userId: string): Promise<RowndUser> {
-  const client = getRowndClient();
-  const rowndUser = await client.fetchUserInfo({ user_id: userId });
+  const rowndUser = await fetchOptionalRowndUserInfo(userId);
   if (!rowndUser) {
     throw new RowndPluginError("ROWND_USER_NOT_FOUND");
   }
   return rowndUser;
+}
+
+export async function fetchOptionalRowndUserInfo(
+  userId: string,
+): Promise<RowndUser | undefined> {
+  const client = getRowndClient();
+  return client.fetchUserInfo({ user_id: userId });
 }

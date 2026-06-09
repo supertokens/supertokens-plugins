@@ -1422,7 +1422,7 @@ describe("rownd-nodejs plugin", () => {
         expect(user).toBeDefined();
       });
 
-      it("error if user not found in rownd", async () => {
+      it("skips migration if user not found in rownd", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
@@ -1439,10 +1439,11 @@ describe("rownd-nodejs plugin", () => {
           },
         );
         const body = await res.json();
-        expect(body.status).toBe("ERROR");
-        expect(body.message).toBe(
-          ROWND_PLUGIN_ERROR_MESSAGES.ROWND_USER_NOT_FOUND,
-        );
+        expect(body).toEqual({ status: "OK" });
+        expect(res.headers.get("st-access-token")).toBeNull();
+        await expect(
+          getMigratedUserByRowndUserId("rownd-missing"),
+        ).resolves.toBeUndefined();
       });
 
       it("error if Bulk Import API fails (500)", async () => {
@@ -2639,6 +2640,153 @@ describe("rownd-nodejs plugin", () => {
           attributes: {},
         });
       });
+
+      it.each([
+        { providerId: "google", field: "google_id" },
+        { providerId: "apple", field: "apple_id" },
+      ])(
+        "includes $field from a $providerId-only third-party user",
+        async ({ providerId, field }) => {
+          const { server: s, port } = await setup(coreConnectionURI);
+          server = s;
+          testPORT = port;
+          const email = `${providerId}-thirdparty-only@example.com`;
+          const providerUserId = `${providerId}-thirdparty-only-id`;
+
+          const thirdPartyResult =
+            await ThirdParty.manuallyCreateOrUpdateUser(
+              "public",
+              providerId,
+              providerUserId,
+              email,
+              true,
+            );
+          expect(thirdPartyResult.status).toBe("OK");
+          if (thirdPartyResult.status !== "OK") {
+            throw new Error("failed to create thirdparty user");
+          }
+
+          const session = await Session.createNewSessionWithoutRequestResponse(
+            "public",
+            thirdPartyResult.recipeUserId,
+            {},
+            {},
+            true,
+          );
+
+          const res = await fetch(
+            `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+            {
+              headers: getAuthedHeaders(session.getAccessToken()),
+            },
+          );
+
+          expect(res.status).toBe(200);
+          const body = await res.json();
+          expect(body.status).toBe("OK");
+          expect(body.rownd_user).toBe(thirdPartyResult.user.id);
+          expect(body.data).toEqual(
+            expect.objectContaining({
+              user_id: thirdPartyResult.user.id,
+              email,
+              [field]: providerUserId,
+            }),
+          );
+          expect(body.verified_data).toEqual(
+            expect.objectContaining({
+              email,
+              [field]: providerUserId,
+            }),
+          );
+          expect(body.auth_level).toBe("verified");
+        },
+      );
+
+      it.each([
+        { providerId: "google", field: "google_id" },
+        { providerId: "apple", field: "apple_id" },
+      ])(
+        "includes $field from a $providerId login method linked after migration",
+        async ({ providerId, field }) => {
+          const { server: s, port } = await setup(coreConnectionURI);
+          server = s;
+          testPORT = port;
+          const email = `${providerId}-linked-after-migration@example.com`;
+          const providerUserId = `${providerId}-linked-after-migration-id`;
+          const passwordlessResult = await Passwordless.signInUp({
+            email,
+            tenantId: "public",
+          });
+          const primaryResult = await AccountLinking.createPrimaryUser(
+            passwordlessResult.recipeUserId,
+          );
+          expect(primaryResult.status).toBe("OK");
+          const primaryUserId =
+            primaryResult.status === "OK"
+              ? primaryResult.user.id
+              : passwordlessResult.user.id;
+
+          await UserMetadata.updateUserMetadata(primaryUserId, {
+            original_rownd_user: {
+              state: "enabled",
+              auth_level: "verified",
+              data: {
+                user_id: primaryUserId,
+                email,
+              },
+              verified_data: {
+                email,
+              },
+              attributes: {},
+            },
+          });
+
+          const thirdPartyResult =
+            await ThirdParty.manuallyCreateOrUpdateUser(
+              "public",
+              providerId,
+              providerUserId,
+              email,
+              true,
+            );
+          expect(thirdPartyResult.status).toBe("OK");
+          if (thirdPartyResult.status !== "OK") {
+            throw new Error("failed to create thirdparty user");
+          }
+
+          const linkResult = await AccountLinking.linkAccounts(
+            thirdPartyResult.recipeUserId,
+            primaryUserId,
+          );
+          expect(linkResult.status).toBe("OK");
+
+          const session = await Session.createNewSessionWithoutRequestResponse(
+            "public",
+            passwordlessResult.recipeUserId,
+            {},
+            {},
+            true,
+          );
+
+          const res = await fetch(
+            `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+            {
+              headers: getAuthedHeaders(session.getAccessToken()),
+            },
+          );
+
+          expect(res.status).toBe(200);
+          const body = await res.json();
+          expect(body.status).toBe("OK");
+          expect(body.data[field]).toBe(providerUserId);
+          expect(body.verified_data).toEqual(
+            expect.objectContaining({
+              email,
+              [field]: providerUserId,
+            }),
+          );
+        },
+      );
 
       it("returns empty strings for missing schema fields", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);

@@ -26,7 +26,10 @@ import {
   isInternalMetadataField,
   mapRowndUserToSuperTokens,
 } from "./rownd-compatibility";
-import { fetchRowndUserInfo, validateRowndToken } from "./rownd-repository";
+import {
+  fetchOptionalRowndUserInfo,
+  validateRowndToken,
+} from "./rownd-repository";
 import {
   getUserById,
   getUserMetadata,
@@ -190,10 +193,18 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       const appVariantId = getRequestedAppVariantIdFromRequest(req);
       assertRowndAppVariantIsConfigured(appVariantId);
       rowndUserId = await validateRowndToken(parsed.token);
+      const rowndUser = await fetchOptionalRowndUserInfo(rowndUserId);
+
+      if (!rowndUser) {
+        logDebugMessage(
+          `Skipping migration because user does not exist in Rownd. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
+        );
+        return { status: "OK" as const };
+      }
+
       user = await SuperTokens.getUser(rowndUserId, userContext);
 
       if (!user) {
-        const rowndUser = await fetchRowndUserInfo(rowndUserId);
         const stUserImport = mapRowndUserToSuperTokens(rowndUser);
 
         try {
