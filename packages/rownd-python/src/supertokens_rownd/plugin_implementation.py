@@ -238,11 +238,19 @@ async def handle_migrate(
         app_variant_id = get_requested_app_variant_id_from_request(request)
         assert_app_variant_is_configured(config, app_variant_id)
         rownd_user_id = await client.validate_token(token)
+        rownd_user = await client.fetch_optional_user_info(rownd_user_id)
+        if rownd_user is None:
+            log_debug(
+                config,
+                "Skipping migration because user does not exist in Rownd. tenantId: %s, rowndUserId: %s"
+                % (PUBLIC_TENANT_ID, rownd_user_id),
+            )
+            return json_response(response, {"status": "OK"})
+
         user = await get_user(rownd_user_id, user_context)
         recipe_user_id = None
 
         if user is None:
-            rownd_user = await client.fetch_user_info(rownd_user_id)
             try:
                 imported_user = await import_user(
                     map_rownd_user_to_supertokens(rownd_user), supertokens_config

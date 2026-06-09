@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+from typing import Optional
 
 from .types import JsonDict, RowndPluginConfig, RowndPluginError
 
@@ -17,12 +18,18 @@ class RowndClient:
         return user_id
 
     async def fetch_user_info(self, user_id: str) -> JsonDict:
+        data = await self.fetch_optional_user_info(user_id)
+        if data is None:
+            raise RowndPluginError("User not found in Rownd")
+        return data
+
+    async def fetch_optional_user_info(self, user_id: str) -> Optional[JsonDict]:
         data = await self._request(
             "GET",
             "/me/applications/%s/users/%s" % (self.config.rownd_app_key, user_id),
         )
         if not isinstance(data, dict) or not data:
-            raise RowndPluginError("User not found in Rownd")
+            return None
         return data
 
     async def _request(self, method: str, path: str, json: JsonDict | None = None) -> JsonDict:

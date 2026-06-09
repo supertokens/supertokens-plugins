@@ -43,13 +43,13 @@ from supertokens_python.recipe.userroles import UserRolesRecipe
 from supertokens_python.recipe.webauthn.recipe import WebauthnRecipe
 
 from supertokens_rownd import init as rownd_init
-from supertokens_rownd.types import RowndPluginConfig
+from supertokens_rownd.types import RowndPluginConfig, RowndPluginError
 
 
 class MockRowndClient:
     def __init__(self) -> None:
         self.user_id = "rownd-user"
-        self.user_info: Dict[str, Any] = {
+        self.user_info: Optional[Dict[str, Any]] = {
             "data": {"user_id": self.user_id, "email": "rownd-user@example.com"},
             "verified_data": {"email": True},
             "meta": {"created": "2026-01-01T00:00:00.000Z"},
@@ -63,6 +63,12 @@ class MockRowndClient:
         return self.user_id
 
     async def fetch_user_info(self, user_id: str) -> Dict[str, Any]:
+        user_info = await self.fetch_optional_user_info(user_id)
+        if user_info is None:
+            raise RowndPluginError("User not found in Rownd")
+        return user_info
+
+    async def fetch_optional_user_info(self, user_id: str) -> Optional[Dict[str, Any]]:
         if self.fetch_error is not None:
             raise self.fetch_error
         return self.user_info

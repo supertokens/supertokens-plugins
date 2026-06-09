@@ -108,6 +108,24 @@ async def test_migrate_rownd_fetch_error_returns_error(core_url: str, rownd_clie
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
 
 
+async def test_migrate_missing_rownd_user_skips_migration(
+    core_url: str, rownd_client: MockRowndClient
+):
+    rownd_client.user_id = "py-missing-rownd-user"
+    rownd_client.user_info = None
+    client = make_client(core_url, rownd_client)
+
+    res = client.post(
+        "/auth/plugin/rownd/migrate",
+        headers={"Authorization": "Bearer rownd-token", **session_headers()},
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {"status": "OK"}
+    assert res.headers.get("st-access-token") is None
+    assert await get_user("py-missing-rownd-user") is None
+
+
 async def test_migrate_bulk_import_500_returns_error(
     core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch
 ):

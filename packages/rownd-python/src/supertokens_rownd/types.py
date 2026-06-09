@@ -22,6 +22,8 @@ class RowndClientProtocol(Protocol):
 
     async def fetch_user_info(self, user_id: str) -> JsonDict: ...
 
+    async def fetch_optional_user_info(self, user_id: str) -> Optional[JsonDict]: ...
+
 
 @dataclass
 class RowndTelemetryConfig:
