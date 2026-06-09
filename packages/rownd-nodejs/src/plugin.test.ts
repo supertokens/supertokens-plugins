@@ -2653,31 +2653,18 @@ describe("rownd-nodejs plugin", () => {
           const email = `${providerId}-thirdparty-only@example.com`;
           const providerUserId = `${providerId}-thirdparty-only-id`;
 
-          const thirdPartyResult =
-            await ThirdParty.manuallyCreateOrUpdateUser(
-              "public",
-              providerId,
-              providerUserId,
-              email,
-              true,
-            );
+          const thirdPartyResult = await signInUpWithTestProvider({
+            providerId,
+            providerUserId,
+            email,
+          });
           expect(thirdPartyResult.status).toBe("OK");
-          if (thirdPartyResult.status !== "OK") {
-            throw new Error("failed to create thirdparty user");
-          }
-
-          const session = await Session.createNewSessionWithoutRequestResponse(
-            "public",
-            thirdPartyResult.recipeUserId,
-            {},
-            {},
-            true,
-          );
+          expect(thirdPartyResult.accessToken).toBeDefined();
 
           const res = await fetch(
             `http://localhost:${testPORT}/auth/plugin/rownd/user`,
             {
-              headers: getAuthedHeaders(session.getAccessToken()),
+              headers: getAuthedHeaders(thirdPartyResult.accessToken!),
             },
           );
 
@@ -2717,21 +2704,21 @@ describe("rownd-nodejs plugin", () => {
             email,
             tenantId: "public",
           });
-          const primaryResult = await AccountLinking.createPrimaryUser(
-            passwordlessResult.recipeUserId,
-          );
-          expect(primaryResult.status).toBe("OK");
-          const primaryUserId =
-            primaryResult.status === "OK"
-              ? primaryResult.user.id
-              : passwordlessResult.user.id;
+          const passwordlessSession =
+            await Session.createNewSessionWithoutRequestResponse(
+              "public",
+              passwordlessResult.recipeUserId,
+              {},
+              {},
+              true,
+            );
 
-          await UserMetadata.updateUserMetadata(primaryUserId, {
+          await UserMetadata.updateUserMetadata(passwordlessResult.user.id, {
             original_rownd_user: {
               state: "enabled",
               auth_level: "verified",
               data: {
-                user_id: primaryUserId,
+                user_id: passwordlessResult.user.id,
                 email,
               },
               verified_data: {
@@ -2741,37 +2728,132 @@ describe("rownd-nodejs plugin", () => {
             },
           });
 
-          const thirdPartyResult =
-            await ThirdParty.manuallyCreateOrUpdateUser(
-              "public",
-              providerId,
-              providerUserId,
-              email,
-              true,
-            );
+          const thirdPartyResult = await signInUpWithTestProvider({
+            providerId,
+            providerUserId,
+            email,
+            sessionAccessToken: passwordlessSession.getAccessToken(),
+            shouldTryLinkingWithSessionUser: true,
+          });
           expect(thirdPartyResult.status).toBe("OK");
-          if (thirdPartyResult.status !== "OK") {
-            throw new Error("failed to create thirdparty user");
-          }
-
-          const linkResult = await AccountLinking.linkAccounts(
-            thirdPartyResult.recipeUserId,
-            primaryUserId,
+          expect(thirdPartyResult.user.loginMethods).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ recipeId: "passwordless", email }),
+              expect.objectContaining({
+                recipeId: "thirdparty",
+                thirdParty: { id: providerId, userId: providerUserId },
+              }),
+            ]),
           );
-          expect(linkResult.status).toBe("OK");
-
-          const session = await Session.createNewSessionWithoutRequestResponse(
-            "public",
-            passwordlessResult.recipeUserId,
-            {},
-            {},
-            true,
-          );
+          const accessToken =
+            thirdPartyResult.accessToken ??
+            passwordlessSession.getAccessToken();
 
           const res = await fetch(
             `http://localhost:${testPORT}/auth/plugin/rownd/user`,
             {
-              headers: getAuthedHeaders(session.getAccessToken()),
+              headers: getAuthedHeaders(accessToken),
+            },
+          );
+
+          expect(res.status).toBe(200);
+          const body = await res.json();
+          console.log(body);
+
+          expect(body.status).toBe("OK");
+          expect(body.rownd_user).toBe(thirdPartyResult.user.id);
+          expect(body.data[field]).toBe(providerUserId);
+          expect(body.verified_data.email).toBe(email);
+          expect(body.verified_data[field]).toBe(providerUserId);
+        },
+      );
+
+      it.each([
+        { providerId: "google", field: "google_id" },
+        { providerId: "apple", field: "apple_id" },
+      ])(
+        "includes linked $providerId id in verified_data for an imported Rownd user",
+        async ({ providerId, field }) => {
+          const { server: s, port } = await setup(coreConnectionURI);
+          server = s;
+          testPORT = port;
+          const rowndUserId = `${providerId}-imported-linked-user`;
+          const email = `${providerId}-imported-linked@example.com`;
+          const providerUserId = `${providerId}-imported-linked-id`;
+
+          const passwordlessResult = await Passwordless.signInUp({
+            email,
+            tenantId: "public",
+          });
+          const importedUser = passwordlessResult.user;
+          const passwordlessSession =
+            await Session.createNewSessionWithoutRequestResponse(
+              "public",
+              passwordlessResult.recipeUserId,
+              {},
+              {},
+              true,
+            );
+
+          await UserMetadata.updateUserMetadata(importedUser.id, {
+            original_rownd_user: {
+              state: "enabled",
+              auth_level: "verified",
+              data: {
+                user_id: rowndUserId,
+                email,
+              },
+              verified_data: { email: true },
+              attributes: {},
+            },
+          });
+
+          const passwordlessMethod = importedUser?.loginMethods.find(
+            (method) =>
+              method.recipeId === "passwordless" && method.email === email,
+          );
+          expect(passwordlessMethod).toBeDefined();
+
+          const importedMetadata = await UserMetadata.getUserMetadata(
+            importedUser.id,
+          );
+          expect(
+            (importedMetadata.metadata as any).original_rownd_user
+              .verified_data,
+          ).toEqual({ email: true });
+
+          const thirdPartyResult = await signInUpWithTestProvider({
+            providerId,
+            providerUserId,
+            email,
+            sessionAccessToken: passwordlessSession.getAccessToken(),
+            shouldTryLinkingWithSessionUser: true,
+          });
+          expect(thirdPartyResult.status).toBe("OK");
+          expect(thirdPartyResult.user.loginMethods).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ recipeId: "passwordless", email }),
+              expect.objectContaining({
+                recipeId: "thirdparty",
+                thirdParty: { id: providerId, userId: providerUserId },
+              }),
+            ]),
+          );
+
+          const staleMetadata = await UserMetadata.getUserMetadata(
+            thirdPartyResult.user.id,
+          );
+          expect(
+            (staleMetadata.metadata as any).original_rownd_user.verified_data,
+          ).toEqual({ email: true });
+          const accessToken =
+            thirdPartyResult.accessToken ??
+            passwordlessSession.getAccessToken();
+
+          const res = await fetch(
+            `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+            {
+              headers: getAuthedHeaders(accessToken),
             },
           );
 
@@ -2779,12 +2861,8 @@ describe("rownd-nodejs plugin", () => {
           const body = await res.json();
           expect(body.status).toBe("OK");
           expect(body.data[field]).toBe(providerUserId);
-          expect(body.verified_data).toEqual(
-            expect.objectContaining({
-              email,
-              [field]: providerUserId,
-            }),
-          );
+          expect(body.verified_data.email).toBe(email);
+          expect(body.verified_data[field]).toBe(providerUserId);
         },
       );
 
@@ -2901,9 +2979,8 @@ describe("rownd-nodejs plugin", () => {
         const firstAccessToken = await createSessionForUser(
           "latest-session-time-user",
         );
-        const firstSession = await Session.getSessionWithoutRequestResponse(
-          firstAccessToken,
-        );
+        const firstSession =
+          await Session.getSessionWithoutRequestResponse(firstAccessToken);
         const stUser = await SuperTokens.getUser(firstSession.getUserId());
         const recipeUserId = stUser?.loginMethods[0]?.recipeUserId;
         expect(recipeUserId).toBeDefined();
@@ -4418,6 +4495,43 @@ describe("rownd-nodejs plugin", () => {
         "st-auth-mode": "header",
       };
     }
+
+    async function signInUpWithTestProvider(input: {
+      providerId: string;
+      providerUserId: string;
+      email: string;
+      sessionAccessToken?: string;
+      shouldTryLinkingWithSessionUser?: boolean;
+    }) {
+      const res = await fetch(`http://localhost:${testPORT}/auth/signinup`, {
+        method: "POST",
+        headers: {
+          ...(input.sessionAccessToken
+            ? { Authorization: `Bearer ${input.sessionAccessToken}` }
+            : {}),
+          rid: "thirdparty",
+          "content-type": "application/json",
+          "fdi-version": "3.1",
+          "st-auth-mode": "header",
+        },
+        body: JSON.stringify({
+          thirdPartyId: input.providerId,
+          oAuthTokens: {
+            thirdPartyUserId: input.providerUserId,
+            email: input.email,
+            emailVerified: true,
+          },
+          shouldTryLinkingWithSessionUser:
+            input.shouldTryLinkingWithSessionUser ?? false,
+        }),
+      });
+      const body = await res.json();
+
+      return {
+        ...body,
+        accessToken: res.headers.get("st-access-token"),
+      };
+    }
   });
 });
 
@@ -4536,12 +4650,14 @@ async function setup(
                     thirdPartyId: "google",
                     clients: [{ clientId: "test", clientSecret: "test" }],
                   },
+                  override: overrideTestProviderUserInfo,
                 },
                 {
                   config: {
                     thirdPartyId: "apple",
                     clients: [{ clientId: "test", clientSecret: "test" }],
                   },
+                  override: overrideTestProviderUserInfo,
                 },
               ],
             },
@@ -4565,4 +4681,20 @@ async function setup(
       resolve({ server: s, port });
     });
   });
+}
+
+function overrideTestProviderUserInfo(originalImplementation: any) {
+  return {
+    ...originalImplementation,
+    getUserInfo: async ({ oAuthTokens }: { oAuthTokens: any }) => ({
+      thirdPartyUserId: oAuthTokens.thirdPartyUserId,
+      email: {
+        id: oAuthTokens.email,
+        isVerified: oAuthTokens.emailVerified,
+      },
+      rawUserInfoFromProvider: {
+        fromUserInfoAPI: oAuthTokens,
+      },
+    }),
+  };
 }
