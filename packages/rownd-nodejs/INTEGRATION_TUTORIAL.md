@@ -139,6 +139,15 @@ SuperTokens.init({
         rowndAppSecret: process.env.ROWND_APP_SECRET!,
         // Optional plugin debug logs.
         enableDebugLogs: process.env.ROWND_ENABLE_DEBUG_LOGS === "true",
+        // Optional. Rewrites magic-link and email-verification links to client URL bases.
+        clientDomains: {
+          // Default browser client. Used when no explicit client domain is requested.
+          browser: process.env.WEBSITE_DOMAIN!,
+          // Native app Universal Link base. Must match the mobile deep-link domain.
+          mobile: "https://my-app.rownd-hub.supertokens.com",
+          // Optional named browser client for local development or multi-domain apps.
+          browser_local: "http://localhost:3000",
+        },
         // Rownd-compatible config returned by /plugin/rownd/app-config.
         // We will generate and provide the app config value based on your Rownd setup.
         // This example is used as a reference here.
@@ -176,6 +185,38 @@ SuperTokens.init({
   },
 });
 ```
+
+### Client link domains
+
+`clientDomains` tells the plugin which host to use when building magic links. This way you can use a specific domain for web apps, a different one for mobile while also allowing localhost development.
+
+The plugin receives a link from SuperTokens, rewrites it to a Rownd Hub route, and preserves the original SuperTokens query parameters. The rewritten paths are:
+
+- `/account/login` for passwordless magic links
+- `/account/verify-email` for email verification links
+
+For example, with `clientDomains.mobile: "https://my-app.rownd-hub.supertokens.com"`, a mobile magic link becomes a Universal Link URL such as:
+
+```text
+https://my-app.rownd-hub.supertokens.com/account/login?preAuthSessionId=...&tenantId=public&appKey=...&apiDomain=...&apiBasePath=/auth&displayContext=mobile_app
+```
+
+The value selected from `clientDomains` is based on client context:
+
+- If the Hub sends `rownd_client_domain`, the plugin uses that value as a key in `clientDomains`.
+- If no explicit key is sent and `rownd_display_context=mobile_app`, the plugin uses `clientDomains.mobile`.
+- Otherwise, the plugin uses `clientDomains.browser`.
+- If the selected key is not configured, the plugin keeps the link on the Hub URL and only rewrites the Hub path.
+
+All `clientDomains` values must be absolute URL bases. Browser values are usually the app origin, such as `https://app.example.com`. Mobile values should be the mobile deep-link Universal Link domain, such as `https://my-app.rownd-hub.supertokens.com`.
+
+End-to-end, the setup works like this:
+
+1. The client SDK configures a `clientDomain` key or uses the mobile Hub loader.
+2. The Hub keeps that as `clientDomain` or infers `displayContext=mobile_app`.
+3. The Hub appends `rownd_client_domain` and `rownd_display_context` to SuperTokens passwordless requests.
+4. The plugin stores those values in `userContext` before SuperTokens creates the code.
+5. The plugin email delivery overrides rewrite the generated link to the selected frontend base URL.
 
 ### CORS
 
@@ -243,6 +284,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     appKey={import.meta.env.VITE_ROWND_APP_KEY}
     // Optional. Omit in production to use https://rownd-hub.supertokens.com.
     hubUrlOverride={import.meta.env.VITE_ROWND_HUB_URL}
+    // Optional. Selects a key from backend clientDomains for generated account links.
+    clientDomain={import.meta.env.VITE_ROWND_CLIENT_DOMAIN}
     // Required. Replaces original Rownd apiUrl for SuperTokens-backed auth.
     supertokens={{
       appInfo: {
@@ -269,6 +312,36 @@ New required config is supertokens.appInfo.apiDomain
 apiBasePath must match your backend SuperTokens config
 User-facing APIs stay Rownd-compatible
 ```
+
+If you set `clientDomain`, the value is a key, not a URL. It must match a key in the backend plugin's `clientDomains` map. For local browser testing, the client and backend configs commonly look like this:
+
+```tsx
+<RowndProvider
+  appKey={import.meta.env.VITE_ROWND_APP_KEY}
+  clientDomain="browser_local"
+  supertokens={{
+    appInfo: {
+      apiDomain: import.meta.env.VITE_SUPERTOKENS_API_DOMAIN,
+      apiBasePath: "/auth",
+    },
+  }}
+>
+  <App />
+</RowndProvider>
+```
+
+```ts
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY!,
+  rowndAppSecret: process.env.ROWND_APP_SECRET!,
+  clientDomains: {
+    browser: "https://app.example.com",
+    browser_local: "http://localhost:3000",
+  },
+});
+```
+
+The React SDK forwards `clientDomain` to the Hub. The Hub then sends it to the plugin as `rownd_client_domain` when creating passwordless codes, so email links point back to the selected frontend base URL.
 
 ### Step 3: Use the Rownd APIs
 
@@ -333,6 +406,8 @@ npm install @supertokens/rownd-nextjs@0.1.0-beta.2
 ```bash
 ROWND_APP_KEY=...
 API_DOMAIN=https://api.example.com
+# Optional. Must match a key in backend clientDomains, such as browser_local.
+ROWND_CLIENT_DOMAIN=browser_local
 ```
 
 ### Step 3: Create shared config
@@ -344,6 +419,7 @@ Create a shared Rownd config file:
 import type { RowndServerConfig } from "@supertokens/rownd-nextjs/server";
 
 export const rowndAppKey = process.env.ROWND_APP_KEY!;
+export const rowndClientDomain = process.env.ROWND_CLIENT_DOMAIN;
 
 export const rowndServerConfig: RowndServerConfig = {
   supertokens: {
@@ -366,7 +442,11 @@ Add the provider in `app/layout.tsx`:
 ```tsx
 import type { Metadata } from "next";
 import { RowndProvider } from "@supertokens/rownd-nextjs";
-import { rowndAppKey, rowndServerConfig } from "../rowndConfig";
+import {
+  rowndAppKey,
+  rowndClientDomain,
+  rowndServerConfig,
+} from "../rowndConfig";
 
 export const metadata: Metadata = {
   title: "My App",
@@ -383,6 +463,8 @@ export default function RootLayout({
         <RowndProvider
           // Rownd app key. Same value used by RowndMigrationPlugin.
           appKey={rowndAppKey}
+          // Optional. Selects a backend clientDomains key for generated account links.
+          clientDomain={rowndClientDomain}
           // Required. Gives the Hub your SuperTokens backend location.
           supertokens={rowndServerConfig.supertokens}
         >
@@ -451,6 +533,8 @@ Server user loading uses /plugin/rownd/user
 Middleware must include /api/rownd-token-callback
 ```
 
+As with React, `clientDomain` is a logical key forwarded to the Hub, not the URL itself. Set `ROWND_CLIENT_DOMAIN=browser_local` only if the backend plugin has `clientDomains.browser_local` configured. This is useful for local development, preview domains, or multi-domain Next.js deployments where magic links must return to the same frontend domain that initiated sign-in.
+
 ## Mobile SDKs
 
 The iOS and Android SDKs use the same hosted Hub and backend plugin endpoints as the web SDKs. Configure each mobile app with:
@@ -458,6 +542,22 @@ The iOS and Android SDKs use the same hosted Hub and backend plugin endpoints as
 - `appKey`: same value as `RowndMigrationPlugin.init({ rowndAppKey })`
 - `apiDomain`: public backend origin that hosts SuperTokens and the Rownd plugin
 - `apiBasePath`: must match backend `appInfo.apiBasePath`, usually `/auth`
+
+Mobile SDKs load the Hub through `/mobile_app`, which makes the Hub send `rownd_display_context=mobile_app` to the backend. When the plugin sees that display context and no explicit `rownd_client_domain`, it selects `clientDomains.mobile`.
+
+Configure `clientDomains.mobile` on the backend to match the mobile deep-link Universal Link domain for your native app:
+
+```ts
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY!,
+  rowndAppSecret: process.env.ROWND_APP_SECRET!,
+  clientDomains: {
+    mobile: "https://my-app.rownd-hub.supertokens.com",
+  },
+});
+```
+
+With this setup, magic links and verification links opened from email can return directly to the native app instead of opening the hosted Hub in a browser.
 
 ### iOS
 
@@ -500,6 +600,8 @@ func application(
 ```
 
 For app extensions or widgets, configure an app group and set `Rownd.config.appGroupPrefix` before calling `Rownd.configure()`.
+
+The iOS SDK opens `https://rownd-hub.supertokens.com/mobile_app` and passes `apiDomain` and `apiBasePath` to the Hub. The `/mobile_app` loader supplies the mobile display context, so the plugin uses `clientDomains.mobile` when rewriting links. Configure `clientDomains.mobile` to the Universal Link domain associated with the app, such as `https://my-app.rownd-hub.supertokens.com`.
 
 #### Step 3: Use the SDK APIs
 
@@ -571,6 +673,8 @@ class MyApplication : Application() {
     }
 }
 ```
+
+The Android SDK also loads the Hub through `/mobile_app`, so the backend plugin uses `clientDomains.mobile` for generated account links. Configure `clientDomains.mobile` to the Android App Link domain associated with the app, such as `https://my-app.rownd-hub.supertokens.com`.
 
 #### Step 3: Use the SDK APIs
 
