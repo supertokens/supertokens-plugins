@@ -109,6 +109,10 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
         thirdPartyId === ANONYMOUS_AUTH_METHOD_ID
           ? `anon_${randomUUID()}`
           : guestId;
+      const authLevel =
+        thirdPartyId === ANONYMOUS_AUTH_METHOD_ID
+          ? ANONYMOUS_AUTH_METHOD_ID
+          : GUEST_AUTH_METHOD_ID;
 
       const response = await ThirdParty.manuallyCreateOrUpdateUser(
         PUBLIC_TENANT_ID,
@@ -133,7 +137,7 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
         response.recipeUserId,
         {
           ...buildRowndAudience({}, appVariantId),
-          auth_level: GUEST_AUTH_METHOD_ID,
+          auth_level: authLevel,
           is_anonymous: true,
           app_user_id: response.user.id,
         },

@@ -259,7 +259,9 @@ export function buildRowndSessionClaimPayload(input: {
     | undefined;
   const authLevel = getEffectiveAuthLevel(
     input.user,
-    originalRowndUser?.auth_level,
+    typeof currentPayload.auth_level === "string"
+      ? currentPayload.auth_level
+      : originalRowndUser?.auth_level,
     verifiedData,
   );
   const appUserId = getRowndAppUserId(
@@ -268,7 +270,10 @@ export function buildRowndSessionClaimPayload(input: {
     currentPayload,
     input.metadata,
   );
-  const isAnonymous = authLevel === GUEST_AUTH_METHOD_ID;
+  const isAnonymous =
+    currentPayload.is_anonymous === true ||
+    authLevel === GUEST_AUTH_METHOD_ID ||
+    authLevel === ANONYMOUS_AUTH_METHOD_ID;
   const anonymousId = getAnonymousId(input.userId, input.user, input.metadata);
   const isVerifiedUser = authLevel !== "unverified";
   const audience = buildRowndAudience(currentPayload, input.appVariantId);
@@ -460,6 +465,10 @@ export function getEffectiveAuthLevel(
   originalAuthLevel?: string,
   verifiedData?: JsonRecord,
 ) {
+  if (originalAuthLevel === ANONYMOUS_AUTH_METHOD_ID) {
+    return ANONYMOUS_AUTH_METHOD_ID;
+  }
+
   if (hasVerifiedRealLoginMethod(user)) {
     return "verified";
   }

@@ -1719,7 +1719,7 @@ describe("rownd-nodejs plugin", () => {
           session?.getClaimValue(RowndIsAnonymousClaim),
         ).resolves.toBe(true);
         const accessTokenPayload = session!.getAccessTokenPayload();
-        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("guest");
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("anonymous");
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(true);
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(true);
       });
@@ -2551,7 +2551,7 @@ describe("rownd-nodejs plugin", () => {
         expect(guestLogin?.thirdParty?.userId).toMatch(/^guest_[a-f0-9-]{36}$/);
       });
 
-      it("should use the anonymous provider while exposing guest auth_level", async () => {
+      it("should use the anonymous provider while exposing anonymous auth_level", async () => {
         const { server: s, port } = await setup(coreConnectionURI);
         server = s;
         testPORT = port;
@@ -2580,10 +2580,9 @@ describe("rownd-nodejs plugin", () => {
           accessToken!,
         );
         const accessTokenPayload = session!.getAccessTokenPayload();
-        expect(accessTokenPayload["auth_level"]).toBe("guest");
-        expect(accessTokenPayload["auth_level"]).not.toBe("anonymous");
+        expect(accessTokenPayload["auth_level"]).toBe("anonymous");
         expect(accessTokenPayload["anonymous_id"]).toMatch(/^anon_/);
-        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("guest");
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("anonymous");
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(true);
 
         const stUser = await SuperTokens.getUser(session!.getUserId());
