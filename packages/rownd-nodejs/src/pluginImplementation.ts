@@ -38,12 +38,14 @@ import {
   startPendingEmailVerification,
   updateUserData,
   updateUserMetadata,
+  verifyPasswordlessConfirmationBypass,
 } from "./supertokens-repository";
 import {
   getErrorMessage,
   getJsonBody,
   getRequestedAppVariantIdFromRequest,
   hasOwn,
+  isJsonRecord,
   missingFieldResponse,
   parseGuestBody,
   parseRequest,
@@ -173,6 +175,43 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
       return {
         status: "ERROR" as const,
         message: "Guest login failed",
+      };
+    }
+  };
+}
+
+export function handleVerifyPasswordlessConfirmationBypass(deps: RowndRouteHandlerDeps) {
+  return async (req: SuperTokensRequest) => {
+    try {
+      const body = await getJsonBody(req);
+      const input = isJsonRecord(body) ? body : {};
+      const bypass = await verifyPasswordlessConfirmationBypass({
+        stConfig: deps.stConfig,
+        pluginConfig: deps.pluginConfig,
+        token: typeof input.token === "string" ? input.token : undefined,
+        preAuthSessionId: typeof input.preAuthSessionId === "string"
+          ? input.preAuthSessionId
+          : undefined,
+        tenantId: typeof input.tenantId === "string" ? input.tenantId : undefined,
+        clientDomain: typeof input.clientDomain === "string"
+          ? input.clientDomain
+          : undefined,
+        redirectToPath: typeof input.redirectToPath === "string"
+          ? input.redirectToPath
+          : undefined,
+        appVariantId: typeof input.appVariantId === "string"
+          ? input.appVariantId
+          : undefined,
+      });
+
+      return {
+        status: "OK" as const,
+        bypass,
+      };
+    } catch {
+      return {
+        status: "OK" as const,
+        bypass: false,
       };
     }
   };

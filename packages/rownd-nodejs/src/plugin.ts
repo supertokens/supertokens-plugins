@@ -16,7 +16,10 @@ import {
 import { RowndPluginConfig, RowndPluginNormalisedConfig } from "./types";
 import { enableDebugLogs, logDebugMessage } from "./logger";
 import { createClient } from "./telemetry/createTelemetryClient";
-import { assertRowndAppVariantIsConfigured, setPluginConfig } from "./config";
+import {
+  assertRowndAppVariantIsConfigured,
+  setPluginConfig,
+} from "./config";
 import { shouldLinkRowndAccounts } from "./rownd-compatibility";
 import { setRowndClient } from "./rownd-repository";
 import {
@@ -39,6 +42,7 @@ import {
   handleGetUser,
   handleGetUserField,
   handleGetUserMeta,
+  handleVerifyPasswordlessConfirmationBypass,
   handleGuestLogin,
   handleMigrate,
   handleSignOut,
@@ -163,6 +167,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/guest`,
                 method: "post" as const,
                 handler: withRequestHandler(handleGuestLogin(routeHandlerDeps)),
+              },
+              {
+                path: `${apiBasePath}${HANDLE_BASE_PATH}/passwordless/bypass-device-confirmation/verify`,
+                method: "post" as const,
+                handler: withRequestHandler(
+                  handleVerifyPasswordlessConfirmationBypass(routeHandlerDeps),
+                ),
               },
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate`,

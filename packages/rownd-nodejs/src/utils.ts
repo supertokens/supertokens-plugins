@@ -1,6 +1,9 @@
 import type { JSONObject, PluginRouteHandler } from "supertokens-node/types";
+import type { SuperTokensPublicConfig } from "supertokens-node/types";
 
+import { HUB_LOGIN_PAGE_PATH } from "./constants";
 import { RowndPluginError } from "./errors";
+import type { RowndPluginNormalisedConfig } from "./types";
 
 type SuperTokensRequest = Parameters<PluginRouteHandler["handler"]>[0];
 export type JsonRecord = JSONObject;
@@ -158,6 +161,184 @@ export function getStringList(value: unknown) {
 
 export function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
+}
+
+export function getAppInfoString(value: { getAsStringDangerous: () => string }) {
+  return value.getAsStringDangerous();
+}
+
+export function getWebsiteDomain(input: {
+  stConfig: SuperTokensPublicConfig;
+  request?: any;
+  userContext?: Record<string, any>;
+}) {
+  return getAppInfoString(input.stConfig.appInfo.getOrigin({
+    request: input.request,
+    userContext: (input.userContext ?? {}) as any,
+  }));
+}
+
+export function normalizeClientDomain(value: string) {
+  if (value.endsWith("://")) {
+    return value;
+  }
+
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return parsed.origin;
+    }
+
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    throw new Error(`Invalid clientDomain: ${value}`);
+  }
+}
+
+function resolveClientDomain(input: {
+  clientDomain?: string;
+  pluginConfig: RowndPluginNormalisedConfig;
+  websiteDomain: string;
+}) {
+  if (!input.clientDomain) {
+    return input.websiteDomain;
+  }
+
+  const resolved = input.pluginConfig.clientDomains?.[input.clientDomain];
+  if (!resolved) {
+    throw new Error(`Unknown clientDomain key: ${input.clientDomain}`);
+  }
+
+  return resolved;
+}
+
+function assertAllowedClientDomain(input: {
+  clientDomain: string;
+  pluginConfig: RowndPluginNormalisedConfig;
+  websiteDomain: string;
+}) {
+  const normalizedClientDomain = normalizeClientDomain(input.clientDomain);
+  const allowed = [
+    input.websiteDomain,
+    ...Object.values(input.pluginConfig.clientDomains ?? {}),
+  ].map(normalizeClientDomain);
+
+  if (!allowed.includes(normalizedClientDomain)) {
+    throw new Error(`clientDomain is not allowed: ${input.clientDomain}`);
+  }
+
+  return normalizedClientDomain;
+}
+
+export function resolveAllowedClientDomain(input: {
+  clientDomain?: string;
+  pluginConfig: RowndPluginNormalisedConfig;
+  stConfig: SuperTokensPublicConfig;
+  request?: any;
+  userContext?: Record<string, any>;
+}) {
+  const websiteDomain = getWebsiteDomain(input);
+  const resolvedClientDomain = resolveClientDomain({
+    clientDomain: input.clientDomain,
+    pluginConfig: input.pluginConfig,
+    websiteDomain,
+  });
+
+  return assertAllowedClientDomain({
+    clientDomain: resolvedClientDomain,
+    pluginConfig: input.pluginConfig,
+    websiteDomain,
+  });
+}
+
+export function normalizeRedirectToPathForClientDomain(
+  redirectToPath: string | undefined,
+  clientDomain: string,
+) {
+  if (!redirectToPath) {
+    return undefined;
+  }
+
+  if (redirectToPath === "NATIVE_APP") {
+    return redirectToPath;
+  }
+
+  if (redirectToPath.startsWith("//")) {
+    throw new Error("redirectToPath cannot be schemaless");
+  }
+
+  const normalizedClientDomain = normalizeClientDomain(clientDomain);
+
+  try {
+    const redirectUrl = new URL(
+      redirectToPath,
+      normalizedClientDomain.endsWith("://") ? "http://localhost" : normalizedClientDomain,
+    );
+    const hasExplicitScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(redirectToPath);
+
+    if (hasExplicitScheme) {
+      if (redirectUrl.protocol !== "http:" && redirectUrl.protocol !== "https:") {
+        throw new Error("redirectToPath must be http(s) or relative");
+      }
+
+      if (redirectUrl.origin !== normalizedClientDomain) {
+        throw new Error("redirectToPath must match clientDomain");
+      }
+    }
+
+    return `${redirectUrl.pathname}${redirectUrl.search}${redirectUrl.hash}`;
+  } catch (err) {
+    if (err instanceof Error) {
+      throw err;
+    }
+
+    throw new Error("Invalid redirectToPath");
+  }
+}
+
+export function getMagicLinkBootstrapParams(input: {
+  appKey: string;
+  apiDomain: string;
+  apiBasePath: string;
+  appVariantId?: string;
+  displayContext?: "browser" | "mobile_app" | "customer_web_view";
+  redirectToPath?: string;
+  clientDomainKey?: string;
+}) {
+  return {
+    appKey: input.appKey,
+    apiDomain: input.apiDomain,
+    apiBasePath: input.apiBasePath,
+    ...(input.appVariantId ? { appVariantId: input.appVariantId } : {}),
+    ...(input.displayContext ? { displayContext: input.displayContext } : {}),
+    ...(input.redirectToPath ? { redirectToPath: input.redirectToPath } : {}),
+    ...(input.clientDomainKey ? { clientDomain: input.clientDomainKey } : {}),
+  };
+}
+
+export function rewriteMagicLink(input: {
+  magicLink: string;
+  clientDomain: string;
+  bootstrapParams: Record<string, string>;
+}) {
+  return rewriteLinkToBaseUrl(
+    input.magicLink,
+    HUB_LOGIN_PAGE_PATH,
+    input.clientDomain,
+    input.bootstrapParams,
+  );
+}
+
+export function getRequiredSearchParam(url: URL, name: string) {
+  const value = url.searchParams.get(name);
+  if (!value) {
+    throw new Error(`Magic link is missing ${name}`);
+  }
+  return value;
+}
+
+export function decodeBase64UrlJson<T>(value: string): T {
+  return JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as T;
 }
 
 export function getRequestedAppVariantIdFromRequest(
