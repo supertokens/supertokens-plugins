@@ -1269,6 +1269,55 @@ describe("rownd-nodejs plugin", () => {
         expect(user?.loginMethods[0].thirdParty?.id).toBe("google");
       });
 
+      it("migrates a newly imported mapped user when email verification is enabled", async () => {
+        const { server: s, port } = await setup(
+          importCoreConnectionURI,
+          undefined,
+          { enableEmailVerification: true },
+        );
+        server = s;
+        testPORT = port;
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-ev-google",
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-ev-google",
+          data: {
+            user_id: "rownd-ev-google",
+            google_id: "google-ev-id",
+            email: "rownd-ev-google@example.com",
+          },
+          verified_data: { google_id: true },
+        });
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer some-token",
+              rid: "session",
+              "fdi-version": "1.18",
+            },
+          },
+        );
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ status: "OK" });
+
+        const accessToken = res.headers.get("st-access-token");
+        expect(accessToken).toBeTruthy();
+
+        const session = await Session.getSessionWithoutRequestResponse(
+          accessToken!,
+        );
+        expect(session?.getUserId()).toBe("rownd-ev-google");
+
+        const migratedUser =
+          await getMigratedUserByRowndUserId("rownd-ev-google");
+        expect(migratedUser?.user.loginMethods[0].recipeId).toBe("thirdparty");
+      });
+
       it("error if the auth header is missing", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;

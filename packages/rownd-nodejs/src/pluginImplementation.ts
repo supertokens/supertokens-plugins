@@ -58,6 +58,12 @@ type SuperTokensSession = Parameters<PluginRouteHandler["handler"]>[2];
 type SuperTokensUserContext = Parameters<PluginRouteHandler["handler"]>[3];
 type TelemetryClient = ReturnType<typeof createClient>;
 
+type SuperTokensUserContextWithCache = SuperTokensUserContext & {
+  _default?: {
+    coreCallCache?: Record<string, unknown>;
+  };
+};
+
 export type RowndRouteHandlerDeps = {
   pluginConfig: RowndPluginNormalisedConfig;
   stConfig: SuperTokensPublicConfig;
@@ -212,16 +218,14 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         const stUserImport = mapRowndUserToSuperTokens(rowndUser);
 
         try {
-          const importedUser = await importUser(
-            stUserImport,
-            deps.stConfig.supertokens,
-          );
-          superTokensUserId = importedUser.id;
-          if (importedUser.loginMethods[0]?.recipeUserId) {
-            recipeUserId = SuperTokens.convertToRecipeUserId(
-              importedUser.loginMethods[0].recipeUserId,
-            );
+          await importUser(stUserImport, deps.stConfig.supertokens);
+          clearSuperTokensCoreCallCache(userContext);
+          user = await SuperTokens.getUser(rowndUserId, userContext);
+          if (!user) {
+            throw new Error("Imported user could not be resolved");
           }
+          superTokensUserId = user.id;
+          recipeUserId = user.loginMethods[0]?.recipeUserId;
         } catch (err) {
           user = await SuperTokens.getUser(rowndUserId, userContext);
           if (!user) {
@@ -296,6 +300,13 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       };
     }
   };
+}
+
+function clearSuperTokensCoreCallCache(userContext: SuperTokensUserContext) {
+  const cacheContext = userContext as SuperTokensUserContextWithCache;
+  if (cacheContext._default?.coreCallCache) {
+    cacheContext._default.coreCallCache = {};
+  }
 }
 
 export function handleGetUser() {
