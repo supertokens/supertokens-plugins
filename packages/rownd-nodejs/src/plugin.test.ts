@@ -50,7 +50,9 @@ import {
   RowndIsAnonymousClaim,
   buildRowndSessionClaims,
   completePendingEmailVerification,
+  createMagicLinkWithConfirmationBypass,
   recordRowndAppVariantForUser,
+  verifyPasswordlessConfirmationBypass,
 } from "./supertokens-repository";
 
 let testPORT = 30001;
@@ -615,6 +617,140 @@ describe("rownd-nodejs plugin", () => {
       expect(rewrittenUrl.pathname).toBe("/account/login");
       expect(rewrittenUrl.searchParams.get("displayContext")).toBe("browser");
       expect(rewrittenUrl.hash).toBe("#abc");
+    });
+
+    it("creates a signed passwordless magic link that bypasses cross-device confirmation", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: { browser_local: "http://localhost:3000" },
+      };
+      const { server: s, port } = await setup(coreConnectionURI, pluginConfig);
+      server = s;
+      testPORT = port;
+      const stConfig = makePublicConfig(
+        `http://localhost:${port}`,
+        "/auth",
+        `http://localhost:${port + 1}`,
+      ) as any;
+
+      const link = await createMagicLinkWithConfirmationBypass({
+        stConfig,
+        pluginConfig,
+        email: "bypass@example.com",
+        clientDomain: "browser_local",
+        redirectToPath: "http://localhost:3000/profile?tab=security",
+        displayContext: "browser",
+      });
+      const url = new URL(link);
+
+      expect(url.origin).toBe("http://localhost:3000");
+      expect(url.pathname).toBe("/account/login");
+      expect(url.searchParams.get("bypassDeviceConfirmation")).toBe("true");
+      expect(url.searchParams.get("bypassDeviceConfirmationToken")).toBeTruthy();
+      expect(url.searchParams.get("redirectToPath")).toBe("/profile?tab=security");
+      expect(url.searchParams.get("clientDomain")).toBe("browser_local");
+
+      await expect(
+        verifyPasswordlessConfirmationBypass({
+          stConfig,
+          pluginConfig,
+          token: url.searchParams.get("bypassDeviceConfirmationToken") || undefined,
+          preAuthSessionId: url.searchParams.get("preAuthSessionId") || undefined,
+          tenantId: url.searchParams.get("tenantId") || undefined,
+          clientDomain: "browser_local",
+          redirectToPath: "/profile?tab=security",
+        }),
+      ).resolves.toBe(true);
+    });
+
+    it("rejects bypass magic links for unknown client domain keys", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: { browser_local: "http://localhost:3000" },
+      };
+      const { server: s, port } = await setup(coreConnectionURI, pluginConfig);
+      server = s;
+      testPORT = port;
+      const stConfig = makePublicConfig(
+        `http://localhost:${port}`,
+        "/auth",
+        `http://localhost:${port + 1}`,
+      ) as any;
+
+      await expect(
+        createMagicLinkWithConfirmationBypass({
+          stConfig,
+          pluginConfig,
+          email: "bypass@example.com",
+          clientDomain: "http://localhost:3000",
+        }),
+      ).rejects.toThrow("Unknown clientDomain key");
+    });
+
+    it("rejects bypass magic links for cross-domain redirects", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: { browser_local: "http://localhost:3000" },
+      };
+      const { server: s, port } = await setup(coreConnectionURI, pluginConfig);
+      server = s;
+      testPORT = port;
+      const stConfig = makePublicConfig(
+        `http://localhost:${port}`,
+        "/auth",
+        `http://localhost:${port + 1}`,
+      ) as any;
+
+      await expect(
+        createMagicLinkWithConfirmationBypass({
+          stConfig,
+          pluginConfig,
+          email: "bypass@example.com",
+          clientDomain: "browser_local",
+          redirectToPath: "https://evil.example.com/profile",
+        }),
+      ).rejects.toThrow("redirectToPath must match clientDomain");
+    });
+
+    it("rejects confirmation bypass verification for mismatched client domains", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        clientDomains: {
+          browser_local: "http://localhost:3000",
+          browser_other: "http://localhost:3001",
+        },
+      };
+      const { server: s, port } = await setup(coreConnectionURI, pluginConfig);
+      server = s;
+      testPORT = port;
+      const stConfig = makePublicConfig(
+        `http://localhost:${port}`,
+        "/auth",
+        `http://localhost:${port + 1}`,
+      ) as any;
+
+      const link = await createMagicLinkWithConfirmationBypass({
+        stConfig,
+        pluginConfig,
+        email: "bypass@example.com",
+        clientDomain: "browser_local",
+      });
+      const url = new URL(link);
+
+      await expect(
+        verifyPasswordlessConfirmationBypass({
+          stConfig,
+          pluginConfig,
+          token: url.searchParams.get("bypassDeviceConfirmationToken") || undefined,
+          preAuthSessionId: url.searchParams.get("preAuthSessionId") || undefined,
+          tenantId: url.searchParams.get("tenantId") || undefined,
+          clientDomain: "browser_other",
+        }),
+      ).resolves.toBe(false);
     });
 
     it("adds hub bootstrap params to passwordless SMS magic links", async () => {
@@ -4608,7 +4744,7 @@ function makeRequest(query: Record<string, string>) {
   };
 }
 
-function makePublicConfig(apiDomain: string, apiBasePath: string) {
+function makePublicConfig(apiDomain: string, apiBasePath: string, websiteDomain = "https://hub.example.com") {
   return {
     appInfo: {
       apiDomain: {
@@ -4617,6 +4753,12 @@ function makePublicConfig(apiDomain: string, apiBasePath: string) {
       apiBasePath: {
         getAsStringDangerous: () => apiBasePath,
       },
+      websiteBasePath: {
+        getAsStringDangerous: () => "/auth",
+      },
+      getOrigin: () => ({
+        getAsStringDangerous: () => websiteDomain,
+      }),
       appName: "Test App",
     },
   };

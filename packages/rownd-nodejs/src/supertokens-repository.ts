@@ -1,16 +1,25 @@
+import { createPublicKey, createVerify } from "node:crypto";
 import SuperTokens from "supertokens-node";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
 import EmailVerification from "supertokens-node/recipe/emailverification";
 import Passwordless from "supertokens-node/recipe/passwordless";
 import Session from "supertokens-node/recipe/session";
 import { BooleanClaim } from "supertokens-node/recipe/session/claims";
+import type { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import type { JSONObject, SuperTokensPublicConfig } from "supertokens-node/types";
 
-import { DEFAULT_ROWND_SCHEMA, GUEST_AUTH_METHOD_ID, PUBLIC_TENANT_ID } from "./constants";
+import {
+  DEFAULT_ROWND_SCHEMA,
+  GUEST_AUTH_METHOD_ID,
+  PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM,
+  PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PURPOSE,
+  PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_TOKEN_PARAM,
+  PUBLIC_TENANT_ID,
+} from "./constants";
 import { RowndPluginError } from "./errors";
 import { assertRowndAppVariantIsConfigured, getPluginConfig } from "./config";
-import type { SuperTokensUserImport } from "./types";
+import type { RowndPluginNormalisedConfig, SuperTokensUserImport } from "./types";
 import {
   buildRowndSessionClaimPayload,
   getEffectiveAuthLevel,
@@ -27,10 +36,108 @@ import {
 } from "./rownd-compatibility";
 import {
   getStringList,
+  getAppInfoString,
+  getMagicLinkBootstrapParams,
+  getRequiredSearchParam,
+  getWebsiteDomain,
   isJsonRecord,
   isRecord,
+  normalizeRedirectToPathForClientDomain,
+  resolveAllowedClientDomain,
+  rewriteMagicLink,
+  decodeBase64UrlJson,
   type JsonRecord,
 } from "./utils";
+
+const DEFAULT_BYPASS_TOKEN_VALIDITY_SECONDS = 300;
+
+type BypassDisplayContext = "browser" | "mobile_app" | "customer_web_view";
+
+export type CreateMagicLinkWithConfirmationBypassInput = {
+  stConfig: SuperTokensPublicConfig;
+  pluginConfig: RowndPluginNormalisedConfig;
+  email?: string;
+  phoneNumber?: string;
+  tenantId?: string;
+  request?: any;
+  session?: SessionContainerInterface;
+  userContext?: Record<string, any>;
+  redirectToPath?: string;
+  clientDomain?: string;
+  displayContext?: BypassDisplayContext;
+  appVariantId?: string;
+  validitySeconds?: number;
+};
+
+export type VerifyPasswordlessConfirmationBypassInput = {
+  stConfig: SuperTokensPublicConfig;
+  pluginConfig: RowndPluginNormalisedConfig;
+  token?: string;
+  preAuthSessionId?: string;
+  tenantId?: string;
+  clientDomain?: string;
+  redirectToPath?: string;
+  appVariantId?: string;
+};
+
+type BypassTokenPayload = {
+  purpose?: string;
+  preAuthSessionId?: string;
+  tenantId?: string;
+  clientDomain?: string;
+  redirectToPath?: string;
+  appVariantId?: string;
+  exp?: number;
+  nbf?: number;
+};
+
+function parseJwt(token: string) {
+  const parts = token.split(".");
+  const [headerPart, payloadPart, signaturePart] = parts;
+  if (parts.length !== 3 || !headerPart || !payloadPart || !signaturePart) {
+    throw new Error("Invalid JWT format");
+  }
+
+  return {
+    signingInput: `${headerPart}.${payloadPart}`,
+    signature: Buffer.from(signaturePart, "base64url"),
+    header: decodeBase64UrlJson<{ alg?: string; kid?: string }>(headerPart),
+    payload: decodeBase64UrlJson<BypassTokenPayload>(payloadPart),
+  };
+}
+
+async function verifyJwtSignature(token: string) {
+  const parsed = parseJwt(token);
+  if (parsed.header.alg !== "RS256") {
+    throw new Error("Unsupported JWT algorithm");
+  }
+
+  const jwks = await Session.getJWKS();
+  const keys = parsed.header.kid
+    ? jwks.keys.filter((key) => key.kid === parsed.header.kid)
+    : jwks.keys;
+
+  for (const key of keys) {
+    try {
+      const verifier = createVerify("RSA-SHA256");
+      verifier.update(parsed.signingInput);
+      verifier.end();
+      const publicKey = createPublicKey({ key, format: "jwk" });
+      if (verifier.verify(publicKey, parsed.signature)) {
+        return parsed.payload;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error("Invalid JWT signature");
+}
+
+function isTokenTimeValid(payload: BypassTokenPayload) {
+  const now = Math.floor(Date.now() / 1000);
+  return (payload.exp === undefined || payload.exp > now) && (payload.nbf === undefined || payload.nbf <= now);
+}
 
 export async function importUser(
   stUser: SuperTokensUserImport,
@@ -146,6 +253,131 @@ export async function buildRowndSessionClaims(
     currentPayload,
     appVariantId,
   });
+}
+
+export async function createMagicLinkWithConfirmationBypass(
+  input: CreateMagicLinkWithConfirmationBypassInput,
+) {
+  const hasEmail = typeof input.email === "string" && input.email.length > 0;
+  const hasPhoneNumber = typeof input.phoneNumber === "string" && input.phoneNumber.length > 0;
+
+  if (hasEmail === hasPhoneNumber) {
+    throw new Error("Exactly one of email or phoneNumber is required");
+  }
+
+  const tenantId = input.tenantId ?? PUBLIC_TENANT_ID;
+  const appVariantId = input.appVariantId;
+  assertRowndAppVariantIsConfigured(appVariantId);
+
+  const clientDomain = resolveAllowedClientDomain({
+    clientDomain: input.clientDomain,
+    pluginConfig: input.pluginConfig,
+    stConfig: input.stConfig,
+    request: input.request,
+    userContext: input.userContext,
+  });
+  const redirectToPath = normalizeRedirectToPathForClientDomain(input.redirectToPath, clientDomain);
+  const apiDomain = getAppInfoString(input.stConfig.appInfo.apiDomain);
+  const apiBasePath = getAppInfoString(input.stConfig.appInfo.apiBasePath);
+  const userContext = {
+    ...(input.userContext ?? {}),
+    ...(input.displayContext ? { rowndDisplayContext: input.displayContext } : {}),
+    ...(redirectToPath ? { rowndRedirectToPath: redirectToPath } : {}),
+    ...(input.clientDomain ? { rowndClientDomain: input.clientDomain } : {}),
+    ...(appVariantId ? { rowndAppVariantId: appVariantId } : {}),
+  };
+  const codeInfo = hasEmail
+    ? await Passwordless.createCode({
+      email: input.email!,
+      tenantId,
+      session: input.session,
+      userContext,
+    })
+    : await Passwordless.createCode({
+      phoneNumber: input.phoneNumber!,
+      tenantId,
+      session: input.session,
+      userContext,
+    });
+
+  if (codeInfo.status !== "OK") {
+    throw new Error("Failed to create magic link");
+  }
+
+  const magicLink = `${getWebsiteDomain({
+    stConfig: input.stConfig,
+    request: input.request,
+    userContext,
+  })}${getAppInfoString(input.stConfig.appInfo.websiteBasePath)}/verify?preAuthSessionId=${encodeURIComponent(
+    codeInfo.preAuthSessionId,
+  )}&tenantId=${encodeURIComponent(tenantId)}#${encodeURIComponent(codeInfo.linkCode)}`;
+  const rewrittenLink = rewriteMagicLink({
+    magicLink,
+    clientDomain,
+    bootstrapParams: getMagicLinkBootstrapParams({
+      appKey: input.pluginConfig.rowndAppKey,
+      apiDomain,
+      apiBasePath,
+      appVariantId,
+      displayContext: input.displayContext,
+      redirectToPath,
+      clientDomainKey: input.clientDomain,
+    }),
+  });
+  const rewrittenUrl = new URL(rewrittenLink);
+  const preAuthSessionId = getRequiredSearchParam(rewrittenUrl, "preAuthSessionId");
+  const linkTenantId = getRequiredSearchParam(rewrittenUrl, "tenantId");
+  const jwtResponse = await Session.createJWT(
+    {
+      purpose: PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PURPOSE,
+      preAuthSessionId,
+      tenantId: linkTenantId,
+      clientDomain,
+      ...(redirectToPath ? { redirectToPath } : {}),
+      ...(appVariantId ? { appVariantId } : {}),
+    },
+    input.validitySeconds ?? DEFAULT_BYPASS_TOKEN_VALIDITY_SECONDS,
+  );
+
+  if (jwtResponse.status !== "OK") {
+    throw new Error("Failed to create confirmation bypass token");
+  }
+
+  rewrittenUrl.searchParams.set(PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM, "true");
+  rewrittenUrl.searchParams.set(PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_TOKEN_PARAM, jwtResponse.jwt);
+
+  return rewrittenUrl.toString();
+}
+
+export async function verifyPasswordlessConfirmationBypass(
+  input: VerifyPasswordlessConfirmationBypassInput,
+) {
+  try {
+    if (!input.token || !input.preAuthSessionId) {
+      return false;
+    }
+
+    const tenantId = input.tenantId ?? PUBLIC_TENANT_ID;
+    const clientDomain = resolveAllowedClientDomain({
+      clientDomain: input.clientDomain,
+      pluginConfig: input.pluginConfig,
+      stConfig: input.stConfig,
+    });
+    const redirectToPath = normalizeRedirectToPathForClientDomain(input.redirectToPath, clientDomain);
+    const payload = await verifyJwtSignature(input.token);
+
+    return Boolean(
+      isTokenTimeValid(payload) &&
+        payload.purpose === PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PURPOSE &&
+        payload.preAuthSessionId === input.preAuthSessionId &&
+        payload.tenantId === tenantId &&
+        payload.clientDomain === clientDomain &&
+        (payload.redirectToPath ?? undefined) === (redirectToPath ?? undefined) &&
+        (payload.appVariantId ?? undefined) === (input.appVariantId ?? undefined)
+    );
+  } catch {
+    return false;
+  }
 }
 
 export async function getUserMetadata(userId: string): Promise<RowndMetadata> {

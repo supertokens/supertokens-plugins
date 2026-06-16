@@ -47,3 +47,9 @@ export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
 
 export const HUB_LOGIN_PAGE_PATH = "/account/login";
 export const HUB_VERIFY_EMAIL_PAGE_PATH = "/account/verify-email";
+export const PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM =
+  "bypassDeviceConfirmation";
+export const PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_TOKEN_PARAM =
+  "bypassDeviceConfirmationToken";
+export const PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PURPOSE =
+  "rownd_passwordless_cross_device_confirmation_bypass";
