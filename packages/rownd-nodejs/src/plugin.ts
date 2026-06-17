@@ -1,5 +1,9 @@
 import { SuperTokensPlugin } from "supertokens-node/types";
 import type { APIInterface as EmailVerificationAPIInterface } from "supertokens-node/recipe/emailverification";
+import type {
+  APIInterface as OAuth2ProviderAPIInterface,
+  RecipeInterface as OAuth2ProviderRecipeInterface,
+} from "supertokens-node/recipe/oauth2provider/types";
 import type { APIInterface as PasswordlessAPIInterface } from "supertokens-node/recipe/passwordless";
 import type { APIInterface as ThirdPartyAPIInterface } from "supertokens-node/recipe/thirdparty";
 import { createPluginInitFunction } from "@shared/js";
@@ -17,7 +21,13 @@ import { RowndPluginConfig, RowndPluginNormalisedConfig } from "./types";
 import { enableDebugLogs, logDebugMessage } from "./logger";
 import { createClient } from "./telemetry/createTelemetryClient";
 import { assertRowndAppVariantIsConfigured, setPluginConfig } from "./config";
-import { shouldLinkRowndAccounts } from "./rownd-compatibility";
+import {
+  applyRowndOAuthResourceParams,
+  buildRowndOAuthPayload,
+  buildRowndOAuthUserInfo,
+  normalizeRowndOAuthScopes,
+  shouldLinkRowndAccounts,
+} from "./rownd-compatibility";
 import { setRowndClient } from "./rownd-repository";
 import {
   buildRowndSessionClaims,
@@ -229,6 +239,80 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           };
         },
         overrideMap: {
+          oauth2provider: {
+            recipeInitRequired: false,
+            functions: (
+              originalImplementation: OAuth2ProviderRecipeInterface,
+            ) => ({
+              ...originalImplementation,
+              getRequestedScopes: async (input) => {
+                const scopes = await originalImplementation.getRequestedScopes(
+                  input,
+                );
+                return normalizeRowndOAuthScopes(scopes);
+              },
+              buildAccessTokenPayload: async (input) => {
+                const payload = await originalImplementation.buildAccessTokenPayload(
+                  input,
+                );
+                return buildRowndOAuthPayload({
+                  user: input.user,
+                  client: input.client,
+                  scopes: input.scopes,
+                  currentPayload: payload,
+                  userContext: input.userContext,
+                });
+              },
+              buildIdTokenPayload: async (input) => {
+                const payload = await originalImplementation.buildIdTokenPayload(
+                  input,
+                );
+                return buildRowndOAuthPayload({
+                  user: input.user,
+                  client: input.client,
+                  scopes: input.scopes,
+                  currentPayload: payload,
+                  userContext: input.userContext,
+                });
+              },
+              buildUserInfo: async (input) => {
+                const payload = await originalImplementation.buildUserInfo(input);
+                return buildRowndOAuthUserInfo({
+                  user: input.user,
+                  accessTokenPayload: input.accessTokenPayload,
+                  scopes: input.scopes,
+                  currentPayload: payload,
+                });
+              },
+            }),
+            apis: (originalImplementation: OAuth2ProviderAPIInterface) => ({
+              ...originalImplementation,
+              authGET: async (input) => {
+                if (originalImplementation.authGET === undefined) {
+                  throw new Error("OAuth2Provider authGET is unavailable");
+                }
+
+                applyRowndOAuthResourceParams({
+                  params: input.params,
+                  userContext: input.userContext,
+                });
+
+                return originalImplementation.authGET(input);
+              },
+              tokenPOST: async (input) => {
+                if (originalImplementation.tokenPOST === undefined) {
+                  throw new Error("OAuth2Provider tokenPOST is unavailable");
+                }
+
+                applyRowndOAuthResourceParams({
+                  params: input.body,
+                  userContext: input.userContext,
+                });
+
+                return originalImplementation.tokenPOST(input);
+              },
+            }),
+          },
           passwordless: {
             config: (config) => {
               const originalEmailDeliveryOverride =

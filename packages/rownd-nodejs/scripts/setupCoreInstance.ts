@@ -55,7 +55,19 @@ export async function provisionSuperTokensInfrastructure(
               "client_credentials",
               "implicit",
             ],
-            tokenEndpointAuthMethod: "client_secret_post",
+            tokenEndpointAuthMethod:
+              oidcClient.config.token_endpoint_auth_method ??
+              "client_secret_basic",
+            audience: [`app:${config.rownd.appId}`],
+            metadata: {
+              rowndOidcClientId: oidcClient.id,
+              rowndAppVariantId: credential.app_variant_id || undefined,
+              rowndAllowedScopes: oidcClient.config.allowed_scopes || [],
+              rowndApplicationType: oidcClient.config.application_type,
+              rowndIsPkceRequired: oidcClient.config.is_pkce_required,
+              rowndIsPkceSupported: oidcClient.config.is_pkce_supported,
+              rowndDeviceFlowEnabled: oidcClient.config.device_flow_enabled,
+            },
           }),
         },
       );
@@ -82,6 +94,13 @@ const RowndOidcClientSchema = z.object({
     redirect_uris: z.array(z.string()).optional(),
     post_logout_uris: z.array(z.string()).optional(),
     allowed_scopes: z.array(z.string()).optional(),
+    token_endpoint_auth_method: z
+      .enum(["client_secret_basic", "client_secret_post", "none"])
+      .optional(),
+    application_type: z.enum(["web", "native"]).optional(),
+    is_pkce_required: z.boolean().optional(),
+    is_pkce_supported: z.boolean().optional(),
+    device_flow_enabled: z.boolean().optional(),
   }),
   credentials: z
     .array(

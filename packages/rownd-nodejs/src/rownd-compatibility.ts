@@ -1,5 +1,6 @@
 import SuperTokens from "supertokens-node";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
+import UserMetadata from "supertokens-node/recipe/usermetadata";
 import type { JSONObject } from "supertokens-node/types";
 
 import {
@@ -15,7 +16,7 @@ import type {
   SuperTokensUserImport,
 } from "./types";
 import type { JsonRecord, JsonValue } from "./utils";
-import { getStringList } from "./utils";
+import { getStringList, isJsonRecord } from "./utils";
 
 export type RowndMetadata = RowndUserMetadata & JsonRecord;
 
@@ -287,6 +288,204 @@ export function buildRowndSessionClaimPayload(input: {
     ...(isAnonymous ? { [ROWND_JWT_CLAIMS.IsAnonymous]: true } : {}),
     ...(anonymousId ? { anonymous_id: anonymousId } : {}),
   };
+}
+
+type OAuthClientLike = {
+  audience?: string[];
+};
+
+export function normalizeRowndOAuthScopes(scopes: string[]) {
+  return [...new Set(scopes.filter((scope) => scope.length > 0))];
+}
+
+export function getRowndOAuthAudience(input: {
+  requestedAudience?: string;
+  requestedResource?: string;
+}) {
+  const requested = input.requestedResource ?? input.requestedAudience;
+  if (requested?.startsWith("app:")) {
+    return requested;
+  }
+
+  return undefined;
+}
+
+export function applyRowndOAuthResourceParams(input: {
+  params: Record<string, any>;
+  userContext: Record<string, any>;
+}) {
+  const resource = firstString(input.params.resource);
+  const audience = firstString(input.params.audience);
+  const rowndAudience = getRowndOAuthAudience({
+    requestedResource: resource,
+    requestedAudience: audience,
+  });
+
+  if (!rowndAudience) {
+    return;
+  }
+
+  input.userContext.rowndOAuthAudience = rowndAudience;
+  input.params.audience = audience ?? rowndAudience;
+  delete input.params.resource;
+}
+
+export async function buildRowndOAuthPayload(input: {
+  user: SuperTokensUser | undefined;
+  client?: OAuthClientLike;
+  scopes: string[];
+  currentPayload?: JsonRecord;
+  userContext?: Record<string, any>;
+}) {
+  const currentPayload = input.currentPayload ?? {};
+  const standardClaims = input.user
+    ? await buildStandardOAuthClaims(input.user, input.scopes)
+    : {};
+  const rowndClaims = input.user
+    ? await buildRowndOAuthSessionClaims(input.user, currentPayload)
+    : {};
+  const audience = getRowndOAuthAudience({
+    requestedAudience:
+      typeof input.userContext?.rowndOAuthAudience === "string"
+        ? input.userContext.rowndOAuthAudience
+        : undefined,
+  });
+
+  return {
+    ...currentPayload,
+    ...standardClaims,
+    ...rowndClaims,
+    ...(audience ? { aud: audience } : {}),
+  };
+}
+
+export async function buildRowndOAuthUserInfo(input: {
+  user: SuperTokensUser;
+  accessTokenPayload: JsonRecord;
+  scopes: string[];
+  currentPayload?: JsonRecord;
+}) {
+  const standardClaims = await buildStandardOAuthClaims(
+    input.user,
+    input.scopes,
+  );
+  const rowndClaims = pickOAuthUserInfoRowndClaims(input.accessTokenPayload);
+
+  return {
+    ...input.currentPayload,
+    ...standardClaims,
+    ...rowndClaims,
+  };
+}
+
+async function buildStandardOAuthClaims(user: SuperTokensUser, scopes: string[]) {
+  const claims: JsonRecord = {};
+  const metadata = await getRowndMetadata(user.id);
+  const rowndData = isJsonRecord(metadata.original_rownd_user?.data)
+    ? metadata.original_rownd_user.data
+    : {};
+  const verifiedData = isJsonRecord(metadata.original_rownd_user?.verified_data)
+    ? metadata.original_rownd_user.verified_data
+    : {};
+
+  if (scopes.includes("email")) {
+    const email = firstString(rowndData.email) ?? user.emails[0];
+    if (email) {
+      claims.email = email;
+      claims.email_verified = isOAuthClaimVerified(
+        verifiedData.email,
+        email,
+        user.loginMethods.some(
+          (method) => method.hasSameEmailAs(email) && method.verified,
+        ),
+      );
+    }
+  }
+
+  if (scopes.includes("phone")) {
+    const phoneNumber =
+      firstString(rowndData.phone_number) ?? user.phoneNumbers[0];
+    if (phoneNumber) {
+      claims.phone_number = phoneNumber;
+      claims.phone_number_verified = isOAuthClaimVerified(
+        verifiedData.phone_number,
+        phoneNumber,
+        user.loginMethods.some(
+          (method) =>
+            method.hasSamePhoneNumberAs(phoneNumber) && method.verified,
+        ),
+      );
+    }
+  }
+
+  if (scopes.includes("profile")) {
+    const givenName = firstString(rowndData.first_name);
+    const familyName = firstString(rowndData.last_name);
+    const name = [givenName, familyName].filter(Boolean).join(" ");
+
+    if (name) claims.name = name;
+    if (givenName) claims.given_name = givenName;
+    if (familyName) claims.family_name = familyName;
+    if (typeof metadata.original_rownd_user?.data?.updated_at === "string") {
+      claims.updated_at = metadata.original_rownd_user.data.updated_at;
+    }
+  }
+
+  return claims;
+}
+
+async function getRowndMetadata(userId: string): Promise<RowndMetadata> {
+  const metadata = await UserMetadata.getUserMetadata(userId);
+  return (metadata.metadata || {}) as RowndMetadata;
+}
+
+function pickOAuthUserInfoRowndClaims(payload: JsonRecord) {
+  const claims: JsonRecord = {};
+  for (const key of [
+    "app_user_id",
+    "auth_level",
+    "is_verified_user",
+    "is_anonymous",
+    "anonymous_id",
+    "https://auth.rownd.io/app_user_id",
+    "https://auth.rownd.io/auth_level",
+    "https://auth.rownd.io/is_verified_user",
+    "https://auth.rownd.io/is_anonymous",
+  ]) {
+    if (payload[key] !== undefined) {
+      claims[key] = payload[key];
+    }
+  }
+
+  return claims;
+}
+
+function firstString(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.find((entry): entry is string => typeof entry === "string");
+  }
+
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function isOAuthClaimVerified(
+  value: unknown,
+  expectedValue: string,
+  fallback: boolean,
+) {
+  return value === true || value === expectedValue || fallback;
+}
+
+async function buildRowndOAuthSessionClaims(
+  user: SuperTokensUser,
+  currentPayload: JsonRecord,
+) {
+  return buildRowndSessionClaimPayload({
+    userId: user.id,
+    user,
+    metadata: await getRowndMetadata(user.id),
+    currentPayload,
+  });
 }
 
 export async function shouldLinkRowndAccounts(

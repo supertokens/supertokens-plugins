@@ -1033,6 +1033,67 @@ describe("rownd-nodejs plugin", () => {
       ).rejects.toThrow("Unknown Rownd app variant: missing_variant");
       expect(originalSignInUpPOST).not.toHaveBeenCalled();
     });
+
+    it("passes Rownd OAuth scopes through unchanged and de-duplicated", async () => {
+      const oauthFunctions = (init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+      }) as any).overrideMap.oauth2provider.functions({
+        getRequestedScopes: vi
+          .fn()
+          .mockResolvedValue(["openid", "profile", "email", "phone", "phone"]),
+      });
+
+      await expect(
+        oauthFunctions.getRequestedScopes({ scopeParam: [], userContext: {} }),
+      ).resolves.toEqual(["openid", "profile", "email", "phone"]);
+    });
+
+    it("translates Rownd OAuth resource params into audience params", async () => {
+      const originalAuthGET = vi.fn().mockResolvedValue({ redirectTo: "ok" });
+      const oauthApis = (init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+      }) as any).overrideMap.oauth2provider.apis({
+        authGET: originalAuthGET,
+      });
+      const input = {
+        params: { resource: "app:app_123", client_id: "client_123" },
+        userContext: {},
+      };
+
+      await oauthApis.authGET(input);
+
+      expect(originalAuthGET).toHaveBeenCalledWith(
+        expect.objectContaining({
+          params: { client_id: "client_123", audience: "app:app_123" },
+          userContext: { rowndOAuthAudience: "app:app_123" },
+        }),
+      );
+    });
+
+    it("translates Rownd OAuth token resource params into audience params", async () => {
+      const originalTokenPOST = vi.fn().mockResolvedValue({ access_token: "token" });
+      const oauthApis = (init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+      }) as any).overrideMap.oauth2provider.apis({
+        tokenPOST: originalTokenPOST,
+      });
+      const input = {
+        body: { resource: "app:app_123", grant_type: "client_credentials" },
+        userContext: {},
+      };
+
+      await oauthApis.tokenPOST(input);
+
+      expect(originalTokenPOST).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: { grant_type: "client_credentials", audience: "app:app_123" },
+          userContext: { rowndOAuthAudience: "app:app_123" },
+        }),
+      );
+    });
   });
 
   describe("endpoints", () => {
