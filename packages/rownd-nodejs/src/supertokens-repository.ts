@@ -10,6 +10,7 @@ import type { JSONObject, SuperTokensPublicConfig } from "supertokens-node/types
 import {
   DEFAULT_ROWND_SCHEMA,
   GUEST_AUTH_METHOD_ID,
+  INSTANT_AUTH_METHOD_ID,
   PUBLIC_TENANT_ID,
 } from "./constants";
 import { RowndPluginError } from "./errors";
@@ -131,7 +132,7 @@ export const RowndIsAnonymousClaim = new BooleanClaim({
   fetchValue: async (userId) => {
     const user = await SuperTokens.getUser(userId);
     const effectiveAuthLevel = getEffectiveAuthLevel(user);
-    return effectiveAuthLevel === GUEST_AUTH_METHOD_ID;
+    return [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(effectiveAuthLevel);
   },
 });
 

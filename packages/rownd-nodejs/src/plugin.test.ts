@@ -1734,7 +1734,7 @@ describe("rownd-nodejs plugin", () => {
         expect(claims).not.toHaveProperty("missing_field");
       });
 
-      it("does not add anonymous claims for instant Rownd sessions", async () => {
+      it("adds anonymous claims for instant Rownd sessions", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
@@ -1768,14 +1768,12 @@ describe("rownd-nodejs plugin", () => {
         );
         await expect(
           session?.getClaimValue(RowndIsAnonymousClaim),
-        ).resolves.toBe(false);
+        ).resolves.toBe(true);
         const accessTokenPayload = session!.getAccessTokenPayload();
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("instant");
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(true);
         expect(accessTokenPayload).not.toHaveProperty("anonymous_id");
-        expect(accessTokenPayload).not.toHaveProperty(
-          ROWND_JWT_CLAIMS.IsAnonymous,
-        );
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(true);
       });
 
       it("create user and then migrate their session", async () => {
@@ -2638,12 +2636,10 @@ describe("rownd-nodejs plugin", () => {
         expect(accessTokenPayload["auth_level"]).toBe("instant");
         expect(accessTokenPayload).not.toHaveProperty("anonymous_id");
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("instant");
-        expect(accessTokenPayload).not.toHaveProperty(
-          ROWND_JWT_CLAIMS.IsAnonymous,
-        );
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(true);
         await expect(
           session?.getClaimValue(RowndIsAnonymousClaim),
-        ).resolves.toBe(false);
+        ).resolves.toBe(true);
 
         const stUser = await SuperTokens.getUser(session!.getUserId());
         const instantLogin = stUser?.loginMethods.find(

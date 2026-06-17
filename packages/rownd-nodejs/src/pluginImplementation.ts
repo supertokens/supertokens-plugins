@@ -144,7 +144,7 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
         {
           ...buildRowndAudience({}, appVariantId),
           auth_level: authLevel,
-          ...(authLevel === GUEST_AUTH_METHOD_ID ? { is_anonymous: true } : {}),
+          ...([GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(authLevel) ? { is_anonymous: true } : {}),
           app_user_id: response.user.id,
         },
         {},
