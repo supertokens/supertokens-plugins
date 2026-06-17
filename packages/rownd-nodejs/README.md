@@ -91,8 +91,8 @@ The plugin exposes a single endpoint:
 ### Migrate
 
 - **POST** `/plugin/rownd/migrate`
-- **Headers**: `Authorization: Bearer <Rownd_JWT>`
-- **Description**: Validates the Rownd JWT, ensures the user is migrated to SuperTokens in the `public` tenant, syncs Rownd user data to SuperTokens UserMetadata, and then creates a new SuperTokens session for that user.
+- **Headers**: `Authorization: Bearer <Rownd_JWT>`. Header-token clients should also send `rid: session`, `fdi-version: 1.18`, and `st-auth-mode: header`.
+- **Description**: Validates the Rownd JWT, ensures the user is migrated to SuperTokens in the `public` tenant, syncs Rownd user data to SuperTokens UserMetadata, and then creates a new SuperTokens session for that user. Header-token clients must receive `st-access-token`, `st-refresh-token`, and `front-token` response headers.
 
 ## Debug Logging
 

@@ -1359,6 +1359,7 @@ describe("rownd-nodejs plugin", () => {
               Authorization: "Bearer some-token",
               rid: "session",
               "fdi-version": "1.18",
+              "st-auth-mode": "header",
             },
           },
         );
@@ -1661,6 +1662,7 @@ describe("rownd-nodejs plugin", () => {
               Authorization: "Bearer some-token",
               rid: "session",
               "fdi-version": "1.18",
+              "st-auth-mode": "header",
             },
           },
         );
@@ -1668,6 +1670,7 @@ describe("rownd-nodejs plugin", () => {
         expect(res.status).toBe(200);
         expect(body).toEqual({ status: "OK" });
         expect(res.headers.get("front-token")).toBeTruthy();
+        expect(res.headers.get("st-refresh-token")).toBeTruthy();
         expect(
           res.headers.get("st-access-token") || res.headers.get("set-cookie"),
         ).toBeTruthy();
