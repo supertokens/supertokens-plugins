@@ -9,8 +9,8 @@ export const PUBLIC_TENANT_ID = "public";
 
 // When a user explicitly chooses to log in as a guest
 export const GUEST_AUTH_METHOD_ID = "guest";
-// When a user is automatically logged in as anonymous when they open the app
-export const ANONYMOUS_AUTH_METHOD_ID = "anonymous";
+// When a user is automatically logged in when they open the app
+export const INSTANT_AUTH_METHOD_ID = "instant";
 
 export const ROWND_JWT_CLAIMS = {
   AppUserId: "https://auth.rownd.io/app_user_id",

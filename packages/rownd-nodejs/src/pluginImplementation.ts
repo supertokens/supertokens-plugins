@@ -8,8 +8,8 @@ import type {
 } from "supertokens-node/types";
 
 import {
-  ANONYMOUS_AUTH_METHOD_ID,
   GUEST_AUTH_METHOD_ID,
+  INSTANT_AUTH_METHOD_ID,
   PUBLIC_TENANT_ID,
 } from "./constants";
 import { RowndPluginError } from "./errors";
@@ -108,16 +108,16 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
       const appVariantId = getRequestedAppVariantIdFromRequest(req);
       assertRowndAppVariantIsConfigured(appVariantId);
       const thirdPartyId =
-        body.authLevel === ANONYMOUS_AUTH_METHOD_ID
-          ? ANONYMOUS_AUTH_METHOD_ID
+        body.authLevel === INSTANT_AUTH_METHOD_ID
+          ? INSTANT_AUTH_METHOD_ID
           : GUEST_AUTH_METHOD_ID;
       const thirdPartyUserId =
-        thirdPartyId === ANONYMOUS_AUTH_METHOD_ID
+        thirdPartyId === INSTANT_AUTH_METHOD_ID
           ? `anon_${randomUUID()}`
           : guestId;
       const authLevel =
-        thirdPartyId === ANONYMOUS_AUTH_METHOD_ID
-          ? ANONYMOUS_AUTH_METHOD_ID
+        thirdPartyId === INSTANT_AUTH_METHOD_ID
+          ? INSTANT_AUTH_METHOD_ID
           : GUEST_AUTH_METHOD_ID;
 
       const response = await ThirdParty.manuallyCreateOrUpdateUser(
@@ -144,7 +144,7 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
         {
           ...buildRowndAudience({}, appVariantId),
           auth_level: authLevel,
-          is_anonymous: true,
+          ...(authLevel === GUEST_AUTH_METHOD_ID ? { is_anonymous: true } : {}),
           app_user_id: response.user.id,
         },
         {},

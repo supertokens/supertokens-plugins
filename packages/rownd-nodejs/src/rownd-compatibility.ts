@@ -3,9 +3,9 @@ import AccountLinking from "supertokens-node/recipe/accountlinking";
 import type { JSONObject } from "supertokens-node/types";
 
 import {
-  ANONYMOUS_AUTH_METHOD_ID,
   DEFAULT_ROWND_SCHEMA,
   GUEST_AUTH_METHOD_ID,
+  INSTANT_AUTH_METHOD_ID,
   ROWND_JWT_CLAIMS,
 } from "./constants";
 import { getPluginConfig } from "./config";
@@ -129,7 +129,7 @@ export function mapRowndUserToSuperTokens(
     const thirdPartyId =
       authLevel === GUEST_AUTH_METHOD_ID
         ? GUEST_AUTH_METHOD_ID
-        : ANONYMOUS_AUTH_METHOD_ID;
+        : INSTANT_AUTH_METHOD_ID;
     if (!authLevel) authLevel = thirdPartyId;
     loginMethods.push({
       recipeId: "thirdparty",
@@ -232,17 +232,14 @@ export function getAnonymousId(
     return originalAnonymousId;
   }
 
-  const anonymousMethod = user?.loginMethods.find((loginMethod) => {
+  const guestMethod = user?.loginMethods.find((loginMethod) => {
     return (
       loginMethod.recipeId === "thirdparty" &&
-      getThirdPartyId(loginMethod) === ANONYMOUS_AUTH_METHOD_ID
+      getThirdPartyId(loginMethod) === GUEST_AUTH_METHOD_ID
     );
   });
-  const thirdPartyUserId = anonymousMethod
-    ? getThirdPartyUserId(anonymousMethod)
-    : undefined;
 
-  return thirdPartyUserId || (hasAnonymousLoginMethod(user) ? `anon_${userId}` : undefined);
+  return guestMethod ? `anon_${user?.id || userId}` : undefined;
 }
 
 export function buildRowndSessionClaimPayload(input: {
@@ -272,8 +269,7 @@ export function buildRowndSessionClaimPayload(input: {
   );
   const isAnonymous =
     currentPayload.is_anonymous === true ||
-    authLevel === GUEST_AUTH_METHOD_ID ||
-    authLevel === ANONYMOUS_AUTH_METHOD_ID;
+    authLevel === GUEST_AUTH_METHOD_ID;
   const anonymousId = getAnonymousId(input.userId, input.user, input.metadata);
   const isVerifiedUser = authLevel !== "unverified";
   const audience = buildRowndAudience(currentPayload, input.appVariantId);
@@ -288,7 +284,7 @@ export function buildRowndSessionClaimPayload(input: {
     [ROWND_JWT_CLAIMS.AppUserId]: appUserId,
     [ROWND_JWT_CLAIMS.AuthLevel]: authLevel,
     [ROWND_JWT_CLAIMS.IsVerifiedUser]: isVerifiedUser,
-    [ROWND_JWT_CLAIMS.IsAnonymous]: isAnonymous,
+    ...(isAnonymous ? { [ROWND_JWT_CLAIMS.IsAnonymous]: true } : {}),
     ...(anonymousId ? { anonymous_id: anonymousId } : {}),
   };
 }
@@ -356,20 +352,24 @@ export function getThirdPartyUserId(method: SuperTokensLoginMethod) {
 function getGuestAuthLevel(
   user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
 ) {
-  const guestMethod = user?.loginMethods.find(isGuestLoginMethod);
-
-  return guestMethod ? GUEST_AUTH_METHOD_ID : undefined;
-}
-
-export function hasAnonymousLoginMethod(
-  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
-) {
-  return !!user?.loginMethods.some((loginMethod) => {
+  const guestMethod = user?.loginMethods.find((method) => {
     return (
-      loginMethod.recipeId === "thirdparty" &&
-      getThirdPartyId(loginMethod) === ANONYMOUS_AUTH_METHOD_ID
+      method.recipeId === "thirdparty" &&
+      getThirdPartyId(method) === GUEST_AUTH_METHOD_ID
     );
   });
+  if (guestMethod) {
+    return GUEST_AUTH_METHOD_ID;
+  }
+
+  const instantMethod = user?.loginMethods.find((method) => {
+    return (
+      method.recipeId === "thirdparty" &&
+      getThirdPartyId(method) === INSTANT_AUTH_METHOD_ID
+    );
+  });
+
+  return instantMethod ? INSTANT_AUTH_METHOD_ID : undefined;
 }
 
 export function hasOnlyGuestLoginMethods(
@@ -385,7 +385,7 @@ export function isGuestLoginMethod(method: SuperTokensLoginMethod) {
   return (
     method.recipeId === "thirdparty" &&
     (thirdPartyId === GUEST_AUTH_METHOD_ID ||
-      thirdPartyId === ANONYMOUS_AUTH_METHOD_ID)
+      thirdPartyId === INSTANT_AUTH_METHOD_ID)
   );
 }
 
@@ -396,7 +396,7 @@ function isGuestAccountInfo(input?: {
   return (
     input?.recipeId === "thirdparty" &&
     (input.thirdParty?.id === GUEST_AUTH_METHOD_ID ||
-      input.thirdParty?.id === ANONYMOUS_AUTH_METHOD_ID)
+      input.thirdParty?.id === INSTANT_AUTH_METHOD_ID)
   );
 }
 
@@ -465,8 +465,8 @@ export function getEffectiveAuthLevel(
   originalAuthLevel?: string,
   verifiedData?: JsonRecord,
 ) {
-  if (originalAuthLevel === ANONYMOUS_AUTH_METHOD_ID) {
-    return ANONYMOUS_AUTH_METHOD_ID;
+  if (originalAuthLevel === INSTANT_AUTH_METHOD_ID) {
+    return INSTANT_AUTH_METHOD_ID;
   }
 
   if (hasVerifiedRealLoginMethod(user)) {

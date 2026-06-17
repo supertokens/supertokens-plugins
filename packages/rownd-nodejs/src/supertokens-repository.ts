@@ -7,7 +7,11 @@ import { BooleanClaim } from "supertokens-node/recipe/session/claims";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import type { JSONObject, SuperTokensPublicConfig } from "supertokens-node/types";
 
-import { DEFAULT_ROWND_SCHEMA, GUEST_AUTH_METHOD_ID, PUBLIC_TENANT_ID } from "./constants";
+import {
+  DEFAULT_ROWND_SCHEMA,
+  GUEST_AUTH_METHOD_ID,
+  PUBLIC_TENANT_ID,
+} from "./constants";
 import { RowndPluginError } from "./errors";
 import { assertRowndAppVariantIsConfigured, getPluginConfig } from "./config";
 import type { SuperTokensUserImport } from "./types";

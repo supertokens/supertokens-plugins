@@ -1628,7 +1628,9 @@ describe("rownd-nodejs plugin", () => {
         );
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("verified");
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(true);
-        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(false);
+        expect(accessTokenPayload).not.toHaveProperty(
+          ROWND_JWT_CLAIMS.IsAnonymous,
+        );
         expect(accessTokenPayload["aud"]).toEqual([
           "app:app_session_test",
           "app_variant:variant_session_test",
@@ -1732,17 +1734,17 @@ describe("rownd-nodejs plugin", () => {
         expect(claims).not.toHaveProperty("missing_field");
       });
 
-      it("adds is_anonymous claim for anonymous Rownd sessions", async () => {
+      it("does not add anonymous claims for instant Rownd sessions", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
         mockRowndClient.validateToken.mockResolvedValue({
-          user_id: "rownd-session-anonymous",
+          user_id: "rownd-session-instant",
         });
         mockRowndClient.fetchUserInfo.mockResolvedValue({
-          app_user_id: "rownd-session-anonymous",
-          auth_level: "anonymous",
-          data: { user_id: "rownd-session-anonymous" },
+          app_user_id: "rownd-session-instant",
+          auth_level: "instant",
+          data: { user_id: "rownd-session-instant" },
           verified_data: {},
         });
 
@@ -1766,11 +1768,14 @@ describe("rownd-nodejs plugin", () => {
         );
         await expect(
           session?.getClaimValue(RowndIsAnonymousClaim),
-        ).resolves.toBe(true);
+        ).resolves.toBe(false);
         const accessTokenPayload = session!.getAccessTokenPayload();
-        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("anonymous");
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("instant");
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(true);
-        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(true);
+        expect(accessTokenPayload).not.toHaveProperty("anonymous_id");
+        expect(accessTokenPayload).not.toHaveProperty(
+          ROWND_JWT_CLAIMS.IsAnonymous,
+        );
       });
 
       it("create user and then migrate their session", async () => {
@@ -2588,6 +2593,7 @@ describe("rownd-nodejs plugin", () => {
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("guest");
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(true);
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(true);
+        expect(accessTokenPayload["anonymous_id"]).toMatch(/^anon_/);
         await expect(
           session?.getClaimValue(RowndIsAnonymousClaim),
         ).resolves.toBe(true);
@@ -2600,7 +2606,7 @@ describe("rownd-nodejs plugin", () => {
         expect(guestLogin?.thirdParty?.userId).toMatch(/^guest_[a-f0-9-]{36}$/);
       });
 
-      it("should use the anonymous provider while exposing anonymous auth_level", async () => {
+      it("should use the instant provider while exposing instant auth_level", async () => {
         const { server: s, port } = await setup(coreConnectionURI);
         server = s;
         testPORT = port;
@@ -2614,7 +2620,7 @@ describe("rownd-nodejs plugin", () => {
               rid: "session",
               "fdi-version": "1.18",
             },
-            body: JSON.stringify({ auth_level: "anonymous" }),
+            body: JSON.stringify({ auth_level: "instant" }),
           },
         );
 
@@ -2629,18 +2635,35 @@ describe("rownd-nodejs plugin", () => {
           accessToken!,
         );
         const accessTokenPayload = session!.getAccessTokenPayload();
-        expect(accessTokenPayload["auth_level"]).toBe("anonymous");
-        expect(accessTokenPayload["anonymous_id"]).toMatch(/^anon_/);
-        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("anonymous");
-        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(true);
+        expect(accessTokenPayload["auth_level"]).toBe("instant");
+        expect(accessTokenPayload).not.toHaveProperty("anonymous_id");
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("instant");
+        expect(accessTokenPayload).not.toHaveProperty(
+          ROWND_JWT_CLAIMS.IsAnonymous,
+        );
+        await expect(
+          session?.getClaimValue(RowndIsAnonymousClaim),
+        ).resolves.toBe(false);
 
         const stUser = await SuperTokens.getUser(session!.getUserId());
-        const anonymousLogin = stUser?.loginMethods.find(
+        const instantLogin = stUser?.loginMethods.find(
           (m) =>
-            m.recipeId === "thirdparty" && m.thirdParty?.id === "anonymous",
+            m.recipeId === "thirdparty" && m.thirdParty?.id === "instant",
         );
-        expect(anonymousLogin).toBeDefined();
-        expect(anonymousLogin?.thirdParty?.userId).toMatch(/^anon_/);
+        expect(instantLogin).toBeDefined();
+        expect(instantLogin?.thirdParty?.userId).toMatch(/^anon_/);
+
+        const userRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            headers: getAuthedHeaders(accessToken!),
+          },
+        );
+        expect(userRes.status).toBe(200);
+        const userData = await userRes.json();
+        expect(userData.auth_level).toBe("instant");
+        expect(userData.data.user_id).toBe(session!.getUserId());
+        expect(userData.data).not.toHaveProperty("anonymous_id");
       });
     });
 
@@ -3441,6 +3464,81 @@ describe("rownd-nodejs plugin", () => {
         ).toEqual([]);
       });
 
+      it("converts an instant user into a verified passwordless user without anonymous fields", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const instantSession = await createGuestSession("instant");
+        const verifiedEmail = "instant-primary@example.com";
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(instantSession.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ data: { email: verifiedEmail } }),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.auth_level).toBe("instant");
+        expect(body.data).not.toHaveProperty("anonymous_id");
+        expect(body.verified_data.email).toBeUndefined();
+
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            instantSession.recipeUserId,
+            verifiedEmail,
+          );
+        expect(tokenResponse.status).toBe("OK");
+
+        const verifyRes = await verifyEmailToken(
+          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+        );
+        expect(verifyRes.status).toBe(200);
+        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+
+        const passwordlessResult = await Passwordless.signInUp({
+          email: verifiedEmail,
+          tenantId: "public",
+        });
+        const linkedUser = await SuperTokens.getUser(
+          passwordlessResult.user.id,
+        );
+        expect(linkedUser?.isPrimaryUser).toBe(true);
+        expect(linkedUser?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email: verifiedEmail,
+            }),
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: expect.objectContaining({ id: "instant" }),
+            }),
+          ]),
+        );
+
+        const claims = await buildRowndSessionClaims(passwordlessResult.user.id);
+        expect(claims).toMatchObject({
+          app_user_id: passwordlessResult.user.id,
+          auth_level: "verified",
+          is_verified_user: true,
+          [ROWND_JWT_CLAIMS.AppUserId]: passwordlessResult.user.id,
+          [ROWND_JWT_CLAIMS.AuthLevel]: "verified",
+          [ROWND_JWT_CLAIMS.IsVerifiedUser]: true,
+        });
+        expect(claims).not.toHaveProperty("anonymous_id");
+        expect(claims).not.toHaveProperty(ROWND_JWT_CLAIMS.IsAnonymous);
+      });
+
       it("links a guest into an existing passwordless primary for the verified email", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
@@ -3725,7 +3823,7 @@ describe("rownd-nodejs plugin", () => {
         const { server: s, port } = await setup(coreConnectionURI);
         server = s;
         testPORT = port;
-        const guestSession = await createGuestSession("anonymous");
+        const guestSession = await createGuestSession();
         const passwordlessResult = await Passwordless.signInUp({
           email: "linked@example.com",
           tenantId: "public",
@@ -3742,9 +3840,8 @@ describe("rownd-nodejs plugin", () => {
         );
         expect(linkResult.status).toBe("OK");
 
-        await expect(
-          buildRowndSessionClaims(passwordlessResult.user.id),
-        ).resolves.toMatchObject({
+        const claims = await buildRowndSessionClaims(passwordlessResult.user.id);
+        expect(claims).toMatchObject({
           app_user_id: passwordlessResult.user.id,
           auth_level: "verified",
           is_verified_user: true,
@@ -3752,8 +3849,8 @@ describe("rownd-nodejs plugin", () => {
           [ROWND_JWT_CLAIMS.AppUserId]: passwordlessResult.user.id,
           [ROWND_JWT_CLAIMS.AuthLevel]: "verified",
           [ROWND_JWT_CLAIMS.IsVerifiedUser]: true,
-          [ROWND_JWT_CLAIMS.IsAnonymous]: false,
         });
+        expect(claims).not.toHaveProperty(ROWND_JWT_CLAIMS.IsAnonymous);
       });
 
       it("stores pending verification for a new email even if the current email is verified", async () => {
@@ -4444,7 +4541,7 @@ describe("rownd-nodejs plugin", () => {
     }
 
     async function createGuestSession(
-      authLevel: "guest" | "anonymous" = "guest",
+      authLevel: "guest" | "instant" = "guest",
     ) {
       const res = await fetch(
         `http://localhost:${testPORT}/auth/plugin/rownd/guest`,
