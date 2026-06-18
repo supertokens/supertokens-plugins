@@ -1181,6 +1181,13 @@ def build_sign_in_methods_config(methods_array: List[JsonDict]) -> JsonDict:
     sign_in_faster_with_google = google.get("signInFasterWithGoogle")
     anonymous_type = "instant" if anonymous.get("type") == "instant" else "guest"
     anonymous_config: JsonDict = {"enabled": "anonymous" in methods and anonymous_type != "instant"}
+    apple_config: JsonDict = {"enabled": "apple" in methods, "client_id": apple.get("clientId", "")}
+    if isinstance(apple.get("webClientType"), str):
+        apple_config["web_client_type"] = apple["webClientType"]
+    if isinstance(apple.get("iosClientType"), str):
+        apple_config["ios_client_type"] = apple["iosClientType"]
+    if isinstance(apple.get("androidClientType"), str):
+        apple_config["android_client_type"] = apple["androidClientType"]
     if "anonymous" in methods and anonymous_type != "instant":
         anonymous_config["type"] = anonymous_type
         if isinstance(anonymous.get("displayName"), str):
@@ -1201,7 +1208,7 @@ def build_sign_in_methods_config(methods_array: List[JsonDict]) -> JsonDict:
             **({"sign_in_faster_with_google": sign_in_faster_with_google} if sign_in_faster_with_google in {"enabled", "disabled"} else {}),
             "one_tap": build_google_one_tap_config(google.get("oneTap")),
         },
-        "apple": {"enabled": "apple" in methods, "client_id": apple.get("clientId", "")},
+        "apple": apple_config,
         "anonymous": anonymous_config,
         **custom_providers,
     }

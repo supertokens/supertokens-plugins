@@ -240,6 +240,41 @@ def test_google_sign_in_method_matches_node_config_shape():
     }
 
 
+def test_apple_sign_in_method_matches_node_config_shape():
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        app_config={
+            "signInMethods": [
+                {
+                    "method": "apple",
+                    "clientId": "apple-client-id",
+                    "webClientType": "web",
+                    "iosClientType": "ios",
+                    "androidClientType": "android",
+                }
+            ]
+        },
+    )
+
+    body = build_app_config(config, None)
+    assert body is not None
+    app = as_json_dict(body.get("app"))
+    app_config = as_json_dict(app.get("config"))
+    hub = as_json_dict(app_config.get("hub"))
+    auth = as_json_dict(hub.get("auth"))
+    sign_in_methods = as_json_dict(auth.get("sign_in_methods"))
+    apple = as_json_dict(sign_in_methods.get("apple"))
+
+    assert apple == {
+        "enabled": True,
+        "client_id": "apple-client-id",
+        "web_client_type": "web",
+        "ios_client_type": "ios",
+        "android_client_type": "android",
+    }
+
+
 def test_anonymous_sign_in_method_matches_node_config_shape():
     guest_config = RowndPluginConfig(
         rownd_app_key="app-key",
