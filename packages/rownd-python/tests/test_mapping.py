@@ -389,3 +389,65 @@ async def test_rownd_compat_user_uses_latest_session_for_last_sign_in_method(mon
     assert meta["first_sign_in_method"] == "email"
     assert meta["last_sign_in_method"] == "email"
     assert meta["last_sign_in"] == "1970-01-01T00:00:06Z"
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "field"),
+    [("google", "google_id"), ("apple", "apple_id")],
+)
+@pytest.mark.asyncio
+async def test_rownd_compat_user_includes_provider_id_for_imported_linked_user(
+    monkeypatch: pytest.MonkeyPatch, provider_id: str, field: str
+):
+    async def get_user_metadata(user_id: str):
+        return {
+            "original_rownd_user": {
+                "state": "enabled",
+                "auth_level": "verified",
+                "data": {"user_id": "rownd-imported-user", "email": "linked@example.com"},
+                "verified_data": {"email": True},
+                "attributes": {},
+            }
+        }
+
+    async def get_user(user_id: str, user_context=None):
+        return SimpleNamespace(
+            id=user_id,
+            time_joined=1000,
+            login_methods=[
+                SimpleNamespace(
+                    recipe_id="passwordless",
+                    email="linked@example.com",
+                    phone_number=None,
+                    recipe_user_id=SimpleNamespace(get_as_string=lambda: "passwordless-recipe-user"),
+                    time_joined=2000,
+                    verified=True,
+                ),
+                SimpleNamespace(
+                    recipe_id="thirdparty",
+                    email="linked@example.com",
+                    phone_number=None,
+                    recipe_user_id=SimpleNamespace(get_as_string=lambda: "%s-recipe-user" % provider_id),
+                    third_party=SimpleNamespace(id=provider_id, user_id="%s-linked-id" % provider_id),
+                    verified=True,
+                    time_joined=3000,
+                ),
+            ],
+        )
+
+    async def get_latest_session_info(user_id: str):
+        return None
+
+    monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)
+    monkeypatch.setattr(impl, "get_user", get_user)
+    monkeypatch.setattr(impl, "get_latest_session_info", get_latest_session_info)
+
+    user = await get_rownd_compat_user("st-user")
+    data = as_json_dict(user.get("data"))
+    verified_data = as_json_dict(user.get("verified_data"))
+
+    assert user["rownd_user"] == "rownd-imported-user"
+    assert data["email"] == "linked@example.com"
+    assert data[field] == "%s-linked-id" % provider_id
+    assert verified_data["email"] == "linked@example.com"
+    assert verified_data[field] == "%s-linked-id" % provider_id

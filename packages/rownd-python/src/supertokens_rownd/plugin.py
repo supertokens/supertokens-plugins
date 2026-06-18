@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from typing import Generic, Optional, TypeVar, cast
+from typing import Any, Generic, Optional, TypeVar, cast
 from typing_extensions import Unpack
 from urllib.parse import urlparse
 
@@ -27,6 +27,7 @@ from supertokens_python.recipe.accountlinking.types import (
 from supertokens_python.recipe.emailverification.interfaces import APIInterface as EmailVerificationAPIInterface, APIOptions as EmailVerificationAPIOptions
 from supertokens_python.recipe.emailverification.types import EmailTemplateVars
 from supertokens_python.recipe.emailverification.utils import EmailVerificationOverrideableConfig
+from supertokens_python.recipe.oauth2provider.interfaces import APIInterface as OAuth2ProviderAPIInterface, RecipeInterface as OAuth2ProviderRecipeInterface
 from supertokens_python.recipe.passwordless.interfaces import APIInterface as PasswordlessAPIInterface, APIOptions as PasswordlessAPIOptions
 from supertokens_python.recipe.passwordless.types import PasswordlessLoginEmailTemplateVars, PasswordlessLoginSMSTemplateVars
 from supertokens_python.recipe.passwordless.utils import PasswordlessOverrideableConfig
@@ -41,7 +42,10 @@ from supertokens_python.types.recipe import BaseAPIInterface, BaseRecipeInterfac
 from .constants import HANDLE_BASE_PATH, PLUGIN_ID, PLUGIN_SDK_VERSION
 from .plugin_implementation import (
     add_hub_bootstrap_params,
+    apply_rownd_oauth_resource_params,
     assert_app_variant_is_configured,
+    build_rownd_oauth_payload,
+    build_rownd_oauth_user_info,
     build_rownd_session_claims,
     complete_pending_email_verification,
     does_account_info_match_auth_method,
@@ -62,6 +66,7 @@ from .plugin_implementation import (
     handle_update_user_meta,
     has_only_guest_login_methods,
     is_guest_account_info,
+    normalize_rownd_oauth_scopes,
     record_rownd_app_variant_for_user,
 )
 from .rownd_client import RowndClient
@@ -190,7 +195,13 @@ def init(config: Optional[RowndPluginConfig] = None, **kwargs: Unpack[RowndPlugi
     emailverification_override.apis = cast(Callable[[BaseAPIInterface], BaseAPIInterface], _emailverification_api_override())
     emailverification_override.recipe_init_required = True
 
+    oauth2provider_override = RecipePluginOverride()
+    oauth2provider_override.functions = cast(Callable[[BaseRecipeInterface], BaseRecipeInterface], _oauth2provider_function_override(config))
+    oauth2provider_override.apis = cast(Callable[[BaseAPIInterface], BaseAPIInterface], _oauth2provider_api_override())
+    oauth2provider_override.recipe_init_required = False
+
     override_map: OverrideMap = {
+        "oauth2provider": oauth2provider_override,
         "passwordless": passwordless_override,
         "thirdparty": thirdparty_override,
         "accountlinking": accountlinking_override,
@@ -220,6 +231,127 @@ def init(config: Optional[RowndPluginConfig] = None, **kwargs: Unpack[RowndPlugi
             ]
         ),
     )
+
+
+def _oauth2provider_function_override(config: RowndPluginConfig):
+    def override(original: OAuth2ProviderRecipeInterface) -> OAuth2ProviderRecipeInterface:
+        original_get_requested_scopes = original.get_requested_scopes
+        original_build_access_token_payload = original.build_access_token_payload
+        original_build_id_token_payload = original.build_id_token_payload
+        original_build_user_info = original.build_user_info
+
+        async def get_requested_scopes(
+            recipe_user_id: Optional[RecipeUserId],
+            session_handle: Optional[str],
+            scope_param: list[str],
+            client_id: str,
+            user_context: UserContext,
+        ) -> list[str]:
+            scopes = await original_get_requested_scopes(
+                recipe_user_id,
+                session_handle,
+                scope_param,
+                client_id,
+                user_context,
+            )
+            return normalize_rownd_oauth_scopes(scopes)
+
+        async def build_access_token_payload(
+            user: Optional[User],
+            client: Any,
+            session_handle: Optional[str],
+            scopes: list[str],
+            user_context: UserContext,
+        ) -> dict[str, Any]:
+            payload = await original_build_access_token_payload(
+                user,
+                client,
+                session_handle,
+                scopes,
+                user_context,
+            )
+            return await build_rownd_oauth_payload(config, user, scopes, payload, user_context)
+
+        async def build_id_token_payload(
+            user: Optional[User],
+            client: Any,
+            session_handle: Optional[str],
+            scopes: list[str],
+            user_context: UserContext,
+        ) -> dict[str, Any]:
+            payload = await original_build_id_token_payload(
+                user,
+                client,
+                session_handle,
+                scopes,
+                user_context,
+            )
+            return await build_rownd_oauth_payload(config, user, scopes, payload, user_context)
+
+        async def build_user_info(
+            user: User,
+            access_token_payload: dict[str, Any],
+            scopes: list[str],
+            tenant_id: str,
+            user_context: UserContext,
+        ) -> dict[str, Any]:
+            payload = await original_build_user_info(
+                user,
+                access_token_payload,
+                scopes,
+                tenant_id,
+                user_context,
+            )
+            return await build_rownd_oauth_user_info(user, access_token_payload, scopes, payload)
+
+        original.get_requested_scopes = get_requested_scopes
+        original.build_access_token_payload = build_access_token_payload
+        original.build_id_token_payload = build_id_token_payload
+        original.build_user_info = build_user_info
+        return original
+
+    return override
+
+
+def _oauth2provider_api_override():
+    def override(original: OAuth2ProviderAPIInterface) -> OAuth2ProviderAPIInterface:
+        original_auth_get = original.auth_get
+        original_token_post = original.token_post
+
+        async def auth_get(
+            params: Any,
+            cookie: Optional[str],
+            session: Optional[SessionContainer],
+            should_try_refresh: bool,
+            options: Any,
+            user_context: UserContext,
+        ):
+            if isinstance(params, dict):
+                apply_rownd_oauth_resource_params(params, user_context)
+            return await original_auth_get(
+                params,
+                cookie,
+                session,
+                should_try_refresh,
+                options,
+                user_context,
+            )
+
+        async def token_post(
+            authorization_header: Optional[str],
+            body: Any,
+            options: Any,
+            user_context: UserContext,
+        ):
+            if isinstance(body, dict):
+                apply_rownd_oauth_resource_params(body, user_context)
+            return await original_token_post(authorization_header, body, options, user_context)
+
+        original.auth_get = auth_get
+        original.token_post = token_post
+        return original
+
+    return override
 
 
 def _passwordless_config_override(config: RowndPluginConfig):

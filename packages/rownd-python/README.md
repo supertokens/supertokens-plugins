@@ -101,6 +101,32 @@ The plugin registers these routes below `api_base_path`:
 - `GET /plugin/rownd/user/field`
 - `PUT /plugin/rownd/user/field`
 
+## Rownd Compatibility
+
+The plugin exposes Rownd-compatible user/session behavior for migrated and new SuperTokens users:
+
+- Guest sessions use the `guest` third-party provider.
+- Instant sessions use the `instant` third-party provider and preserve `auth_level: "instant"`.
+- Google and Apple third-party login methods are exposed as `google_id` and `apple_id` in Rownd-compatible user payloads.
+- OAuth2 Provider tokens and userinfo responses include Rownd claims plus standard `email`, `phone`, and `profile` claims when those scopes are requested.
+- OAuth2 `resource=app:*` requests are translated to SuperTokens `audience=app:*` for Rownd-compatible OAuth clients.
+
+Apple sign-in methods may include SuperTokens client type mapping fields:
+
+```python
+"signInMethods": [
+    {
+        "method": "apple",
+        "clientId": "com.example.service",
+        "webClientType": "web",
+        "iosClientType": "ios",
+        "androidClientType": "android",
+    }
+]
+```
+
+See [OAUTH_MIGRATION_TUTORIAL.md](./OAUTH_MIGRATION_TUTORIAL.md) for OAuth/OIDC client migration steps.
+
 ## Notes
 
 The Python SDK plugin API does not currently pass `app_info` into plugin route construction. Configure `api_base_path`, `api_domain`, and `app_name` on the Rownd plugin so it can register routes and rewrite Rownd hub links consistently.

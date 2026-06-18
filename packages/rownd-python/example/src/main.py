@@ -17,6 +17,7 @@ from supertokens_python.framework.fastapi import get_middleware
 from supertokens_python.recipe import (
     accountlinking,
     emailverification,
+    oauth2provider,
     passwordless,
     session,
     thirdparty,
@@ -59,6 +60,42 @@ def cors_origins() -> list[str]:
     return list(dict.fromkeys([*configured_origins, *local_frontend_origins, hub_origin]))
 
 
+def rownd_sign_in_methods() -> list[dict[str, object]]:
+    anonymous_type = os.environ.get("ROWND_ANONYMOUS_TYPE", "guest")
+    methods: list[dict[str, object]] = [
+        {"method": "email"},
+        {"method": "phone"},
+        {
+            "method": "google",
+            "clientId": os.environ.get("GOOGLE_CLIENT_ID"),
+            "signInFasterWithGoogle": "enabled",
+            "oneTap": {
+                "browser": {"autoPrompt": False, "delay": 7000},
+                "mobileApp": {"autoPrompt": False, "delay": 7000},
+            },
+        },
+    ]
+
+    apple_client_id = os.environ.get("APPLE_CLIENT_ID")
+    if apple_client_id:
+        methods.append(
+            {
+                "method": "apple",
+                "clientId": apple_client_id,
+                "webClientType": os.environ.get("APPLE_WEB_CLIENT_TYPE", "web"),
+                "iosClientType": os.environ.get("APPLE_IOS_CLIENT_TYPE", "ios"),
+                "androidClientType": os.environ.get("APPLE_ANDROID_CLIENT_TYPE", "android"),
+            }
+        )
+
+    methods.append(
+        {"method": "anonymous", "type": "instant"}
+        if anonymous_type == "instant"
+        else {"method": "anonymous", "type": "guest", "displayName": "Continue as guest"}
+    )
+    return methods
+
+
 init(
     app_info=InputAppInfo(
         app_name=APP_NAME,
@@ -75,6 +112,7 @@ init(
     recipe_list=[
         accountlinking.init(),
         session.init(),
+        oauth2provider.init(),
         usermetadata.init(),
         passwordless.init(
             contact_config=passwordless.ContactEmailOrPhoneConfig(),
@@ -104,31 +142,18 @@ init(
     experimental=SupertokensExperimentalConfig(
         plugins=[
             rownd_init(
-                    RowndPluginConfig(
-                        rownd_app_key=require_env("ROWND_APP_KEY"),
-                        rownd_app_secret=require_env("ROWND_APP_SECRET"),
-                        # Keep these in sync with InputAppInfo. Python plugins cannot read app_info.
-                        api_base_path=API_BASE_PATH,
-                        api_domain=API_DOMAIN,
+                RowndPluginConfig(
+                    rownd_app_key=require_env("ROWND_APP_KEY"),
+                    rownd_app_secret=require_env("ROWND_APP_SECRET"),
+                    # Keep these in sync with InputAppInfo. Python plugins cannot read app_info.
+                    api_base_path=API_BASE_PATH,
+                    api_domain=API_DOMAIN,
                     app_name=APP_NAME,
                     enable_debug_logs=os.environ.get("ROWND_ENABLE_DEBUG_LOGS") == "true",
                     app_config={
                         "id": os.environ.get("ROWND_APP_KEY", ""),
                         "name": APP_NAME,
-                        "signInMethods": [
-                            {"method": "email"},
-                            {"method": "phone"},
-                            {
-                                "method": "google",
-                                "clientId": os.environ.get("GOOGLE_CLIENT_ID"),
-                                "signInFasterWithGoogle": "enabled",
-                                "oneTap": {
-                                    "browser": {"autoPrompt": False, "delay": 7000},
-                                    "mobileApp": {"autoPrompt": False, "delay": 7000},
-                                },
-                            },
-                            {"method": "anonymous", "displayName": "Continue as guest"},
-                        ],
+                        "signInMethods": rownd_sign_in_methods(),
                         "profile": {
                             "accountInformation": {
                                 "methods": {

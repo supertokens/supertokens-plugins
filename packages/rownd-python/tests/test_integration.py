@@ -1041,6 +1041,45 @@ async def test_get_user_returns_payload_for_existing_passwordless_user(
     assert body["verified_data"]["email"] == "non-migrated@example.com"
 
 
+@pytest.mark.parametrize(
+    ("provider_id", "field"),
+    [("google", "google_id"), ("apple", "apple_id")],
+)
+async def test_get_user_includes_provider_id_for_thirdparty_only_user(
+    core_url: str, rownd_client: MockRowndClient, provider_id: str, field: str
+):
+    client = make_client(core_url, rownd_client)
+    email = "%s-thirdparty-only@example.com" % provider_id
+    provider_user_id = "%s-thirdparty-only-id" % provider_id
+    result = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id=provider_id,
+        third_party_user_id=provider_user_id,
+        email=email,
+        is_verified=True,
+        user_context={},
+    )
+    result = cast(Any, result)
+    st_session = await session_asyncio.create_new_session_without_request_response(
+        "public", result.recipe_user_id, {}, {}, True
+    )
+
+    res = client.get(
+        "/auth/plugin/rownd/user", headers=auth_headers(st_session.get_access_token())
+    )
+    body = res.json()
+
+    assert res.status_code == 200
+    assert body["status"] == "OK"
+    assert body["rownd_user"] == result.user.id
+    assert body["data"]["user_id"] == result.user.id
+    assert body["data"]["email"] == email
+    assert body["data"][field] == provider_user_id
+    assert body["verified_data"]["email"] == email
+    assert body["verified_data"][field] == provider_user_id
+    assert body["auth_level"] == "verified"
+
+
 async def test_update_user_data_and_reject_app_owned_fields(
     core_url: str, rownd_client: MockRowndClient
 ):

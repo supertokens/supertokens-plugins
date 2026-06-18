@@ -55,7 +55,9 @@ Do not expose SuperTokens Core directly to the public internet. Use `SUPERTOKENS
 - `ROWND_APP_KEY`: Rownd app key.
 - `ROWND_APP_SECRET`: Rownd app secret.
 - `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`: Google OAuth credentials.
-- `APPLE_CLIENT_ID` and `APPLE_CLIENT_SECRET`: Apple OAuth credentials.
+- `APPLE_CLIENT_ID` and `APPLE_CLIENT_SECRET`: Optional Apple OAuth credentials.
+- `APPLE_WEB_CLIENT_TYPE`, `APPLE_IOS_CLIENT_TYPE`, and `APPLE_ANDROID_CLIENT_TYPE`: Optional SuperTokens Apple client type names used in Rownd app config. Defaults are `web`, `ios`, and `android` when `APPLE_CLIENT_ID` is set.
+- `ROWND_ANONYMOUS_TYPE`: Optional anonymous mode. Use `guest` for an explicit guest button or `instant` for automatic instant-user sessions. Defaults to `guest`.
 
 ## OAuth Setup
 
@@ -63,11 +65,14 @@ For Google local testing, add `http://localhost:5173` to allowed JavaScript orig
 
 If you need multiple frontend domains, keep `WEBSITE_DOMAIN` as one primary domain and add all browser origins to `CORS_ALLOWED_ORIGINS`. For a production multi-domain setup, use SuperTokens `InputAppInfo.origin` instead of `website_domain`.
 
-Apple is enabled in the backend config and requires real Apple service credentials. Remove the Apple provider and sign-in method from `src/main.py` if you only want to test email, phone, Google, and guest flows locally.
+Apple is optional in the backend config and requires real Apple service credentials. Set `APPLE_CLIENT_ID` to include Apple in the Rownd app config.
+
+The Rownd plugin also overrides SuperTokens OAuth2 Provider behavior for Rownd compatibility. It de-duplicates requested scopes, maps `resource=app:*` to `audience=app:*`, and adds Rownd-compatible claims to OAuth access tokens, ID tokens, and userinfo responses.
 
 ## Recipes Initialized
 
 - `Session`
+- `OAuth2Provider`
 - `UserMetadata`
 - `Passwordless` with email or phone magic links
 - `ThirdParty` with Google and Apple providers
@@ -80,8 +85,9 @@ Apple is enabled in the backend config and requires real Apple service credentia
 - `GET /example-bootstrap`: Frontend bootstrap config for `@supertokens/rownd-react`.
 - `GET /test/protected`: Protected debug route that returns the SuperTokens user ID and access-token payload.
 - `POST /auth/plugin/rownd/migrate`: Migrates a Rownd-authenticated user into SuperTokens. Send `Authorization: Bearer <rownd-access-token>`.
-- `POST /auth/plugin/rownd/guest`: Creates an anonymous or guest SuperTokens session.
+- `POST /auth/plugin/rownd/guest`: Creates an instant or guest SuperTokens session.
 - `GET /auth/plugin/rownd/app-config`: Returns Rownd-compatible app config derived from this backend setup.
+- OAuth2 Provider routes below `/auth/oauth/*`, including Rownd-compatible token and userinfo behavior.
 - `GET /sessioninfo`: Local debugging route showing the current SuperTokens user ID.
 
 For production, add rate limits and abuse protection around migration and guest session endpoints. Review `accountlinking.init` before enabling automatic account linking for your app; only link trusted, verified identifiers.

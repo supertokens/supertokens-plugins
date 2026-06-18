@@ -756,6 +756,137 @@ async def build_rownd_session_claims(
     return claims
 
 
+def normalize_rownd_oauth_scopes(scopes: List[str]) -> List[str]:
+    normalized = []
+    for scope in scopes:
+        if scope and scope not in normalized:
+            normalized.append(scope)
+    return normalized
+
+
+def first_string(value: object) -> Optional[str]:
+    if isinstance(value, list):
+        return next((item for item in value if isinstance(item, str) and item), None)
+    return value if isinstance(value, str) and value else None
+
+
+def get_rownd_oauth_audience(
+    requested_audience: Optional[str] = None,
+    requested_resource: Optional[str] = None,
+) -> Optional[str]:
+    requested = requested_resource or requested_audience
+    return requested if requested and requested.startswith("app:") else None
+
+
+def apply_rownd_oauth_resource_params(params: Dict[str, object], user_context: UserContext) -> None:
+    rownd_audience = get_rownd_oauth_audience(
+        requested_audience=first_string(params.get("audience")),
+        requested_resource=first_string(params.get("resource")),
+    )
+    if not rownd_audience:
+        return
+    user_context["rowndOAuthAudience"] = rownd_audience
+    params["audience"] = first_string(params.get("audience")) or rownd_audience
+    params.pop("resource", None)
+
+
+async def build_rownd_oauth_payload(
+    config: RowndPluginConfig,
+    user: Optional[User],
+    scopes: List[str],
+    current_payload: Optional[JsonDict],
+    user_context: UserContext,
+) -> JsonDict:
+    payload = current_payload or {}
+    rownd_audience = get_rownd_oauth_audience(
+        requested_audience=first_string(user_context.get("rowndOAuthAudience"))
+    )
+    return {
+        **payload,
+        **(await build_standard_oauth_claims(user, scopes) if user else {}),
+        **(await build_rownd_session_claims(config, user.id, payload, None) if user else {}),
+        **({"aud": rownd_audience} if rownd_audience else {}),
+    }
+
+
+async def build_rownd_oauth_user_info(
+    user: User,
+    access_token_payload: JsonDict,
+    scopes: List[str],
+    current_payload: Optional[JsonDict],
+) -> JsonDict:
+    return {
+        **(current_payload or {}),
+        **(await build_standard_oauth_claims(user, scopes)),
+        **pick_oauth_user_info_rownd_claims(access_token_payload),
+    }
+
+
+async def build_standard_oauth_claims(user: User, scopes: List[str]) -> JsonDict:
+    claims: JsonDict = {}
+    metadata = await get_user_metadata(user.id)
+    original = as_json_dict(metadata.get("original_rownd_user"))
+    rownd_data = as_json_dict(original.get("data"))
+    verified_data = as_json_dict(original.get("verified_data"))
+
+    if "email" in scopes:
+        email = first_string(rownd_data.get("email")) or (user.emails[0] if user.emails else None)
+        if email:
+            claims["email"] = email
+            claims["email_verified"] = is_oauth_claim_verified(
+                verified_data.get("email"),
+                email,
+                any(method.email == email and method.verified for method in user.login_methods),
+            )
+
+    if "phone" in scopes:
+        phone_number = first_string(rownd_data.get("phone_number")) or (user.phone_numbers[0] if user.phone_numbers else None)
+        if phone_number:
+            claims["phone_number"] = phone_number
+            claims["phone_number_verified"] = is_oauth_claim_verified(
+                verified_data.get("phone_number"),
+                phone_number,
+                any(method.phone_number == phone_number and method.verified for method in user.login_methods),
+            )
+
+    if "profile" in scopes:
+        given_name = first_string(rownd_data.get("first_name"))
+        family_name = first_string(rownd_data.get("last_name"))
+        name = " ".join(item for item in [given_name, family_name] if item)
+        if name:
+            claims["name"] = name
+        if given_name:
+            claims["given_name"] = given_name
+        if family_name:
+            claims["family_name"] = family_name
+        if isinstance(rownd_data.get("updated_at"), str):
+            claims["updated_at"] = rownd_data["updated_at"]
+
+    return claims
+
+
+def pick_oauth_user_info_rownd_claims(payload: JsonDict) -> JsonDict:
+    return {
+        key: payload[key]
+        for key in [
+            "app_user_id",
+            "auth_level",
+            "is_verified_user",
+            "is_anonymous",
+            "anonymous_id",
+            ROWND_JWT_CLAIMS["app_user_id"],
+            ROWND_JWT_CLAIMS["auth_level"],
+            ROWND_JWT_CLAIMS["is_verified_user"],
+            ROWND_JWT_CLAIMS["is_anonymous"],
+        ]
+        if key in payload
+    }
+
+
+def is_oauth_claim_verified(value: object, expected_value: str, fallback: bool) -> bool:
+    return value is True or value == expected_value or fallback
+
+
 def build_configured_session_claims(config: RowndPluginConfig, metadata: JsonDict) -> JsonDict:
     original = as_json_dict(metadata.get("original_rownd_user"))
     original_data = as_json_dict(original.get("data"))

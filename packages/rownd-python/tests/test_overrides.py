@@ -5,8 +5,11 @@ from typing import Any, Dict, Optional, cast
 
 import pytest
 from supertokens_python.recipe.accountlinking.types import AccountInfoWithRecipeId
+from supertokens_python.types import LoginMethod, User
 
 from supertokens_rownd import plugin
+import supertokens_rownd.plugin_implementation as impl
+from supertokens_rownd.constants import ROWND_JWT_CLAIMS
 from supertokens_rownd.types import RowndPluginConfig
 
 
@@ -239,6 +242,173 @@ async def test_plugin_routes_use_explicit_api_base_path():
 
     assert "/api/auth/plugin/rownd/app-config" in paths
     assert "/api/auth/plugin/migrate-session" in paths
+
+
+async def test_oauth_scopes_are_deduplicated():
+    async def get_requested_scopes(
+        recipe_user_id: Any,
+        session_handle: Any,
+        scope_param: list[str],
+        client_id: str,
+        user_context: Dict[str, Any],
+    ):
+        return ["openid", "profile", "email", "phone", "phone", ""]
+
+    original = SimpleNamespace(
+        get_requested_scopes=get_requested_scopes,
+        build_access_token_payload=None,
+        build_id_token_payload=None,
+        build_user_info=None,
+    )
+    overridden = plugin._oauth2provider_function_override(make_config())(cast(Any, original))
+
+    assert await overridden.get_requested_scopes(None, None, [], "client-id", {}) == [
+        "openid",
+        "profile",
+        "email",
+        "phone",
+    ]
+
+
+async def test_oauth_auth_get_translates_resource_to_audience():
+    captured: Dict[str, Any] = {}
+
+    async def auth_get(
+        params: Dict[str, Any],
+        cookie: Any,
+        session: Any,
+        should_try_refresh: bool,
+        options: Any,
+        user_context: Dict[str, Any],
+    ):
+        captured["params"] = params
+        captured["user_context"] = user_context
+        return SimpleNamespace(status="OK")
+
+    original = SimpleNamespace(auth_get=auth_get, token_post=None)
+    overridden = plugin._oauth2provider_api_override()(cast(Any, original))
+    params = {"resource": "app:app_123", "client_id": "client_123"}
+    user_context: Dict[str, Any] = {}
+
+    await overridden.auth_get(params, None, None, False, cast(Any, None), user_context)
+
+    assert captured["params"] == {"client_id": "client_123", "audience": "app:app_123"}
+    assert captured["user_context"] == {"rowndOAuthAudience": "app:app_123"}
+
+
+async def test_oauth_token_post_translates_resource_to_audience():
+    captured: Dict[str, Any] = {}
+
+    async def token_post(
+        authorization_header: Any,
+        body: Dict[str, Any],
+        options: Any,
+        user_context: Dict[str, Any],
+    ):
+        captured["body"] = body
+        captured["user_context"] = user_context
+        return SimpleNamespace(status="OK")
+
+    original = SimpleNamespace(auth_get=None, token_post=token_post)
+    overridden = plugin._oauth2provider_api_override()(cast(Any, original))
+    body = {"resource": "app:app_123", "grant_type": "client_credentials"}
+    user_context: Dict[str, Any] = {}
+
+    await overridden.token_post(None, body, cast(Any, None), user_context)
+
+    assert captured["body"] == {"grant_type": "client_credentials", "audience": "app:app_123"}
+    assert captured["user_context"] == {"rowndOAuthAudience": "app:app_123"}
+
+
+async def test_rownd_oauth_payload_adds_standard_and_rownd_claims(monkeypatch: pytest.MonkeyPatch):
+    login_method = LoginMethod(
+        "passwordless",
+        "recipe-user",
+        ["public"],
+        "oauth@example.com",
+        None,
+        None,
+        None,
+        1000,
+        True,
+    )
+    user = User(
+        "st-user",
+        False,
+        ["public"],
+        ["fallback@example.com"],
+        [],
+        [],
+        cast(Any, []),
+        [login_method],
+        1000,
+    )
+
+    async def get_user(user_id: str, user_context: Any = None):
+        return user
+
+    async def get_user_metadata(user_id: str):
+        return {
+            "original_rownd_user": {
+                "data": {
+                    "user_id": "rownd-user",
+                    "email": "oauth@example.com",
+                    "first_name": "Ada",
+                    "last_name": "Lovelace",
+                },
+                "verified_data": {"email": True},
+            }
+        }
+
+    monkeypatch.setattr(impl, "get_user", get_user)
+    monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)
+
+    payload = await impl.build_rownd_oauth_payload(
+        make_config(),
+        user,
+        ["email", "profile"],
+        {"existing": "claim"},
+        {"rowndOAuthAudience": "app:app_123"},
+    )
+
+    assert payload["existing"] == "claim"
+    assert payload["email"] == "oauth@example.com"
+    assert payload["email_verified"] is True
+    assert payload["name"] == "Ada Lovelace"
+    assert payload["app_user_id"] == "rownd-user"
+    assert payload["auth_level"] == "verified"
+    assert payload[ROWND_JWT_CLAIMS["app_user_id"]] == "rownd-user"
+    assert payload["aud"] == "app:app_123"
+
+
+async def test_rownd_oauth_user_info_picks_rownd_claims(monkeypatch: pytest.MonkeyPatch):
+    user = User("st-user", False, ["public"], ["user@example.com"], [], [], cast(Any, []), [], 1000)
+
+    async def get_user_metadata(user_id: str):
+        return {}
+
+    monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)
+
+    user_info = await impl.build_rownd_oauth_user_info(
+        user,
+        {
+            "app_user_id": "rownd-user",
+            "auth_level": "verified",
+            ROWND_JWT_CLAIMS["is_verified_user"]: True,
+            "ignored": "claim",
+        },
+        ["email"],
+        {"sub": "st-user"},
+    )
+
+    assert user_info == {
+        "sub": "st-user",
+        "email": "user@example.com",
+        "email_verified": False,
+        "app_user_id": "rownd-user",
+        "auth_level": "verified",
+        ROWND_JWT_CLAIMS["is_verified_user"]: True,
+    }
 
 
 async def test_passwordless_consume_records_app_variant(monkeypatch: pytest.MonkeyPatch):
