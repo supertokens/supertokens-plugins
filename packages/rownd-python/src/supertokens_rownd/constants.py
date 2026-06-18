@@ -4,7 +4,7 @@ HANDLE_BASE_PATH = "/plugin/rownd"
 PUBLIC_TENANT_ID = "public"
 
 GUEST_AUTH_METHOD_ID = "guest"
-ANONYMOUS_AUTH_METHOD_ID = "anonymous"
+INSTANT_AUTH_METHOD_ID = "instant"
 
 ROWND_JWT_CLAIMS = {
     "app_user_id": "https://auth.rownd.io/app_user_id",

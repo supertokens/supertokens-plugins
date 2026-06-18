@@ -93,6 +93,26 @@ def test_maps_guest_user():
     ]
 
 
+def test_maps_instant_user():
+    mapped = map_rownd_user_to_supertokens(
+        {
+            "auth_level": "instant",
+            "data": {"user_id": "instant-1"},
+            "verified_data": {},
+        }
+    )
+
+    assert mapped["loginMethods"] == [
+        {
+            "recipeId": "thirdparty",
+            "thirdPartyId": "instant",
+            "thirdPartyUserId": "instant-1",
+            "email": "instant-1@anonymous.local",
+            "isVerified": False,
+        }
+    ]
+
+
 def test_maps_missing_verified_data_as_unverified_email_user():
     mapped = map_rownd_user_to_supertokens(
         {"data": {"user_id": "rownd-missing-verified-data", "email": "missing@example.com"}}

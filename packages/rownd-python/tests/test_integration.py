@@ -514,14 +514,14 @@ async def test_legacy_session_migration_fetch_error_returns_error(
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
 
 
-async def test_legacy_session_migration_adds_anonymous_claims(
+async def test_legacy_session_migration_adds_instant_claims(
     core_url: str, rownd_client: MockRowndClient
 ):
-    rownd_client.user_id = "py-session-anonymous-user"
+    rownd_client.user_id = "py-session-instant-user"
     rownd_client.user_info = {
-        "data": {"user_id": "py-session-anonymous-user"},
+        "data": {"user_id": "py-session-instant-user"},
         "verified_data": {},
-        "auth_level": "anonymous",
+        "auth_level": "instant",
     }
     client = make_client(core_url, rownd_client)
 
@@ -533,10 +533,10 @@ async def test_legacy_session_migration_adds_anonymous_claims(
     access_token = res.headers.get("st-access-token")
     assert access_token is not None
     payload = jwt.decode(access_token, options={"verify_signature": False, "verify_aud": False})
-    assert payload["auth_level"] == "guest"
-    assert payload["is_anonymous"] is True
+    assert payload["auth_level"] == "instant"
+    assert "is_anonymous" not in payload
     assert payload[ROWND_JWT_CLAIMS["is_anonymous"]] is True
-    assert payload["anonymous_id"] == "py-session-anonymous-user"
+    assert "anonymous_id" not in payload
 
 
 async def test_records_app_variant_membership_once(core_url: str, rownd_client: MockRowndClient):
@@ -953,7 +953,7 @@ async def test_guest_login_creates_session_with_claims(core_url: str, rownd_clie
     assert payload["is_anonymous"] is True
 
 
-async def test_guest_login_uses_anonymous_provider_for_anonymous_auth_level(
+async def test_guest_login_uses_instant_provider_for_instant_auth_level(
     core_url: str, rownd_client: MockRowndClient
 ):
     client = make_client(core_url, rownd_client)
@@ -961,7 +961,7 @@ async def test_guest_login_uses_anonymous_provider_for_anonymous_auth_level(
     res = client.post(
         "/auth/plugin/rownd/guest",
         headers={"Content-Type": "application/json", **session_headers()},
-        json={"auth_level": "anonymous"},
+        json={"auth_level": "instant"},
     )
 
     assert res.status_code == 200
@@ -972,11 +972,11 @@ async def test_guest_login_uses_anonymous_provider_for_anonymous_auth_level(
     payload = st_session.get_access_token_payload()
     user = await get_user(st_session.get_user_id())
 
-    assert payload["auth_level"] == "guest"
-    assert payload["anonymous_id"].startswith("anon_")
+    assert payload["auth_level"] == "instant"
+    assert "anonymous_id" not in payload
     assert user is not None
     assert user.login_methods[0].third_party is not None
-    assert user.login_methods[0].third_party.id == "anonymous"
+    assert user.login_methods[0].third_party.id == "instant"
 
 
 async def test_get_user_returns_compatibility_payload(core_url: str, rownd_client: MockRowndClient):
@@ -1126,7 +1126,7 @@ async def test_guest_email_verification_links_passwordless_user(
     guest = client.post(
         "/auth/plugin/rownd/guest",
         headers={"Content-Type": "application/json", **session_headers()},
-        json={"auth_level": "anonymous"},
+        json={"auth_level": "instant"},
     )
     access_token = guest.headers["st-access-token"]
     st_session = await session_asyncio.get_session_without_request_response(access_token)
@@ -1204,7 +1204,7 @@ async def test_email_verify_route_completes_pending_verification(
     guest = client.post(
         "/auth/plugin/rownd/guest",
         headers={"Content-Type": "application/json", **session_headers()},
-        json={"auth_level": "anonymous"},
+        json={"auth_level": "instant"},
     )
     access_token = guest.headers["st-access-token"]
     st_session = await session_asyncio.get_session_without_request_response(access_token)

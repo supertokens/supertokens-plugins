@@ -24,11 +24,11 @@ from supertokens_python.types import LoginMethod, RecipeUserId, User
 from supertokens_python.types.base import UserContext
 
 from .constants import (
-    ANONYMOUS_AUTH_METHOD_ID,
     BUILTIN_SIGN_IN_METHOD_KEYS,
     DEFAULT_ROWND_SCHEMA,
     GUEST_AUTH_METHOD_ID,
     IDENTITY_USER_DATA_FIELDS,
+    INSTANT_AUTH_METHOD_ID,
     INTERNAL_METADATA_FIELDS,
     PUBLIC_TENANT_ID,
     ROWND_JWT_CLAIMS,
@@ -178,13 +178,14 @@ async def handle_guest_login(
         assert_app_variant_is_configured(config, app_variant_id)
         auth_level = body.get("auth_level") if isinstance(body, dict) else None
         third_party_id = (
-            ANONYMOUS_AUTH_METHOD_ID if auth_level == ANONYMOUS_AUTH_METHOD_ID else GUEST_AUTH_METHOD_ID
+            INSTANT_AUTH_METHOD_ID if auth_level == INSTANT_AUTH_METHOD_ID else GUEST_AUTH_METHOD_ID
         )
         third_party_user_id = (
             "anon_%s" % uuid.uuid4()
-            if third_party_id == ANONYMOUS_AUTH_METHOD_ID
+            if third_party_id == INSTANT_AUTH_METHOD_ID
             else "guest_%s" % uuid.uuid4()
         )
+        effective_auth_level = INSTANT_AUTH_METHOD_ID if third_party_id == INSTANT_AUTH_METHOD_ID else GUEST_AUTH_METHOD_ID
 
         result = await thirdparty_asyncio.manually_create_or_update_user(
             tenant_id=PUBLIC_TENANT_ID,
@@ -198,7 +199,7 @@ async def handle_guest_login(
             raise RowndPluginError("Guest user creation failed")
         payload = {
             **build_rownd_audience({}, config, app_variant_id),
-            "auth_level": GUEST_AUTH_METHOD_ID,
+            "auth_level": effective_auth_level,
             "is_anonymous": True,
             "app_user_id": result.user.id,
         }
@@ -645,7 +646,7 @@ def get_third_party_info(method: LoginMethod) -> Tuple[Optional[str], Optional[s
 
 def is_guest_login_method(method: LoginMethod) -> bool:
     third_party_id, _ = get_third_party_info(method)
-    return method.recipe_id == "thirdparty" and third_party_id in {GUEST_AUTH_METHOD_ID, ANONYMOUS_AUTH_METHOD_ID}
+    return method.recipe_id == "thirdparty" and third_party_id in {GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID}
 
 
 def has_only_guest_login_methods(user: Optional[User]) -> bool:
@@ -671,14 +672,23 @@ def has_verified_real_login_method(user: Optional[User]) -> bool:
 
 
 def get_guest_auth_level(user: Optional[User]) -> Optional[str]:
-    if user and any(is_guest_login_method(method) for method in user.login_methods):
-        return GUEST_AUTH_METHOD_ID
+    if user:
+        for method in user.login_methods:
+            third_party_id, _ = get_third_party_info(method)
+            if method.recipe_id == "thirdparty" and third_party_id == GUEST_AUTH_METHOD_ID:
+                return GUEST_AUTH_METHOD_ID
+        for method in user.login_methods:
+            third_party_id, _ = get_third_party_info(method)
+            if method.recipe_id == "thirdparty" and third_party_id == INSTANT_AUTH_METHOD_ID:
+                return INSTANT_AUTH_METHOD_ID
     return None
 
 
 def get_effective_auth_level(
     user: Optional[User], original_auth_level: Optional[str] = None, verified_data: Optional[JsonDict] = None
 ) -> str:
+    if original_auth_level == INSTANT_AUTH_METHOD_ID:
+        return INSTANT_AUTH_METHOD_ID
     if has_verified_real_login_method(user):
         return "verified"
     return get_guest_auth_level(user) or original_auth_level or ("verified" if verified_data else "unverified")
@@ -691,10 +701,10 @@ def get_anonymous_id(user_id: str, user: Optional[User], metadata: JsonDict) -> 
         return cast(str, original_data["anonymous_id"])
     if user:
         for method in user.login_methods:
-            third_party_id, third_party_user_id = get_third_party_info(method)
-            if method.recipe_id == "thirdparty" and third_party_id == ANONYMOUS_AUTH_METHOD_ID and third_party_user_id:
-                return third_party_user_id
-    return "anon_%s" % user_id if user and any(is_guest_login_method(method) for method in user.login_methods) else None
+            third_party_id, _ = get_third_party_info(method)
+            if method.recipe_id == "thirdparty" and third_party_id == GUEST_AUTH_METHOD_ID:
+                return "anon_%s" % user.id
+    return None
 
 
 def map_login_method(method: Optional[LoginMethod]) -> str:
@@ -724,7 +734,10 @@ async def build_rownd_session_claims(
     auth_level = get_effective_auth_level(user, original_auth_level, verified_data)
     app_user_id = as_json_dict(original.get("data")).get("user_id")
     app_user_id = app_user_id or current_payload.get("app_user_id") or (user.id if user else user_id)
-    is_anonymous = auth_level == GUEST_AUTH_METHOD_ID
+    is_anonymous = current_payload.get("is_anonymous") is True or auth_level in {
+        GUEST_AUTH_METHOD_ID,
+        INSTANT_AUTH_METHOD_ID,
+    }
     anonymous_id = get_anonymous_id(user_id, user, metadata) if user else None
     claims = {
         **build_rownd_audience(current_payload, config, app_variant_id),
@@ -732,12 +745,12 @@ async def build_rownd_session_claims(
         "app_user_id": app_user_id,
         "auth_level": auth_level,
         "is_verified_user": auth_level != "unverified",
-        "is_anonymous": is_anonymous,
         ROWND_JWT_CLAIMS["app_user_id"]: app_user_id,
         ROWND_JWT_CLAIMS["auth_level"]: auth_level,
         ROWND_JWT_CLAIMS["is_verified_user"]: auth_level != "unverified",
-        ROWND_JWT_CLAIMS["is_anonymous"]: is_anonymous,
     }
+    if is_anonymous:
+        claims[ROWND_JWT_CLAIMS["is_anonymous"]] = True
     if anonymous_id:
         claims["anonymous_id"] = anonymous_id
     return claims
@@ -815,7 +828,7 @@ def map_rownd_user_to_supertokens(rownd_user: JsonDict) -> JsonDict:
         login_methods.append({"recipeId": "passwordless", "email": data["email"], "isVerified": bool(verified_data.get("email"))})
     if not login_methods:
         auth_level = rownd_user.get("auth_level")
-        third_party_id = GUEST_AUTH_METHOD_ID if auth_level == GUEST_AUTH_METHOD_ID else ANONYMOUS_AUTH_METHOD_ID
+        third_party_id = GUEST_AUTH_METHOD_ID if auth_level == GUEST_AUTH_METHOD_ID else INSTANT_AUTH_METHOD_ID
         login_methods.append({"recipeId": "thirdparty", "thirdPartyId": third_party_id, "thirdPartyUserId": data["user_id"], "email": "%s@anonymous.local" % data["user_id"], "isVerified": False})
 
     return {
@@ -1015,7 +1028,7 @@ def get_passwordless_email_login_method(user: Optional[User]) -> Optional[LoginM
 
 def is_guest_account_info(account_info: AccountInfoWithRecipeId) -> bool:
     third_party = getattr(account_info, "third_party", None)
-    return getattr(account_info, "recipe_id", None) == "thirdparty" and getattr(third_party, "id", None) in {GUEST_AUTH_METHOD_ID, ANONYMOUS_AUTH_METHOD_ID}
+    return getattr(account_info, "recipe_id", None) == "thirdparty" and getattr(third_party, "id", None) in {GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID}
 
 
 def does_account_info_match_auth_method(user: User, account_info: AccountInfoWithRecipeId) -> bool:
