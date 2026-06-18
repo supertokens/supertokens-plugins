@@ -4,6 +4,7 @@ import EmailVerification from "supertokens-node/recipe/emailverification";
 import Passwordless from "supertokens-node/recipe/passwordless";
 import Session from "supertokens-node/recipe/session";
 import { BooleanClaim } from "supertokens-node/recipe/session/claims";
+import type { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import type { JSONObject, SuperTokensPublicConfig } from "supertokens-node/types";
 
@@ -11,10 +12,11 @@ import {
   DEFAULT_ROWND_SCHEMA,
   GUEST_AUTH_METHOD_ID,
   INSTANT_AUTH_METHOD_ID,
+  PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM,
   PUBLIC_TENANT_ID,
 } from "./constants";
 import { RowndPluginError } from "./errors";
-import { assertRowndAppVariantIsConfigured, getPluginConfig } from "./config";
+import { assertRowndAppVariantIsConfigured, getPluginConfig, getSuperTokensConfig } from "./config";
 import type { SuperTokensUserImport } from "./types";
 import {
   buildRowndSessionClaimPayload,
@@ -31,11 +33,33 @@ import {
   type RowndPendingVerification,
 } from "./rownd-compatibility";
 import {
+  assertAllowedBypassRedirectPath,
   getStringList,
+  getAppInfoString,
+  getMagicLinkBootstrapParams,
+  getWebsiteDomain,
   isJsonRecord,
   isRecord,
+  normalizeRedirectToPathForClientDomain,
+  resolveAllowedClientDomain,
+  rewriteMagicLink,
   type JsonRecord,
 } from "./utils";
+
+type BypassDisplayContext = "browser" | "mobile_app" | "customer_web_view";
+
+export type CreateMagicLinkWithConfirmationBypassInput = {
+  email?: string;
+  phoneNumber?: string;
+  tenantId?: string;
+  request?: any;
+  session?: SessionContainerInterface;
+  userContext?: Record<string, any>;
+  redirectToPath?: string;
+  clientDomain?: string;
+  displayContext?: BypassDisplayContext;
+  appVariantId?: string;
+};
 
 export async function importUser(
   stUser: SuperTokensUserImport,
@@ -151,6 +175,91 @@ export async function buildRowndSessionClaims(
     currentPayload,
     appVariantId,
   });
+}
+
+export async function createMagicLinkWithConfirmationBypass(
+  input: CreateMagicLinkWithConfirmationBypassInput,
+) {
+  const hasEmail = typeof input.email === "string" && input.email.length > 0;
+  const hasPhoneNumber = typeof input.phoneNumber === "string" && input.phoneNumber.length > 0;
+
+  if (hasEmail === hasPhoneNumber) {
+    throw new Error("Exactly one of email or phoneNumber is required");
+  }
+
+  const stConfig = getSuperTokensConfig();
+  if (!stConfig) {
+    throw new Error("SuperTokens config is not initialized");
+  }
+
+  const pluginConfig = getPluginConfig();
+  if (!pluginConfig) {
+    throw new Error("Rownd plugin config is not initialized");
+  }
+
+  const tenantId = input.tenantId ?? PUBLIC_TENANT_ID;
+  const appVariantId = input.appVariantId;
+  assertRowndAppVariantIsConfigured(appVariantId);
+
+  const clientDomain = resolveAllowedClientDomain({
+    clientDomain: input.clientDomain,
+    pluginConfig,
+    stConfig,
+    request: input.request,
+    userContext: input.userContext,
+  });
+  const redirectToPath = normalizeRedirectToPathForClientDomain(input.redirectToPath, clientDomain);
+  assertAllowedBypassRedirectPath(pluginConfig, redirectToPath);
+
+  const userContext = {
+    ...(input.userContext ?? {}),
+    ...(input.displayContext ? { rowndDisplayContext: input.displayContext } : {}),
+    rowndRedirectToPath: redirectToPath,
+    ...(input.clientDomain ? { rowndClientDomain: input.clientDomain } : {}),
+    ...(appVariantId ? { rowndAppVariantId: appVariantId } : {}),
+  };
+  const codeInfo = hasEmail
+    ? await Passwordless.createCode({
+      email: input.email!,
+      tenantId,
+      session: input.session,
+      userContext,
+    })
+    : await Passwordless.createCode({
+      phoneNumber: input.phoneNumber!,
+      tenantId,
+      session: input.session,
+      userContext,
+    });
+
+  if (codeInfo.status !== "OK") {
+    throw new Error("Failed to create magic link");
+  }
+
+  const magicLink = `${getWebsiteDomain({
+    stConfig,
+    request: input.request,
+    userContext,
+  })}${getAppInfoString(stConfig.appInfo.websiteBasePath)}/verify?preAuthSessionId=${encodeURIComponent(
+    codeInfo.preAuthSessionId,
+  )}&tenantId=${encodeURIComponent(tenantId)}#${encodeURIComponent(codeInfo.linkCode)}`;
+  const rewrittenUrl = new URL(rewriteMagicLink({
+    magicLink,
+    clientDomain,
+    bootstrapParams: getMagicLinkBootstrapParams({
+      appKey: pluginConfig.rowndAppKey,
+      apiDomain: getAppInfoString(stConfig.appInfo.apiDomain),
+      apiBasePath: getAppInfoString(stConfig.appInfo.apiBasePath),
+      appVariantId,
+      displayContext: input.displayContext,
+      redirectToPath,
+      clientDomainKey: input.clientDomain,
+    }),
+  }));
+
+  rewrittenUrl.searchParams.set(PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM, "true");
+
+  return rewrittenUrl.toString();
 }
 
 export async function getUserMetadata(userId: string): Promise<RowndMetadata> {

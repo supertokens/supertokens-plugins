@@ -11,6 +11,7 @@ import type {
 import { isRecord } from "./utils";
 
 let pluginConfig: RowndPluginNormalisedConfig | undefined;
+let superTokensConfig: SuperTokensPublicConfig | undefined;
 
 export function setPluginConfig(config: RowndPluginNormalisedConfig) {
   pluginConfig = config;
@@ -18,6 +19,14 @@ export function setPluginConfig(config: RowndPluginNormalisedConfig) {
 
 export function getPluginConfig() {
   return pluginConfig;
+}
+
+export function setSuperTokensConfig(config: SuperTokensPublicConfig) {
+  superTokensConfig = config;
+}
+
+export function getSuperTokensConfig() {
+  return superTokensConfig;
 }
 
 export function assertRowndAppVariantIsConfigured(appVariantId?: string) {

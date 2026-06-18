@@ -1,6 +1,8 @@
-import type { JSONObject, PluginRouteHandler } from "supertokens-node/types";
+import type { JSONObject, PluginRouteHandler, SuperTokensPublicConfig } from "supertokens-node/types";
 
+import { HUB_LOGIN_PAGE_PATH } from "./constants";
 import { RowndPluginError } from "./errors";
+import type { RowndPluginNormalisedConfig } from "./types";
 
 type SuperTokensRequest = Parameters<PluginRouteHandler["handler"]>[0];
 export type JsonRecord = JSONObject;
@@ -158,6 +160,164 @@ export function getStringList(value: unknown) {
 
 export function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
+}
+
+export function getAppInfoString(value: { getAsStringDangerous: () => string }) {
+  return value.getAsStringDangerous();
+}
+
+export function getWebsiteDomain(input: {
+  stConfig: SuperTokensPublicConfig;
+  request?: any;
+  userContext?: Record<string, any>;
+}) {
+  return getAppInfoString(input.stConfig.appInfo.getOrigin({
+    request: input.request,
+    userContext: (input.userContext ?? {}) as any,
+  }));
+}
+
+export function normalizeClientDomain(value: string) {
+  if (value.endsWith("://")) {
+    return value;
+  }
+
+  const parsed = new URL(value);
+  if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+    return parsed.origin;
+  }
+
+  return `${parsed.protocol}//${parsed.host}`;
+}
+
+function resolveClientDomain(input: {
+  clientDomain?: string;
+  pluginConfig: RowndPluginNormalisedConfig;
+  websiteDomain: string;
+}) {
+  if (!input.clientDomain) {
+    return input.websiteDomain;
+  }
+
+  const resolved = input.pluginConfig.clientDomains?.[input.clientDomain];
+  if (!resolved) {
+    throw new Error(`Unknown clientDomain key: ${input.clientDomain}`);
+  }
+
+  return resolved;
+}
+
+export function resolveAllowedClientDomain(input: {
+  clientDomain?: string;
+  pluginConfig: RowndPluginNormalisedConfig;
+  stConfig: SuperTokensPublicConfig;
+  request?: any;
+  userContext?: Record<string, any>;
+}) {
+  const websiteDomain = getWebsiteDomain(input);
+  const resolvedClientDomain = resolveClientDomain({
+    clientDomain: input.clientDomain,
+    pluginConfig: input.pluginConfig,
+    websiteDomain,
+  });
+  const normalizedClientDomain = normalizeClientDomain(resolvedClientDomain);
+  const allowed = [
+    websiteDomain,
+    ...Object.values(input.pluginConfig.clientDomains ?? {}),
+  ].map(normalizeClientDomain);
+
+  if (!allowed.includes(normalizedClientDomain)) {
+    throw new Error(`clientDomain is not allowed: ${resolvedClientDomain}`);
+  }
+
+  return normalizedClientDomain;
+}
+
+export function normalizeRedirectToPathForClientDomain(
+  redirectToPath: string | undefined,
+  clientDomain: string,
+) {
+  if (!redirectToPath) {
+    return undefined;
+  }
+
+  if (redirectToPath === "NATIVE_APP") {
+    return redirectToPath;
+  }
+
+  if (redirectToPath.startsWith("//")) {
+    throw new Error("redirectToPath cannot be schemaless");
+  }
+
+  const normalizedClientDomain = normalizeClientDomain(clientDomain);
+  const redirectUrl = new URL(
+    redirectToPath,
+    normalizedClientDomain.endsWith("://") ? "http://localhost" : normalizedClientDomain,
+  );
+  const hasExplicitScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(redirectToPath);
+
+  if (hasExplicitScheme) {
+    if (redirectUrl.protocol !== "http:" && redirectUrl.protocol !== "https:") {
+      throw new Error("redirectToPath must be http(s) or relative");
+    }
+
+    if (redirectUrl.origin !== normalizedClientDomain) {
+      throw new Error("redirectToPath must match clientDomain");
+    }
+  }
+
+  return `${redirectUrl.pathname}${redirectUrl.search}${redirectUrl.hash}`;
+}
+
+export function assertAllowedBypassRedirectPath(
+  pluginConfig: RowndPluginNormalisedConfig,
+  redirectToPath: string | undefined,
+) {
+  if (!redirectToPath) {
+    throw new Error("redirectToPath is required for confirmation bypass magic links");
+  }
+
+  const allowedRedirectPaths = pluginConfig.crossDeviceConfirmationBypass?.allowedRedirectPaths ?? [];
+  if (allowedRedirectPaths.length === 0) {
+    throw new Error("crossDeviceConfirmationBypass.allowedRedirectPaths must be configured");
+  }
+
+  if (!allowedRedirectPaths.includes(redirectToPath)) {
+    throw new Error(`redirectToPath is not allowed for confirmation bypass: ${redirectToPath}`);
+  }
+}
+
+export function getMagicLinkBootstrapParams(input: {
+  appKey: string;
+  apiDomain: string;
+  apiBasePath: string;
+  appVariantId?: string;
+  displayContext?: "browser" | "mobile_app" | "customer_web_view";
+  redirectToPath?: string;
+  clientDomainKey?: string;
+}) {
+  return {
+    appKey: input.appKey,
+    apiDomain: input.apiDomain,
+    apiBasePath: input.apiBasePath,
+    ...(input.appVariantId ? { appVariantId: input.appVariantId } : {}),
+    ...(input.displayContext ? { displayContext: input.displayContext } : {}),
+    ...(input.redirectToPath ? { redirectToPath: input.redirectToPath } : {}),
+    ...(input.clientDomainKey ? { clientDomain: input.clientDomainKey } : {}),
+  };
+}
+
+export function rewriteMagicLink(input: {
+  magicLink: string;
+  clientDomain: string;
+  bootstrapParams: Record<string, string>;
+}) {
+  return rewriteLinkToBaseUrl(
+    input.magicLink,
+    HUB_LOGIN_PAGE_PATH,
+    input.clientDomain,
+    input.bootstrapParams,
+  );
 }
 
 export function getRequestedAppVariantIdFromRequest(

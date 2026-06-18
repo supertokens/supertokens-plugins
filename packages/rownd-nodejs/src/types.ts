@@ -689,6 +689,9 @@ export interface RowndPluginConfig {
   rowndAppSecret: string;
   enableDebugLogs?: boolean;
   clientDomains?: RowndClientDomains;
+  crossDeviceConfirmationBypass?: {
+    allowedRedirectPaths: string[];
+  };
   telemetry?: RowndTelemetryConfig;
   // Optional field schema override. If omitted, DEFAULT_ROWND_SCHEMA is used.
   schema?: RowndSchema;
@@ -786,6 +789,9 @@ export interface RowndPluginNormalisedConfig {
   rowndAppSecret: string;
   enableDebugLogs?: boolean;
   clientDomains?: RowndClientDomains;
+  crossDeviceConfirmationBypass?: {
+    allowedRedirectPaths: string[];
+  };
   telemetry?: RowndTelemetryConfig;
   schema?: RowndSchema;
   appConfig?: RowndAppConfigInput;

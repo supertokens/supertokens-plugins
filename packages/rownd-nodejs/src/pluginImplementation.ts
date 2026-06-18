@@ -40,16 +40,20 @@ import {
   updateUserMetadata,
 } from "./supertokens-repository";
 import {
+  assertAllowedBypassRedirectPath,
   getErrorMessage,
   getJsonBody,
+  normalizeRedirectToPathForClientDomain,
   getRequestedAppVariantIdFromRequest,
   hasOwn,
+  isRecord,
   missingFieldResponse,
   parseGuestBody,
   parseRequest,
   parseUpdateFieldBody,
   parseUpdateMetaBody,
   parseUpdateUserBody,
+  resolveAllowedClientDomain,
 } from "./utils";
 
 type SuperTokensRequest = Parameters<PluginRouteHandler["handler"]>[0];
@@ -63,6 +67,10 @@ type SuperTokensUserContextWithCache = SuperTokensUserContext & {
     coreCallCache?: Record<string, unknown>;
   };
 };
+
+function isBodyString(body: unknown, key: string): body is Record<string, string> {
+  return isRecord(body) && typeof body[key] === "string" && body[key].length > 0;
+}
 
 export type RowndRouteHandlerDeps = {
   pluginConfig: RowndPluginNormalisedConfig;
@@ -90,6 +98,54 @@ export function handleGetAppConfig(deps: RowndRouteHandlerDeps) {
       status: "OK" as const,
       ...appConfig,
     };
+  };
+}
+
+export function handleValidatePasswordlessConfirmationBypass(
+  deps: RowndRouteHandlerDeps,
+) {
+  return async (req: SuperTokensRequest) => {
+    try {
+      const body = await getJsonBody(req);
+      const clientDomain = isBodyString(body, "clientDomain")
+        ? body.clientDomain
+        : undefined;
+      const redirectToPath = isBodyString(body, "redirectToPath")
+        ? body.redirectToPath
+        : undefined;
+      const appVariantId = isBodyString(body, "appVariantId")
+        ? body.appVariantId
+        : undefined;
+
+      assertRowndAppVariantIsConfigured(appVariantId);
+      const resolvedClientDomain = resolveAllowedClientDomain({
+        clientDomain,
+        pluginConfig: deps.pluginConfig,
+        stConfig: deps.stConfig,
+        request: req,
+      });
+      const normalizedRedirectToPath = normalizeRedirectToPathForClientDomain(
+        redirectToPath,
+        resolvedClientDomain,
+      );
+      assertAllowedBypassRedirectPath(
+        deps.pluginConfig,
+        normalizedRedirectToPath,
+      );
+
+      return {
+        status: "OK" as const,
+        bypass: true,
+      };
+    } catch (error) {
+      logDebugMessage(
+        `Passwordless confirmation bypass validation failed. Error: ${getErrorMessage(error)}`,
+      );
+      return {
+        status: "ERROR" as const,
+        bypass: false,
+      };
+    }
   };
 }
 

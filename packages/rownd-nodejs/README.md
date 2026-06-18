@@ -80,6 +80,62 @@ RowndMigrationPlugin.init({
 });
 ```
 
+### Passwordless Confirmation Bypass
+
+Use `createMagicLinkWithConfirmationBypass` when your backend needs to create a passwordless magic link that can be opened on a different device without showing the SuperTokens cross-device confirmation prompt.
+This is intended for trusted server-side flows only.
+
+First, configure the exact post-login paths that may use the bypass:
+
+```typescript
+const rowndPluginConfig = {
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  clientDomains: {
+    browser: "https://app.example.com",
+  },
+  crossDeviceConfirmationBypass: {
+    allowedRedirectPaths: ["/profile", "/settings/security"],
+  },
+};
+
+const superTokensConfig = {
+  // your app info and recipe list
+  experimental: {
+    plugins: [RowndMigrationPlugin.init(rowndPluginConfig)],
+  },
+};
+
+SuperTokens.init(superTokensConfig);
+```
+
+Then call the helper from your backend:
+
+```typescript
+import { createMagicLinkWithConfirmationBypass } from "@supertokens-plugins/rownd-nodejs";
+
+const magicLink = await createMagicLinkWithConfirmationBypass({
+  email: "user@example.com",
+  clientDomain: "browser",
+  redirectToPath: "/profile",
+  displayContext: "browser",
+});
+```
+
+`redirectToPath` is required and must match `crossDeviceConfirmationBypass.allowedRedirectPaths` exactly after normalization. Absolute URLs are accepted only when their origin matches the resolved `clientDomain`; they are normalized back to a relative path before being added to the magic link.
+
+`clientDomain` must be a configured `clientDomains` key, not a raw domain. Omit it to use the SuperTokens website domain.
+
+Pass exactly one of `email` or `phoneNumber`. The helper returns the rewritten magic link with `bypassDeviceConfirmation=true`.
+
+Before skipping the cross-device confirmation prompt, the frontend should validate the callback against the plugin:
+
+- **POST** `/plugin/passwordless-cross-device-confirmation/validate`
+- **Body**: `{ "clientDomain": "browser", "redirectToPath": "/profile", "appVariantId": "optional_variant" }`
+- **Success response**: `{ "status": "OK", "bypass": true }`
+
+If validation fails, the frontend should show the normal cross-device confirmation prompt.
+
 ## API Endpoint
 
 The plugin exposes a single endpoint:

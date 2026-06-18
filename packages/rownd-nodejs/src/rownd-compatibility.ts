@@ -383,10 +383,10 @@ async function buildStandardOAuthClaims(user: SuperTokensUser, scopes: string[])
   const metadata = await getRowndMetadata(user.id);
   const rowndData = isJsonRecord(metadata.original_rownd_user?.data)
     ? metadata.original_rownd_user.data
-    : {};
+    : ({} as JsonRecord);
   const verifiedData = isJsonRecord(metadata.original_rownd_user?.verified_data)
     ? metadata.original_rownd_user.verified_data
-    : {};
+    : ({} as JsonRecord);
 
   if (scopes.includes("email")) {
     const email = firstString(rowndData.email) ?? user.emails[0];

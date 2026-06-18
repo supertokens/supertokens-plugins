@@ -20,7 +20,7 @@ import {
 import { RowndPluginConfig, RowndPluginNormalisedConfig } from "./types";
 import { enableDebugLogs, logDebugMessage } from "./logger";
 import { createClient } from "./telemetry/createTelemetryClient";
-import { assertRowndAppVariantIsConfigured, setPluginConfig } from "./config";
+import { assertRowndAppVariantIsConfigured, setPluginConfig, setSuperTokensConfig } from "./config";
 import {
   applyRowndOAuthResourceParams,
   buildRowndOAuthPayload,
@@ -55,6 +55,7 @@ import {
   handleUpdateUser,
   handleUpdateUserField,
   handleUpdateUserMeta,
+  handleValidatePasswordlessConfirmationBypass,
 } from "./pluginImplementation";
 
 export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
@@ -147,6 +148,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           }
         },
         routeHandlers(stConfig) {
+          setSuperTokensConfig(stConfig);
           const apiBasePath =
             stConfig.appInfo.apiBasePath.getAsStringDangerous();
           hubBootstrapParams = {
@@ -178,6 +180,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate`,
                 method: "post" as const,
                 handler: withRequestHandler(handleMigrate(routeHandlerDeps)),
+              },
+              {
+                path: `${apiBasePath}/plugin/passwordless-cross-device-confirmation/validate`,
+                method: "post" as const,
+                handler: withRequestHandler(
+                  handleValidatePasswordlessConfirmationBypass(routeHandlerDeps),
+                ),
               },
               {
                 path: `${apiBasePath}/plugin/migrate-session`,
@@ -624,6 +633,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         rowndAppSecret: config.rowndAppSecret,
         enableDebugLogs: config.enableDebugLogs,
         clientDomains: config.clientDomains,
+        crossDeviceConfirmationBypass: config.crossDeviceConfirmationBypass,
         telemetry: config.telemetry,
         schema: config.schema,
         appConfig: config.appConfig,
