@@ -21,6 +21,9 @@ type RowndSignInMethodConfig = {
   type?: string;
   client_id?: string;
   ios_client_id?: string;
+  web_client_type?: string;
+  ios_client_type?: string;
+  android_client_type?: string;
   scopes?: string[];
   sign_in_faster_with_google?: string;
   one_tap?: {
@@ -250,6 +253,9 @@ export function convertRowndConfigToPluginConfig(
           result.push({
             method: "apple",
             clientId: value.client_id,
+            webClientType: value.web_client_type,
+            iosClientType: value.ios_client_type,
+            androidClientType: value.android_client_type,
           });
           instructions.push(
             "Apple sign-in was enabled. Please ensure you configure the \"apple\" provider in your SuperTokens ThirdParty recipe. You will need to manually provide the Apple 'clientSecret' (or private key) as Rownd cannot export it.",

@@ -1970,7 +1970,13 @@ describe("rownd-nodejs plugin", () => {
                 clientId: "test-client-id.apps.googleusercontent.com",
                 oneTap: { browser: { autoPrompt: true, delay: 3000 } },
               },
-              { method: "apple", clientId: "com.example.app" },
+              {
+                method: "apple",
+                clientId: "com.example.app",
+                webClientType: "web",
+                iosClientType: "ios",
+                androidClientType: "android",
+              },
             ],
           },
         });
@@ -1993,6 +1999,9 @@ describe("rownd-nodejs plugin", () => {
         expect(methods.google.one_tap.browser.delay).toBe(3000);
         expect(methods.apple.enabled).toBe(true);
         expect(methods.apple.client_id).toBe("com.example.app");
+        expect(methods.apple.web_client_type).toBe("web");
+        expect(methods.apple.ios_client_type).toBe("ios");
+        expect(methods.apple.android_client_type).toBe("android");
       });
 
       it("returns platform-specific auth order from plugin config", async () => {

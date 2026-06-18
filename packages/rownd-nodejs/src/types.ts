@@ -26,6 +26,18 @@ export type RowndSignInMethod =
        * @default ""
        */
       clientId?: string;
+      /**
+       * SuperTokens provider clientType used for browser Apple redirect flows.
+       */
+      webClientType?: string;
+      /**
+       * SuperTokens provider clientType used for native iOS Apple auth code exchange.
+       */
+      iosClientType?: string;
+      /**
+       * SuperTokens provider clientType used for native Android Apple auth code exchange.
+       */
+      androidClientType?: string;
     }
   | {
       /**

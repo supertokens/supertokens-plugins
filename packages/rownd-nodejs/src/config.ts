@@ -121,6 +121,15 @@ function buildSignInMethodsConfig(
     apple: {
       enabled: !!appleMethod,
       client_id: getStringMethodProperty(appleMethod, "clientId") ?? "",
+      ...(getStringMethodProperty(appleMethod, "webClientType") !== undefined
+        ? { web_client_type: getStringMethodProperty(appleMethod, "webClientType") }
+        : {}),
+      ...(getStringMethodProperty(appleMethod, "iosClientType") !== undefined
+        ? { ios_client_type: getStringMethodProperty(appleMethod, "iosClientType") }
+        : {}),
+      ...(getStringMethodProperty(appleMethod, "androidClientType") !== undefined
+        ? { android_client_type: getStringMethodProperty(appleMethod, "androidClientType") }
+        : {}),
     },
     anonymous: {
       enabled: !!anonymousMethod && anonymousType !== "instant",
