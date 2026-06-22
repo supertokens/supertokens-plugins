@@ -664,12 +664,12 @@ export function getEffectiveAuthLevel(
   originalAuthLevel?: string,
   verifiedData?: JsonRecord,
 ) {
-  if (originalAuthLevel === INSTANT_AUTH_METHOD_ID) {
-    return INSTANT_AUTH_METHOD_ID;
-  }
-
   if (hasVerifiedRealLoginMethod(user)) {
     return "verified";
+  }
+
+  if (originalAuthLevel === INSTANT_AUTH_METHOD_ID) {
+    return INSTANT_AUTH_METHOD_ID;
   }
 
   return (

@@ -565,7 +565,13 @@ export async function completePendingEmailVerification(input: {
   recipeUserId: Parameters<typeof AccountLinking.createPrimaryUser>[0];
   email: string;
   userContext?: JsonRecord;
-}) {
+}): Promise<
+  | {
+      userId: string;
+      recipeUserId: Parameters<typeof AccountLinking.createPrimaryUser>[0];
+    }
+  | undefined
+> {
   const user = await SuperTokens.getUser(
     input.recipeUserId.getAsString(),
     input.userContext,
@@ -585,6 +591,7 @@ export async function completePendingEmailVerification(input: {
   }
 
   let metadataUserId = userId;
+  let verifiedRecipeUserId = input.recipeUserId;
   const passwordlessEmailMethod = getPasswordlessEmailLoginMethod(user);
   if (passwordlessEmailMethod) {
     const updateResult = await Passwordless.updateUser({
@@ -598,6 +605,8 @@ export async function completePendingEmailVerification(input: {
         `Failed to update verified email method: ${updateResult.status}`,
       );
     }
+
+    verifiedRecipeUserId = passwordlessEmailMethod.recipeUserId;
   } else if (hasOnlyGuestLoginMethods(user)) {
     const isPasswordlessSignUpAllowed = await AccountLinking.isSignUpAllowed(
       PUBLIC_TENANT_ID,
@@ -619,6 +628,7 @@ export async function completePendingEmailVerification(input: {
       tenantId: PUBLIC_TENANT_ID,
       userContext: input.userContext,
     });
+    verifiedRecipeUserId = passwordlessUser.recipeUserId;
 
     const primaryUserResult = await AccountLinking.createPrimaryUser(
       passwordlessUser.recipeUserId,
@@ -681,6 +691,11 @@ export async function completePendingEmailVerification(input: {
   };
 
   await UserMetadata.updateUserMetadata(metadataUserId, updatedMetadata);
+
+  return {
+    userId: metadataUserId,
+    recipeUserId: verifiedRecipeUserId,
+  };
 }
 
 function isMatchingPendingEmailVerification(

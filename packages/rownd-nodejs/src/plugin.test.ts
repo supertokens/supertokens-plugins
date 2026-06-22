@@ -3759,6 +3759,109 @@ describe("rownd-nodejs plugin", () => {
         expect(claims).not.toHaveProperty(ROWND_JWT_CLAIMS.IsAnonymous);
       });
 
+      it("allows instant users to start email verification when email verification is required", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+          emailVerificationMode: "REQUIRED",
+        });
+        server = s;
+        testPORT = port;
+        const instantSession = await createGuestSession("instant");
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(instantSession.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: { email: "required-instant-primary@example.com" },
+            }),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.status).toBe("OK");
+        expect(body.auth_level).toBe("instant");
+        expect(body.verified_data.email).toBeUndefined();
+      });
+
+      it("replaces the instant session with a verified passwordless session after email verification", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const instantSession = await createGuestSession("instant");
+        const verifiedEmail = "instant-session-replacement@example.com";
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(instantSession.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ data: { email: verifiedEmail } }),
+          },
+        );
+        expect(updateRes.status).toBe(200);
+
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            instantSession.recipeUserId,
+            verifiedEmail,
+          );
+        expect(tokenResponse.status).toBe("OK");
+
+        const verifyRes = await verifyEmailToken(
+          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+          instantSession.accessToken,
+        );
+        expect(verifyRes.status).toBe(200);
+        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+
+        const newAccessToken = verifyRes.headers.get("st-access-token");
+        expect(newAccessToken).toBeTruthy();
+        expect(newAccessToken).not.toBe(instantSession.accessToken);
+
+        const newSession = await Session.getSessionWithoutRequestResponse(
+          newAccessToken!,
+        );
+        expect(newSession).toBeDefined();
+        const payload = newSession!.getAccessTokenPayload();
+
+        expect(payload.auth_level).toBe("verified");
+        expect(payload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("verified");
+        expect(payload.is_verified_user).toBe(true);
+        expect(payload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(true);
+        await expect(
+          newSession?.getClaimValue(RowndIsAnonymousClaim),
+        ).resolves.toBe(false);
+        expect(payload[ROWND_JWT_CLAIMS.IsAnonymous]).toBeUndefined();
+        expect(payload["st-ev"]?.v).toBe(true);
+
+        const linkedUser = await SuperTokens.getUser(newSession!.getUserId());
+        expect(linkedUser?.isPrimaryUser).toBe(true);
+        expect(linkedUser?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email: verifiedEmail,
+            }),
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: expect.objectContaining({ id: "instant" }),
+            }),
+          ]),
+        );
+      });
+
       it("links a guest into an existing passwordless primary for the verified email", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
@@ -4782,6 +4885,8 @@ describe("rownd-nodejs plugin", () => {
 
       const session = await Session.getSessionWithoutRequestResponse(
         accessToken!,
+        undefined,
+        { overrideGlobalClaimValidators: () => [] },
       );
       expect(session).toBeDefined();
 
@@ -4793,10 +4898,13 @@ describe("rownd-nodejs plugin", () => {
       };
     }
 
-    async function verifyEmailToken(token: string) {
+    async function verifyEmailToken(token: string, accessToken?: string) {
       return fetch(`http://localhost:${testPORT}/auth/user/email/verify`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          ...(accessToken ? getAuthedHeaders(accessToken) : {}),
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           method: "token",
           token,
@@ -4964,6 +5072,7 @@ async function setup(
   config?: Partial<RowndPluginConfig>,
   options?: {
     enableEmailVerification?: boolean;
+    emailVerificationMode?: "OPTIONAL" | "REQUIRED";
     emailVerificationLinks?: string[];
   },
 ): Promise<{ server: Server; port: number }> {
@@ -4999,7 +5108,7 @@ async function setup(
           ...(options?.enableEmailVerification
             ? [
                 EmailVerification.init({
-                  mode: "OPTIONAL",
+                  mode: options.emailVerificationMode ?? "OPTIONAL",
                   emailDelivery: {
                     override: (originalImplementation) => ({
                       ...originalImplementation,

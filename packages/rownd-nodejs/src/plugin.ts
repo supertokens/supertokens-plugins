@@ -1,11 +1,16 @@
 import { SuperTokensPlugin } from "supertokens-node/types";
-import type { APIInterface as EmailVerificationAPIInterface } from "supertokens-node/recipe/emailverification";
+import {
+  EmailVerificationClaim,
+  type APIInterface as EmailVerificationAPIInterface,
+} from "supertokens-node/recipe/emailverification";
 import type {
   APIInterface as OAuth2ProviderAPIInterface,
   RecipeInterface as OAuth2ProviderRecipeInterface,
 } from "supertokens-node/recipe/oauth2provider/types";
 import type { APIInterface as PasswordlessAPIInterface } from "supertokens-node/recipe/passwordless";
+import Session from "supertokens-node/recipe/session";
 import type { APIInterface as ThirdPartyAPIInterface } from "supertokens-node/recipe/thirdparty";
+import type { VerifySessionOptions } from "supertokens-node/recipe/session/types";
 import { createPluginInitFunction } from "@shared/js";
 import { withRequestHandler } from "@shared/nodejs";
 import { createInstance } from "@rownd/node";
@@ -57,6 +62,14 @@ import {
   handleUpdateUserMeta,
   handleValidatePasswordlessConfirmationBypass,
 } from "./pluginImplementation";
+
+const verifyRowndUserSessionOptions: VerifySessionOptions = {
+  sessionRequired: true,
+  overrideGlobalClaimValidators: (validators) =>
+    validators.filter((validator) => {
+      return !("claim" in validator) || validator.claim.key !== EmailVerificationClaim.key;
+    }),
+};
 
 export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
   createPluginInitFunction<
@@ -205,13 +218,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user`,
                 method: "get" as const,
-                verifySessionOptions: { sessionRequired: true },
+                verifySessionOptions: verifyRowndUserSessionOptions,
                 handler: withRequestHandler(handleGetUser()),
               },
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user`,
                 method: "put" as const,
-                verifySessionOptions: { sessionRequired: true },
+                verifySessionOptions: verifyRowndUserSessionOptions,
                 handler: withRequestHandler(handleUpdateUser()),
               },
               {
@@ -235,13 +248,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user/field`,
                 method: "get" as const,
-                verifySessionOptions: { sessionRequired: true },
+                verifySessionOptions: verifyRowndUserSessionOptions,
                 handler: withRequestHandler(handleGetUserField()),
               },
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user/field`,
                 method: "put" as const,
-                verifySessionOptions: { sessionRequired: true },
+                verifySessionOptions: verifyRowndUserSessionOptions,
                 handler: withRequestHandler(handleUpdateUserField()),
               },
             ],
@@ -590,11 +603,32 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const response =
                   await originalImplementation.verifyEmailPOST(input);
                 if (response.status === "OK") {
-                  await completePendingEmailVerification({
+                  const verificationResult = await completePendingEmailVerification({
                     recipeUserId: response.user.recipeUserId,
                     email: response.user.email,
                     userContext: input.userContext,
                   });
+
+                  const session = input.session;
+                  const shouldReplaceSession =
+                    session &&
+                    verificationResult &&
+                    (session.getUserId(input.userContext) !== verificationResult.userId ||
+                      session.getRecipeUserId(input.userContext).getAsString() !==
+                        verificationResult.recipeUserId.getAsString());
+
+                  if (shouldReplaceSession) {
+                    await session.revokeSession(input.userContext);
+                    response.newSession = await Session.createNewSession(
+                      input.options.req,
+                      input.options.res,
+                      session.getTenantId(input.userContext),
+                      verificationResult.recipeUserId,
+                      {},
+                      {},
+                      input.userContext,
+                    );
+                  }
                 }
 
                 return response;
