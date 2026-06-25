@@ -180,6 +180,7 @@ def make_client(
     rownd_client: MockRowndClient,
     plugin_config: Optional[Dict[str, Any]] = None,
     enable_email_verification: bool = False,
+    email_verification_mode: str = "OPTIONAL",
 ) -> TestClientWithNoCookieJar:
     app = FastAPI()
     app.add_middleware(get_middleware())
@@ -223,7 +224,7 @@ def make_client(
         ),
     ]
     if enable_email_verification:
-        recipes.insert(4, emailverification.init(mode="OPTIONAL"))
+        recipes.insert(4, emailverification.init(mode=email_verification_mode))
 
     supertokens_init(
         app_info=InputAppInfo(

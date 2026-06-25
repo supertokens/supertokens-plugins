@@ -24,6 +24,7 @@ from supertokens_python.recipe.accountlinking.types import (
     ShouldAutomaticallyLink,
     ShouldNotAutomaticallyLink,
 )
+from supertokens_python.recipe.emailverification import EmailVerificationClaim
 from supertokens_python.recipe.emailverification.interfaces import APIInterface as EmailVerificationAPIInterface, APIOptions as EmailVerificationAPIOptions
 from supertokens_python.recipe.emailverification.types import EmailTemplateVars
 from supertokens_python.recipe.emailverification.utils import EmailVerificationOverrideableConfig
@@ -32,6 +33,7 @@ from supertokens_python.recipe.passwordless.interfaces import APIInterface as Pa
 from supertokens_python.recipe.passwordless.types import PasswordlessLoginEmailTemplateVars, PasswordlessLoginSMSTemplateVars
 from supertokens_python.recipe.passwordless.utils import PasswordlessOverrideableConfig
 from supertokens_python.recipe.session import SessionContainer
+from supertokens_python.recipe.session import asyncio as session_asyncio
 from supertokens_python.recipe.session.interfaces import RecipeInterface as SessionRecipeInterface
 from supertokens_python.recipe.thirdparty.interfaces import APIInterface as ThirdPartyAPIInterface, APIOptions as ThirdPartyAPIOptions
 from supertokens_python.recipe.thirdparty.provider import Provider, RedirectUriInfo
@@ -178,7 +180,11 @@ def init(config: Optional[RowndPluginConfig] = None, **kwargs: Unpack[RowndPlugi
     async def update_user_field_handler(request: BaseRequest, response: BaseResponse, session: Optional[SessionContainer], user_context: UserContext) -> BaseResponse:
         return await handle_update_user_field(config, request, response, session, user_context)
 
-    session_required = VerifySessionOptions(session_required=True, check_database=False)
+    rownd_user_session_required = VerifySessionOptions(
+        session_required=True,
+        check_database=False,
+        override_global_claim_validators=_without_email_verification_claim_validator,
+    )
     checked_session_required = VerifySessionOptions(session_required=True, check_database=True)
 
     passwordless_override = RecipePluginOverride()
@@ -228,16 +234,24 @@ def init(config: Optional[RowndPluginConfig] = None, **kwargs: Unpack[RowndPlugi
                 PluginRouteHandler(method="post", path=plugin_config.api_base_path + "/plugin/passwordless-cross-device-confirmation/validate", handler=validate_passwordless_confirmation_bypass_handler, verify_session_options=None),
                 PluginRouteHandler(method="post", path=plugin_config.api_base_path + "/plugin/migrate-session", handler=migrate_handler, verify_session_options=None),
                 PluginRouteHandler(method="post", path=route_base + "/signout", handler=signout_handler, verify_session_options=checked_session_required),
-                PluginRouteHandler(method="get", path=route_base + "/user", handler=get_user_handler, verify_session_options=session_required),
-                PluginRouteHandler(method="put", path=route_base + "/user", handler=update_user_handler, verify_session_options=session_required),
-                PluginRouteHandler(method="delete", path=route_base + "/user", handler=delete_user_handler, verify_session_options=session_required),
-                PluginRouteHandler(method="get", path=route_base + "/user/meta", handler=get_user_meta_handler, verify_session_options=session_required),
-                PluginRouteHandler(method="put", path=route_base + "/user/meta", handler=update_user_meta_handler, verify_session_options=session_required),
-                PluginRouteHandler(method="get", path=route_base + "/user/field", handler=get_user_field_handler, verify_session_options=session_required),
-                PluginRouteHandler(method="put", path=route_base + "/user/field", handler=update_user_field_handler, verify_session_options=session_required),
+                PluginRouteHandler(method="get", path=route_base + "/user", handler=get_user_handler, verify_session_options=rownd_user_session_required),
+                PluginRouteHandler(method="put", path=route_base + "/user", handler=update_user_handler, verify_session_options=rownd_user_session_required),
+                PluginRouteHandler(method="delete", path=route_base + "/user", handler=delete_user_handler, verify_session_options=rownd_user_session_required),
+                PluginRouteHandler(method="get", path=route_base + "/user/meta", handler=get_user_meta_handler, verify_session_options=rownd_user_session_required),
+                PluginRouteHandler(method="put", path=route_base + "/user/meta", handler=update_user_meta_handler, verify_session_options=rownd_user_session_required),
+                PluginRouteHandler(method="get", path=route_base + "/user/field", handler=get_user_field_handler, verify_session_options=rownd_user_session_required),
+                PluginRouteHandler(method="put", path=route_base + "/user/field", handler=update_user_field_handler, verify_session_options=rownd_user_session_required),
             ]
         ),
     )
+
+
+def _without_email_verification_claim_validator(global_claim_validators: list[Any], session: SessionContainer, user_context: UserContext) -> list[Any]:
+    return [
+        validator
+        for validator in global_claim_validators
+        if getattr(getattr(validator, "claim", None), "key", None) != EmailVerificationClaim.key
+    ]
 
 
 def _oauth2provider_function_override(config: RowndPluginConfig):
@@ -577,7 +591,26 @@ def _emailverification_api_override():
                 recipe_user_id = getattr(user, "recipe_user_id", None)
                 email = getattr(user, "email", None)
                 if recipe_user_id is not None and isinstance(email, str):
-                    await complete_pending_email_verification(recipe_user_id, email, user_context)
+                    verification_result = await complete_pending_email_verification(recipe_user_id, email, user_context)
+                    if session is not None and verification_result is not None:
+                        current_user_id = session.get_user_id(user_context)
+                        current_recipe_user_id = session.get_recipe_user_id(user_context).get_as_string()
+                        verified_recipe_user_id = verification_result["recipe_user_id"]
+                        should_replace_session = (
+                            current_user_id != verification_result["user_id"]
+                            or current_recipe_user_id != verified_recipe_user_id.get_as_string()
+                        )
+                        if should_replace_session:
+                            tenant_id = session.get_tenant_id(user_context)
+                            await session.revoke_session(user_context)
+                            result.new_session = await session_asyncio.create_new_session(
+                                api_options.request,
+                                tenant_id,
+                                verified_recipe_user_id,
+                                {},
+                                {},
+                                user_context,
+                            )
             return result
 
         original.email_verify_post = email_verify_post

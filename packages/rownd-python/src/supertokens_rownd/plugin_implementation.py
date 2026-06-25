@@ -1324,21 +1324,23 @@ async def complete_pending_email_verification(
     recipe_user_id: RecipeUserId,
     email: str,
     user_context: UserContext,
-) -> None:
+) -> Optional[Dict[str, object]]:
     user = await get_user(recipe_user_id.get_as_string(), user_context)
     user_id = user.id if user else recipe_user_id.get_as_string()
     metadata = await get_user_metadata(user_id)
     pending = as_json_list(metadata.get("rownd_pending_verification"))
     pending_verification = next((item for item in pending if item.get("field") == "email" and item.get("value") == email), None)
     if not pending_verification:
-        return
+        return None
 
     metadata_user_id = user_id
+    verified_recipe_user_id = recipe_user_id
     passwordless_email_method = get_passwordless_email_login_method(user)
     if passwordless_email_method:
         result = await passwordless_asyncio.update_user(passwordless_email_method.recipe_user_id, email=email, user_context=user_context)
         if getattr(result, "status", "OK") != "OK":
             raise RowndPluginError("Failed to update verified email method: %s" % getattr(result, "status", "ERROR"))
+        verified_recipe_user_id = passwordless_email_method.recipe_user_id
     elif has_only_guest_login_methods(user):
         allowed = await accountlinking_asyncio.is_sign_up_allowed(
             PUBLIC_TENANT_ID,
@@ -1352,6 +1354,7 @@ async def complete_pending_email_verification(
         passwordless_result = await passwordless_asyncio.signinup(
             PUBLIC_TENANT_ID, email, None, None, user_context
         )
+        verified_recipe_user_id = passwordless_result.recipe_user_id
         primary_result = await accountlinking_asyncio.create_primary_user(
             passwordless_result.recipe_user_id, user_context
         )
@@ -1388,6 +1391,7 @@ async def complete_pending_email_verification(
         "verified_data": {**as_json_dict(original.get("verified_data")), "email": email},
     }
     await usermetadata_asyncio.update_user_metadata(metadata_user_id, updated)
+    return {"user_id": metadata_user_id, "recipe_user_id": verified_recipe_user_id}
 
 
 def get_passwordless_email_login_method(user: Optional[User]) -> Optional[LoginMethod]:

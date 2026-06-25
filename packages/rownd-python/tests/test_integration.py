@@ -1260,6 +1260,63 @@ async def test_user_email_update_stores_pending_verification(
     assert pending[0]["value"] == "new-email@example.com"
 
 
+async def test_instant_user_can_start_email_verification_when_required(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(
+        core_url,
+        rownd_client,
+        enable_email_verification=True,
+        email_verification_mode="REQUIRED",
+    )
+    guest = client.post(
+        "/auth/plugin/rownd/guest",
+        headers={"Content-Type": "application/json", **session_headers()},
+        json={"auth_level": "instant"},
+    )
+    access_token = guest.headers["st-access-token"]
+    st_session = await session_asyncio.get_session_without_request_response(
+        access_token,
+        override_global_claim_validators=lambda validators, _session, _user_context: [],
+    )
+    assert st_session is not None
+
+    res = client.put(
+        "/auth/plugin/rownd/user",
+        headers={**auth_headers(access_token), "Content-Type": "application/json"},
+        json={"data": {"email": "required-instant@example.com"}},
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "OK"
+    assert body["auth_level"] == "instant"
+    assert body["verified_data"].get("email") is None
+    metadata = await usermetadata_asyncio.get_user_metadata(st_session.get_user_id())
+    pending = metadata.metadata["rownd_pending_verification"]
+    assert pending[0]["field"] == "email"
+    assert pending[0]["value"] == "required-instant@example.com"
+
+
+async def test_required_email_verification_does_not_bypass_missing_session(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(
+        core_url,
+        rownd_client,
+        enable_email_verification=True,
+        email_verification_mode="REQUIRED",
+    )
+
+    res = client.put(
+        "/auth/plugin/rownd/user",
+        headers={"Content-Type": "application/json"},
+        json={"data": {"email": "missing-session@example.com"}},
+    )
+
+    assert res.json().get("status") != "OK"
+
+
 async def test_guest_email_verification_links_passwordless_user(
     memory_core_url: str, rownd_client: MockRowndClient
 ):
@@ -1376,6 +1433,75 @@ async def test_email_verify_route_completes_pending_verification(
     metadata = await usermetadata_asyncio.get_user_metadata(linked_user.id)
     assert metadata.metadata["rownd_pending_verification"] == []
     assert metadata.metadata["original_rownd_user"]["data"]["email"] == "route-verified@example.com"
+
+
+async def test_email_verify_route_replaces_instant_session_after_linking(
+    memory_core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(memory_core_url, rownd_client, enable_email_verification=True)
+    guest = client.post(
+        "/auth/plugin/rownd/guest",
+        headers={"Content-Type": "application/json", **session_headers()},
+        json={"auth_level": "instant"},
+    )
+    access_token = guest.headers["st-access-token"]
+    st_session = await session_asyncio.get_session_without_request_response(access_token)
+    assert st_session is not None
+    old_session_handle = st_session.get_handle()
+    verified_email = "instant-session-replacement@example.com"
+
+    update_res = client.put(
+        "/auth/plugin/rownd/user",
+        headers={**auth_headers(access_token), "Content-Type": "application/json"},
+        json={"data": {"email": verified_email}},
+    )
+    assert update_res.status_code == 200
+
+    token_result = await emailverification_asyncio.create_email_verification_token(
+        "public", st_session.get_recipe_user_id(), verified_email, {}
+    )
+    token = getattr(token_result, "token", None)
+    assert isinstance(token, str)
+
+    verify_res = client.post(
+        "/auth/user/email/verify",
+        headers={
+            "Authorization": "Bearer %s" % access_token,
+            "Content-Type": "application/json",
+            "rid": "emailverification",
+            "fdi-version": "1.18",
+            "st-auth-mode": "header",
+        },
+        json={"method": "token", "token": token},
+    )
+
+    assert verify_res.status_code == 200
+    assert verify_res.json() == {"status": "OK"}
+    new_access_token = verify_res.headers.get("st-access-token")
+    assert new_access_token is not None
+    assert new_access_token != access_token
+    assert await session_asyncio.get_session_information(old_session_handle) is None
+
+    new_session = await session_asyncio.get_session_without_request_response(new_access_token)
+    assert new_session is not None
+    payload = new_session.get_access_token_payload()
+    assert payload["auth_level"] == "verified"
+    assert payload["is_verified_user"] is True
+    assert payload[ROWND_JWT_CLAIMS["auth_level"]] == "verified"
+    assert ROWND_JWT_CLAIMS["is_anonymous"] not in payload
+    assert "anonymous_id" not in payload
+
+    linked_user = await get_user(new_session.get_user_id())
+    assert linked_user is not None
+    assert linked_user.is_primary_user is True
+    assert any(
+        method.recipe_id == "passwordless" and method.email == verified_email
+        for method in linked_user.login_methods
+    )
+    assert any(
+        method.recipe_id == "thirdparty" and method.third_party is not None and method.third_party.id == "instant"
+        for method in linked_user.login_methods
+    )
 
 
 async def test_email_update_replaces_only_pending_email_entry(
