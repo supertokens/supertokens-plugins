@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from os import environ
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 environ["SUPERTOKENS_ENV"] = "testing"
 
@@ -180,7 +180,7 @@ def make_client(
     rownd_client: MockRowndClient,
     plugin_config: Optional[Dict[str, Any]] = None,
     enable_email_verification: bool = False,
-    email_verification_mode: str = "OPTIONAL",
+    email_verification_mode: Literal["OPTIONAL", "REQUIRED"] = "OPTIONAL",
 ) -> TestClientWithNoCookieJar:
     app = FastAPI()
     app.add_middleware(get_middleware())

@@ -77,6 +77,8 @@ init(
                 api_base_path="/auth",
                 # Should match InputAppInfo.api_domain.
                 api_domain="https://api.example.com",
+                # Should match InputAppInfo.website_domain when using passwordless confirmation bypass.
+                website_domain="https://example.com",
                 app_name="My App",
             )
         ]
@@ -92,6 +94,7 @@ The plugin registers these routes below `api_base_path`:
 - `POST /plugin/rownd/guest`
 - `POST /plugin/rownd/migrate`
 - `POST /plugin/migrate-session`
+- `POST /plugin/passwordless-cross-device-confirmation/validate`
 - `POST /plugin/rownd/signout`
 - `GET /plugin/rownd/user`
 - `PUT /plugin/rownd/user`
@@ -110,6 +113,57 @@ The plugin exposes Rownd-compatible user/session behavior for migrated and new S
 - Google and Apple third-party login methods are exposed as `google_id` and `apple_id` in Rownd-compatible user payloads.
 - OAuth2 Provider tokens and userinfo responses include Rownd claims plus standard `email`, `phone`, and `profile` claims when those scopes are requested.
 - OAuth2 `resource=app:*` requests are translated to SuperTokens `audience=app:*` for Rownd-compatible OAuth clients.
+- Rownd compatibility user routes ignore the global email verification claim validator so instant users can update email fields even when email verification is required.
+
+### Passwordless Confirmation Bypass
+
+Use `create_magic_link_with_confirmation_bypass` when your backend needs to create a passwordless magic link that can be opened on a different device without showing the SuperTokens cross-device confirmation prompt.
+This is intended for trusted server-side flows only.
+
+First, configure the exact post-login paths that may use the bypass:
+
+```python
+from supertokens_rownd import RowndPluginConfig
+
+rownd_plugin_config = RowndPluginConfig(
+    rownd_app_key="rownd_app_key",
+    rownd_app_secret="rownd_app_secret",
+    api_base_path="/auth",
+    api_domain="https://api.example.com",
+    website_domain="https://example.com",
+    client_domains={"browser": "https://app.example.com"},
+    cross_device_confirmation_bypass={
+        "allowed_redirect_paths": ["/profile", "/settings/security"],
+    },
+)
+```
+
+Then call the helper from your backend after SuperTokens has been initialized with the Rownd plugin:
+
+```python
+from supertokens_rownd import create_magic_link_with_confirmation_bypass
+
+magic_link = await create_magic_link_with_confirmation_bypass(
+    email="user@example.com",
+    client_domain="browser",
+    redirect_to_path="/profile",
+    display_context="browser",
+)
+```
+
+`redirect_to_path` is required and must match `cross_device_confirmation_bypass.allowed_redirect_paths` exactly after normalization. Absolute URLs are accepted only when their origin matches the resolved `client_domain`; they are normalized back to a relative path before being added to the magic link.
+
+`client_domain` must be a configured `client_domains` key, not a raw domain. Omit it to use `website_domain`.
+
+Pass exactly one of `email` or `phone_number`. The helper returns the rewritten magic link with `bypassDeviceConfirmation=true`.
+
+Before skipping the cross-device confirmation prompt, the frontend should validate the callback against the plugin:
+
+- **POST** `/plugin/passwordless-cross-device-confirmation/validate`
+- **Body**: `{ "clientDomain": "browser", "redirectToPath": "/profile", "appVariantId": "optional_variant" }`
+- **Success response**: `{ "status": "OK", "bypass": true }`
+
+If validation fails, the frontend should show the normal cross-device confirmation prompt.
 
 Apple sign-in methods may include SuperTokens client type mapping fields:
 
@@ -129,8 +183,10 @@ See [OAUTH_MIGRATION_TUTORIAL.md](./OAUTH_MIGRATION_TUTORIAL.md) for OAuth/OIDC 
 
 ## Notes
 
-The Python SDK plugin API does not currently pass `app_info` into plugin route construction. Configure `api_base_path`, `api_domain`, and `app_name` on the Rownd plugin so it can register routes and rewrite Rownd hub links consistently.
+The Python SDK plugin API does not currently pass `app_info` into plugin route construction. Configure `api_base_path`, `api_domain`, `website_domain`, and `app_name` on the Rownd plugin so it can register routes and rewrite Rownd hub links consistently.
 
 `api_base_path` must match `InputAppInfo.api_base_path`. If these differ, Rownd plugin routes are mounted at the Rownd plugin value, not the SuperTokens app value.
 
 `api_domain` should match `InputAppInfo.api_domain`. This value is added to rewritten Rownd hub links so browser and mobile flows can call back to the correct API domain.
+
+`website_domain` should match `InputAppInfo.website_domain`. It is required when `create_magic_link_with_confirmation_bypass` is called without `client_domain`.

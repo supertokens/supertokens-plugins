@@ -240,6 +240,10 @@ def get_magic_link_bootstrap_params(
     return params
 
 
+def optional_string(value: object) -> Optional[str]:
+    return value if isinstance(value, str) else None
+
+
 def rewrite_magic_link(
     magic_link: str,
     client_domain: str,
@@ -333,9 +337,9 @@ async def handle_validate_passwordless_confirmation_bypass(
 ) -> BaseResponse:
     try:
         body = await _json_body(request)
-        client_domain = body.get("clientDomain") if isinstance(body.get("clientDomain"), str) else None
-        redirect_to_path = body.get("redirectToPath") if isinstance(body.get("redirectToPath"), str) else None
-        app_variant_id = body.get("appVariantId") if isinstance(body.get("appVariantId"), str) else None
+        client_domain = optional_string(body.get("clientDomain"))
+        redirect_to_path = optional_string(body.get("redirectToPath"))
+        app_variant_id = optional_string(body.get("appVariantId"))
 
         assert_app_variant_is_configured(config, app_variant_id)
         resolved_client_domain = resolve_allowed_client_domain(

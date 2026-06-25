@@ -595,15 +595,16 @@ def _emailverification_api_override():
                     if session is not None and verification_result is not None:
                         current_user_id = session.get_user_id(user_context)
                         current_recipe_user_id = session.get_recipe_user_id(user_context).get_as_string()
-                        verified_recipe_user_id = verification_result["recipe_user_id"]
+                        verified_user_id = cast(str, verification_result["user_id"])
+                        verified_recipe_user_id = cast(RecipeUserId, verification_result["recipe_user_id"])
                         should_replace_session = (
-                            current_user_id != verification_result["user_id"]
+                            current_user_id != verified_user_id
                             or current_recipe_user_id != verified_recipe_user_id.get_as_string()
                         )
                         if should_replace_session:
                             tenant_id = session.get_tenant_id(user_context)
                             await session.revoke_session(user_context)
-                            result.new_session = await session_asyncio.create_new_session(
+                            cast(Any, result).new_session = await session_asyncio.create_new_session(
                                 api_options.request,
                                 tenant_id,
                                 verified_recipe_user_id,
