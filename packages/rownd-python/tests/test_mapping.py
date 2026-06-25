@@ -8,6 +8,7 @@ from supertokens_rownd.plugin_implementation import (
     assert_allowed_bypass_redirect_path,
     as_json_dict,
     build_app_config,
+    clear_supertokens_core_call_cache,
     get_magic_link_bootstrap_params,
     get_rownd_compat_user,
     map_rownd_user_to_supertokens,
@@ -296,6 +297,26 @@ def test_magic_link_bootstrap_params_include_confirmation_context():
         "displayContext": "browser",
         "redirectToPath": "/profile",
         "clientDomain": "browser",
+    }
+
+
+def test_clear_supertokens_core_call_cache_handles_known_cache_keys():
+    user_context = {
+        "_default": {
+            "coreCallCache": {"/recipe/user": "stale"},
+            "core_call_cache": {"/recipe/user": "stale"},
+        },
+        "custom": "value",
+    }
+
+    clear_supertokens_core_call_cache(user_context)
+
+    assert user_context == {
+        "_default": {
+            "coreCallCache": {},
+            "core_call_cache": {},
+        },
+        "custom": "value",
     }
 
 

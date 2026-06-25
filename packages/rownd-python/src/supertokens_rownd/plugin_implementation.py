@@ -492,15 +492,13 @@ async def handle_migrate(
 
         if user is None:
             try:
-                imported_user = await import_user(
-                    map_rownd_user_to_supertokens(rownd_user), supertokens_config
-                )
-                supertokens_user_id = imported_user["id"]
-                login_methods = as_json_list(imported_user.get("loginMethods"))
-                if login_methods:
-                    imported_recipe_user_id = login_methods[0].get("recipeUserId")
-                    if isinstance(imported_recipe_user_id, str):
-                        recipe_user_id = RecipeUserId(imported_recipe_user_id)
+                await import_user(map_rownd_user_to_supertokens(rownd_user), supertokens_config)
+                clear_supertokens_core_call_cache(user_context)
+                user = await get_user(rownd_user_id, user_context)
+                if user is None:
+                    raise RowndPluginError("Imported user could not be resolved")
+                supertokens_user_id = user.id
+                recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else None
             except Exception:
                 user = await get_user(rownd_user_id, user_context)
                 if user is None:
@@ -544,6 +542,16 @@ async def handle_migrate(
             response,
             {"status": "ERROR", "message": str(err) if isinstance(err, RowndPluginError) else "Migration failed"},
         )
+
+
+def clear_supertokens_core_call_cache(user_context: UserContext) -> None:
+    default_context = user_context.get("_default") if isinstance(user_context, dict) else None
+    if not isinstance(default_context, dict):
+        return
+    if isinstance(default_context.get("coreCallCache"), dict):
+        default_context["coreCallCache"] = {}
+    if isinstance(default_context.get("core_call_cache"), dict):
+        default_context["core_call_cache"] = {}
 
 
 async def handle_signout(session: Optional[SessionContainer], response: BaseResponse) -> BaseResponse:

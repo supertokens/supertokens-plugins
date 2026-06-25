@@ -318,6 +318,10 @@ async def test_migrate_with_emailverification_enabled_succeeds(
     assert res.status_code == 200
     assert res.json() == {"status": "OK"}
     assert res.headers.get("st-access-token")
+    user = await get_user("py-emailverification-migrate-user")
+    assert user is not None
+    assert user.login_methods[0].recipe_id == "passwordless"
+    assert user.login_methods[0].email == "ev-migrate@example.com"
 
 
 async def test_migrate_records_success_telemetry(core_url: str, rownd_client: MockRowndClient):
