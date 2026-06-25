@@ -64,10 +64,12 @@ from .plugin_implementation import (
     handle_update_user,
     handle_update_user_field,
     handle_update_user_meta,
+    handle_validate_passwordless_confirmation_bypass,
     has_only_guest_login_methods,
     is_guest_account_info,
     normalize_rownd_oauth_scopes,
     record_rownd_app_variant_for_user,
+    set_active_rownd_config,
 )
 from .rownd_client import RowndClient
 from .telemetry import create_telemetry_client
@@ -123,6 +125,7 @@ def init(config: Optional[RowndPluginConfig] = None, **kwargs: Unpack[RowndPlugi
 
     config.api_base_path = _normalise_path(config.api_base_path)
     _validate_config(config)
+    set_active_rownd_config(config)
     client = config.rownd_client or RowndClient(config)
     telemetry_client = create_telemetry_client(config)
 
@@ -147,6 +150,9 @@ def init(config: Optional[RowndPluginConfig] = None, **kwargs: Unpack[RowndPlugi
             response,
             user_context,
         )
+
+    async def validate_passwordless_confirmation_bypass_handler(request: BaseRequest, response: BaseResponse, session: Optional[SessionContainer], user_context: UserContext) -> BaseResponse:
+        return await handle_validate_passwordless_confirmation_bypass(config, request, response)
 
     async def signout_handler(request: BaseRequest, response: BaseResponse, session: Optional[SessionContainer], user_context: UserContext) -> BaseResponse:
         return await handle_signout(session, response)
@@ -219,6 +225,7 @@ def init(config: Optional[RowndPluginConfig] = None, **kwargs: Unpack[RowndPlugi
                 PluginRouteHandler(method="get", path=route_base + "/app-config", handler=app_config_handler, verify_session_options=None),
                 PluginRouteHandler(method="post", path=route_base + "/guest", handler=guest_handler, verify_session_options=None),
                 PluginRouteHandler(method="post", path=route_base + "/migrate", handler=migrate_handler, verify_session_options=None),
+                PluginRouteHandler(method="post", path=plugin_config.api_base_path + "/plugin/passwordless-cross-device-confirmation/validate", handler=validate_passwordless_confirmation_bypass_handler, verify_session_options=None),
                 PluginRouteHandler(method="post", path=plugin_config.api_base_path + "/plugin/migrate-session", handler=migrate_handler, verify_session_options=None),
                 PluginRouteHandler(method="post", path=route_base + "/signout", handler=signout_handler, verify_session_options=checked_session_required),
                 PluginRouteHandler(method="get", path=route_base + "/user", handler=get_user_handler, verify_session_options=session_required),

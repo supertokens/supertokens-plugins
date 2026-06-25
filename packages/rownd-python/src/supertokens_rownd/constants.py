@@ -23,3 +23,4 @@ DEFAULT_ROWND_SCHEMA = {
 IDENTITY_USER_DATA_FIELDS = {"user_id", "email", "phone_number", "google_id", "apple_id"}
 INTERNAL_METADATA_FIELDS = {"original_rownd_user", "rownd_pending_verification"}
 BUILTIN_SIGN_IN_METHOD_KEYS = {"email", "phone", "google", "apple", "anonymous"}
+PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM = "bypassDeviceConfirmation"

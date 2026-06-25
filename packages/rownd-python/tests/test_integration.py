@@ -4,6 +4,7 @@ import pytest
 import jwt
 import httpx
 from typing import Any, cast
+from urllib.parse import parse_qs, urlparse
 
 from supertokens_python.asyncio import get_user
 from supertokens_python.recipe.emailverification import asyncio as emailverification_asyncio
@@ -14,6 +15,7 @@ from supertokens_python.recipe.usermetadata import asyncio as usermetadata_async
 
 from supertokens_rownd.constants import ROWND_JWT_CLAIMS
 from supertokens_rownd.plugin_implementation import complete_pending_email_verification
+from supertokens_rownd import create_magic_link_with_confirmation_bypass
 from supertokens_rownd.types import RowndPluginError
 
 from conftest import MockRowndClient, auth_headers, make_client, session_headers
@@ -977,6 +979,106 @@ async def test_guest_login_uses_instant_provider_for_instant_auth_level(
     assert user is not None
     assert user.login_methods[0].third_party is not None
     assert user.login_methods[0].third_party.id == "instant"
+
+
+async def test_creates_confirmation_bypass_magic_link_for_allowlisted_redirect(
+    core_url: str, rownd_client: MockRowndClient
+):
+    make_client(
+        core_url,
+        rownd_client,
+        plugin_config={
+            "client_domains": {"browser_local": "http://localhost:3000"},
+            "cross_device_confirmation_bypass": {
+                "allowed_redirect_paths": ["/profile?tab=security"],
+            },
+        },
+    )
+
+    link = await create_magic_link_with_confirmation_bypass(
+        email="bypass@example.com",
+        client_domain="browser_local",
+        redirect_to_path="http://localhost:3000/profile?tab=security",
+        display_context="browser",
+    )
+    parsed = urlparse(link)
+    query = parse_qs(parsed.query)
+
+    assert parsed.scheme == "http"
+    assert parsed.netloc == "localhost:3000"
+    assert parsed.path == "/account/login"
+    assert query["bypassDeviceConfirmation"] == ["true"]
+    assert query["redirectToPath"] == ["/profile?tab=security"]
+    assert query["clientDomain"] == ["browser_local"]
+    assert query["displayContext"] == ["browser"]
+    assert parsed.fragment
+
+
+async def test_confirmation_bypass_magic_link_rejects_unconfigured_allowlist(
+    core_url: str, rownd_client: MockRowndClient
+):
+    make_client(
+        core_url,
+        rownd_client,
+        plugin_config={"client_domains": {"browser": "http://localhost:3000"}},
+    )
+
+    with pytest.raises(RowndPluginError, match="allowed_redirect_paths must be configured"):
+        await create_magic_link_with_confirmation_bypass(
+            email="bypass@example.com",
+            redirect_to_path="/profile",
+            client_domain="browser",
+        )
+
+
+async def test_confirmation_bypass_validation_endpoint_accepts_allowed_redirect(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(
+        core_url,
+        rownd_client,
+        plugin_config={
+            "client_domains": {"browser_local": "http://localhost:3000"},
+            "cross_device_confirmation_bypass": {"allowed_redirect_paths": ["/profile"]},
+        },
+    )
+
+    res = client.post(
+        "/auth/plugin/passwordless-cross-device-confirmation/validate",
+        headers={"Content-Type": "application/json"},
+        json={
+            "clientDomain": "browser_local",
+            "redirectToPath": "http://localhost:3000/profile",
+        },
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {"status": "OK", "bypass": True}
+
+
+async def test_confirmation_bypass_validation_endpoint_rejects_disallowed_redirect(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(
+        core_url,
+        rownd_client,
+        plugin_config={
+            "client_domains": {"browser_local": "http://localhost:3000"},
+            "cross_device_confirmation_bypass": {"allowed_redirect_paths": ["/profile"]},
+        },
+    )
+
+    res = client.post(
+        "/auth/plugin/passwordless-cross-device-confirmation/validate",
+        headers={"Content-Type": "application/json"},
+        json={
+            "clientDomain": "browser_local",
+            "redirectToPath": "https://evil.example.com/profile",
+        },
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {"status": "ERROR", "bypass": False}
 
 
 async def test_get_user_returns_compatibility_payload(core_url: str, rownd_client: MockRowndClient):

@@ -5,10 +5,14 @@ import pytest
 import supertokens_rownd.plugin_implementation as impl
 from supertokens_rownd.plugin_implementation import (
     add_hub_bootstrap_params,
+    assert_allowed_bypass_redirect_path,
     as_json_dict,
     build_app_config,
+    get_magic_link_bootstrap_params,
     get_rownd_compat_user,
     map_rownd_user_to_supertokens,
+    normalize_redirect_to_path_for_client_domain,
+    resolve_allowed_client_domain,
 )
 from supertokens_rownd.types import RowndPluginConfig, RowndPluginError
 
@@ -202,6 +206,97 @@ def test_adds_hub_bootstrap_params_to_relative_link():
     )
 
     assert link == "/account/verify-email?linkCode=abc&appKey=app-key&apiBasePath=%2Fauth"
+
+
+def test_resolves_allowed_client_domain_from_config_key():
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        client_domains={"browser_local": "http://localhost:3000/settings"},
+    )
+
+    assert (
+        resolve_allowed_client_domain(
+            config,
+            "https://app.example.com",
+            "browser_local",
+        )
+        == "http://localhost:3000"
+    )
+
+
+def test_resolve_allowed_client_domain_rejects_unknown_key():
+    config = RowndPluginConfig(rownd_app_key="app-key", rownd_app_secret="secret")
+
+    with pytest.raises(RowndPluginError, match="Unknown clientDomain key"):
+        resolve_allowed_client_domain(config, "https://app.example.com", "missing")
+
+
+def test_normalizes_confirmation_bypass_absolute_redirect_to_relative_path():
+    assert (
+        normalize_redirect_to_path_for_client_domain(
+            "http://localhost:3000/profile?tab=security#email",
+            "http://localhost:3000",
+        )
+        == "/profile?tab=security#email"
+    )
+
+
+def test_confirmation_bypass_redirect_rejects_cross_domain_url():
+    with pytest.raises(RowndPluginError, match="redirectToPath must match clientDomain"):
+        normalize_redirect_to_path_for_client_domain(
+            "https://evil.example.com/profile",
+            "https://app.example.com",
+        )
+
+
+def test_confirmation_bypass_redirect_rejects_schemaless_url():
+    with pytest.raises(RowndPluginError, match="redirectToPath cannot be schemaless"):
+        normalize_redirect_to_path_for_client_domain("//evil.example.com/profile", "https://app.example.com")
+
+
+def test_assert_allowed_bypass_redirect_path_requires_allowlist_match():
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        cross_device_confirmation_bypass={"allowed_redirect_paths": ["/profile"]},
+    )
+
+    assert_allowed_bypass_redirect_path(config, "/profile")
+    with pytest.raises(RowndPluginError, match="redirectToPath is not allowed"):
+        assert_allowed_bypass_redirect_path(config, "/settings")
+
+
+def test_assert_allowed_bypass_redirect_path_requires_configuration():
+    config = RowndPluginConfig(rownd_app_key="app-key", rownd_app_secret="secret")
+
+    with pytest.raises(RowndPluginError, match="allowed_redirect_paths must be configured"):
+        assert_allowed_bypass_redirect_path(config, "/profile")
+
+
+def test_magic_link_bootstrap_params_include_confirmation_context():
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        api_base_path="/auth",
+        api_domain="https://api.example.com",
+    )
+
+    assert get_magic_link_bootstrap_params(
+        config,
+        app_variant_id="variant_123",
+        display_context="browser",
+        redirect_to_path="/profile",
+        client_domain_key="browser",
+    ) == {
+        "appKey": "app-key",
+        "apiBasePath": "/auth",
+        "apiDomain": "https://api.example.com",
+        "appVariantId": "variant_123",
+        "displayContext": "browser",
+        "redirectToPath": "/profile",
+        "clientDomain": "browser",
+    }
 
 
 def test_google_sign_in_method_matches_node_config_shape():

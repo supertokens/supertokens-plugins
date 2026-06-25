@@ -39,6 +39,7 @@ class RowndPluginKwargs(TypedDict, total=False):
     rownd_app_secret: str
     api_base_path: str
     api_domain: str
+    website_domain: str
     app_name: str
     rownd_api_base_url: str
     enable_debug_logs: bool
@@ -47,7 +48,12 @@ class RowndPluginKwargs(TypedDict, total=False):
     schema: RowndSchema
     app_config: JsonDict
     sub_brands: Dict[str, JsonDict]
+    cross_device_confirmation_bypass: "RowndCrossDeviceConfirmationBypassConfig"
     rownd_client: Optional[RowndClientProtocol]
+
+
+class RowndCrossDeviceConfirmationBypassConfig(TypedDict):
+    allowed_redirect_paths: List[str]
 
 
 @dataclass
@@ -58,6 +64,8 @@ class RowndPluginConfig:
     api_base_path: str = "/auth"
     # Should match InputAppInfo.api_domain so rewritten Rownd hub links can call the right API host.
     api_domain: str = ""
+    # Should match InputAppInfo.website_domain when using passwordless confirmation bypass.
+    website_domain: str = ""
     app_name: str = "Application"
     rownd_api_base_url: str = "https://api.rownd.io"
     enable_debug_logs: bool = False
@@ -66,6 +74,7 @@ class RowndPluginConfig:
     schema: RowndSchema = field(default_factory=lambda: dict(DEFAULT_ROWND_SCHEMA))
     app_config: JsonDict = field(default_factory=dict)
     sub_brands: Dict[str, JsonDict] = field(default_factory=dict)
+    cross_device_confirmation_bypass: Optional[RowndCrossDeviceConfirmationBypassConfig] = None
     rownd_client: Optional[RowndClientProtocol] = None
 
 

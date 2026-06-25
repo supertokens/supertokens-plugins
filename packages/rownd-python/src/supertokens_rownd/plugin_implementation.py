@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import time
 import uuid
+import re
 from typing import Dict, List, Optional, Tuple, cast
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 from supertokens_python import SupertokensConfig
@@ -31,10 +32,25 @@ from .constants import (
     INSTANT_AUTH_METHOD_ID,
     INTERNAL_METADATA_FIELDS,
     PUBLIC_TENANT_ID,
+    PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM,
     ROWND_JWT_CLAIMS,
 )
 from .telemetry import record_error, record_success
 from .types import JsonDict, RowndClientProtocol, RowndPluginConfig, RowndPluginError, RowndTelemetryClient
+
+
+_active_config: Optional[RowndPluginConfig] = None
+
+
+def set_active_rownd_config(config: RowndPluginConfig) -> None:
+    global _active_config
+    _active_config = config
+
+
+def get_active_rownd_config() -> RowndPluginConfig:
+    if _active_config is None:
+        raise RowndPluginError("Rownd plugin config is not initialized")
+    return _active_config
 
 
 def log_debug(config: RowndPluginConfig, message: str) -> None:
@@ -113,6 +129,229 @@ def rewrite_link_to_base_url(
             fragment=source.fragment,
         )
     )
+
+
+def normalize_client_domain(value: str) -> str:
+    if value.endswith("://"):
+        return value
+
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"}:
+        if not parsed.netloc:
+            raise RowndPluginError("Invalid clientDomain")
+        return "%s://%s" % (parsed.scheme, parsed.netloc)
+    if parsed.scheme:
+        return "%s://%s" % (parsed.scheme, parsed.netloc)
+    raise RowndPluginError("Invalid clientDomain")
+
+
+def resolve_client_domain(
+    config: RowndPluginConfig,
+    website_domain: Optional[str],
+    client_domain: Optional[str],
+) -> str:
+    if not client_domain:
+        if not website_domain:
+            raise RowndPluginError("website_domain is required when clientDomain is omitted")
+        return website_domain
+
+    resolved = config.client_domains.get(client_domain)
+    if not resolved:
+        raise RowndPluginError("Unknown clientDomain key: %s" % client_domain)
+    return resolved
+
+
+def resolve_allowed_client_domain(
+    config: RowndPluginConfig,
+    website_domain: Optional[str],
+    client_domain: Optional[str],
+) -> str:
+    resolved = resolve_client_domain(config, website_domain, client_domain)
+    normalized = normalize_client_domain(resolved)
+    allowed = [normalize_client_domain(value) for value in config.client_domains.values()]
+    if website_domain:
+        allowed.insert(0, normalize_client_domain(website_domain))
+    if normalized not in allowed:
+        raise RowndPluginError("clientDomain is not allowed: %s" % resolved)
+    return normalized
+
+
+def normalize_redirect_to_path_for_client_domain(
+    redirect_to_path: Optional[str],
+    client_domain: str,
+) -> Optional[str]:
+    if not redirect_to_path:
+        return None
+    if redirect_to_path == "NATIVE_APP":
+        return redirect_to_path
+    if redirect_to_path.startswith("//"):
+        raise RowndPluginError("redirectToPath cannot be schemaless")
+
+    normalized_client_domain = normalize_client_domain(client_domain)
+    base_url = "http://localhost" if normalized_client_domain.endswith("://") else normalized_client_domain
+    redirect_url = urlparse(urljoin(base_url.rstrip("/") + "/", redirect_to_path))
+    has_explicit_scheme = re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", redirect_to_path) is not None
+
+    if has_explicit_scheme:
+        if redirect_url.scheme not in {"http", "https"}:
+            raise RowndPluginError("redirectToPath must be http(s) or relative")
+        redirect_origin = "%s://%s" % (redirect_url.scheme, redirect_url.netloc)
+        if redirect_origin != normalized_client_domain:
+            raise RowndPluginError("redirectToPath must match clientDomain")
+
+    return urlunparse(("", "", redirect_url.path, "", redirect_url.query, redirect_url.fragment))
+
+
+def assert_allowed_bypass_redirect_path(
+    config: RowndPluginConfig,
+    redirect_to_path: Optional[str],
+) -> None:
+    if not redirect_to_path:
+        raise RowndPluginError("redirectToPath is required for confirmation bypass magic links")
+    bypass_config = config.cross_device_confirmation_bypass or {}
+    allowed_redirect_paths = bypass_config.get("allowed_redirect_paths", [])
+    if not allowed_redirect_paths:
+        raise RowndPluginError("cross_device_confirmation_bypass.allowed_redirect_paths must be configured")
+    if redirect_to_path not in allowed_redirect_paths:
+        raise RowndPluginError("redirectToPath is not allowed for confirmation bypass: %s" % redirect_to_path)
+
+
+def get_magic_link_bootstrap_params(
+    config: RowndPluginConfig,
+    app_variant_id: Optional[str] = None,
+    display_context: Optional[str] = None,
+    redirect_to_path: Optional[str] = None,
+    client_domain_key: Optional[str] = None,
+) -> Dict[str, str]:
+    params = {
+        "appKey": config.rownd_app_key,
+        "apiBasePath": config.api_base_path,
+    }
+    if config.api_domain:
+        params["apiDomain"] = config.api_domain
+    if app_variant_id:
+        params["appVariantId"] = app_variant_id
+    if display_context:
+        params["displayContext"] = display_context
+    if redirect_to_path:
+        params["redirectToPath"] = redirect_to_path
+    if client_domain_key:
+        params["clientDomain"] = client_domain_key
+    return params
+
+
+def rewrite_magic_link(
+    magic_link: str,
+    client_domain: str,
+    bootstrap_params: Dict[str, str],
+) -> str:
+    rewritten = rewrite_link_to_base_url(
+        magic_link,
+        "account/login",
+        client_domain,
+        bootstrap_params,
+    )
+    if rewritten is None:
+        raise RowndPluginError("Failed to rewrite magic link")
+    return rewritten
+
+
+async def create_magic_link_with_confirmation_bypass(
+    email: Optional[str] = None,
+    phone_number: Optional[str] = None,
+    tenant_id: str = PUBLIC_TENANT_ID,
+    session: Optional[SessionContainer] = None,
+    user_context: Optional[UserContext] = None,
+    redirect_to_path: Optional[str] = None,
+    client_domain: Optional[str] = None,
+    display_context: Optional[str] = None,
+    app_variant_id: Optional[str] = None,
+) -> str:
+    has_email = isinstance(email, str) and len(email) > 0
+    has_phone_number = isinstance(phone_number, str) and len(phone_number) > 0
+    if has_email == has_phone_number:
+        raise RowndPluginError("Exactly one of email or phone_number is required")
+
+    config = get_active_rownd_config()
+    assert_app_variant_is_configured(config, app_variant_id)
+    resolved_client_domain = resolve_allowed_client_domain(
+        config,
+        config.website_domain or None,
+        client_domain,
+    )
+    normalized_redirect_to_path = normalize_redirect_to_path_for_client_domain(
+        redirect_to_path,
+        resolved_client_domain,
+    )
+    assert_allowed_bypass_redirect_path(config, normalized_redirect_to_path)
+
+    context = {
+        **(user_context or {}),
+        **({"rowndDisplayContext": display_context} if display_context else {}),
+        "rowndRedirectToPath": normalized_redirect_to_path,
+        **({"rowndClientDomain": client_domain} if client_domain else {}),
+        **({"rowndAppVariantId": app_variant_id} if app_variant_id else {}),
+    }
+    code_info = await passwordless_asyncio.create_code(
+        tenant_id,
+        email=email if has_email else None,
+        phone_number=phone_number if has_phone_number else None,
+        session=session,
+        user_context=context,
+    )
+
+    website_domain = (config.website_domain or resolved_client_domain).rstrip("/")
+    magic_link = "%s%s/verify?preAuthSessionId=%s&tenantId=%s#%s" % (
+        website_domain,
+        config.api_base_path,
+        quote(code_info.pre_auth_session_id, safe=""),
+        quote(tenant_id, safe=""),
+        quote(code_info.link_code, safe=""),
+    )
+    rewritten_url = urlparse(
+        rewrite_magic_link(
+            magic_link,
+            resolved_client_domain,
+            get_magic_link_bootstrap_params(
+                config,
+                app_variant_id=app_variant_id,
+                display_context=display_context,
+                redirect_to_path=normalized_redirect_to_path,
+                client_domain_key=client_domain,
+            ),
+        )
+    )
+    query = dict(parse_qsl(rewritten_url.query, keep_blank_values=True))
+    query[PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM] = "true"
+    return urlunparse(rewritten_url._replace(query=urlencode(query)))
+
+
+async def handle_validate_passwordless_confirmation_bypass(
+    config: RowndPluginConfig,
+    request: BaseRequest,
+    response: BaseResponse,
+) -> BaseResponse:
+    try:
+        body = await _json_body(request)
+        client_domain = body.get("clientDomain") if isinstance(body.get("clientDomain"), str) else None
+        redirect_to_path = body.get("redirectToPath") if isinstance(body.get("redirectToPath"), str) else None
+        app_variant_id = body.get("appVariantId") if isinstance(body.get("appVariantId"), str) else None
+
+        assert_app_variant_is_configured(config, app_variant_id)
+        resolved_client_domain = resolve_allowed_client_domain(
+            config,
+            config.website_domain or None,
+            client_domain,
+        )
+        normalized_redirect_to_path = normalize_redirect_to_path_for_client_domain(
+            redirect_to_path,
+            resolved_client_domain,
+        )
+        assert_allowed_bypass_redirect_path(config, normalized_redirect_to_path)
+        return json_response(response, {"status": "OK", "bypass": True})
+    except Exception as err:
+        log_debug(config, "Passwordless confirmation bypass validation failed: %s" % err)
+        return json_response(response, {"status": "ERROR", "bypass": False})
 
 
 def add_hub_bootstrap_params(
