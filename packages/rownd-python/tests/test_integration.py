@@ -7,6 +7,7 @@ from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 from supertokens_python.asyncio import get_user
+from supertokens_python.recipe.accountlinking import asyncio as accountlinking_asyncio
 from supertokens_python.recipe.emailverification import asyncio as emailverification_asyncio
 from supertokens_python.recipe.passwordless import asyncio as passwordless_asyncio
 from supertokens_python.recipe.session import asyncio as session_asyncio
@@ -14,9 +15,9 @@ from supertokens_python.recipe.thirdparty import asyncio as thirdparty_asyncio
 from supertokens_python.recipe.usermetadata import asyncio as usermetadata_asyncio
 
 from supertokens_rownd.constants import ROWND_JWT_CLAIMS
-from supertokens_rownd.plugin_implementation import complete_pending_email_verification
+from supertokens_rownd.plugin_implementation import build_rownd_session_claims, complete_pending_email_verification
 from supertokens_rownd import create_magic_link_with_confirmation_bypass
-from supertokens_rownd.types import RowndPluginError
+from supertokens_rownd.types import RowndPluginConfig, RowndPluginError
 
 from conftest import MockRowndClient, auth_headers, make_client, session_headers
 
@@ -64,6 +65,8 @@ async def test_migrate_user_successfully(core_url: str, rownd_client: MockRowndC
     assert res.status_code == 200
     assert res.json() == {"status": "OK"}
     assert res.headers.get("st-access-token")
+    assert res.headers.get("st-refresh-token")
+    assert res.headers.get("front-token")
 
     user = await get_user("py-migrate-user")
     assert user is not None
@@ -585,6 +588,11 @@ async def test_app_config_defaults_do_not_require_auth(core_url: str, rownd_clie
     assert body["app"]["id"] == ""
     assert body["app"]["name"] == "Test App"
     assert body["app"]["schema"]["first_name"]["display_name"] == "First name"
+    methods = body["app"]["config"]["hub"]["auth"]["sign_in_methods"]
+    assert methods["email"]["enabled"] is False
+    assert methods["google"]["enabled"] is False
+    assert "email" not in body["app"]["schema"]
+    assert "google_id" not in body["app"]["schema"]
 
 
 async def test_app_config_unknown_sub_brand_returns_error(
@@ -634,6 +642,41 @@ async def test_app_config_returns_sign_in_methods_from_plugin_config(
     assert methods["google"]["client_id"] == "google-client-id"
     assert methods["apple"]["enabled"] is True
     assert methods["apple"]["client_id"] == "apple-client-id"
+
+
+async def test_app_config_returns_platform_specific_auth_order(
+    core_url: str, rownd_client: MockRowndClient
+):
+    auth_order = {
+        "default": [
+            {"name": "email", "type": "input"},
+            {"name": "google", "type": "button"},
+        ],
+        "ios": [
+            {"name": "apple", "type": "button"},
+            {"name": "google", "type": "button", "hidden": True},
+            {"name": "email", "type": "input"},
+        ],
+        "android": [
+            {"name": "google", "type": "button"},
+            {"name": "apple", "type": "button", "hidden": True},
+        ],
+    }
+    client = make_client(
+        core_url,
+        rownd_client,
+        plugin_config={
+            "app_config": {
+                "auth": {"order": auth_order},
+                "signInMethods": [{"method": "email"}, {"method": "google"}, {"method": "apple"}],
+            }
+        },
+    )
+
+    res = client.get("/auth/plugin/rownd/app-config")
+
+    assert res.status_code == 200
+    assert res.json()["app"]["config"]["hub"]["auth"]["order"] == auth_order
 
 
 async def test_app_config_returns_branding_and_legal_fields(
@@ -753,6 +796,48 @@ async def test_app_config_returns_operator_schema_and_custom_provider(
     assert github["enabled"] is True
     assert github["display_name"] == "GitHub"
     assert github["icon_light_url"] == "https://cdn.example.com/github.png"
+
+
+async def test_app_config_fills_optional_schema_defaults(core_url: str, rownd_client: MockRowndClient):
+    client = make_client(
+        core_url,
+        rownd_client,
+        plugin_config={
+            "schema": {
+                "nickname": {"display_name": "Nickname", "type": "string", "user_visible": True}
+            }
+        },
+    )
+
+    res = client.get("/auth/plugin/rownd/app-config")
+    field = res.json()["app"]["schema"]["nickname"]
+
+    assert res.status_code == 200
+    assert field["owned_by"] == "user"
+    assert field["read_only"] is False
+    assert field["show_empty"] is False
+
+
+async def test_app_config_schema_from_plugin_config_appears_in_response(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(
+        core_url,
+        rownd_client,
+        plugin_config={
+            "schema": {
+                "first_name": {"display_name": "First name", "type": "string", "user_visible": True},
+                "last_name": {"display_name": "Last name", "type": "string", "user_visible": True},
+            }
+        },
+    )
+
+    res = client.get("/auth/plugin/rownd/app-config")
+    schema = res.json()["app"]["schema"]
+
+    assert res.status_code == 200
+    assert schema["first_name"]["display_name"] == "First name"
+    assert schema["last_name"]["display_name"] == "Last name"
 
 
 async def test_app_config_returns_auth_mobile_verification_and_capabilities(
@@ -898,6 +983,33 @@ async def test_app_config_returns_selected_hub_ui_fields(
         "origins_to_show_in_bottom_sheet": ["https://app.acme.com"]
     }
     assert hub["profile"]["add_sign_in_methods_button"] == {"enabled": False}
+
+
+async def test_app_config_returns_verification_modal_custom_content(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(
+        core_url,
+        rownd_client,
+        plugin_config={
+            "app_config": {
+                "customContent": {
+                    "verificationModal": {
+                        "title": "Verify your account",
+                        "subtitle": "Enter the code we sent you",
+                    }
+                }
+            }
+        },
+    )
+
+    res = client.get("/auth/plugin/rownd/app-config")
+
+    assert res.status_code == 200
+    assert res.json()["app"]["config"]["hub"]["custom_content"]["verification_modal"] == {
+        "title": "Verify your account",
+        "subtitle": "Enter the code we sent you",
+    }
 
 
 async def test_app_config_returns_anonymous_instant_config(
@@ -1186,6 +1298,51 @@ async def test_get_user_includes_provider_id_for_thirdparty_only_user(
     assert body["auth_level"] == "verified"
 
 
+async def test_get_user_includes_provider_id_for_linked_thirdparty_user(
+    memory_core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(memory_core_url, rownd_client)
+    passwordless = await passwordless_asyncio.signinup(
+        "public", "linked-thirdparty@example.com", None, None, {}
+    )
+    thirdparty = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="google",
+        third_party_user_id="google-linked-thirdparty-id",
+        email="linked-thirdparty@example.com",
+        is_verified=True,
+        user_context={},
+    )
+    thirdparty = cast(Any, thirdparty)
+    primary = await accountlinking_asyncio.create_primary_user(passwordless.recipe_user_id, {})
+    assert getattr(primary, "status", "OK") == "OK"
+    link_result = await accountlinking_asyncio.link_accounts(
+        thirdparty.recipe_user_id, passwordless.user.id, {}
+    )
+    assert getattr(link_result, "status", "OK") == "OK"
+    await usermetadata_asyncio.update_user_metadata(
+        passwordless.user.id,
+        {
+            "original_rownd_user": {
+                "data": {"user_id": passwordless.user.id, "email": "linked-thirdparty@example.com"},
+                "verified_data": {"email": True},
+            }
+        },
+    )
+    st_session = await session_asyncio.create_new_session_without_request_response(
+        "public", passwordless.recipe_user_id, {}, {}, True
+    )
+
+    res = client.get(
+        "/auth/plugin/rownd/user", headers=auth_headers(st_session.get_access_token())
+    )
+    body = res.json()
+
+    assert res.status_code == 200
+    assert body["data"]["google_id"] == "google-linked-thirdparty-id"
+    assert body["verified_data"]["google_id"] == "google-linked-thirdparty-id"
+
+
 async def test_update_user_data_and_reject_app_owned_fields(
     core_url: str, rownd_client: MockRowndClient
 ):
@@ -1262,6 +1419,44 @@ async def test_user_email_update_stores_pending_verification(
     assert len(pending) == 1
     assert pending[0]["field"] == "email"
     assert pending[0]["value"] == "new-email@example.com"
+
+
+async def test_email_update_clears_pending_verification_when_reset_to_current_email(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    sign_in = await passwordless_asyncio.signinup(
+        "public", "email-reset-current@example.com", None, None, {}
+    )
+    st_session = await session_asyncio.create_new_session_without_request_response(
+        "public", sign_in.recipe_user_id, {}, {}, True
+    )
+    access_token = st_session.get_access_token()
+    await usermetadata_asyncio.update_user_metadata(
+        sign_in.user.id,
+        {
+            "original_rownd_user": {
+                "data": {"user_id": sign_in.user.id, "email": "email-reset-current@example.com"},
+                "verified_data": {"email": "email-reset-current@example.com"},
+            }
+        },
+    )
+
+    pending_res = client.put(
+        "/auth/plugin/rownd/user",
+        headers={**auth_headers(access_token), "Content-Type": "application/json"},
+        json={"data": {"email": "email-reset-pending@example.com"}},
+    )
+    reset_res = client.put(
+        "/auth/plugin/rownd/user",
+        headers={**auth_headers(access_token), "Content-Type": "application/json"},
+        json={"data": {"email": "email-reset-current@example.com"}},
+    )
+
+    assert pending_res.status_code == 200
+    assert reset_res.status_code == 200
+    metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
+    assert metadata.metadata["rownd_pending_verification"] == []
 
 
 async def test_instant_user_can_start_email_verification_when_required(
@@ -1359,6 +1554,43 @@ async def test_guest_email_verification_links_passwordless_user(
     assert metadata.metadata["original_rownd_user"]["verified_data"]["email"] == "guest-linked@example.com"
 
 
+async def test_guest_email_verification_creates_passwordless_primary(
+    memory_core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(memory_core_url, rownd_client, enable_email_verification=True)
+    guest = client.post(
+        "/auth/plugin/rownd/guest",
+        headers={"Content-Type": "application/json", **session_headers()},
+        json={"auth_level": "guest"},
+    )
+    access_token = guest.headers["st-access-token"]
+    st_session = await session_asyncio.get_session_without_request_response(access_token)
+    assert st_session is not None
+    guest_user_id = st_session.get_user_id()
+    recipe_user_id = st_session.get_recipe_user_id()
+
+    update_res = client.put(
+        "/auth/plugin/rownd/user",
+        headers={**auth_headers(access_token), "Content-Type": "application/json"},
+        json={"data": {"email": "guest-primary@example.com"}},
+    )
+    assert update_res.status_code == 200
+
+    await complete_pending_email_verification(recipe_user_id, "guest-primary@example.com", {})
+
+    linked_user = await get_user(guest_user_id)
+    assert linked_user is not None
+    assert linked_user.is_primary_user is True
+    assert any(
+        method.recipe_id == "passwordless" and method.email == "guest-primary@example.com"
+        for method in linked_user.login_methods
+    )
+    assert any(
+        method.recipe_id == "thirdparty" and method.third_party is not None and method.third_party.id == "guest"
+        for method in linked_user.login_methods
+    )
+
+
 async def test_guest_email_verification_links_existing_passwordless_primary(
     memory_core_url: str, rownd_client: MockRowndClient
 ):
@@ -1397,6 +1629,57 @@ async def test_guest_email_verification_links_existing_passwordless_primary(
     metadata = await usermetadata_asyncio.get_user_metadata(existing.user.id)
     assert metadata.metadata["rownd_pending_verification"] == []
     assert metadata.metadata["original_rownd_user"]["data"]["email"] == "existing-primary@example.com"
+
+
+async def test_guest_email_verification_preserves_existing_primary_metadata(
+    memory_core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(memory_core_url, rownd_client, enable_email_verification=True)
+    existing = await passwordless_asyncio.signinup(
+        "public", "existing-primary-metadata@example.com", None, None, {}
+    )
+    await usermetadata_asyncio.update_user_metadata(
+        existing.user.id,
+        {
+            "plan": "pro",
+            "original_rownd_user": {
+                "state": "enabled",
+                "auth_level": "verified",
+                "data": {
+                    "user_id": existing.user.id,
+                    "email": "existing-primary-metadata@example.com",
+                    "first_name": "Existing",
+                },
+                "verified_data": {"email": "existing-primary-metadata@example.com"},
+                "attributes": {"source": "primary"},
+            },
+        },
+    )
+    guest = client.post(
+        "/auth/plugin/rownd/guest",
+        headers={"Content-Type": "application/json", **session_headers()},
+        json={"auth_level": "guest"},
+    )
+    access_token = guest.headers["st-access-token"]
+    st_session = await session_asyncio.get_session_without_request_response(access_token)
+    assert st_session is not None
+
+    update_res = client.put(
+        "/auth/plugin/rownd/user",
+        headers={**auth_headers(access_token), "Content-Type": "application/json"},
+        json={"data": {"email": "existing-primary-metadata@example.com"}},
+    )
+    assert update_res.status_code == 200
+
+    await complete_pending_email_verification(
+        st_session.get_recipe_user_id(), "existing-primary-metadata@example.com", {}
+    )
+
+    metadata = await usermetadata_asyncio.get_user_metadata(existing.user.id)
+    assert metadata.metadata["plan"] == "pro"
+    assert metadata.metadata["rownd_pending_verification"] == []
+    assert metadata.metadata["original_rownd_user"]["data"]["first_name"] == "Existing"
+    assert metadata.metadata["original_rownd_user"]["attributes"] == {"source": "primary"}
 
 
 async def test_email_verify_route_completes_pending_verification(
@@ -1554,6 +1837,68 @@ async def test_email_update_replaces_only_pending_email_entry(
     assert pending[0] == {"id": "phone-pending", "field": "phone_number", "value": "+15555550123"}
     assert pending[1]["field"] == "email"
     assert pending[1]["value"] == "new-pending@example.com"
+
+
+async def test_email_verification_removes_duplicate_matching_pending_entries(
+    core_url: str, rownd_client: MockRowndClient
+):
+    make_client(core_url, rownd_client, enable_email_verification=True)
+    sign_in = await passwordless_asyncio.signinup(
+        "public", "duplicate-pending-current@example.com", None, None, {}
+    )
+    await usermetadata_asyncio.update_user_metadata(
+        sign_in.user.id,
+        {
+            "rownd_pending_verification": [
+                {"id": "duplicate-email-1", "field": "email", "value": "duplicate-target@example.com"},
+                {"id": "duplicate-email-2", "field": "email", "value": "duplicate-target@example.com"},
+                {"id": "future-phone", "field": "phone_number", "value": "+15555550123"},
+            ]
+        },
+    )
+
+    await complete_pending_email_verification(sign_in.recipe_user_id, "duplicate-target@example.com", {})
+
+    metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
+    assert metadata.metadata["rownd_pending_verification"] == [
+        {"id": "future-phone", "field": "phone_number", "value": "+15555550123"}
+    ]
+
+
+async def test_linked_guest_claims_keep_anonymous_id_but_not_is_anonymous(
+    memory_core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(memory_core_url, rownd_client)
+    guest = client.post(
+        "/auth/plugin/rownd/guest",
+        headers={"Content-Type": "application/json", **session_headers()},
+        json={"auth_level": "guest"},
+    )
+    access_token = guest.headers["st-access-token"]
+    st_session = await session_asyncio.get_session_without_request_response(access_token)
+    assert st_session is not None
+    passwordless_result = await passwordless_asyncio.signinup(
+        "public", "linked@example.com", None, None, {}
+    )
+
+    primary = await accountlinking_asyncio.create_primary_user(passwordless_result.recipe_user_id, {})
+    assert getattr(primary, "status", "OK") == "OK"
+    link_result = await accountlinking_asyncio.link_accounts(
+        st_session.get_recipe_user_id(), passwordless_result.user.id, {}
+    )
+    assert getattr(link_result, "status", "OK") == "OK"
+
+    claims = await build_rownd_session_claims(
+        RowndPluginConfig(rownd_app_key="test-key", rownd_app_secret="test-secret"),
+        passwordless_result.user.id,
+        {},
+        None,
+    )
+    assert claims["auth_level"] == "verified"
+    anonymous_id = claims["anonymous_id"]
+    assert isinstance(anonymous_id, str)
+    assert anonymous_id.startswith("anon_")
+    assert ROWND_JWT_CLAIMS["is_anonymous"] not in claims
 
 
 async def test_email_verification_updates_existing_passwordless_method(

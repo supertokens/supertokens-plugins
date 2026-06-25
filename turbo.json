@@ -24,6 +24,8 @@
       ],
       "outputs": [
         "dist/**",
+        "build/**",
+        "src/*.egg-info/**",
         ".next/**",
         "!.next/cache/**",
         "storybook-static/**"

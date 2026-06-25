@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional, cast
 
 import pytest
-from supertokens_python.recipe.accountlinking.types import AccountInfoWithRecipeId
+from supertokens_python.recipe.accountlinking.types import AccountInfoWithRecipeId, ShouldNotAutomaticallyLink
 from supertokens_python.types import LoginMethod, User
 
 from supertokens_rownd import plugin
@@ -101,6 +101,26 @@ async def test_delivery_rewrites_magic_link_to_configured_client_domain():
     )
 
 
+async def test_delivery_uses_mobile_https_client_domain():
+    original = CapturingDelivery()
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        client_domains={"mobile": "https://mobile.example.com", "browser": "https://app.example.com"},
+    )
+    override = plugin.RowndEmailDeliveryOverride(
+        cast(Any, original), config, "url_with_link_code", "account/login"
+    )
+    template_vars = SimpleNamespace(url_with_link_code="https://api.example.com/auth/verify?linkCode=code")
+
+    await override.send_email(template_vars, {"rowndDisplayContext": "mobile_app"})
+
+    assert original.template_vars.url_with_link_code == (
+        "https://mobile.example.com/account/login?linkCode=code&appKey=app-key"
+        "&apiBasePath=%2Fauth&displayContext=mobile_app"
+    )
+
+
 async def test_delivery_uses_explicit_client_domain_key():
     original = CapturingDelivery()
     config = RowndPluginConfig(
@@ -120,6 +140,25 @@ async def test_delivery_uses_explicit_client_domain_key():
     )
 
 
+async def test_delivery_keeps_hub_link_when_requested_client_domain_missing():
+    original = CapturingDelivery()
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        client_domains={"browser": "https://app.example.com"},
+    )
+    override = plugin.RowndEmailDeliveryOverride(
+        cast(Any, original), config, "url_with_link_code", "account/login"
+    )
+    template_vars = SimpleNamespace(url_with_link_code="/auth/verify?linkCode=code")
+
+    await override.send_email(template_vars, {"rowndClientDomain": "missing"})
+
+    assert original.template_vars.url_with_link_code == (
+        "/account/login?linkCode=code&appKey=app-key&apiBasePath=%2Fauth"
+    )
+
+
 async def test_emailverification_delivery_rewrites_verify_link():
     original = CapturingDelivery()
     override = plugin.RowndEmailDeliveryOverride(
@@ -132,6 +171,45 @@ async def test_emailverification_delivery_rewrites_verify_link():
     assert original.template_vars.email_verify_link == (
         "/account/verify-email?token=token&appKey=app-key&apiBasePath=%2Fauth"
         "&redirectToPath=%2Fsettings"
+    )
+
+
+async def test_emailverification_delivery_uses_mobile_client_domain():
+    original = CapturingDelivery()
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        client_domains={"mobile": "myapp://"},
+    )
+    override = plugin.RowndEmailDeliveryOverride(
+        cast(Any, original), config, "email_verify_link", "account/verify-email"
+    )
+    template_vars = SimpleNamespace(email_verify_link="https://api.example.com/auth/verify?token=token")
+
+    await override.send_email(template_vars, {"rowndDisplayContext": "mobile_app"})
+
+    assert original.template_vars.email_verify_link == (
+        "myapp://account/verify-email?token=token&appKey=app-key&apiBasePath=%2Fauth"
+        "&displayContext=mobile_app"
+    )
+
+
+async def test_emailverification_delivery_uses_explicit_client_domain_key():
+    original = CapturingDelivery()
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        client_domains={"browser_local": "http://localhost:3000"},
+    )
+    override = plugin.RowndEmailDeliveryOverride(
+        cast(Any, original), config, "email_verify_link", "account/verify-email"
+    )
+    template_vars = SimpleNamespace(email_verify_link="/auth/verify?token=token")
+
+    await override.send_email(template_vars, {"rowndClientDomain": "browser_local"})
+
+    assert original.template_vars.email_verify_link == (
+        "http://localhost:3000/account/verify-email?token=token&appKey=app-key&apiBasePath=%2Fauth"
     )
 
 
@@ -609,6 +687,21 @@ async def test_accountlinking_links_guest_session_without_verification(
     )
 
     assert result.should_require_verification is False
+
+
+async def test_accountlinking_does_not_link_without_session():
+    original_config = SimpleNamespace(should_do_automatic_account_linking=None)
+    overridden = cast(Any, plugin._accountlinking_config_override()(cast(Any, original_config)))
+
+    result = await overridden.should_do_automatic_account_linking(
+        AccountInfoWithRecipeId(recipe_id="passwordless", email="user@example.com"),
+        None,
+        None,
+        "public",
+        {},
+    )
+
+    assert isinstance(result, ShouldNotAutomaticallyLink)
 
 
 async def test_accountlinking_links_matching_real_session_with_verification(
