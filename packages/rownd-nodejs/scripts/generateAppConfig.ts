@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import { resolve } from "node:path";
+import type { JSONObject } from "supertokens-node/types";
 import {
   loadConfig,
   fetchWithRetry,
@@ -455,8 +456,8 @@ function getObject(value: unknown): RowndConfigObject {
   return isRecord(value) ? value : {};
 }
 
-function getOptionalObject(value: unknown): RowndConfigObject | undefined {
-  return isRecord(value) ? value : undefined;
+function getOptionalObject(value: unknown): JSONObject | undefined {
+  return isRecord(value) ? (value as JSONObject) : undefined;
 }
 
 function getString(value: unknown) {

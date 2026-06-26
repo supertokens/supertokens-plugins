@@ -5,6 +5,14 @@
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
     "rownd-nodejs": "./dist/cli.js"
   },
@@ -15,6 +23,8 @@
     "build": "rm -rf dist && tsup",
     "cli": "npm run build && node dist/cli.js",
     "lint": "eslint ./src --ext .ts",
+    "prepack": "npm run build",
+    "typecheck": "tsc --noEmit",
     "test": "TEST_MODE=testing vitest run --pool=forks"
   },
   "keywords": [

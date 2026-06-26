@@ -5,6 +5,7 @@
     "outDir": "./dist",
     "declaration": true,
     "declarationDir": "./dist",
+    "ignoreDeprecations": "5.0",
     "types": ["node"],
     "skipLibCheck": true
   },

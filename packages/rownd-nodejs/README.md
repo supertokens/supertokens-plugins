@@ -15,7 +15,7 @@ npm install @supertokens-plugins/rownd-nodejs
 Initialize the plugin in your SuperTokens backend configuration.
 
 > [!IMPORTANT]
-> This plugin requires the `Session` and `UserMetadata` recipes to be initialized in your SuperTokens configuration.
+> This plugin always requires the `Session` and `UserMetadata` recipes. Enable `Passwordless` for email/phone, `ThirdParty` for Google/Apple/guest/anonymous users, `EmailVerification` for verified email profile updates, and `AccountLinking` when migrated Rownd users may have multiple supported login methods.
 
 ```typescript
 import SuperTokens from "supertokens-node";
@@ -128,17 +128,18 @@ const magicLink = await createMagicLinkWithConfirmationBypass({
 
 Pass exactly one of `email` or `phoneNumber`. The helper returns the rewritten magic link with `bypassDeviceConfirmation=true`.
 
-Before skipping the cross-device confirmation prompt, the frontend should validate the callback against the plugin:
+Before skipping the cross-device confirmation prompt, the frontend should validate the callback against the plugin. Routes are mounted under your SuperTokens `apiBasePath`, which defaults to `/auth`.
 
-- **POST** `/plugin/passwordless-cross-device-confirmation/validate`
+- **POST** `{apiBasePath}/plugin/passwordless-cross-device-confirmation/validate`
+- **Default**: `POST /auth/plugin/passwordless-cross-device-confirmation/validate`
 - **Body**: `{ "clientDomain": "browser", "redirectToPath": "/profile", "appVariantId": "optional_variant" }`
 - **Success response**: `{ "status": "OK", "bypass": true }`
 
 If validation fails, the frontend should show the normal cross-device confirmation prompt.
 
-## API Endpoint
+## API Endpoints
 
-The plugin exposes a single endpoint:
+Routes are mounted under your SuperTokens `apiBasePath`, which defaults to `/auth`. The migration endpoint is the main Rownd-to-SuperTokens session handoff endpoint; the plugin also exposes Rownd-compatible app config, guest, user, metadata, field, and sign-out endpoints under `{apiBasePath}/plugin/rownd/...`.
 
 > [!IMPORTANT]
 > The plugin always migrates users and sessions into the `public` tenant.
@@ -146,7 +147,8 @@ The plugin exposes a single endpoint:
 
 ### Migrate
 
-- **POST** `/plugin/rownd/migrate`
+- **POST** `{apiBasePath}/plugin/rownd/migrate`
+- **Default**: `POST /auth/plugin/rownd/migrate`
 - **Headers**: `Authorization: Bearer <Rownd_JWT>`. Header-token clients should also send `rid: session`, `fdi-version: 1.18`, and `st-auth-mode: header`.
 - **Description**: Validates the Rownd JWT, ensures the user is migrated to SuperTokens in the `public` tenant, syncs Rownd user data to SuperTokens UserMetadata, and then creates a new SuperTokens session for that user. Header-token clients must receive `st-access-token`, `st-refresh-token`, and `front-token` response headers.
 
@@ -164,13 +166,11 @@ The plugin emits exactly one telemetry event per `/migrate` call result.
 
 Each event includes endpoint outcome data only (not step-by-step events), including:
 
-- `operation`: `migrate`
 - `outcome`: `success` or `error`
 - `durationMs`
 - `tenantId` (when available)
 - `rowndUserId` (when available)
 - `superTokensUserId` (when available)
-- `migrationState`: `already-migrated` or `imported-during-request` (when available)
 - for errors: `error.message` and `error.name`
 
 > [!NOTE]
@@ -228,19 +228,20 @@ RowndMigrationPlugin.init({
 
 The package includes a bulk migration script for importing Rownd users into SuperTokens.
 
-The script now runs directly from a YAML config file that lives beside the script:
-
-- config file: `packages/rownd-nodejs/scripts/config.yaml`
-- script: `packages/rownd-nodejs/scripts/bulkMigrate.ts`
+The script runs from a YAML config file generated from the included template.
 
 ### Usage
 
-1. Edit `scripts/config.yaml` with your Rownd and SuperTokens credentials.
-2. Run the script from `packages/rownd-nodejs`.
+1. Generate a local config file.
+2. Edit the config with your Rownd and SuperTokens credentials.
+3. Run the migration.
 
 ```bash
-npm run bulk-import
+npx rownd-nodejs init-config --output ./rownd-bulk-migrate.yaml
+npx rownd-nodejs bulk-migrate --config ./rownd-bulk-migrate.yaml
 ```
+
+For repo-local development, use `npm run cli -- bulk-migrate --config ./rownd-bulk-migrate.yaml` from `packages/rownd-nodejs`.
 
 The script:
 
@@ -252,5 +253,5 @@ The script:
 
 ### Config File
 
-All runtime config is read from `scripts/config.yaml`.
+All runtime config is read from the YAML file passed with `--config`.
 There is no environment variable parsing.

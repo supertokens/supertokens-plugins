@@ -23,7 +23,7 @@ Default `apiBasePath` is `/auth`, so plugin endpoints usually live under `/auth/
 ### Step 1: Install packages
 
 ```bash
-npm install supertokens-node @supertokens-plugins/rownd-nodejs@0.3.0-beta.0
+npm install supertokens-node @supertokens-plugins/rownd-nodejs
 ```
 
 ### Step 2: Set environment variables
@@ -235,7 +235,7 @@ const app = express();
 app.use(
   cors({
     origin: "<YOUR_WEBSITE_DOMAIN>",
-    allowedHeaders: ["content-type", ...supertokens.getAllCORSHeaders()],
+    allowedHeaders: ["content-type", ...SuperTokens.getAllCORSHeaders()],
     credentials: true,
   }),
 );

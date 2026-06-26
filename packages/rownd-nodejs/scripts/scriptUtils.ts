@@ -222,7 +222,7 @@ function parseRowndUser(parsed: RowndUserRecord) {
     },
     verified_data: (parsed.verified_data ?? {}) as RowndUser["verified_data"],
     attributes: parsed.attributes as RowndUser["attributes"],
-    groups: parsed.groups,
+    groups: parsed.groups as RowndUser["groups"],
     meta: parsed.meta as RowndUser["meta"],
   };
 

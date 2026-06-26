@@ -49,7 +49,7 @@ SuperTokens.init({
     Session.init(),
     UserMetadata.init(),
     Passwordless.init({
-      contactMethod: "EMAIL",
+      contactMethod: "EMAIL_OR_PHONE",
       flowType: "MAGIC_LINK",
     }),
     EmailVerification.init({

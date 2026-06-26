@@ -89,7 +89,11 @@ SuperTokens.init({
               clients: [
                 {
                   clientId: "<APPLE_CLIENT_ID>",
-                  clientSecret: "<APPLE_CLIENT_SECRET>",
+                  additionalConfig: {
+                    teamId: "<APPLE_TEAM_ID>",
+                    keyId: "<APPLE_KEY_ID>",
+                    privateKey: "<APPLE_PRIVATE_KEY>",
+                  },
                 },
               ],
             },

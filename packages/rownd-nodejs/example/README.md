@@ -31,7 +31,7 @@ Do not expose SuperTokens Core directly to the public internet. Use `SUPERTOKENS
 - `ROWND_APP_KEY`: Rownd app key.
 - `ROWND_APP_SECRET`: Rownd app secret.
 - `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`: Google OAuth credentials.
-- `APPLE_CLIENT_ID` and `APPLE_CLIENT_SECRET`: Apple OAuth credentials.
+- `APPLE_CLIENT_ID`, `APPLE_TEAM_ID`, `APPLE_KEY_ID`, and `APPLE_PRIVATE_KEY`: Apple OAuth credentials.
 
 ## Recipes Initialized
 
