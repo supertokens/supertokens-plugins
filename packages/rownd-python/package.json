@@ -1,11 +1,11 @@
 {
   "name": "@supertokens-plugins/rownd-python",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Rownd migration plugin for SuperTokens Python",
   "scripts": {
     "sync": "uv sync --dev",
-    "build": "uv run python -m build",
+    "build": "if command -v uv >/dev/null 2>&1; then uv run python -m build; elif command -v python >/dev/null 2>&1; then python -m pip install build && python -m build; else python3 -m pip install build && python3 -m build; fi",
     "test": "uv run pytest",
     "lint": "uv run ruff check . && uv run pyright",
     "clean": "rm -rf .turbo dist build src/*.egg-info .pytest_cache .ruff_cache src/supertokens_rownd/__pycache__ tests/__pycache__"
