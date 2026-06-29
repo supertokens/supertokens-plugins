@@ -41,7 +41,7 @@ from supertokens_python.types import RecipeUserId, User
 from supertokens_python.types.base import UserContext
 from supertokens_python.types.recipe import BaseAPIInterface, BaseRecipeInterface
 
-from .constants import HANDLE_BASE_PATH, PLUGIN_ID, PLUGIN_SDK_VERSION
+from .constants import HANDLE_BASE_PATH, PLUGIN_ID, PLUGIN_SDK_VERSION, PLUGIN_VERSION
 from .plugin_implementation import (
     add_hub_bootstrap_params,
     apply_rownd_oauth_resource_params,
@@ -223,7 +223,7 @@ def init(config: Optional[RowndPluginConfig] = None, **kwargs: Unpack[RowndPlugi
 
     return SuperTokensPlugin(
         id=PLUGIN_ID,
-        version="0.1.0",
+        version=PLUGIN_VERSION,
         compatible_sdk_versions=PLUGIN_SDK_VERSION,
         override_map=override_map,
         route_handlers=lambda config, all_plugins, sdk_version: PluginRouteHandlerFunctionOkResponse(

@@ -6,17 +6,19 @@ This package is managed by Turborepo through `package.json`, but published as a 
 
 ## Installation
 
-Until this package is published to PyPI, install it from the `rownd-python` branch:
+Install from PyPI:
 
 ```bash
-pip install "supertokens-rownd @ git+https://github.com/supertokens/supertokens-plugins.git@rownd-python#subdirectory=packages/rownd-python"
+pip install supertokens-rownd
 ```
 
 With `uv`:
 
 ```bash
-uv add "supertokens-rownd @ git+https://github.com/supertokens/supertokens-plugins.git@rownd-python#subdirectory=packages/rownd-python"
+uv add supertokens-rownd
 ```
+
+For local development, install from this repository checkout with `uv sync --dev`.
 
 ## Local Development
 

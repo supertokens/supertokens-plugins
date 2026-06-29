@@ -8,6 +8,7 @@
     "test:watch": "turbo run test:watch",
     "clean": "turbo run clean && rm -rf node_modules",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
+    "check:python-versions": "node scripts/check-python-package-versions.mjs",
     "changeset": "changeset",
     "version": "changeset version && node scripts/sync-python-package-versions.mjs",
     "version:private": "changeset version --snapshot",

@@ -7,7 +7,7 @@ name = "supertokens-rownd"
 version = "0.1.0"
 description = "Rownd migration plugin for SuperTokens Python"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = "Apache-2.0"
 authors = [{ name = "SuperTokens", email = "team@supertokens.com" }]
 keywords = ["supertokens", "rownd", "migration", "plugin"]

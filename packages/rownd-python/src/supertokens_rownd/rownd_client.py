@@ -24,15 +24,20 @@ class RowndClient:
         return data
 
     async def fetch_optional_user_info(self, user_id: str) -> Optional[JsonDict]:
-        data = await self._request(
-            "GET",
-            "/me/applications/%s/users/%s" % (self.config.rownd_app_key, user_id),
-        )
+        try:
+            data = await self._request(
+                "GET",
+                "/me/applications/%s/users/%s" % (self.config.rownd_app_key, user_id),
+            )
+        except httpx.HTTPStatusError as err:
+            if err.response.status_code == 404:
+                return None
+            raise
         if not isinstance(data, dict) or not data:
             return None
         return data
 
-    async def _request(self, method: str, path: str, json: JsonDict | None = None) -> JsonDict:
+    async def _request(self, method: str, path: str, json: Optional[JsonDict] = None) -> JsonDict:
         headers = (
             {
                 "x-rownd-app-key": self.config.rownd_app_key,
