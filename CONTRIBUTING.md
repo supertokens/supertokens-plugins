@@ -49,8 +49,12 @@ In the end, a unique file will be generated in the `.changeset` directory with y
 Everytime something gets merged to the main branch, a PR will be created/updated, from the CI.
 The PR relies on the `npm run version` command to update package versions and changelogs.
 
-Publishing to NPM can be triggered manually, from the CI, using the `public-release` workflow.
+Publishing to NPM and PyPI can be triggered manually, from the CI, using the `public-release` workflow.
 The workflow run is conditioned by an approval from one of the admins.
+
+Python packages are versioned through Changesets by bumping their workspace `package.json` version.
+The release script syncs that version into `pyproject.toml`, builds the package, and publishes unpublished versions to PyPI.
+PyPI publishing requires either trusted publishing for the GitHub workflow or a `PYPI_TOKEN` secret.
 
 > [!IMPORTANT]  
 > If the target branch has unversioned changes, the `public-release` workflow will create a versioning PR instead of publishing.
