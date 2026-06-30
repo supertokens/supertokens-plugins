@@ -26,63 +26,148 @@ export async function provisionSuperTokensInfrastructure(
     headers["api-key"] = config.supertokens.apiKey;
   }
 
+  const provisionedClientIds = new Set<string>();
+
   for (const oidcClient of oidcClients) {
-    for (const credential of oidcClient.credentials ?? []) {
-      console.log(
-        `Provisioning SuperTokens OAuth2 Client: ${credential.client_id}`,
-      );
+    const credentials = oidcClient.credentials ?? [];
+    for (const credential of credentials) {
+      await createSuperTokensOAuthClient({
+        config,
+        headers,
+        oidcClient,
+        clientId: credential.client_id,
+        clientSecret: resolveOidcClientSecret(
+          config,
+          credential.client_id,
+          credential.secret,
+        ),
+        appVariantId: credential.app_variant_id,
+        provisionedClientIds,
+      });
+    }
 
-      const oauthRes = await fetch(
-        new URL(
-          "/recipe/oauth/clients",
-          config.supertokens.connectionURI,
-        ).toString(),
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            clientName:
-              oidcClient.name || credential.client_id || "Rownd Client",
-            clientId: credential.client_id,
-            clientSecret: credential.secret,
-            redirectUris: oidcClient.config.redirect_uris || [],
-            postLogoutRedirectUris: oidcClient.config.post_logout_uris || [],
-            scope: oidcClient.config.allowed_scopes?.join(" "),
-            responseTypes: ["code", "token", "id_token"],
-            grantTypes: [
-              "authorization_code",
-              "refresh_token",
-              "client_credentials",
-              "implicit",
-            ],
-            tokenEndpointAuthMethod:
-              oidcClient.config.token_endpoint_auth_method ??
-              "client_secret_basic",
-            audience: [`app:${config.rownd.appId}`],
-            metadata: {
-              rowndOidcClientId: oidcClient.id,
-              rowndAppVariantId: credential.app_variant_id || undefined,
-              rowndAllowedScopes: oidcClient.config.allowed_scopes || [],
-              rowndApplicationType: oidcClient.config.application_type,
-              rowndIsPkceRequired: oidcClient.config.is_pkce_required,
-              rowndIsPkceSupported: oidcClient.config.is_pkce_supported,
-              rowndDeviceFlowEnabled: oidcClient.config.device_flow_enabled,
-            },
-          }),
-        },
-      );
-
-      if (!oauthRes.ok) {
-        const errorText = await oauthRes.text();
-        if (
-          !errorText.includes("already exists") &&
-          !errorText.includes("Duplicate")
-        ) {
-          throw new Error(
-            `Failed to create OAuth2 Client ${credential.client_id}: ${oauthRes.status} ${errorText}`,
-          );
-        }
+    if (config.rownd.provisionOidcClientIdAliases && credentials.length > 0) {
+      const firstCredential = credentials[0];
+      if (!firstCredential) {
+        continue;
       }
+
+      const firstCredentialSecret = resolveOidcClientSecret(
+        config,
+        firstCredential.client_id,
+        firstCredential.secret,
+      );
+      const aliasSecret = resolveOidcClientSecret(
+        config,
+        oidcClient.id,
+        firstCredentialSecret,
+      );
+
+      await createSuperTokensOAuthClient({
+        config,
+        headers,
+        oidcClient,
+        clientId: oidcClient.id,
+        clientSecret: aliasSecret,
+        isOidcClientIdAlias: true,
+        provisionedClientIds,
+      });
+    }
+  }
+}
+
+function resolveOidcClientSecret(
+  config: BulkMigrateConfig,
+  clientId: string,
+  apiSecret?: string,
+) {
+  const secret = config.rownd.oidcClientSecrets?.[clientId] ?? apiSecret;
+  if (!secret) {
+    throw new Error(
+      `Missing plaintext secret for Rownd OIDC client ${clientId}. Add rownd.oidcClientSecrets.${clientId} to the config.`,
+    );
+  }
+
+  if (secret.startsWith("$argon2")) {
+    throw new Error(
+      `Rownd returned a hashed secret for OIDC client ${clientId}. Add the plaintext secret under rownd.oidcClientSecrets.${clientId}.`,
+    );
+  }
+
+  return secret;
+}
+
+async function createSuperTokensOAuthClient(input: {
+  config: BulkMigrateConfig;
+  headers: Record<string, string>;
+  oidcClient: RowndOidcClient;
+  clientId: string;
+  clientSecret: string;
+  appVariantId?: string;
+  isOidcClientIdAlias?: boolean;
+  provisionedClientIds: Set<string>;
+}) {
+  if (input.provisionedClientIds.has(input.clientId)) {
+    return;
+  }
+  input.provisionedClientIds.add(input.clientId);
+
+  console.log(`Provisioning SuperTokens OAuth2 Client: ${input.clientId}`);
+
+  const grantTypes = [
+    "authorization_code",
+    "refresh_token",
+    "client_credentials",
+    "implicit",
+  ];
+  if (input.oidcClient.config.device_flow_enabled) {
+    grantTypes.push("urn:ietf:params:oauth:grant-type:device_code");
+  }
+
+  const oauthRes = await fetch(
+    new URL(
+      "/recipe/oauth/clients",
+      input.config.supertokens.connectionURI,
+    ).toString(),
+    {
+      method: "POST",
+      headers: input.headers,
+      body: JSON.stringify({
+        clientName: input.oidcClient.name || input.clientId || "Rownd Client",
+        clientId: input.clientId,
+        clientSecret: input.clientSecret,
+        redirectUris: input.oidcClient.config.redirect_uris || [],
+        postLogoutRedirectUris: input.oidcClient.config.post_logout_uris || [],
+        scope: input.oidcClient.config.allowed_scopes?.join(" "),
+        responseTypes: ["code", "token", "id_token"],
+        grantTypes,
+        tokenEndpointAuthMethod:
+          input.oidcClient.config.token_endpoint_auth_method ??
+          "client_secret_basic",
+        audience: [`app:${input.config.rownd.appId}`],
+        metadata: {
+          rowndOidcClientId: input.oidcClient.id,
+          rowndAppVariantId: input.appVariantId || undefined,
+          rowndAllowedScopes: input.oidcClient.config.allowed_scopes || [],
+          rowndApplicationType: input.oidcClient.config.application_type,
+          rowndIsPkceRequired: input.oidcClient.config.is_pkce_required,
+          rowndIsPkceSupported: input.oidcClient.config.is_pkce_supported,
+          rowndDeviceFlowEnabled: input.oidcClient.config.device_flow_enabled,
+          rowndIsOidcClientIdAlias: input.isOidcClientIdAlias || undefined,
+        },
+      }),
+    },
+  );
+
+  if (!oauthRes.ok) {
+    const errorText = await oauthRes.text();
+    if (
+      !errorText.includes("already exists") &&
+      !errorText.includes("Duplicate")
+    ) {
+      throw new Error(
+        `Failed to create OAuth2 Client ${input.clientId}: ${oauthRes.status} ${errorText}`,
+      );
     }
   }
 }

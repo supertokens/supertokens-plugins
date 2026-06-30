@@ -23,6 +23,8 @@ export type RowndSourceConfig = {
   appSecret: string;
   bearerToken?: string;
   pageSize: number;
+  oidcClientSecrets?: Record<string, string>;
+  provisionOidcClientIdAliases: boolean;
 };
 
 export type SuperTokensTargetConfig = {
@@ -70,6 +72,8 @@ const ConfigSchema = z.object({
     appSecret: z.string(),
     bearerToken: z.string().optional(),
     pageSize: z.number().int().positive(),
+    oidcClientSecrets: z.record(z.string(), z.string()).optional(),
+    provisionOidcClientIdAliases: z.boolean().default(true),
   }),
   supertokens: z.object({
     connectionURI: z.string(),

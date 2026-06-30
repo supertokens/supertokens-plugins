@@ -24,6 +24,16 @@ rownd:
   # bearerToken: <ROWND_API_BEARER_TOKEN>
   # Number of Rownd users to request per page.
   pageSize: 100
+  # Rownd stores existing OIDC credential secrets hashed. Provide plaintext
+  # values here when migrating OIDC clients. Keys can be credential client IDs
+  # (key_...) and OIDC client configuration IDs (oc_...).
+  oidcClientSecrets: {}
+  # oidcClientSecrets:
+  #   key_123: ras_plaintext_secret
+  #   oc_123: ras_plaintext_secret_for_oidc_client_id_alias
+  # Rownd accepts the OIDC client configuration ID (oc_...) as a client_id in
+  # addition to each linked credential client_id (key_...).
+  provisionOidcClientIdAliases: true
 
 supertokens:
   connectionURI: <CONNECTION_URI>
