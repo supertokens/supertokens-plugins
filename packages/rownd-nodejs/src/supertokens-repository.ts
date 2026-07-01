@@ -243,6 +243,8 @@ export async function createMagicLinkWithConfirmationBypass(
   })}${getAppInfoString(stConfig.appInfo.websiteBasePath)}/verify?preAuthSessionId=${encodeURIComponent(
     codeInfo.preAuthSessionId,
   )}&tenantId=${encodeURIComponent(tenantId)}#${encodeURIComponent(codeInfo.linkCode)}`;
+  const oauthLoginChallenge = (userContext as Record<string, unknown>)
+    .rowndOAuthLoginChallenge;
   const rewrittenUrl = new URL(rewriteMagicLink({
     magicLink,
     clientDomain,
@@ -254,6 +256,9 @@ export async function createMagicLinkWithConfirmationBypass(
       displayContext: input.displayContext,
       redirectToPath,
       clientDomainKey: input.clientDomain,
+      oauthLoginChallenge: typeof oauthLoginChallenge === "string"
+        ? oauthLoginChallenge
+        : undefined,
     }),
   }));
 

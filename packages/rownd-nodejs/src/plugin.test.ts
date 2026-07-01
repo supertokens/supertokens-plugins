@@ -466,6 +466,37 @@ describe("rownd-nodejs plugin", () => {
       );
     });
 
+    it("adds OAuth login challenge bootstrap param to passwordless magic links", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+      };
+      const plugin = init(pluginConfig) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid&linkCode=abc",
+        userContext: {
+          rowndOAuthLoginChallenge: "login_challenge_123",
+        },
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.pathname).toBe("/account/login");
+      expect(rewrittenUrl.searchParams.get("oauthLoginChallenge")).toBe(
+        "login_challenge_123",
+      );
+    });
+
     it("uses mobile client domain with custom scheme for passwordless magic links", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
@@ -1030,6 +1061,38 @@ describe("rownd-nodejs plugin", () => {
           userContext: {
             rowndDisplayContext: "browser",
             rowndClientDomain: "browser_local",
+          },
+        }),
+      );
+    });
+
+    it("adds OAuth login challenge context before passwordless code creation", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+      };
+      const originalCreateCodePOST = vi
+        .fn()
+        .mockResolvedValue({ status: "OK" });
+      const passwordlessApis = (
+        init(pluginConfig) as any
+      ).overrideMap.passwordless.apis({
+        createCodePOST: originalCreateCodePOST,
+      });
+
+      await passwordlessApis.createCodePOST({
+        options: {
+          req: makeRequest({
+            rownd_oauth_login_challenge: "login_challenge_123",
+          }),
+        },
+        userContext: {},
+      });
+
+      expect(originalCreateCodePOST).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userContext: {
+            rowndOAuthLoginChallenge: "login_challenge_123",
           },
         }),
       );

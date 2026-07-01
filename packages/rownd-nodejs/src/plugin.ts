@@ -44,6 +44,7 @@ import {
   getRequestedAppVariantIdFromRequest,
   getRequestedClientDomainFromRequest,
   getRequestedDisplayContextFromRequest,
+  getRequestedOAuthLoginChallengeFromRequest,
   getRequestedRedirectToPathFromRequest,
   rewriteLinkToBaseUrl,
   rewriteLinkPath,
@@ -103,6 +104,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         const clientDomain = input?.userContext?.rowndClientDomain as
           | string
           | undefined;
+        const oauthLoginChallenge = input?.userContext
+          ?.rowndOAuthLoginChallenge as string | undefined;
         const clientDomainKey =
           clientDomain ?? (displayContext === "mobile_app" ? "mobile" : "browser");
         const clientBaseUrl = pluginConfig.clientDomains?.[clientDomainKey];
@@ -112,6 +115,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           ...(typeof appVariantId === "string" ? { appVariantId } : {}),
           ...(typeof displayContext === "string" ? { displayContext } : {}),
           ...(typeof redirectToPath === "string" ? { redirectToPath } : {}),
+          ...(typeof oauthLoginChallenge === "string"
+            ? { oauthLoginChallenge }
+            : {}),
         };
 
         const rewrittenLink = input[linkKey]
@@ -427,6 +433,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 );
                 if (appVariantId) {
                   input.userContext.rowndAppVariantId = appVariantId;
+                }
+                const oauthLoginChallenge = getRequestedOAuthLoginChallengeFromRequest(
+                  input.options.req,
+                );
+                if (oauthLoginChallenge) {
+                  input.userContext.rowndOAuthLoginChallenge = oauthLoginChallenge;
                 }
                 assertRowndAppVariantIsConfigured(appVariantId);
 

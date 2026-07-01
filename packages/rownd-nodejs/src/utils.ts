@@ -8,6 +8,8 @@ type SuperTokensRequest = Parameters<PluginRouteHandler["handler"]>[0];
 export type JsonRecord = JSONObject;
 export type JsonValue = JsonRecord[string];
 
+export const ROWND_OAUTH_LOGIN_CHALLENGE_PARAM = "rownd_oauth_login_challenge";
+
 export function rewriteLinkPath(
   inputUrl: string,
   targetPath: string,
@@ -295,6 +297,7 @@ export function getMagicLinkBootstrapParams(input: {
   displayContext?: "browser" | "mobile_app" | "customer_web_view";
   redirectToPath?: string;
   clientDomainKey?: string;
+  oauthLoginChallenge?: string;
 }) {
   return {
     appKey: input.appKey,
@@ -304,6 +307,9 @@ export function getMagicLinkBootstrapParams(input: {
     ...(input.displayContext ? { displayContext: input.displayContext } : {}),
     ...(input.redirectToPath ? { redirectToPath: input.redirectToPath } : {}),
     ...(input.clientDomainKey ? { clientDomain: input.clientDomainKey } : {}),
+    ...(input.oauthLoginChallenge
+      ? { oauthLoginChallenge: input.oauthLoginChallenge }
+      : {}),
   };
 }
 
@@ -352,5 +358,14 @@ export function getRequestedRedirectToPathFromRequest(
   const redirectToPath = req.getKeyValueFromQuery("rownd_redirect_to_path");
   return typeof redirectToPath === "string" && redirectToPath.length > 0
     ? redirectToPath
+    : undefined;
+}
+
+export function getRequestedOAuthLoginChallengeFromRequest(
+  req: Pick<SuperTokensRequest, "getKeyValueFromQuery">,
+) {
+  const loginChallenge = req.getKeyValueFromQuery(ROWND_OAUTH_LOGIN_CHALLENGE_PARAM);
+  return typeof loginChallenge === "string" && loginChallenge.length > 0
+    ? loginChallenge
     : undefined;
 }
