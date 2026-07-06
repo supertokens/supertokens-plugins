@@ -57,6 +57,22 @@ const INTERNAL_METADATA_FIELDS = new Set([
   "rownd_pending_verification",
 ]);
 
+const SUPERTOKENS_FAKE_EMAIL_DOMAIN = "stfakeemail.supertokens.com";
+
+export function isSuperTokensFakeEmail(email: unknown): email is string {
+  return (
+    typeof email === "string" &&
+    email.toLowerCase().endsWith(`@${SUPERTOKENS_FAKE_EMAIL_DOMAIN}`)
+  );
+}
+
+function buildSuperTokensFakeEmail(
+  thirdPartyUserId: string,
+  thirdPartyId: string,
+) {
+  return `${thirdPartyUserId}.${thirdPartyId}@${SUPERTOKENS_FAKE_EMAIL_DOMAIN}`;
+}
+
 export function isIdentityField(field: string) {
   return IDENTITY_USER_DATA_FIELDS.has(field);
 }
@@ -90,16 +106,16 @@ export function mapRowndUserToSuperTokens(
   }
 
   if (rowndUserData.apple_id) {
-    if (!rowndUserData.email) {
-      throw new Error("Rownd Apple user is missing email");
-    }
+    const appleEmail =
+      rowndUserData.email ??
+      buildSuperTokensFakeEmail(rowndUserData.apple_id, "apple");
 
     loginMethods.push({
       recipeId: "thirdparty",
       thirdPartyId: "apple",
       thirdPartyUserId: rowndUserData.apple_id,
-      email: rowndUserData.email,
-      isVerified: !!rowndUserVerifiedData.apple_id,
+      email: appleEmail,
+      isVerified: !!rowndUserData.email && !!rowndUserVerifiedData.apple_id,
     });
   }
 
@@ -389,7 +405,7 @@ async function buildStandardOAuthClaims(user: SuperTokensUser, scopes: string[])
     : ({} as JsonRecord);
 
   if (scopes.includes("email")) {
-    const email = firstString(rowndData.email) ?? user.emails[0];
+    const email = firstRealEmail(firstString(rowndData.email), ...user.emails);
     if (email) {
       claims.email = email;
       claims.email_verified = isOAuthClaimVerified(
@@ -466,6 +482,16 @@ function firstString(value: unknown) {
   }
 
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function firstRealEmail(...values: unknown[]) {
+  return values.find((entry): entry is string => {
+    return (
+      typeof entry === "string" &&
+      entry.length > 0 &&
+      !isSuperTokensFakeEmail(entry)
+    );
+  });
 }
 
 function isOAuthClaimVerified(

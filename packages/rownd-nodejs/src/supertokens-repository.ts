@@ -27,6 +27,7 @@ import {
   hasOnlyGuestLoginMethods,
   isIdentityField,
   isInternalMetadataField,
+  isSuperTokensFakeEmail,
   mapMethod,
   type RowndCompatUserResponse,
   type RowndMetadata,
@@ -340,7 +341,7 @@ export async function getUserById(
 
   for (const method of stUser.loginMethods) {
     if (method.recipeId === "passwordless") {
-      if (method.email) {
+      if (method.email && !isSuperTokensFakeEmail(method.email)) {
         verifiedData.email = method.email;
         if (data.email === undefined) data.email = method.email;
       }
@@ -352,10 +353,18 @@ export async function getUserById(
     } else if (method.recipeId === "thirdparty") {
       const thirdPartyId = getThirdPartyId(method);
       const thirdPartyUserId = getThirdPartyUserId(method);
-      if (method.verified && method.email) {
+      if (
+        method.verified &&
+        method.email &&
+        !isSuperTokensFakeEmail(method.email)
+      ) {
         verifiedData.email = method.email;
       }
-      if (method.email && data.email === undefined) {
+      if (
+        method.email &&
+        !isSuperTokensFakeEmail(method.email) &&
+        data.email === undefined
+      ) {
         data.email = method.email;
       }
       if (thirdPartyId === "google" && thirdPartyUserId) {
@@ -367,7 +376,11 @@ export async function getUserById(
         verifiedData.apple_id = thirdPartyUserId;
       }
     } else if (method.recipeId === "emailpassword") {
-      if (method.email && data.email === undefined) {
+      if (
+        method.email &&
+        !isSuperTokensFakeEmail(method.email) &&
+        data.email === undefined
+      ) {
         data.email = method.email;
       }
     }
