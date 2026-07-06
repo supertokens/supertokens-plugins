@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import SuperTokens from "supertokens-node";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
@@ -70,7 +72,12 @@ function buildSuperTokensFakeEmail(
   thirdPartyUserId: string,
   thirdPartyId: string,
 ) {
-  return `${thirdPartyUserId}.${thirdPartyId}@${SUPERTOKENS_FAKE_EMAIL_DOMAIN}`;
+  const hash = createHash("sha256")
+    .update(`${thirdPartyId}:${thirdPartyUserId}`)
+    .digest("hex")
+    .slice(0, 32);
+
+  return `st-${thirdPartyId}-${hash}@${SUPERTOKENS_FAKE_EMAIL_DOMAIN}`;
 }
 
 export function isIdentityField(field: string) {
@@ -92,16 +99,16 @@ export function mapRowndUserToSuperTokens(
   }
 
   if (rowndUserData.google_id) {
-    if (!rowndUserData.email) {
-      throw new Error("Rownd Google user is missing email");
-    }
+    const googleEmail =
+      rowndUserData.email ??
+      buildSuperTokensFakeEmail(rowndUserData.google_id, "google");
 
     loginMethods.push({
       recipeId: "thirdparty",
       thirdPartyId: "google",
       thirdPartyUserId: rowndUserData.google_id,
-      email: rowndUserData.email,
-      isVerified: !!rowndUserVerifiedData.google_id,
+      email: googleEmail,
+      isVerified: !!rowndUserData.email && !!rowndUserVerifiedData.google_id,
     });
   }
 

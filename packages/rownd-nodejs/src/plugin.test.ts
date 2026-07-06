@@ -1,5 +1,5 @@
 import express from "express";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   describe,
   it,
@@ -56,6 +56,15 @@ import {
 } from "./supertokens-repository";
 
 let testPORT = 30001;
+
+function buildExpectedFakeEmail(providerUserId: string, providerId: string) {
+  const hash = createHash("sha256")
+    .update(`${providerId}:${providerUserId}`)
+    .digest("hex")
+    .slice(0, 32);
+
+  return `st-${providerId}-${hash}@stfakeemail.supertokens.com`;
+}
 
 const mockRowndClient = {
   validateToken: vi.fn(),
@@ -249,49 +258,46 @@ describe("rownd-nodejs plugin", () => {
       ).toThrowError(new Error("Rownd user has no user_id"));
     });
 
-    it("throws when a google user is missing email", () => {
-      expect(() =>
-        mapRowndUserToSuperTokens({
-          data: {
-            user_id: "rownd-google-missing-email",
-            google_id: "google-user-id",
-          },
-          verified_data: { google_id: true },
-        } as any),
-      ).toThrowError(new Error("Rownd Google user is missing email"));
-    });
+    it.each([
+      { providerId: "google", field: "google_id" },
+      { providerId: "apple", field: "apple_id" },
+    ])(
+      "maps a $providerId user missing email with a fake SuperTokens email",
+      ({ providerId, field }) => {
+        const rowndUserId = `rownd-${providerId}-missing-email`;
+        const providerUserId = `${providerId}-user-id`;
 
-    it("maps an apple user missing email with a fake SuperTokens email", () => {
-      expect(
-        mapRowndUserToSuperTokens({
-          data: {
-            user_id: "rownd-apple-missing-email",
-            apple_id: "apple-user-id",
-          },
-          verified_data: { apple_id: true },
-        } as any),
-      ).toEqual({
-        externalUserId: "rownd-apple-missing-email",
-        loginMethods: [
-          {
-            recipeId: "thirdparty",
-            thirdPartyId: "apple",
-            thirdPartyUserId: "apple-user-id",
-            email: "apple-user-id.apple@stfakeemail.supertokens.com",
-            isVerified: false,
-          },
-        ],
-        userMetadata: {
-          original_rownd_user: {
+        expect(
+          mapRowndUserToSuperTokens({
             data: {
-              user_id: "rownd-apple-missing-email",
-              apple_id: "apple-user-id",
+              user_id: rowndUserId,
+              [field]: providerUserId,
             },
-            verified_data: { apple_id: true },
+            verified_data: { [field]: true },
+          } as any),
+        ).toEqual({
+          externalUserId: rowndUserId,
+          loginMethods: [
+            {
+              recipeId: "thirdparty",
+              thirdPartyId: providerId,
+              thirdPartyUserId: providerUserId,
+              email: buildExpectedFakeEmail(providerUserId, providerId),
+              isVerified: false,
+            },
+          ],
+          userMetadata: {
+            original_rownd_user: {
+              data: {
+                user_id: rowndUserId,
+                [field]: providerUserId,
+              },
+              verified_data: { [field]: true },
+            },
           },
-        },
-      });
-    });
+        });
+      },
+    );
 
     it("maps a user with no login methods as a guest", () => {
       const user = mapRowndUserToSuperTokens({
@@ -1565,76 +1571,83 @@ describe("rownd-nodejs plugin", () => {
         expect(user?.loginMethods[0].thirdParty?.id).toBe("google");
       });
 
-      it("migrates an apple auth user without email and hides the fake email from Rownd compatibility data", async () => {
-        const { server: s, port } = await setup(importCoreConnectionURI);
-        server = s;
-        testPORT = port;
-        mockRowndClient.validateToken.mockResolvedValue({
-          user_id: "rownd-user-apple-no-email",
-        });
-        mockRowndClient.fetchUserInfo.mockResolvedValue({
-          app_user_id: "rownd-user-apple-no-email",
-          auth_level: "verified",
-          data: {
-            user_id: "rownd-user-apple-no-email",
-            apple_id: "apple-no-email-id",
-          },
-          verified_data: { apple_id: true },
-        });
+      it.each([
+        { providerId: "google", field: "google_id" },
+        { providerId: "apple", field: "apple_id" },
+      ])(
+        "migrates a $providerId auth user without email and hides the fake email from Rownd compatibility data",
+        async ({ providerId, field }) => {
+          const { server: s, port } = await setup(importCoreConnectionURI);
+          server = s;
+          testPORT = port;
+          const rowndUserId = `rownd-user-${providerId}-no-email`;
+          const providerUserId = `${providerId}-no-email-id-with-a-long-enough-value-to-match-e2e-provider-ids`;
 
-        const res = await fetch(
-          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: "Bearer some-token",
-              rid: "session",
-              "fdi-version": "1.18",
-              "st-auth-mode": "header",
+          mockRowndClient.validateToken.mockResolvedValue({
+            user_id: rowndUserId,
+          });
+          mockRowndClient.fetchUserInfo.mockResolvedValue({
+            app_user_id: rowndUserId,
+            auth_level: "verified",
+            data: {
+              user_id: rowndUserId,
+              [field]: providerUserId,
             },
-          },
-        );
+            verified_data: { [field]: true },
+          });
 
-        expect(res.status).toBe(200);
-        expect(await res.json()).toEqual({ status: "OK" });
+          const res = await fetch(
+            `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+            {
+              method: "POST",
+              headers: {
+                Authorization: "Bearer some-token",
+                rid: "session",
+                "fdi-version": "1.18",
+                "st-auth-mode": "header",
+              },
+            },
+          );
 
-        const migratedUser = await getMigratedUserByRowndUserId(
-          "rownd-user-apple-no-email",
-        );
-        expect(migratedUser).toBeDefined();
-        const loginMethod = migratedUser?.user.loginMethods[0];
-        expect(loginMethod?.recipeId).toBe("thirdparty");
-        expect(loginMethod?.thirdParty?.id).toBe("apple");
-        expect(loginMethod?.thirdParty?.userId).toBe("apple-no-email-id");
-        expect(loginMethod?.email).toBe(
-          "apple-no-email-id.apple@stfakeemail.supertokens.com",
-        );
-        expect(loginMethod?.verified).toBe(false);
+          expect(res.status).toBe(200);
+          expect(await res.json()).toEqual({ status: "OK" });
 
-        const accessToken = res.headers.get("st-access-token");
-        expect(accessToken).toBeTruthy();
+          const migratedUser = await getMigratedUserByRowndUserId(rowndUserId);
+          expect(migratedUser).toBeDefined();
+          const loginMethod = migratedUser?.user.loginMethods[0];
+          expect(loginMethod?.recipeId).toBe("thirdparty");
+          expect(loginMethod?.thirdParty?.id).toBe(providerId);
+          expect(loginMethod?.thirdParty?.userId).toBe(providerUserId);
+          expect(loginMethod?.email).toBe(
+            buildExpectedFakeEmail(providerUserId, providerId),
+          );
+          expect(loginMethod?.verified).toBe(false);
 
-        const userRes = await fetch(
-          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
-          {
-            headers: getAuthedHeaders(accessToken!),
-          },
-        );
-        expect(userRes.status).toBe(200);
-        const userBody = await userRes.json();
-        expect(userBody.status).toBe("OK");
-        expect(userBody.data.apple_id).toBe("apple-no-email-id");
-        expect(userBody.verified_data.apple_id).toBe("apple-no-email-id");
-        expect(userBody.data.email).toBeUndefined();
-        expect(userBody.verified_data.email).toBeUndefined();
+          const accessToken = res.headers.get("st-access-token");
+          expect(accessToken).toBeTruthy();
 
-        const oauthPayload = await buildRowndOAuthPayload({
-          user: migratedUser!.user,
-          scopes: ["email"],
-        });
-        expect(oauthPayload.email).toBeUndefined();
-        expect(oauthPayload.email_verified).toBeUndefined();
-      });
+          const userRes = await fetch(
+            `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+            {
+              headers: getAuthedHeaders(accessToken!),
+            },
+          );
+          expect(userRes.status).toBe(200);
+          const userBody = await userRes.json();
+          expect(userBody.status).toBe("OK");
+          expect(userBody.data[field]).toBe(providerUserId);
+          expect(userBody.verified_data[field]).toBe(providerUserId);
+          expect(userBody.data.email).toBeUndefined();
+          expect(userBody.verified_data.email).toBeUndefined();
+
+          const oauthPayload = await buildRowndOAuthPayload({
+            user: migratedUser!.user,
+            scopes: ["email"],
+          });
+          expect(oauthPayload.email).toBeUndefined();
+          expect(oauthPayload.email_verified).toBeUndefined();
+        },
+      );
 
       it("migrates a newly imported mapped user when email verification is enabled", async () => {
         const { server: s, port } = await setup(
