@@ -48,9 +48,14 @@ def test_maps_provider_user_without_email(provider_id: str, field: str):
         }
     )
 
-    login_method = mapped["loginMethods"][0]
-    assert login_method["email"].startswith("st-%s-" % provider_id)
-    assert login_method["email"].endswith("@stfakeemail.supertokens.com")
+    login_methods = mapped["loginMethods"]
+    assert isinstance(login_methods, list)
+    login_method = login_methods[0]
+    assert isinstance(login_method, dict)
+    email = login_method["email"]
+    assert isinstance(email, str)
+    assert email.startswith("st-%s-" % provider_id)
+    assert email.endswith("@stfakeemail.supertokens.com")
     assert login_method["isVerified"] is False
 
 
