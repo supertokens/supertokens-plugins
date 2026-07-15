@@ -54,6 +54,7 @@ from .plugin_implementation import (
     get_requested_app_variant_id_from_request,
     get_requested_client_domain_from_request,
     get_requested_display_context_from_request,
+    get_requested_oauth_login_challenge_from_request,
     get_requested_redirect_to_path_from_request,
     handle_app_config,
     handle_delete_user,
@@ -425,6 +426,7 @@ def _passwordless_api_override(config: RowndPluginConfig):
             display_context = get_requested_display_context_from_request(api_options.request)
             redirect_to_path = get_requested_redirect_to_path_from_request(api_options.request)
             client_domain = get_requested_client_domain_from_request(api_options.request)
+            oauth_login_challenge = get_requested_oauth_login_challenge_from_request(api_options.request)
             if app_variant_id:
                 extra_context["rowndAppVariantId"] = app_variant_id
             if display_context:
@@ -433,6 +435,8 @@ def _passwordless_api_override(config: RowndPluginConfig):
                 extra_context["rowndRedirectToPath"] = redirect_to_path
             if client_domain:
                 extra_context["rowndClientDomain"] = client_domain
+            if oauth_login_challenge:
+                extra_context["rowndOAuthLoginChallenge"] = oauth_login_challenge
             return await original_create_code_post(
                 email,
                 phone_number,

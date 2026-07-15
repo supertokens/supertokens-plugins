@@ -34,6 +34,7 @@ from .constants import (
     INTERNAL_METADATA_FIELDS,
     PUBLIC_TENANT_ID,
     PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM,
+    ROWND_OAUTH_LOGIN_CHALLENGE_PARAM,
     ROWND_JWT_CLAIMS,
 )
 from .telemetry import record_error, record_success
@@ -93,6 +94,11 @@ def get_requested_client_domain_from_request(request: BaseRequest) -> Optional[s
 
 def get_requested_redirect_to_path_from_request(request: BaseRequest) -> Optional[str]:
     return request.get_query_param("rownd_redirect_to_path") or None
+
+
+def get_requested_oauth_login_challenge_from_request(request: BaseRequest) -> Optional[str]:
+    value = request.get_query_param(ROWND_OAUTH_LOGIN_CHALLENGE_PARAM)
+    return value if isinstance(value, str) and value else None
 
 
 def assert_app_variant_is_configured(config: RowndPluginConfig, app_variant_id: Optional[str]) -> None:
@@ -224,6 +230,7 @@ def get_magic_link_bootstrap_params(
     display_context: Optional[str] = None,
     redirect_to_path: Optional[str] = None,
     client_domain_key: Optional[str] = None,
+    oauth_login_challenge: Optional[str] = None,
 ) -> Dict[str, str]:
     params = {
         "appKey": config.rownd_app_key,
@@ -239,6 +246,8 @@ def get_magic_link_bootstrap_params(
         params["redirectToPath"] = redirect_to_path
     if client_domain_key:
         params["clientDomain"] = client_domain_key
+    if oauth_login_challenge:
+        params["oauthLoginChallenge"] = oauth_login_challenge
     return params
 
 
@@ -324,6 +333,11 @@ async def create_magic_link_with_confirmation_bypass(
                 display_context=display_context,
                 redirect_to_path=normalized_redirect_to_path,
                 client_domain_key=client_domain,
+                oauth_login_challenge=(
+                    user_context["rowndOAuthLoginChallenge"]
+                    if isinstance(user_context.get("rowndOAuthLoginChallenge"), str)
+                    else None
+                ),
             ),
         )
     )
@@ -380,6 +394,8 @@ def add_hub_bootstrap_params(
         params["displayContext"] = user_context["rowndDisplayContext"]
     if isinstance(user_context.get("rowndRedirectToPath"), str):
         params["redirectToPath"] = user_context["rowndRedirectToPath"]
+    if isinstance(user_context.get("rowndOAuthLoginChallenge"), str):
+        params["oauthLoginChallenge"] = user_context["rowndOAuthLoginChallenge"]
     client_domain = user_context.get("rowndClientDomain")
     client_domain_key = (
         client_domain

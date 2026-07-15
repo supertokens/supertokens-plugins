@@ -244,6 +244,7 @@ async def test_passwordless_create_code_adds_rownd_context():
                     "rownd_display_context": "mobile_app",
                     "rownd_redirect_to_path": "/dashboard",
                     "rownd_client_domain": "admin",
+                    "rownd_oauth_login_challenge": "challenge_123",
                 }
             )
         )),
@@ -256,7 +257,20 @@ async def test_passwordless_create_code_adds_rownd_context():
         "rowndDisplayContext": "mobile_app",
         "rowndRedirectToPath": "/dashboard",
         "rowndClientDomain": "admin",
+        "rowndOAuthLoginChallenge": "challenge_123",
     }
+
+
+async def test_passwordless_email_delivery_rewrites_oauth_login_challenge():
+    original = CapturingDelivery()
+    override = plugin.RowndEmailDeliveryOverride(
+        cast(Any, original), make_config(), "url_with_link_code", "account/login"
+    )
+    template_vars = SimpleNamespace(url_with_link_code="/auth/verify?linkCode=code")
+
+    await override.send_email(template_vars, {"rowndOAuthLoginChallenge": "challenge_123"})
+
+    assert "oauthLoginChallenge=challenge_123" in original.template_vars.url_with_link_code
 
 
 async def test_init_rejects_invalid_client_domain():

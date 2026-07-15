@@ -54,6 +54,15 @@ def test_maps_provider_user_without_email(provider_id: str, field: str):
     assert login_method["isVerified"] is False
 
 
+def test_magic_link_bootstrap_params_include_oauth_login_challenge():
+    params = get_magic_link_bootstrap_params(
+        RowndPluginConfig(rownd_app_key="app-key", rownd_app_secret="secret"),
+        oauth_login_challenge="challenge_123",
+    )
+
+    assert params["oauthLoginChallenge"] == "challenge_123"
+
+
 def test_maps_email_passwordless_user():
     mapped = map_rownd_user_to_supertokens(
         {
