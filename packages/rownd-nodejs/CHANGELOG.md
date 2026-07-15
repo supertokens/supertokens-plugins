@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.5.1
+
+### Patch Changes
+
+- Handle apple/google users that do not have an email address
+
 ## 0.5.0
 
 ### Minor Changes

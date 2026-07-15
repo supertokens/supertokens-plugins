@@ -1571,6 +1571,101 @@ describe("rownd-nodejs plugin", () => {
         expect(user?.loginMethods[0].thirdParty?.id).toBe("google");
       });
 
+      it("migrates and links a Rownd user when one of multiple login methods already exists", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const rowndUserId = "rownd-existing-google-plus-phone";
+        const email = "existing-google-plus-phone@example.com";
+        const googleId = "google-existing-plus-phone";
+        const phoneNumber = "+15555550123";
+
+        const existingGoogleUser = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          googleId,
+          email,
+          true,
+        );
+        expect(existingGoogleUser.status).toBe("OK");
+        if (existingGoogleUser.status !== "OK") {
+          throw new Error("failed to create existing google user");
+        }
+
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: rowndUserId,
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: rowndUserId,
+          auth_level: "verified",
+          data: {
+            user_id: rowndUserId,
+            google_id: googleId,
+            phone_number: phoneNumber,
+            email,
+          },
+          verified_data: {
+            google_id: true,
+            phone_number: true,
+          },
+        });
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer some-token",
+              rid: "session",
+              "fdi-version": "1.18",
+              "st-auth-mode": "header",
+            },
+          },
+        );
+
+        expect(res.status).toBe(200);
+        await expect(res.json()).resolves.toEqual({ status: "OK" });
+
+        const accessToken = res.headers.get("st-access-token");
+        expect(accessToken).toBeTruthy();
+
+        const session = await Session.getSessionWithoutRequestResponse(
+          accessToken!,
+        );
+        expect(session).toBeDefined();
+
+        const linkedUser = await SuperTokens.getUser(session!.getUserId());
+        expect(linkedUser?.isPrimaryUser).toBe(true);
+        expect(linkedUser?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: { id: "google", userId: googleId },
+            }),
+            expect.objectContaining({
+              recipeId: "passwordless",
+              phoneNumber,
+            }),
+          ]),
+        );
+
+        const userRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            headers: getAuthedHeaders(accessToken!),
+          },
+        );
+
+        expect(userRes.status).toBe(200);
+        const userBody = await userRes.json();
+        expect(userBody.status).toBe("OK");
+        expect(userBody.rownd_user).toBe(rowndUserId);
+        expect(userBody.data.google_id).toBe(googleId);
+        expect(userBody.data.phone_number).toBe(phoneNumber);
+        expect(userBody.verified_data.google_id).toBe(googleId);
+        expect(userBody.verified_data.phone_number).toBe(phoneNumber);
+      });
+
       it.each([
         { providerId: "google", field: "google_id" },
         { providerId: "apple", field: "apple_id" },
