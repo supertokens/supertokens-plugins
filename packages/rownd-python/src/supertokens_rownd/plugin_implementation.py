@@ -334,8 +334,8 @@ async def create_magic_link_with_confirmation_bypass(
                 redirect_to_path=normalized_redirect_to_path,
                 client_domain_key=client_domain,
                 oauth_login_challenge=(
-                    user_context["rowndOAuthLoginChallenge"]
-                    if isinstance(user_context.get("rowndOAuthLoginChallenge"), str)
+                    context["rowndOAuthLoginChallenge"]
+                    if isinstance(context.get("rowndOAuthLoginChallenge"), str)
                     else None
                 ),
             ),
@@ -1234,12 +1234,14 @@ def map_rownd_user_to_supertokens(rownd_user: JsonDict) -> JsonDict:
     if not data.get("user_id"):
         raise RowndPluginError("Rownd user has no user_id")
 
-    if data.get("google_id"):
-        email = data.get("email") or build_supertokens_fake_email(data["google_id"], "google")
-        login_methods.append({"recipeId": "thirdparty", "thirdPartyId": "google", "thirdPartyUserId": data["google_id"], "email": email, "isVerified": bool(data.get("email")) and bool(verified_data.get("google_id"))})
-    if data.get("apple_id"):
-        email = data.get("email") or build_supertokens_fake_email(data["apple_id"], "apple")
-        login_methods.append({"recipeId": "thirdparty", "thirdPartyId": "apple", "thirdPartyUserId": data["apple_id"], "email": email, "isVerified": bool(data.get("email")) and bool(verified_data.get("apple_id"))})
+    google_id = data.get("google_id")
+    if isinstance(google_id, str) and google_id:
+        email = data.get("email") or build_supertokens_fake_email(google_id, "google")
+        login_methods.append({"recipeId": "thirdparty", "thirdPartyId": "google", "thirdPartyUserId": google_id, "email": email, "isVerified": bool(data.get("email")) and bool(verified_data.get("google_id"))})
+    apple_id = data.get("apple_id")
+    if isinstance(apple_id, str) and apple_id:
+        email = data.get("email") or build_supertokens_fake_email(apple_id, "apple")
+        login_methods.append({"recipeId": "thirdparty", "thirdPartyId": "apple", "thirdPartyUserId": apple_id, "email": email, "isVerified": bool(data.get("email")) and bool(verified_data.get("apple_id"))})
     if data.get("phone_number"):
         login_methods.append({"recipeId": "passwordless", "phoneNumber": data["phone_number"], "isVerified": bool(verified_data.get("phone_number"))})
     if data.get("email") and not data.get("google_id") and not data.get("apple_id"):

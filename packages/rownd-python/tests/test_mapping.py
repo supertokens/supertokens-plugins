@@ -81,6 +81,35 @@ def test_maps_email_passwordless_user():
     assert user_metadata["source"] == "rownd"
 
 
+def test_maps_multiple_rownd_login_methods():
+    mapped = map_rownd_user_to_supertokens(
+        {
+            "data": {
+                "user_id": "rownd-existing-google-plus-phone",
+                "google_id": "google-existing-plus-phone",
+                "phone_number": "+15555550123",
+                "email": "existing-google-plus-phone@example.com",
+            },
+            "verified_data": {"google_id": True, "phone_number": True},
+        }
+    )
+
+    assert mapped["loginMethods"] == [
+        {
+            "recipeId": "thirdparty",
+            "thirdPartyId": "google",
+            "thirdPartyUserId": "google-existing-plus-phone",
+            "email": "existing-google-plus-phone@example.com",
+            "isVerified": True,
+        },
+        {
+            "recipeId": "passwordless",
+            "phoneNumber": "+15555550123",
+            "isVerified": True,
+        },
+    ]
+
+
 def test_maps_guest_user():
     mapped = map_rownd_user_to_supertokens(
         {
