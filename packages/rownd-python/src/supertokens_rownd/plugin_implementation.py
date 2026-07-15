@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import uuid
 import re
+from hashlib import sha256
 from typing import Dict, List, Optional, Tuple, cast
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 
@@ -40,6 +41,7 @@ from .types import JsonDict, RowndClientProtocol, RowndPluginConfig, RowndPlugin
 
 
 _active_config: Optional[RowndPluginConfig] = None
+SUPERTOKENS_FAKE_EMAIL_DOMAIN = "stfakeemail.supertokens.com"
 
 
 def set_active_rownd_config(config: RowndPluginConfig) -> None:
@@ -780,7 +782,7 @@ async def get_rownd_compat_user(user_id: str, config: Optional[RowndPluginConfig
 
     for method in st_user.login_methods:
         if method.recipe_id == "passwordless":
-            if method.email:
+            if method.email and not is_supertokens_fake_email(method.email):
                 verified_data["email"] = method.email
                 data.setdefault("email", method.email)
             if method.phone_number:
@@ -788,9 +790,9 @@ async def get_rownd_compat_user(user_id: str, config: Optional[RowndPluginConfig
                 data.setdefault("phone_number", method.phone_number)
         elif method.recipe_id == "thirdparty":
             third_party_id, third_party_user_id = get_third_party_info(method)
-            if method.verified and method.email:
+            if method.verified and method.email and not is_supertokens_fake_email(method.email):
                 verified_data["email"] = method.email
-            if method.email:
+            if method.email and not is_supertokens_fake_email(method.email):
                 data.setdefault("email", method.email)
             if third_party_id == "google" and third_party_user_id:
                 data["google_id"] = third_party_user_id
@@ -1021,6 +1023,26 @@ def first_string(value: object) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
+def is_supertokens_fake_email(value: object) -> bool:
+    return isinstance(value, str) and value.lower().endswith("@%s" % SUPERTOKENS_FAKE_EMAIL_DOMAIN)
+
+
+def build_supertokens_fake_email(provider_user_id: str, provider_id: str) -> str:
+    digest = sha256(("%s:%s" % (provider_id, provider_user_id)).encode("utf-8")).hexdigest()[:32]
+    return "st-%s-%s@%s" % (provider_id, digest, SUPERTOKENS_FAKE_EMAIL_DOMAIN)
+
+
+def first_real_email(*values: object) -> Optional[str]:
+    return next(
+        (
+            value
+            for value in values
+            if isinstance(value, str) and value and not is_supertokens_fake_email(value)
+        ),
+        None,
+    )
+
+
 def get_rownd_oauth_audience(
     requested_audience: Optional[str] = None,
     requested_resource: Optional[str] = None,
@@ -1081,7 +1103,7 @@ async def build_standard_oauth_claims(user: User, scopes: List[str]) -> JsonDict
     verified_data = as_json_dict(original.get("verified_data"))
 
     if "email" in scopes:
-        email = first_string(rownd_data.get("email")) or (user.emails[0] if user.emails else None)
+        email = first_real_email(first_string(rownd_data.get("email")), *(user.emails or []))
         if email:
             claims["email"] = email
             claims["email_verified"] = is_oauth_claim_verified(
@@ -1197,13 +1219,11 @@ def map_rownd_user_to_supertokens(rownd_user: JsonDict) -> JsonDict:
         raise RowndPluginError("Rownd user has no user_id")
 
     if data.get("google_id"):
-        if not data.get("email"):
-            raise RowndPluginError("Rownd Google user is missing email")
-        login_methods.append({"recipeId": "thirdparty", "thirdPartyId": "google", "thirdPartyUserId": data["google_id"], "email": data["email"], "isVerified": bool(verified_data.get("google_id"))})
+        email = data.get("email") or build_supertokens_fake_email(data["google_id"], "google")
+        login_methods.append({"recipeId": "thirdparty", "thirdPartyId": "google", "thirdPartyUserId": data["google_id"], "email": email, "isVerified": bool(data.get("email")) and bool(verified_data.get("google_id"))})
     if data.get("apple_id"):
-        if not data.get("email"):
-            raise RowndPluginError("Rownd Apple user is missing email")
-        login_methods.append({"recipeId": "thirdparty", "thirdPartyId": "apple", "thirdPartyUserId": data["apple_id"], "email": data["email"], "isVerified": bool(verified_data.get("apple_id"))})
+        email = data.get("email") or build_supertokens_fake_email(data["apple_id"], "apple")
+        login_methods.append({"recipeId": "thirdparty", "thirdPartyId": "apple", "thirdPartyUserId": data["apple_id"], "email": email, "isVerified": bool(data.get("email")) and bool(verified_data.get("apple_id"))})
     if data.get("phone_number"):
         login_methods.append({"recipeId": "passwordless", "phoneNumber": data["phone_number"], "isVerified": bool(verified_data.get("phone_number"))})
     if data.get("email") and not data.get("google_id") and not data.get("apple_id"):

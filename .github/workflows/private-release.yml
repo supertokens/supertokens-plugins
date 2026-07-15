@@ -82,7 +82,7 @@ jobs:
 
       - name: Publish to npm
         if: ${{ steps.check-changes.has-changes == true }}
-        run: npm run publish:private -- ${{ inputs.tag }}
+        run: npm run release:private -- ${{ inputs.tag }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

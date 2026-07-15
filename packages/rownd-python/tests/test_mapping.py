@@ -38,26 +38,20 @@ def test_throws_when_data_user_id_is_missing():
         raise AssertionError("expected RowndPluginError")
 
 
-def test_throws_when_google_user_is_missing_email():
-    try:
-        map_rownd_user_to_supertokens(
-            {"data": {"user_id": "u", "google_id": "g"}, "verified_data": {"google_id": True}}
-        )
-    except RowndPluginError as err:
-        assert str(err) == "Rownd Google user is missing email"
-    else:
-        raise AssertionError("expected RowndPluginError")
+@pytest.mark.parametrize("provider_id, field", [("google", "google_id"), ("apple", "apple_id")])
+def test_maps_provider_user_without_email(provider_id: str, field: str):
+    provider_user_id = "%s-user-id" % provider_id
+    mapped = map_rownd_user_to_supertokens(
+        {
+            "data": {"user_id": "u", field: provider_user_id},
+            "verified_data": {field: True},
+        }
+    )
 
-
-def test_throws_when_apple_user_is_missing_email():
-    try:
-        map_rownd_user_to_supertokens(
-            {"data": {"user_id": "u", "apple_id": "a"}, "verified_data": {"apple_id": True}}
-        )
-    except RowndPluginError as err:
-        assert str(err) == "Rownd Apple user is missing email"
-    else:
-        raise AssertionError("expected RowndPluginError")
+    login_method = mapped["loginMethods"][0]
+    assert login_method["email"].startswith("st-%s-" % provider_id)
+    assert login_method["email"].endswith("@stfakeemail.supertokens.com")
+    assert login_method["isVerified"] is False
 
 
 def test_maps_email_passwordless_user():
