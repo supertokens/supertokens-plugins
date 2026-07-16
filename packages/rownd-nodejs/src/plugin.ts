@@ -618,6 +618,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   const verificationResult = await completePendingEmailVerification({
                     recipeUserId: response.user.recipeUserId,
                     email: response.user.email,
+                    tenantId: input.tenantId,
                     userContext: input.userContext,
                   });
 

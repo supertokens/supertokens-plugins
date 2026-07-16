@@ -38,6 +38,8 @@ rownd:
 supertokens:
   connectionURI: <CONNECTION_URI>
   apiKey: <API_KEY>
+  # Tenant that receives every imported login method.
+  tenantId: public
   # Number of users to send to SuperTokens per bulk import request.
   batchSize: 500
 `;

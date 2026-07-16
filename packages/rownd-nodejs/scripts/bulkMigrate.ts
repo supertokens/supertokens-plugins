@@ -26,6 +26,7 @@ Options:
 type Checkpoint = {
   cursor?: string;
   importedCount?: number;
+  tenantId?: string;
   updatedAt: string;
 };
 
@@ -37,6 +38,7 @@ type FailedMapping = {
 const CheckpointSchema = z.object({
   cursor: z.string().optional(),
   importedCount: z.number().int().nonnegative().optional(),
+  tenantId: z.string().optional(),
   updatedAt: z.string(),
 });
 
@@ -162,6 +164,14 @@ export async function migrateRowndUsersToSuperTokens(
   const checkpoint = config.checkpoint.resume
     ? await loadCheckpoint(config.checkpoint.file)
     : null;
+  if (
+    checkpoint &&
+    (checkpoint.tenantId ?? "public") !== config.supertokens.tenantId
+  ) {
+    throw new Error(
+      `Checkpoint tenant ${checkpoint.tenantId ?? "public"} does not match configured tenant ${config.supertokens.tenantId}`,
+    );
+  }
   const failedMappingsFile = getFailedMappingsFilePath(config.checkpoint.file);
   let cursor = checkpoint?.cursor;
   let totalProcessed = 0;
@@ -211,7 +221,12 @@ export async function migrateRowndUsersToSuperTokens(
       try {
         mappedUsers.push({
           rowndUserId,
-          user: mapRowndUserToSuperTokens(rowndUser),
+          user: mapRowndUserToSuperTokens(
+            rowndUser,
+            config.supertokens.tenantId === "public"
+              ? undefined
+              : config.supertokens.tenantId,
+          ),
         });
       } catch (error) {
         const errorMessage =
@@ -238,6 +253,7 @@ export async function migrateRowndUsersToSuperTokens(
     await saveCheckpoint(config.checkpoint.file, {
       cursor,
       importedCount: totalImported,
+      tenantId: config.supertokens.tenantId,
       updatedAt: new Date().toISOString(),
     });
 

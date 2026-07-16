@@ -31,6 +31,7 @@ export type SuperTokensTargetConfig = {
   connectionURI: string;
   apiKey?: string;
   batchSize: number;
+  tenantId: string;
 };
 
 export type ThirdPartyProviderConfig = {
@@ -79,6 +80,7 @@ const ConfigSchema = z.object({
     connectionURI: z.string(),
     apiKey: z.string().optional(),
     batchSize: z.number().int().positive(),
+    tenantId: z.string().min(1).default("public"),
   }),
   thirdPartyProviders: z
     .array(

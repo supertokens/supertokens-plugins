@@ -775,6 +775,7 @@ export type RowndUserMetadata = {
     field: string;
     value: string;
     created_at: string;
+    tenantId?: string;
   }>;
   [key: string]: unknown;
 };

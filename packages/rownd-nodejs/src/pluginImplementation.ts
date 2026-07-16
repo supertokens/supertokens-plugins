@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import SuperTokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
+import MultiTenancy from "supertokens-node/recipe/multitenancy";
 import type {
   PluginRouteHandler,
   SuperTokensPublicConfig,
@@ -53,6 +54,7 @@ import {
   parseUpdateFieldBody,
   parseUpdateMetaBody,
   parseUpdateUserBody,
+  resolveTenantId,
   resolveAllowedClientDomain,
 } from "./utils";
 
@@ -158,8 +160,11 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
   ) => {
     const startedAt = Date.now();
     const guestId = `guest_${randomUUID()}`;
+    let tenantId: string | undefined;
 
     try {
+      tenantId = resolveTenantId(req);
+
       const body = parseGuestBody(await getJsonBody(req));
       const appVariantId = getRequestedAppVariantIdFromRequest(req);
       assertRowndAppVariantIsConfigured(appVariantId);
@@ -177,7 +182,7 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
           : GUEST_AUTH_METHOD_ID;
 
       const response = await ThirdParty.manuallyCreateOrUpdateUser(
-        PUBLIC_TENANT_ID,
+        tenantId,
         thirdPartyId,
         thirdPartyUserId,
         `${thirdPartyUserId}@anonymous.local`,
@@ -195,7 +200,7 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
       await Session.createNewSession(
         req,
         res,
-        PUBLIC_TENANT_ID,
+        tenantId,
         response.recipeUserId,
         {
           ...buildRowndAudience({}, appVariantId),
@@ -211,7 +216,7 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
       deps.telemetryClient.recordSuccess({
         outcome: "success",
         durationMs: Date.now() - startedAt,
-        tenantId: PUBLIC_TENANT_ID,
+        tenantId,
         superTokensUserId: response.user.id,
       });
 
@@ -224,7 +229,7 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
       deps.telemetryClient.recordError({
         error,
         startedAt,
-        tenantId: PUBLIC_TENANT_ID,
+        tenantId,
       });
       return {
         status: "ERROR" as const,
@@ -242,7 +247,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
     userContext: SuperTokensUserContext,
   ) => {
     const startedAt = Date.now();
-    let tenantId: string | undefined = PUBLIC_TENANT_ID;
+    let tenantId: string | undefined;
     let rowndUserId: string | undefined;
     let superTokensUserId: string | undefined;
     let user: Awaited<ReturnType<typeof SuperTokens.getUser>>;
@@ -255,6 +260,8 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         throw new Error("Supertokens config not found");
       }
 
+      tenantId = resolveTenantId(req);
+
       const parsed = await parseRequest(req);
       const appVariantId = getRequestedAppVariantIdFromRequest(req);
       assertRowndAppVariantIsConfigured(appVariantId);
@@ -263,7 +270,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
 
       if (!rowndUser) {
         logDebugMessage(
-          `Skipping migration because user does not exist in Rownd. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
+          `Skipping migration because user does not exist in Rownd. tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,
         );
         return { status: "OK" as const };
       }
@@ -271,7 +278,10 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       user = await SuperTokens.getUser(rowndUserId, userContext);
 
       if (!user) {
-        const stUserImport = mapRowndUserToSuperTokens(rowndUser);
+        const stUserImport = mapRowndUserToSuperTokens(
+          rowndUser,
+          tenantId === PUBLIC_TENANT_ID ? undefined : tenantId,
+        );
 
         try {
           await importUser(stUserImport, deps.stConfig.supertokens);
@@ -290,18 +300,18 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
           superTokensUserId = user.id;
           recipeUserId = user.loginMethods[0]?.recipeUserId;
           logDebugMessage(
-            `User already migrated (race condition). tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
+            `User already migrated (race condition). tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,
           );
         }
 
         logDebugMessage(
-          `User migrated successfully. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
+          `User migrated successfully. tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,
         );
       } else {
         superTokensUserId = user.id;
         recipeUserId = user.loginMethods[0]?.recipeUserId;
         logDebugMessage(
-          `User already migrated. tenantId: ${PUBLIC_TENANT_ID}, rowndUserId: ${rowndUserId}`,
+          `User already migrated. tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,
         );
       }
 
@@ -309,14 +319,30 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         await recordRowndAppVariantForUser(superTokensUserId, appVariantId);
       }
 
+      const tenantLoginMethod = user?.loginMethods.find((method) =>
+        method.tenantIds.includes(tenantId!),
+      );
+      recipeUserId = tenantLoginMethod?.recipeUserId ?? recipeUserId;
+
       if (!recipeUserId) {
         throw new Error("User not found or has no login methods");
+      }
+
+      if (!tenantLoginMethod) {
+        const associationResult = await MultiTenancy.associateUserToTenant(
+          tenantId,
+          recipeUserId,
+          userContext,
+        );
+        if (associationResult.status !== "OK") {
+          throw new Error(`Failed to associate migrated user with tenant: ${associationResult.status}`);
+        }
       }
 
       await Session.createNewSession(
         req,
         res,
-        PUBLIC_TENANT_ID,
+        tenantId,
         recipeUserId,
         {
           ...buildRowndAudience({}, appVariantId),
@@ -326,7 +352,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       );
 
       logDebugMessage(
-        `Session migrated successfully. tenantId: ${PUBLIC_TENANT_ID}, userId: ${superTokensUserId}`,
+        `Session migrated successfully. tenantId: ${tenantId}, userId: ${superTokensUserId}`,
       );
 
       deps.telemetryClient.recordSuccess({
@@ -371,7 +397,7 @@ export function handleGetUser() {
     _res: SuperTokensResponse,
     session: SuperTokensSession,
   ) => {
-    const user = await getUserById(session!.getUserId());
+    const user = await getUserById(session!.getUserId(), session!.getTenantId());
     return {
       status: "OK" as const,
       ...user,
@@ -406,7 +432,11 @@ export function handleUpdateUser() {
     }
 
     if (Object.keys(dataWithoutEmail).length > 0) {
-      await updateUserData(session!.getUserId(), dataWithoutEmail);
+      await updateUserData(
+        session!.getUserId(),
+        dataWithoutEmail,
+        session!.getTenantId(),
+      );
     }
 
     if (hasEmailUpdate) {
@@ -426,7 +456,7 @@ export function handleUpdateUser() {
       };
     }
 
-    const user = await getUserById(session!.getUserId());
+    const user = await getUserById(session!.getUserId(), session!.getTenantId());
     return {
       status: "OK" as const,
       ...user,
@@ -523,7 +553,7 @@ export function handleGetUserField() {
       return missingFieldResponse();
     }
 
-    const user = await getUserById(session!.getUserId());
+    const user = await getUserById(session!.getUserId(), session!.getTenantId());
     return {
       status: "OK" as const,
       value: user.data[field],
@@ -568,9 +598,11 @@ export function handleUpdateUserField() {
       return permissionError;
     }
 
-    const updateUserDataResult = await updateUserData(session!.getUserId(), {
-      [field]: payload.value,
-    });
+    const updateUserDataResult = await updateUserData(
+      session!.getUserId(),
+      { [field]: payload.value },
+      session!.getTenantId(),
+    );
     return {
       status: "OK" as const,
       ...updateUserDataResult,

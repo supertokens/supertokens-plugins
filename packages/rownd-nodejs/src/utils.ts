@@ -1,6 +1,6 @@
 import type { JSONObject, PluginRouteHandler, SuperTokensPublicConfig } from "supertokens-node/types";
 
-import { HUB_LOGIN_PAGE_PATH } from "./constants";
+import { HUB_LOGIN_PAGE_PATH, PUBLIC_TENANT_ID } from "./constants";
 import { RowndPluginError } from "./errors";
 import type { RowndPluginNormalisedConfig } from "./types";
 
@@ -9,6 +9,12 @@ export type JsonRecord = JSONObject;
 export type JsonValue = JsonRecord[string];
 
 export const ROWND_OAUTH_LOGIN_CHALLENGE_PARAM = "rownd_oauth_login_challenge";
+
+export function resolveTenantId(
+  req: Pick<SuperTokensRequest, "getKeyValueFromQuery">,
+) {
+  return req.getKeyValueFromQuery("tenantId") || PUBLIC_TENANT_ID;
+}
 
 export function rewriteLinkPath(
   inputUrl: string,

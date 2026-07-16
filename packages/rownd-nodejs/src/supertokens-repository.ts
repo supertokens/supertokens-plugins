@@ -299,6 +299,7 @@ function isPendingVerification(
 
 export async function getUserById(
   userId: string,
+  tenantId: string = PUBLIC_TENANT_ID,
 ): Promise<RowndCompatUserResponse> {
   const metadata = await getUserMetadata(userId);
   const stUser = await SuperTokens.getUser(userId);
@@ -339,7 +340,10 @@ export async function getUserById(
     ...((originalRowndUser?.verified_data || {}) as JsonRecord),
   };
 
-  for (const method of stUser.loginMethods) {
+  const tenantLoginMethods = stUser.loginMethods.filter((method) =>
+    method.tenantIds.includes(tenantId),
+  );
+  for (const method of tenantLoginMethods) {
     if (method.recipeId === "passwordless") {
       if (method.email && !isSuperTokensFakeEmail(method.email)) {
         verifiedData.email = method.email;
@@ -396,13 +400,17 @@ export async function getUserById(
     verifiedData.phone_number = data.phone_number;
   }
 
-  const anonymousId = getAnonymousId(stUser.id, stUser, metadata);
+  const tenantUser = {
+    ...stUser,
+    loginMethods: tenantLoginMethods,
+  };
+  const anonymousId = getAnonymousId(stUser.id, tenantUser, metadata);
   if (anonymousId && data.anonymous_id === undefined) {
     data.anonymous_id = anonymousId;
   }
 
   const authLevel = getEffectiveAuthLevel(
-    stUser,
+    tenantUser,
     originalRowndUser?.auth_level,
     verifiedData,
   );
@@ -413,17 +421,17 @@ export async function getUserById(
     }
   }
 
-  const sortedByJoined = [...stUser.loginMethods].sort(
+  const sortedByJoined = [...tenantLoginMethods].sort(
     (a, b) => a.timeJoined - b.timeJoined,
   );
-  const latestSessionInfo = await getLatestSessionInfo(stUser.id);
+  const latestSessionInfo = await getLatestSessionInfo(stUser.id, tenantId);
   const firstMethod = sortedByJoined[0];
   const latestSessionRecipeUserId = latestSessionInfo?.recipeUserId.getAsString();
   const lastMethod = latestSessionRecipeUserId
     ? stUser.loginMethods.find(
       (method) => method.recipeUserId.getAsString() === latestSessionRecipeUserId,
     )
-    : [...stUser.loginMethods].sort((a, b) => b.timeJoined - a.timeJoined)[0];
+    : [...tenantLoginMethods].sort((a, b) => b.timeJoined - a.timeJoined)[0];
   const lastSignInAt = latestSessionInfo?.timeCreated ?? stUser.timeJoined;
 
   const metadataMeta = Object.fromEntries(
@@ -455,11 +463,11 @@ export async function getUserById(
   };
 }
 
-async function getLatestSessionInfo(userId: string) {
+async function getLatestSessionInfo(userId: string, tenantId: string) {
   const sessionHandles = await Session.getAllSessionHandlesForUser(
     userId,
     true,
-    PUBLIC_TENANT_ID,
+    tenantId,
   );
   const sessionInfos = await Promise.all(
     sessionHandles.map((sessionHandle) =>
@@ -481,7 +489,11 @@ async function getLatestSessionInfo(userId: string) {
   return latestSessionInfo;
 }
 
-export async function updateUserData(userId: string, inputData: JsonRecord) {
+export async function updateUserData(
+  userId: string,
+  inputData: JsonRecord,
+  tenantId: string = PUBLIC_TENANT_ID,
+) {
   const metadata = await getUserMetadata(userId);
   const updatedMetadata: JSONObject = {
     ...metadata,
@@ -489,7 +501,7 @@ export async function updateUserData(userId: string, inputData: JsonRecord) {
   };
 
   await UserMetadata.updateUserMetadata(userId, updatedMetadata);
-  return getUserById(userId);
+  return getUserById(userId, tenantId);
 }
 
 export async function startPendingEmailVerification(input: {
@@ -503,10 +515,12 @@ export async function startPendingEmailVerification(input: {
   userContext?: JsonRecord;
 }) {
   const metadata = await getUserMetadata(input.userId);
-  const currentEmail = (await getUserById(input.userId)).data.email;
+  const currentEmail = (await getUserById(input.userId, input.tenantId)).data.email;
   const pendingVerifications = getPendingVerifications(metadata);
   const pendingEmailVerifications = pendingVerifications.filter(
-    (pendingVerification) => pendingVerification.field === "email",
+    (pendingVerification) =>
+      pendingVerification.field === "email" &&
+      (pendingVerification.tenantId ?? PUBLIC_TENANT_ID) === input.tenantId,
   );
 
   if (currentEmail === input.email) {
@@ -523,12 +537,14 @@ export async function startPendingEmailVerification(input: {
       await UserMetadata.updateUserMetadata(input.userId, {
         ...metadata,
         rownd_pending_verification: pendingVerifications.filter(
-          (pendingVerification) => pendingVerification.field !== "email",
+          (pendingVerification) =>
+            pendingVerification.field !== "email" ||
+            (pendingVerification.tenantId ?? PUBLIC_TENANT_ID) !== input.tenantId,
         ),
       });
     }
 
-    return getUserById(input.userId);
+    return getUserById(input.userId, input.tenantId);
   }
 
   for (const pendingVerification of pendingEmailVerifications) {
@@ -545,13 +561,16 @@ export async function startPendingEmailVerification(input: {
     field: "email",
     value: input.email,
     created_at: new Date().toISOString(),
+    tenantId: input.tenantId,
   };
 
   await UserMetadata.updateUserMetadata(input.userId, {
     ...metadata,
     rownd_pending_verification: [
       ...pendingVerifications.filter(
-        (pendingVerification) => pendingVerification.field !== "email",
+        (pendingVerification) =>
+          pendingVerification.field !== "email" ||
+          (pendingVerification.tenantId ?? PUBLIC_TENANT_ID) !== input.tenantId,
       ),
       pendingVerification,
     ],
@@ -572,16 +591,18 @@ export async function startPendingEmailVerification(input: {
     await completePendingEmailVerification({
       recipeUserId: input.recipeUserId,
       email: input.email,
+      tenantId: input.tenantId,
       userContext: input.userContext,
     });
   }
 
-  return getUserById(input.userId);
+  return getUserById(input.userId, input.tenantId);
 }
 
 export async function completePendingEmailVerification(input: {
   recipeUserId: Parameters<typeof AccountLinking.createPrimaryUser>[0];
   email: string;
+  tenantId?: string;
   userContext?: JsonRecord;
 }): Promise<
   | {
@@ -590,6 +611,7 @@ export async function completePendingEmailVerification(input: {
     }
   | undefined
 > {
+  const tenantId = input.tenantId ?? PUBLIC_TENANT_ID;
   const user = await SuperTokens.getUser(
     input.recipeUserId.getAsString(),
     input.userContext,
@@ -601,6 +623,7 @@ export async function completePendingEmailVerification(input: {
     (pendingVerification) => isMatchingPendingEmailVerification(
       pendingVerification,
       input.email,
+      tenantId,
     ),
   );
 
@@ -610,7 +633,12 @@ export async function completePendingEmailVerification(input: {
 
   let metadataUserId = userId;
   let verifiedRecipeUserId = input.recipeUserId;
-  const passwordlessEmailMethod = getPasswordlessEmailLoginMethod(user);
+  const tenantLoginMethods = user?.loginMethods.filter((method) =>
+    method.tenantIds.includes(tenantId),
+  ) ?? [];
+  const passwordlessEmailMethod = getPasswordlessEmailLoginMethod(
+    tenantLoginMethods,
+  );
   if (passwordlessEmailMethod) {
     const updateResult = await Passwordless.updateUser({
       recipeUserId: passwordlessEmailMethod.recipeUserId,
@@ -625,9 +653,11 @@ export async function completePendingEmailVerification(input: {
     }
 
     verifiedRecipeUserId = passwordlessEmailMethod.recipeUserId;
-  } else if (hasOnlyGuestLoginMethods(user)) {
+  } else if (hasOnlyGuestLoginMethods(user
+    ? { ...user, loginMethods: tenantLoginMethods }
+    : user)) {
     const isPasswordlessSignUpAllowed = await AccountLinking.isSignUpAllowed(
-      PUBLIC_TENANT_ID,
+      tenantId,
       {
         recipeId: "passwordless",
         email: input.email,
@@ -643,7 +673,7 @@ export async function completePendingEmailVerification(input: {
 
     const passwordlessUser = await Passwordless.signInUp({
       email: input.email,
-      tenantId: PUBLIC_TENANT_ID,
+      tenantId,
       userContext: input.userContext,
     });
     verifiedRecipeUserId = passwordlessUser.recipeUserId;
@@ -704,6 +734,7 @@ export async function completePendingEmailVerification(input: {
       (verification) => !isMatchingPendingEmailVerification(
         verification,
         input.email,
+        tenantId,
       ),
     ),
   };
@@ -719,8 +750,11 @@ export async function completePendingEmailVerification(input: {
 function isMatchingPendingEmailVerification(
   verification: RowndPendingVerification,
   email: string,
+  tenantId: string,
 ) {
-  return verification.field === "email" && verification.value === email;
+  return verification.field === "email" &&
+    verification.value === email &&
+    (verification.tenantId ?? PUBLIC_TENANT_ID) === tenantId;
 }
 
 export async function updateUserMetadata(
@@ -746,9 +780,9 @@ export async function updateUserMetadata(
 }
 
 function getPasswordlessEmailLoginMethod(
-  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+  loginMethods: NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>["loginMethods"],
 ) {
-  return user?.loginMethods.find((method) => {
+  return loginMethods.find((method) => {
     return method.recipeId === "passwordless" && !!method.email;
   });
 }

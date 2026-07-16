@@ -116,6 +116,7 @@ import { createMagicLinkWithConfirmationBypass } from "@supertokens-plugins/rown
 
 const magicLink = await createMagicLinkWithConfirmationBypass({
   email: "user@example.com",
+  tenantId: "tenant-a",
   clientDomain: "browser",
   redirectToPath: "/profile",
   displayContext: "browser",
@@ -126,7 +127,7 @@ const magicLink = await createMagicLinkWithConfirmationBypass({
 
 `clientDomain` must be a configured `clientDomains` key, not a raw domain. Omit it to use the SuperTokens website domain.
 
-Pass exactly one of `email` or `phoneNumber`. The helper returns the rewritten magic link with `bypassDeviceConfirmation=true`.
+Pass exactly one of `email` or `phoneNumber`. `tenantId` defaults to `public`. The helper returns the rewritten magic link with `bypassDeviceConfirmation=true`.
 
 Before skipping the cross-device confirmation prompt, the frontend should validate the callback against the plugin. Routes are mounted under your SuperTokens `apiBasePath`, which defaults to `/auth`.
 
@@ -141,16 +142,25 @@ If validation fails, the frontend should show the normal cross-device confirmati
 
 Routes are mounted under your SuperTokens `apiBasePath`, which defaults to `/auth`. The migration endpoint is the main Rownd-to-SuperTokens session handoff endpoint; the plugin also exposes Rownd-compatible app config, guest, user, metadata, field, and sign-out endpoints under `{apiBasePath}/plugin/rownd/...`.
 
+Unauthenticated migration and guest routes accept an optional `tenantId` query parameter. It defaults to `public`. SuperTokens Core validates the tenant when the operation runs. Authenticated identity-field and sign-out operations use the tenant from the current session; custom Rownd metadata remains global to the SuperTokens user.
+
 > [!IMPORTANT]
-> The plugin always migrates users and sessions into the `public` tenant.
 > Rownd users with multiple supported login methods are rejected unless SuperTokens account linking is enabled in the target environment.
 
 ### Migrate
 
 - **POST** `{apiBasePath}/plugin/rownd/migrate`
 - **Default**: `POST /auth/plugin/rownd/migrate`
+- **Non-public tenant**: `POST /auth/plugin/rownd/migrate?tenantId=tenant-a`
 - **Headers**: `Authorization: Bearer <Rownd_JWT>`. Header-token clients should also send `rid: session`, `fdi-version: 1.18`, and `st-auth-mode: header`.
-- **Description**: Validates the Rownd JWT, ensures the user is migrated to SuperTokens in the `public` tenant, syncs Rownd user data to SuperTokens UserMetadata, and then creates a new SuperTokens session for that user. Header-token clients must receive `st-access-token`, `st-refresh-token`, and `front-token` response headers.
+- **Description**: Validates the Rownd JWT, imports new users with their Rownd profile data, ensures the selected login method is associated with the requested SuperTokens tenant, and then creates a new SuperTokens session in that tenant. Header-token clients must receive `st-access-token`, `st-refresh-token`, and `front-token` response headers.
+
+### Guest
+
+- **POST** `{apiBasePath}/plugin/rownd/guest`
+- **Default**: `POST /auth/plugin/rownd/guest`
+- **Non-public tenant**: `POST /auth/plugin/rownd/guest?tenantId=tenant-a`
+- **Description**: Creates a guest or instant user and session in the requested tenant.
 
 ## Debug Logging
 
@@ -227,6 +237,8 @@ RowndMigrationPlugin.init({
 ## Bulk Import Script
 
 The package includes a bulk migration script for importing Rownd users into SuperTokens.
+
+Set `supertokens.tenantId` in the generated configuration to associate every imported login method with a non-public tenant. It defaults to `public` when omitted. Resuming from a checkpoint with a different tenant is rejected.
 
 The script runs from a YAML config file generated from the included template.
 

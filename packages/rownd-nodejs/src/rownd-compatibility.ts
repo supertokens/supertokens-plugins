@@ -29,6 +29,7 @@ export type RowndPendingVerification = {
   field: RowndVerifiableField;
   value: string;
   created_at: string;
+  tenantId?: string;
 };
 
 export type RowndCompatUserResponse = {
@@ -90,6 +91,7 @@ export function isInternalMetadataField(field: string) {
 
 export function mapRowndUserToSuperTokens(
   rowndUser: RowndUser,
+  tenantId?: string,
 ): SuperTokensUserImport {
   const loginMethods: SuperTokensUserImport["loginMethods"] = [];
   const rowndUserData = rowndUser.data || {};
@@ -109,6 +111,7 @@ export function mapRowndUserToSuperTokens(
       thirdPartyUserId: rowndUserData.google_id,
       email: googleEmail,
       isVerified: !!rowndUserData.email && !!rowndUserVerifiedData.google_id,
+      ...(tenantId ? { tenantIds: [tenantId] } : {}),
     });
   }
 
@@ -123,6 +126,7 @@ export function mapRowndUserToSuperTokens(
       thirdPartyUserId: rowndUserData.apple_id,
       email: appleEmail,
       isVerified: !!rowndUserData.email && !!rowndUserVerifiedData.apple_id,
+      ...(tenantId ? { tenantIds: [tenantId] } : {}),
     });
   }
 
@@ -131,6 +135,7 @@ export function mapRowndUserToSuperTokens(
       recipeId: "passwordless",
       phoneNumber: rowndUserData.phone_number,
       isVerified: !!rowndUserVerifiedData.phone_number,
+      ...(tenantId ? { tenantIds: [tenantId] } : {}),
     });
   }
 
@@ -145,6 +150,7 @@ export function mapRowndUserToSuperTokens(
       recipeId: "passwordless",
       email: rowndUserData.email,
       isVerified: !!rowndUserVerifiedData.email,
+      ...(tenantId ? { tenantIds: [tenantId] } : {}),
     });
   }
 
@@ -161,6 +167,7 @@ export function mapRowndUserToSuperTokens(
       thirdPartyUserId: rowndUserData.user_id,
       email: `${rowndUserData.user_id}@anonymous.local`,
       isVerified: false,
+      ...(tenantId ? { tenantIds: [tenantId] } : {}),
     });
   }
 

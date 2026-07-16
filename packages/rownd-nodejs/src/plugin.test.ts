@@ -19,6 +19,7 @@ import Passwordless from "supertokens-node/recipe/passwordless";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
 import EmailVerification from "supertokens-node/recipe/emailverification";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
+import MultiTenancy from "supertokens-node/recipe/multitenancy";
 import { middleware, errorHandler } from "supertokens-node/framework/express";
 import { ProcessState } from "supertokens-node/lib/build/processState";
 import SuperTokensRaw from "supertokens-node/lib/build/supertokens";
@@ -54,6 +55,9 @@ import {
   createMagicLinkWithConfirmationBypass,
   recordRowndAppVariantForUser,
 } from "./supertokens-repository";
+import { handleGuestLogin, handleMigrate } from "./pluginImplementation";
+import { setRowndClient } from "./rownd-repository";
+import { resolveTenantId } from "./utils";
 
 let testPORT = 30001;
 
@@ -154,6 +158,20 @@ describe("rownd-nodejs plugin", () => {
     vi.restoreAllMocks();
   });
 
+  describe("resolveTenantId", () => {
+    it("defaults to public", () => {
+      expect(resolveTenantId({
+        getKeyValueFromQuery: () => undefined,
+      } as any)).toBe("public");
+    });
+
+    it("returns the requested tenant without pre-validating it", () => {
+      expect(resolveTenantId({
+        getKeyValueFromQuery: () => "tenant-a",
+      } as any)).toBe("tenant-a");
+    });
+  });
+
   describe("shouldLinkRowndAccounts", () => {
     it("does not enable account linking without a session", async () => {
       await expect(
@@ -242,6 +260,30 @@ describe("rownd-nodejs plugin", () => {
   });
 
   describe("mapRowndUserToSuperTokens", () => {
+    it("associates every mapped login method with the requested tenant", () => {
+      const user = mapRowndUserToSuperTokens(
+        {
+          state: "enabled",
+          auth_level: "verified",
+          data: {
+            user_id: "tenant-mapped-user",
+            email: "tenant-mapped@example.com",
+            phone_number: "+15555550100",
+          },
+          verified_data: {
+            email: true,
+            phone_number: true,
+          },
+        },
+        "tenant-a",
+      );
+
+      expect(user.loginMethods).toHaveLength(2);
+      expect(user.loginMethods.every((method) =>
+        method.tenantIds?.[0] === "tenant-a"
+      )).toBe(true);
+    });
+
     it("throws when the Rownd payload has no data object", () => {
       expect(() =>
         mapRowndUserToSuperTokens({ app_user_id: "rownd-no-data" } as any),
@@ -1339,6 +1381,75 @@ describe("rownd-nodejs plugin", () => {
 
   describe("endpoints", () => {
     describe("POST /migrate", () => {
+      it("uses the requested tenant for association and session creation", async () => {
+        const tenantId = "migration-tenant";
+        const rowndUserId = `rownd-${randomUUID()}`;
+        const recipeUserId = {
+          getAsString: () => "migration-recipe-user",
+        } as any;
+        const associateUserToTenant = vi
+          .spyOn(MultiTenancy, "associateUserToTenant")
+          .mockResolvedValue({ status: "OK", wasAlreadyAssociated: false });
+        const createNewSession = vi.spyOn(Session, "createNewSession")
+          .mockResolvedValue({} as any);
+        vi.spyOn(SuperTokens, "getUser").mockResolvedValue({
+          id: rowndUserId,
+          tenantIds: [],
+          loginMethods: [{ recipeUserId, tenantIds: [] }],
+        } as any);
+        setRowndClient(mockRowndClient);
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: rowndUserId,
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          state: "enabled",
+          auth_level: "verified",
+          data: {
+            user_id: rowndUserId,
+            email: `${rowndUserId}@example.com`,
+          },
+          verified_data: { email: true },
+        });
+        const req = {
+          getHeaderValue: (key: string) =>
+            key === "authorization" ? "Bearer some-token" : undefined,
+          getKeyValueFromQuery: (key: string) =>
+            key === "tenantId" ? tenantId : undefined,
+        } as any;
+        const res = {} as any;
+        const userContext = { requestId: "migration-request" };
+
+        const result = await handleMigrate({
+          pluginConfig: {
+            rowndAppKey: "test-key",
+            rowndAppSecret: "test-secret",
+          },
+          stConfig: {
+            supertokens: { connectionURI: "http://core.example.com" },
+          } as any,
+          telemetryClient: {
+            recordSuccess: vi.fn(),
+            recordError: vi.fn(),
+          },
+        })(req, res, undefined, userContext);
+
+        expect(result).toEqual({ status: "OK" });
+        expect(associateUserToTenant).toHaveBeenCalledWith(
+          tenantId,
+          recipeUserId,
+          userContext,
+        );
+        expect(createNewSession).toHaveBeenCalledWith(
+          req,
+          res,
+          tenantId,
+          recipeUserId,
+          {},
+          {},
+          userContext,
+        );
+      });
+
       it("migrate user successfully", async () => {
         const telemetryEvents: unknown[] = [];
         const telemetryClient: RowndTelemetryClient = {
@@ -3030,6 +3141,62 @@ describe("rownd-nodejs plugin", () => {
     });
 
     describe("POST /guest", () => {
+      it("uses the requested tenant for guest creation and session creation", async () => {
+        const tenantId = "guest-tenant";
+        const recipeUserId = { getAsString: () => "guest-recipe-user" } as any;
+        const createGuest = vi.spyOn(ThirdParty, "manuallyCreateOrUpdateUser")
+          .mockResolvedValue({
+            status: "OK",
+            createdNewRecipeUser: true,
+            recipeUserId,
+            user: { id: "guest-user" },
+          } as any);
+        const createNewSession = vi.spyOn(Session, "createNewSession")
+          .mockResolvedValue({} as any);
+        const req = {
+          getKeyValueFromQuery: (key: string) =>
+            key === "tenantId" ? tenantId : undefined,
+          getJSONBody: async () => ({}),
+        } as any;
+        const res = {} as any;
+        const userContext = { requestId: "guest-request" };
+
+        const result = await handleGuestLogin({
+          pluginConfig: {
+            rowndAppKey: "test-key",
+            rowndAppSecret: "test-secret",
+          },
+          stConfig: {} as any,
+          telemetryClient: {
+            recordSuccess: vi.fn(),
+            recordError: vi.fn(),
+          },
+        })(req, res, undefined, userContext);
+
+        expect(result).toEqual({
+          status: "OK",
+          createdNewRecipeUser: true,
+        });
+        expect(createGuest).toHaveBeenCalledWith(
+          tenantId,
+          "guest",
+          expect.stringMatching(/^guest_/),
+          expect.stringMatching(/^guest_.*@anonymous\.local$/),
+          false,
+          undefined,
+          userContext,
+        );
+        expect(createNewSession).toHaveBeenCalledWith(
+          req,
+          res,
+          tenantId,
+          recipeUserId,
+          expect.objectContaining({ auth_level: "guest" }),
+          {},
+          userContext,
+        );
+      });
+
       it("should create a guest user and a session with correct claims (default auth_level)", async () => {
         const { server: s, port } = await setup(coreConnectionURI);
         server = s;
