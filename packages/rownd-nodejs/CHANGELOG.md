@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.6.1
+
+### Patch Changes
+
+- Add the ability to disable the migration endpoint
+
 ## 0.6.0
 
 ### Minor Changes
