@@ -685,8 +685,14 @@ export type RowndSubBrandConfigInput = RowndAppConfigInput & {
 };
 
 export interface RowndPluginConfig {
-  rowndAppKey: string;
-  rowndAppSecret: string;
+  rowndAppKey?: string;
+  rowndAppSecret?: string;
+  /**
+   * Disables Rownd user and session migration. This must be enabled when
+   * rowndAppKey or rowndAppSecret is omitted.
+   * @default false
+   */
+  disableRowndUserMigration?: boolean;
   enableDebugLogs?: boolean;
   clientDomains?: RowndClientDomains;
   crossDeviceConfirmationBypass?: {
@@ -787,7 +793,8 @@ export interface MigrationResponse {
 
 export interface RowndPluginNormalisedConfig {
   rowndAppKey: string;
-  rowndAppSecret: string;
+  rowndAppSecret?: string;
+  disableRowndUserMigration: boolean;
   enableDebugLogs?: boolean;
   clientDomains?: RowndClientDomains;
   crossDeviceConfirmationBypass?: {

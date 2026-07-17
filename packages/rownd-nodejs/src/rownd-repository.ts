@@ -3,7 +3,7 @@ import type { IRowndClient, RowndUser } from "./types";
 
 let rowndClient: IRowndClient | undefined;
 
-export function setRowndClient(client: IRowndClient) {
+export function setRowndClient(client: IRowndClient | undefined) {
   rowndClient = client;
 }
 

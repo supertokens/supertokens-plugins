@@ -489,6 +489,71 @@ describe("rownd-nodejs plugin", () => {
     });
   });
 
+  describe("disabled Rownd user migration", () => {
+    it("requires credentials unless migration is explicitly disabled", () => {
+      expect(() => init({})).toThrow(
+        "Missing rowndAppKey or rowndAppSecret in plugin config",
+      );
+      expect(() =>
+        init({ disableRowndUserMigration: true }),
+      ).not.toThrow();
+      expect(() =>
+        init({ disableRowndUserMigration: "false" } as any),
+      ).toThrow("disableRowndUserMigration must be a boolean");
+    });
+
+    it("warns during plugin initialization", async () => {
+      vi.spyOn(SuperTokens, "isRecipeInitialized").mockReturnValue(true);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const plugin = init({ disableRowndUserMigration: true }) as any;
+
+      await plugin.init();
+
+      expect(warn).toHaveBeenCalledWith(
+        "RowndMigrationPlugin: Rownd user and session migration is disabled.",
+      );
+    });
+
+    it("does not register migration routes", () => {
+      const plugin = init({ disableRowndUserMigration: true }) as any;
+      const result = plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+      const paths = result.routeHandlers.map(
+        (routeHandler: { path: string }) => routeHandler.path,
+      );
+
+      expect(paths).not.toContain("/auth/plugin/rownd/migrate");
+      expect(paths).not.toContain("/auth/plugin/migrate-session");
+      expect(paths).toContain("/auth/plugin/rownd/app-config");
+    });
+
+    it("rewrites hub links with a dummy app key", async () => {
+      const plugin = init({ disableRowndUserMigration: true }) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid&linkCode=abc",
+        userContext: {},
+      });
+
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.pathname).toBe("/account/login");
+      expect(rewrittenUrl.searchParams.get("appKey")).toBe(
+        "migration-disabled",
+      );
+    });
+  });
+
   describe("recipe API overrides", () => {
     it("adds hub bootstrap params to passwordless magic links", async () => {
       const pluginConfig: RowndPluginConfig = {

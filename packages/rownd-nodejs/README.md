@@ -44,6 +44,26 @@ SuperTokens.init({
 });
 ```
 
+### Disabling Rownd User Migration
+
+After migration is complete, disable Rownd user and session migration to run
+the compatibility endpoints without Rownd credentials:
+
+```typescript
+RowndMigrationPlugin.init({
+  disableRowndUserMigration: true,
+});
+```
+
+This prevents the Rownd API client and the `/plugin/rownd/migrate` and
+`/plugin/migrate-session` routes from being initialized. Other compatibility
+endpoints remain enabled. Passwordless and email-verification links continue to
+use the Rownd Hub with an internal dummy app key when `rowndAppKey` is omitted.
+The plugin logs a warning during initialization while migration is disabled.
+
+Without `disableRowndUserMigration: true`, both `rowndAppKey` and
+`rowndAppSecret` are required.
+
 ### Session Claim Fields
 
 Schema fields can be copied into the SuperTokens access-token payload by setting `include_in_session_claims: true`. Use `session_claim_name` when the claim name should differ from the Rownd data field name.

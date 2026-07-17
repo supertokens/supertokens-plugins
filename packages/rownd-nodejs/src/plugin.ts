@@ -64,6 +64,8 @@ import {
   handleValidatePasswordlessConfirmationBypass,
 } from "./pluginImplementation";
 
+const DISABLED_MIGRATION_ROWND_APP_KEY = "migration-disabled";
+
 const verifyRowndUserSessionOptions: VerifySessionOptions = {
   sessionRequired: true,
   overrideGlobalClaimValidators: (validators) =>
@@ -80,10 +82,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
     RowndPluginNormalisedConfig
   >(
     (pluginConfig) => {
-      const rowndClient = createInstance({
-        app_key: pluginConfig.rowndAppKey,
-        app_secret: pluginConfig.rowndAppSecret,
-      });
+      const rowndClient = !pluginConfig.disableRowndUserMigration &&
+        pluginConfig.rowndAppSecret
+        ? createInstance({
+          app_key: pluginConfig.rowndAppKey,
+          app_secret: pluginConfig.rowndAppSecret,
+        })
+        : undefined;
       const telemetryClient = createClient(pluginConfig.telemetry);
       let hubBootstrapParams: Record<string, string> | undefined;
 
@@ -150,6 +155,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         id: PLUGIN_ID,
         compatibleSDKVersions: PLUGIN_SDK_VERSION,
         init: async () => {
+          if (pluginConfig.disableRowndUserMigration) {
+            console.warn(
+              "RowndMigrationPlugin: Rownd user and session migration is disabled.",
+            );
+          }
           if (!supertokens.isRecipeInitialized("session")) {
             console.warn(
               "RowndMigrationPlugin: Session recipe is not initialized. Session migration will fail.",
@@ -195,11 +205,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 method: "post" as const,
                 handler: withRequestHandler(handleGuestLogin(routeHandlerDeps)),
               },
-              {
-                path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate`,
-                method: "post" as const,
-                handler: withRequestHandler(handleMigrate(routeHandlerDeps)),
-              },
+              ...(!pluginConfig.disableRowndUserMigration
+                ? [{
+                  path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate`,
+                  method: "post" as const,
+                  handler: withRequestHandler(handleMigrate(routeHandlerDeps)),
+                }]
+                : []),
               {
                 path: `${apiBasePath}/plugin/passwordless-cross-device-confirmation/validate`,
                 method: "post" as const,
@@ -207,11 +219,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   handleValidatePasswordlessConfirmationBypass(routeHandlerDeps),
                 ),
               },
-              {
-                path: `${apiBasePath}/plugin/migrate-session`,
-                method: "post" as const,
-                handler: withRequestHandler(handleMigrate(routeHandlerDeps)),
-              },
+              ...(!pluginConfig.disableRowndUserMigration
+                ? [{
+                  path: `${apiBasePath}/plugin/migrate-session`,
+                  method: "post" as const,
+                  handler: withRequestHandler(handleMigrate(routeHandlerDeps)),
+                }]
+                : []),
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/signout`,
                 method: "post" as const,
@@ -653,9 +667,20 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
     },
     () => ({}),
     (config: RowndPluginConfig) => {
-      if (!config?.rowndAppKey || !config?.rowndAppSecret) {
+      if (
+        config?.disableRowndUserMigration !== undefined &&
+        typeof config.disableRowndUserMigration !== "boolean"
+      ) {
         throw new Error(
-          "Missing rowndAppKey or rowndAppSecret in plugin config",
+          "disableRowndUserMigration must be a boolean in plugin config",
+        );
+      }
+      if (
+        !config?.disableRowndUserMigration &&
+        (!config?.rowndAppKey || !config?.rowndAppSecret)
+      ) {
+        throw new Error(
+          "Missing rowndAppKey or rowndAppSecret in plugin config. Set disableRowndUserMigration to true to disable migration.",
         );
       }
       if (config.telemetry?.provider === "axiom") {
@@ -676,8 +701,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         validateClientDomainUrl(key, value);
       }
       return {
-        rowndAppKey: config.rowndAppKey,
+        rowndAppKey:
+          config.rowndAppKey ?? DISABLED_MIGRATION_ROWND_APP_KEY,
         rowndAppSecret: config.rowndAppSecret,
+        disableRowndUserMigration: config.disableRowndUserMigration === true,
         enableDebugLogs: config.enableDebugLogs,
         clientDomains: config.clientDomains,
         crossDeviceConfirmationBypass: config.crossDeviceConfirmationBypass,
