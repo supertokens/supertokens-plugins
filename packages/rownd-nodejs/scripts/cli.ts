@@ -4,6 +4,9 @@ import { join } from "node:path";
 const COMMANDS: Record<string, string> = {
   "init-config": "initConfig.js",
   "bulk-migrate": "bulkMigrate.js",
+  "bulk-import-monitor": "bulkImportMonitor.js",
+  "bulk-import-failures": "bulkImportFailures.js",
+  "bulk-import-validate": "bulkImportValidate.js",
   "setup-core": "setupCoreInstance.js",
   "generate-plugin-config": "generateAppConfig.js",
 };
@@ -14,6 +17,9 @@ function printHelp() {
 Commands:
   init-config              Write a bulk migration config template
   bulk-migrate             Stage Rownd users for SuperTokens bulk import
+  bulk-import-monitor      Monitor staged user import progress
+  bulk-import-failures     Export failed staged users
+  bulk-import-validate     Validate that a bulk import completed
   setup-core               Provision SuperTokens infrastructure from Rownd OIDC clients
   generate-plugin-config   Generate Rownd plugin configuration from Rownd app config
 

@@ -14,6 +14,16 @@ import {
   type RetryConfig,
   type SuperTokensTargetConfig,
 } from "./scriptUtils";
+import { countStagedUsers } from "./bulkImportApi";
+import {
+  addManifestIds,
+  assertManifestMatchesConfig,
+  createManifest,
+  defaultManifestPath,
+  loadManifest,
+  saveManifest,
+  type BulkImportManifest,
+} from "./bulkImportManifest";
 
 function printHelp() {
   console.log(`Usage: rownd-nodejs bulk-migrate --config <path>
@@ -42,6 +52,8 @@ const CheckpointSchema = z.object({
   updatedAt: z.string(),
 });
 
+const StageUsersResponseSchema = z.object({ status: z.literal("OK") });
+
 async function loadCheckpoint(checkpointFile: string) {
   try {
     const checkpoint = await fs.readFile(checkpointFile, "utf8");
@@ -57,7 +69,10 @@ async function loadCheckpoint(checkpointFile: string) {
 
 async function saveCheckpoint(checkpointFile: string, checkpoint: Checkpoint) {
   const tempFile = `${checkpointFile}.tmp`;
-  await fs.writeFile(tempFile, JSON.stringify(checkpoint, null, 2), "utf8");
+  await fs.writeFile(tempFile, JSON.stringify(checkpoint, null, 2), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
   await fs.rename(tempFile, checkpointFile);
 }
 
@@ -97,7 +112,7 @@ async function appendFailedMappings(
   await fs.writeFile(
     tempFile,
     JSON.stringify([...existingMappings, ...failedMappings], null, 2),
-    "utf8",
+    { encoding: "utf8", mode: 0o600 },
   );
   await fs.rename(tempFile, filePath);
 }
@@ -130,16 +145,21 @@ export async function stageUsersForImport(config: {
   });
 
   if (!response.ok) {
+    const responseText = await response.text();
     throw new Error(
-      `SuperTokens bulk import error: ${response.status} ${await response.text()}`,
+      `SuperTokens bulk import error: ${response.status}${responseText ? ` ${responseText}` : ""}`,
     );
   }
+
+  return StageUsersResponseSchema.parse(await response.json());
 }
 
 async function importUsersBatch(
   config: BulkMigrateConfig,
   users: Array<{ rowndUserId: string; user: SuperTokensUserImport }>,
-  totalImportedBeforeBatch: number,
+  totalStagedBeforeBatch: number,
+  manifest: BulkImportManifest,
+  manifestFile: string,
 ) {
   for (
     let index = 0;
@@ -148,19 +168,26 @@ async function importUsersBatch(
   ) {
     const batch = users.slice(index, index + config.supertokens.batchSize);
     console.log(
-      `Importing batch ${Math.floor(totalImportedBeforeBatch / config.supertokens.batchSize) + 1} (${batch.length} users)`,
+      `Staging batch ${Math.floor((totalStagedBeforeBatch + index) / config.supertokens.batchSize) + 1} (${batch.length} users)`,
     );
     await stageUsersForImport({
       users: batch.map((entry) => entry.user),
       supertokens: config.supertokens,
       retry: config.retry,
     });
+    addManifestIds(
+      manifest,
+      "stagedExternalUserIdHashes",
+      batch.map((entry) => entry.rowndUserId),
+    );
+    await saveManifest(manifestFile, manifest);
   }
 }
 
 export async function migrateRowndUsersToSuperTokens(
   config: BulkMigrateConfig,
 ) {
+  const manifestFile = defaultManifestPath(config.checkpoint.file);
   const checkpoint = config.checkpoint.resume
     ? await loadCheckpoint(config.checkpoint.file)
     : null;
@@ -172,11 +199,31 @@ export async function migrateRowndUsersToSuperTokens(
       `Checkpoint tenant ${checkpoint.tenantId ?? "public"} does not match configured tenant ${config.supertokens.tenantId}`,
     );
   }
+  let manifest: BulkImportManifest;
+  if (checkpoint) {
+    manifest = await loadManifest(manifestFile);
+    assertManifestMatchesConfig(manifest, config);
+  } else {
+    const existingStagedUsers = await countStagedUsers(config);
+    if (existingStagedUsers !== 0) {
+      throw new Error(
+        `SuperTokens has ${existingStagedUsers} staged bulk-import users. Wait for or resolve them before starting a new migration.`,
+      );
+    }
+    manifest = createManifest(config);
+    await saveManifest(manifestFile, manifest);
+  }
   const failedMappingsFile = getFailedMappingsFilePath(config.checkpoint.file);
   let cursor = checkpoint?.cursor;
-  let totalProcessed = 0;
-  let totalImported = checkpoint?.importedCount ?? 0;
-  let totalSkipped = 0;
+  let totalProcessed = manifest.sourceUsersRead;
+  let totalStaged = manifest.stagedExternalUserIdHashes.length;
+  let totalSkipped = manifest.mappingFailureExternalUserIdHashes.length;
+
+  if (manifest.completedStagingAt && totalProcessed < config.limit) {
+    delete manifest.completedStagingAt;
+    manifest.updatedAt = new Date().toISOString();
+    await saveManifest(manifestFile, manifest);
+  }
 
   if (config.checkpoint.resume) {
     console.log(
@@ -242,34 +289,54 @@ export async function migrateRowndUsersToSuperTokens(
     }
 
     await appendFailedMappings(failedMappingsFile, failedMappings);
+    addManifestIds(
+      manifest,
+      "mappingFailureExternalUserIdHashes",
+      failedMappings.map((entry) => entry.user.data.user_id),
+    );
+    await saveManifest(manifestFile, manifest);
     totalSkipped += failedMappings.length;
 
-    await importUsersBatch(config, mappedUsers, totalImported);
+    // await importUsersBatch(
+    //   config,
+    //   mappedUsers,
+    //   totalStaged,
+    //   manifest,
+    //   manifestFile,
+    // );
 
     totalProcessed += pageUsers.length;
-    totalImported += mappedUsers.length;
+    totalStaged += mappedUsers.length;
+    manifest.sourceUsersRead += pageUsers.length;
+    manifest.updatedAt = new Date().toISOString();
     cursor = pageUsers[pageUsers.length - 1]?.rowndUserId;
+    await saveManifest(manifestFile, manifest);
 
     await saveCheckpoint(config.checkpoint.file, {
       cursor,
-      importedCount: totalImported,
+      importedCount: totalStaged,
       tenantId: config.supertokens.tenantId,
       updatedAt: new Date().toISOString(),
     });
 
     console.log(`Processed ${totalProcessed} users so far`);
-    console.log(`Imported ${totalImported} users so far`);
+    console.log(`Staged ${totalStaged} users so far`);
 
     if (pageUsers.length < requestedPageSize) {
       break;
     }
   }
 
+  manifest.completedStagingAt = new Date().toISOString();
+  manifest.updatedAt = manifest.completedStagingAt;
+  await saveManifest(manifestFile, manifest);
+
   return {
     totalProcessed,
-    totalImported,
+    totalStaged,
     totalSkipped,
     cursor,
+    manifestFile,
   };
 }
 
@@ -282,11 +349,13 @@ export async function runCli() {
 
   const config = await loadConfig(parseRequiredConfigArg(args));
   const result = await migrateRowndUsersToSuperTokens(config);
-  console.log(`Migrated ${result.totalImported} users`);
+  console.log(`Staged ${result.totalStaged} users for import`);
+  console.log(`Wrote migration manifest to ${result.manifestFile}`);
   if (result.totalSkipped > 0) {
     console.warn(
       `Skipped ${result.totalSkipped} users. Details saved to ${getFailedMappingsFilePath(config.checkpoint.file)}`,
     );
+    process.exitCode = 2;
   }
 }
 

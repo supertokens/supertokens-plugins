@@ -1,8 +1,8 @@
 import * as fs from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-const BULK_MIGRATE_CONFIG_TEMPLATE = `# Maximum number of users to process. Remove this field to process everything.
-limit: 100
+const BULK_MIGRATE_CONFIG_TEMPLATE = `# Optional maximum number of users to process. Leave unset to process everything.
+# limit: 100
 
 checkpoint:
   # File used to persist migration progress so a later run can resume.
@@ -125,13 +125,16 @@ async function run() {
 
   const outputPath = resolve(options.output);
   if (!options.force && (await fileExists(outputPath))) {
-    throw new Error(`${outputPath} already exists. Use --force to overwrite it.`);
+    throw new Error(
+      `${outputPath} already exists. Use --force to overwrite it.`,
+    );
   }
 
   await fs.mkdir(dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, BULK_MIGRATE_CONFIG_TEMPLATE, {
     encoding: "utf8",
     flag: options.force ? "w" : "wx",
+    mode: 0o600,
   });
 
   console.log(`Wrote bulk migration config template to ${outputPath}`);

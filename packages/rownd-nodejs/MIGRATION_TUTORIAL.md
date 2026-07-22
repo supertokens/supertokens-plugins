@@ -257,6 +257,47 @@ Before moving to bulk migration, validate these flows in staging and then produc
 After lazy migration is live, we'll run the bulk migration for the existing Rownd user base. This imports all the existing users from Rownd.
 The operation will be done from the SuperTokens side by connecting your Rownd account to SuperTokens Core.
 
+Generate the config, add the Rownd and Core credentials, and leave `limit`
+unset so the production migration processes every Rownd user:
+
+```bash
+npx rownd-nodejs init-config --output ./rownd-bulk-migrate.yaml
+```
+
+Start only when `GET /bulk-import/users/count` reports zero. The migration CLI
+enforces this for a fresh run, stages the mapped users, and writes a manifest
+beside its checkpoint. Do not run another Core bulk import until this migration
+has been validated because the status APIs return Core-wide counts.
+
+```bash
+npx rownd-nodejs bulk-migrate --config ./rownd-bulk-migrate.yaml
+npx rownd-nodejs bulk-import-monitor \
+  --config ./rownd-bulk-migrate.yaml \
+  --wait \
+  --output ./migration-progress.ndjson
+```
+
+Core imports staged users asynchronously. The monitor polls the total and the
+`NEW`, `PROCESSING`, and `FAILED` counts. If failed users remain, export them:
+
+```bash
+npx rownd-nodejs bulk-import-failures \
+  --config ./rownd-bulk-migrate.yaml \
+  --output ./migration-failures.ndjson
+```
+
+Before cutover, validate that Core has processed every staged record:
+
+```bash
+npx rownd-nodejs bulk-import-validate \
+  --config ./rownd-bulk-migrate.yaml \
+  --output ./migration-validation.json
+```
+
+Proceed only when validation returns exit code `0` and reports `COMPLETE`.
+This confirms the documented bulk-import lifecycle completed; it is not a
+field-by-field readback of imported user data.
+
 ## Step 3: Cutover to SuperTokens-backed Rownd SDKs
 
 After lazy migration validation and bulk migration are complete, switch client authentication traffic from Rownd to SuperTokens by replacing the Rownd SDKs with the SuperTokens Rownd packages.
