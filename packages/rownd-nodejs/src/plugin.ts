@@ -1,4 +1,4 @@
-import { SuperTokensPlugin } from "supertokens-node/types";
+import { SuperTokensPlugin, type UserContext } from "supertokens-node/types";
 import {
   EmailVerificationClaim,
   type APIInterface as EmailVerificationAPIInterface,
@@ -25,7 +25,11 @@ import {
 import { RowndPluginConfig, RowndPluginNormalisedConfig } from "./types";
 import { enableDebugLogs, logDebugMessage } from "./logger";
 import { createClient } from "./telemetry/createTelemetryClient";
-import { assertRowndAppVariantIsConfigured, setPluginConfig, setSuperTokensConfig } from "./config";
+import {
+  assertRowndAppVariantIsConfigured,
+  setPluginConfig,
+  setSuperTokensConfig,
+} from "./config";
 import {
   applyRowndOAuthResourceParams,
   buildRowndOAuthPayload,
@@ -66,11 +70,41 @@ import {
 
 const DISABLED_MIGRATION_ROWND_APP_KEY = "migration-disabled";
 
+function applyRowndPasswordlessRequestContext(
+  req: Parameters<typeof getRequestedDisplayContextFromRequest>[0],
+  userContext: UserContext,
+) {
+  const displayContext = getRequestedDisplayContextFromRequest(req);
+  if (displayContext) {
+    userContext.rowndDisplayContext = displayContext;
+  }
+  const redirectToPath = getRequestedRedirectToPathFromRequest(req);
+  if (redirectToPath) {
+    userContext.rowndRedirectToPath = redirectToPath;
+  }
+  const clientDomain = getRequestedClientDomainFromRequest(req);
+  if (clientDomain) {
+    userContext.rowndClientDomain = clientDomain;
+  }
+  const appVariantId = getRequestedAppVariantIdFromRequest(req);
+  if (appVariantId) {
+    userContext.rowndAppVariantId = appVariantId;
+  }
+  const oauthLoginChallenge = getRequestedOAuthLoginChallengeFromRequest(req);
+  if (oauthLoginChallenge) {
+    userContext.rowndOAuthLoginChallenge = oauthLoginChallenge;
+  }
+  assertRowndAppVariantIsConfigured(appVariantId);
+}
+
 const verifyRowndUserSessionOptions: VerifySessionOptions = {
   sessionRequired: true,
   overrideGlobalClaimValidators: (validators) =>
     validators.filter((validator) => {
-      return !("claim" in validator) || validator.claim.key !== EmailVerificationClaim.key;
+      return (
+        !("claim" in validator) ||
+        validator.claim.key !== EmailVerificationClaim.key
+      );
     }),
 };
 
@@ -82,13 +116,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
     RowndPluginNormalisedConfig
   >(
     (pluginConfig) => {
-      const rowndClient = !pluginConfig.disableRowndUserMigration &&
-        pluginConfig.rowndAppSecret
-        ? createInstance({
-          app_key: pluginConfig.rowndAppKey,
-          app_secret: pluginConfig.rowndAppSecret,
-        })
-        : undefined;
+      const rowndClient =
+        !pluginConfig.disableRowndUserMigration && pluginConfig.rowndAppSecret
+          ? createInstance({
+              app_key: pluginConfig.rowndAppKey,
+              app_secret: pluginConfig.rowndAppSecret,
+            })
+          : undefined;
       const telemetryClient = createClient(pluginConfig.telemetry);
       let hubBootstrapParams: Record<string, string> | undefined;
 
@@ -112,11 +146,15 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         const oauthLoginChallenge = input?.userContext
           ?.rowndOAuthLoginChallenge as string | undefined;
         const clientDomainKey =
-          clientDomain ?? (displayContext === "mobile_app" ? "mobile" : "browser");
+          clientDomain ??
+          (displayContext === "mobile_app" ? "mobile" : "browser");
         const clientBaseUrl = pluginConfig.clientDomains?.[clientDomainKey];
         const bootstrapParams = {
           appKey: pluginConfig.rowndAppKey,
           ...(hubBootstrapParams ?? {}),
+          ...(input.userInputCode
+            ? { passwordlessFlowType: "USER_INPUT_CODE_AND_MAGIC_LINK" }
+            : {}),
           ...(typeof appVariantId === "string" ? { appVariantId } : {}),
           ...(typeof displayContext === "string" ? { displayContext } : {}),
           ...(typeof redirectToPath === "string" ? { redirectToPath } : {}),
@@ -125,16 +163,18 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
             : {}),
         };
 
-        const rewrittenLink = input[linkKey]
-          ? clientBaseUrl
-            ? rewriteLinkToBaseUrl(
+        if (!input[linkKey]) {
+          return input;
+        }
+
+        const rewrittenLink = clientBaseUrl
+          ? rewriteLinkToBaseUrl(
               input[linkKey],
               targetPath,
               clientBaseUrl,
               bootstrapParams,
             )
-            : rewriteLinkPath(input[linkKey], targetPath, bootstrapParams)
-          : input[linkKey];
+          : rewriteLinkPath(input[linkKey], targetPath, bootstrapParams);
 
         return {
           ...input,
@@ -206,25 +246,35 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 handler: withRequestHandler(handleGuestLogin(routeHandlerDeps)),
               },
               ...(!pluginConfig.disableRowndUserMigration
-                ? [{
-                  path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate`,
-                  method: "post" as const,
-                  handler: withRequestHandler(handleMigrate(routeHandlerDeps)),
-                }]
+                ? [
+                    {
+                      path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate`,
+                      method: "post" as const,
+                      handler: withRequestHandler(
+                        handleMigrate(routeHandlerDeps),
+                      ),
+                    },
+                  ]
                 : []),
               {
                 path: `${apiBasePath}/plugin/passwordless-cross-device-confirmation/validate`,
                 method: "post" as const,
                 handler: withRequestHandler(
-                  handleValidatePasswordlessConfirmationBypass(routeHandlerDeps),
+                  handleValidatePasswordlessConfirmationBypass(
+                    routeHandlerDeps,
+                  ),
                 ),
               },
               ...(!pluginConfig.disableRowndUserMigration
-                ? [{
-                  path: `${apiBasePath}/plugin/migrate-session`,
-                  method: "post" as const,
-                  handler: withRequestHandler(handleMigrate(routeHandlerDeps)),
-                }]
+                ? [
+                    {
+                      path: `${apiBasePath}/plugin/migrate-session`,
+                      method: "post" as const,
+                      handler: withRequestHandler(
+                        handleMigrate(routeHandlerDeps),
+                      ),
+                    },
+                  ]
                 : []),
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/signout`,
@@ -288,15 +338,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
             ) => ({
               ...originalImplementation,
               getRequestedScopes: async (input) => {
-                const scopes = await originalImplementation.getRequestedScopes(
-                  input,
-                );
+                const scopes =
+                  await originalImplementation.getRequestedScopes(input);
                 return normalizeRowndOAuthScopes(scopes);
               },
               buildAccessTokenPayload: async (input) => {
-                const payload = await originalImplementation.buildAccessTokenPayload(
-                  input,
-                );
+                const payload =
+                  await originalImplementation.buildAccessTokenPayload(input);
                 return buildRowndOAuthPayload({
                   user: input.user,
                   client: input.client,
@@ -306,9 +354,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 });
               },
               buildIdTokenPayload: async (input) => {
-                const payload = await originalImplementation.buildIdTokenPayload(
-                  input,
-                );
+                const payload =
+                  await originalImplementation.buildIdTokenPayload(input);
                 return buildRowndOAuthPayload({
                   user: input.user,
                   client: input.client,
@@ -318,7 +365,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 });
               },
               buildUserInfo: async (input) => {
-                const payload = await originalImplementation.buildUserInfo(input);
+                const payload =
+                  await originalImplementation.buildUserInfo(input);
                 return buildRowndOAuthUserInfo({
                   user: input.user,
                   accessTokenPayload: input.accessTokenPayload,
@@ -368,9 +416,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                        originalImplementation,
-                        builder,
-                      )
+                          originalImplementation,
+                          builder,
+                        )
                       : originalImplementation;
 
                     return {
@@ -392,9 +440,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalSmsDeliveryOverride
                       ? originalSmsDeliveryOverride(
-                        originalImplementation,
-                        builder,
-                      )
+                          originalImplementation,
+                          builder,
+                        )
                       : originalImplementation;
 
                     return {
@@ -424,39 +472,28 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   throw new Error("Passwordless createCodePOST is unavailable");
                 }
 
-                const displayContext = getRequestedDisplayContextFromRequest(
+                applyRowndPasswordlessRequestContext(
                   input.options.req,
+                  input.userContext,
                 );
-                if (displayContext) {
-                  input.userContext.rowndDisplayContext = displayContext;
-                }
-                const redirectToPath = getRequestedRedirectToPathFromRequest(
-                  input.options.req,
-                );
-                if (redirectToPath) {
-                  input.userContext.rowndRedirectToPath = redirectToPath;
-                }
-                const clientDomain = getRequestedClientDomainFromRequest(
-                  input.options.req,
-                );
-                if (clientDomain) {
-                  input.userContext.rowndClientDomain = clientDomain;
-                }
-                const appVariantId = getRequestedAppVariantIdFromRequest(
-                  input.options.req,
-                );
-                if (appVariantId) {
-                  input.userContext.rowndAppVariantId = appVariantId;
-                }
-                const oauthLoginChallenge = getRequestedOAuthLoginChallengeFromRequest(
-                  input.options.req,
-                );
-                if (oauthLoginChallenge) {
-                  input.userContext.rowndOAuthLoginChallenge = oauthLoginChallenge;
-                }
-                assertRowndAppVariantIsConfigured(appVariantId);
 
                 return originalImplementation.createCodePOST(input);
+              },
+              resendCodePOST: async (
+                input: Parameters<
+                  NonNullable<PasswordlessAPIInterface["resendCodePOST"]>
+                >[0],
+              ) => {
+                if (originalImplementation.resendCodePOST === undefined) {
+                  throw new Error("Passwordless resendCodePOST is unavailable");
+                }
+
+                applyRowndPasswordlessRequestContext(
+                  input.options.req,
+                  input.userContext,
+                );
+
+                return originalImplementation.resendCodePOST(input);
               },
               consumeCodePOST: async (
                 input: Parameters<
@@ -592,9 +629,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                        originalImplementation,
-                        builder,
-                      )
+                          originalImplementation,
+                          builder,
+                        )
                       : originalImplementation;
 
                     return {
@@ -629,19 +666,23 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const response =
                   await originalImplementation.verifyEmailPOST(input);
                 if (response.status === "OK") {
-                  const verificationResult = await completePendingEmailVerification({
-                    recipeUserId: response.user.recipeUserId,
-                    email: response.user.email,
-                    tenantId: input.tenantId,
-                    userContext: input.userContext,
-                  });
+                  const verificationResult =
+                    await completePendingEmailVerification({
+                      recipeUserId: response.user.recipeUserId,
+                      email: response.user.email,
+                      tenantId: input.tenantId,
+                      userContext: input.userContext,
+                    });
 
                   const session = input.session;
                   const shouldReplaceSession =
                     session &&
                     verificationResult &&
-                    (session.getUserId(input.userContext) !== verificationResult.userId ||
-                      session.getRecipeUserId(input.userContext).getAsString() !==
+                    (session.getUserId(input.userContext) !==
+                      verificationResult.userId ||
+                      session
+                        .getRecipeUserId(input.userContext)
+                        .getAsString() !==
                         verificationResult.recipeUserId.getAsString());
 
                   if (shouldReplaceSession) {
@@ -701,8 +742,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         validateClientDomainUrl(key, value);
       }
       return {
-        rowndAppKey:
-          config.rowndAppKey ?? DISABLED_MIGRATION_ROWND_APP_KEY,
+        rowndAppKey: config.rowndAppKey ?? DISABLED_MIGRATION_ROWND_APP_KEY,
         rowndAppSecret: config.rowndAppSecret,
         disableRowndUserMigration: config.disableRowndUserMigration === true,
         enableDebugLogs: config.enableDebugLogs,
@@ -718,7 +758,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
 
 function validateClientDomainUrl(key: string, value: string) {
   try {
-    if (typeof value !== "string" || !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)) {
+    if (
+      typeof value !== "string" ||
+      !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)
+    ) {
       throw new Error();
     }
     new URL(value);

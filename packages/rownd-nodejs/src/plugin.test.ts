@@ -160,15 +160,19 @@ describe("rownd-nodejs plugin", () => {
 
   describe("resolveTenantId", () => {
     it("defaults to public", () => {
-      expect(resolveTenantId({
-        getKeyValueFromQuery: () => undefined,
-      } as any)).toBe("public");
+      expect(
+        resolveTenantId({
+          getKeyValueFromQuery: () => undefined,
+        } as any),
+      ).toBe("public");
     });
 
     it("returns the requested tenant without pre-validating it", () => {
-      expect(resolveTenantId({
-        getKeyValueFromQuery: () => "tenant-a",
-      } as any)).toBe("tenant-a");
+      expect(
+        resolveTenantId({
+          getKeyValueFromQuery: () => "tenant-a",
+        } as any),
+      ).toBe("tenant-a");
     });
   });
 
@@ -279,9 +283,11 @@ describe("rownd-nodejs plugin", () => {
       );
 
       expect(user.loginMethods).toHaveLength(2);
-      expect(user.loginMethods.every((method) =>
-        method.tenantIds?.[0] === "tenant-a"
-      )).toBe(true);
+      expect(
+        user.loginMethods.every(
+          (method) => method.tenantIds?.[0] === "tenant-a",
+        ),
+      ).toBe(true);
     });
 
     it("throws when the Rownd payload has no data object", () => {
@@ -494,12 +500,10 @@ describe("rownd-nodejs plugin", () => {
       expect(() => init({})).toThrow(
         "Missing rowndAppKey or rowndAppSecret in plugin config",
       );
-      expect(() =>
-        init({ disableRowndUserMigration: true }),
-      ).not.toThrow();
-      expect(() =>
-        init({ disableRowndUserMigration: "false" } as any),
-      ).toThrow("disableRowndUserMigration must be a boolean");
+      expect(() => init({ disableRowndUserMigration: true })).not.toThrow();
+      expect(() => init({ disableRowndUserMigration: "false" } as any)).toThrow(
+        "disableRowndUserMigration must be a boolean",
+      );
     });
 
     it("warns during plugin initialization", async () => {
@@ -598,6 +602,54 @@ describe("rownd-nodejs plugin", () => {
       expect(rewrittenUrl.searchParams.get("redirectToPath")).toBe(
         "/profile.html",
       );
+    });
+
+    it("preserves passwordless user input codes while rewriting combined delivery links", async () => {
+      const plugin = init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+      }) as any;
+      plugin.routeHandlers(
+        makePublicConfig("https://api.example.com", "/auth"),
+      );
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+
+      await emailDelivery.sendEmail({
+        urlWithLinkCode:
+          "https://hub.example.com/auth/verify?preAuthSessionId=pid&linkCode=abc",
+        userInputCode: "123456",
+        userContext: {},
+      });
+
+      expect(sendEmail.mock.calls[0][0].userInputCode).toBe("123456");
+      const rewrittenUrl = new URL(sendEmail.mock.calls[0][0].urlWithLinkCode);
+      expect(rewrittenUrl.pathname).toBe("/account/login");
+      expect(rewrittenUrl.searchParams.get("linkCode")).toBe("abc");
+      expect(rewrittenUrl.searchParams.get("passwordlessFlowType")).toBe(
+        "USER_INPUT_CODE_AND_MAGIC_LINK",
+      );
+    });
+
+    it("passes passwordless OTP-only delivery through without a link", async () => {
+      const plugin = init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+      }) as any;
+      const sendEmail = vi.fn();
+      const passwordlessConfig = plugin.overrideMap.passwordless.config({});
+      const emailDelivery = passwordlessConfig.emailDelivery.override({
+        sendEmail,
+      });
+      const input = { userInputCode: "123456", userContext: {} };
+
+      await emailDelivery.sendEmail(input);
+
+      expect(sendEmail).toHaveBeenCalledWith(input);
+      expect(sendEmail.mock.calls[0][0]).not.toHaveProperty("urlWithLinkCode");
     });
 
     it("adds OAuth login challenge bootstrap param to passwordless magic links", async () => {
@@ -806,7 +858,9 @@ describe("rownd-nodejs plugin", () => {
       expect(url.origin).toBe("http://localhost:3000");
       expect(url.pathname).toBe("/account/login");
       expect(url.searchParams.get("bypassDeviceConfirmation")).toBe("true");
-      expect(url.searchParams.get("redirectToPath")).toBe("/profile?tab=security");
+      expect(url.searchParams.get("redirectToPath")).toBe(
+        "/profile?tab=security",
+      );
       expect(url.searchParams.get("clientDomain")).toBe("browser_local");
     });
 
@@ -824,7 +878,9 @@ describe("rownd-nodejs plugin", () => {
           email: "bypass@example.com",
           redirectToPath: "/profile",
         }),
-      ).rejects.toThrow("crossDeviceConfirmationBypass.allowedRedirectPaths must be configured");
+      ).rejects.toThrow(
+        "crossDeviceConfirmationBypass.allowedRedirectPaths must be configured",
+      );
     });
 
     it("rejects confirmation-bypass magic links for non-allowlisted redirect paths", async () => {
@@ -1232,6 +1288,81 @@ describe("rownd-nodejs plugin", () => {
       );
     });
 
+    it("adds Rownd request context before resending a passwordless code", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        subBrands: {
+          variant_123: {
+            id: "app_xyz",
+            name: "Variant App",
+            variant: { id: "variant_123", name: "Variant App" },
+          },
+        },
+      };
+      const originalResendCodePOST = vi
+        .fn()
+        .mockResolvedValue({ status: "OK" });
+      const passwordlessApis = (
+        init(pluginConfig) as any
+      ).overrideMap.passwordless.apis({
+        resendCodePOST: originalResendCodePOST,
+      });
+
+      await passwordlessApis.resendCodePOST({
+        options: {
+          req: makeRequest({
+            rownd_display_context: "mobile_app",
+            rownd_redirect_to_path: "/profile",
+            rownd_client_domain: "mobile",
+            app_variant_id: "variant_123",
+            rownd_oauth_login_challenge: "login_challenge_123",
+          }),
+        },
+        userContext: {},
+      });
+
+      expect(originalResendCodePOST).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userContext: {
+            rowndDisplayContext: "mobile_app",
+            rowndRedirectToPath: "/profile",
+            rowndClientDomain: "mobile",
+            rowndAppVariantId: "variant_123",
+            rowndOAuthLoginChallenge: "login_challenge_123",
+          },
+        }),
+      );
+    });
+
+    it("rejects passwordless code resend for unknown app variants", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        subBrands: {
+          variant_123: {
+            id: "app_xyz",
+            name: "Variant App",
+            variant: { id: "variant_123", name: "Variant App" },
+          },
+        },
+      };
+      const originalResendCodePOST = vi.fn();
+      const passwordlessApis = (
+        init(pluginConfig) as any
+      ).overrideMap.passwordless.apis({
+        resendCodePOST: originalResendCodePOST,
+      });
+
+      await expect(
+        passwordlessApis.resendCodePOST({
+          options: { req: makeVariantRequest("missing_variant") },
+          userContext: {},
+        }),
+      ).rejects.toThrow("Unknown Rownd app variant: missing_variant");
+      expect(originalResendCodePOST).not.toHaveBeenCalled();
+    });
+
     it("falls back when requested client domain is not configured", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
@@ -1383,10 +1514,12 @@ describe("rownd-nodejs plugin", () => {
     });
 
     it("passes Rownd OAuth scopes through unchanged and de-duplicated", async () => {
-      const oauthFunctions = (init({
-        rowndAppKey: "test-key",
-        rowndAppSecret: "test-secret",
-      }) as any).overrideMap.oauth2provider.functions({
+      const oauthFunctions = (
+        init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+        }) as any
+      ).overrideMap.oauth2provider.functions({
         getRequestedScopes: vi
           .fn()
           .mockResolvedValue(["openid", "profile", "email", "phone", "phone"]),
@@ -1399,10 +1532,12 @@ describe("rownd-nodejs plugin", () => {
 
     it("translates Rownd OAuth resource params into audience params", async () => {
       const originalAuthGET = vi.fn().mockResolvedValue({ redirectTo: "ok" });
-      const oauthApis = (init({
-        rowndAppKey: "test-key",
-        rowndAppSecret: "test-secret",
-      }) as any).overrideMap.oauth2provider.apis({
+      const oauthApis = (
+        init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+        }) as any
+      ).overrideMap.oauth2provider.apis({
         authGET: originalAuthGET,
       });
       const input = {
@@ -1421,11 +1556,15 @@ describe("rownd-nodejs plugin", () => {
     });
 
     it("translates Rownd OAuth token resource params into audience params", async () => {
-      const originalTokenPOST = vi.fn().mockResolvedValue({ access_token: "token" });
-      const oauthApis = (init({
-        rowndAppKey: "test-key",
-        rowndAppSecret: "test-secret",
-      }) as any).overrideMap.oauth2provider.apis({
+      const originalTokenPOST = vi
+        .fn()
+        .mockResolvedValue({ access_token: "token" });
+      const oauthApis = (
+        init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+        }) as any
+      ).overrideMap.oauth2provider.apis({
         tokenPOST: originalTokenPOST,
       });
       const input = {
@@ -1455,7 +1594,8 @@ describe("rownd-nodejs plugin", () => {
         const associateUserToTenant = vi
           .spyOn(MultiTenancy, "associateUserToTenant")
           .mockResolvedValue({ status: "OK", wasAlreadyAssociated: false });
-        const createNewSession = vi.spyOn(Session, "createNewSession")
+        const createNewSession = vi
+          .spyOn(Session, "createNewSession")
           .mockResolvedValue({} as any);
         vi.spyOn(SuperTokens, "getUser").mockResolvedValue({
           id: rowndUserId,
@@ -3209,14 +3349,16 @@ describe("rownd-nodejs plugin", () => {
       it("uses the requested tenant for guest creation and session creation", async () => {
         const tenantId = "guest-tenant";
         const recipeUserId = { getAsString: () => "guest-recipe-user" } as any;
-        const createGuest = vi.spyOn(ThirdParty, "manuallyCreateOrUpdateUser")
+        const createGuest = vi
+          .spyOn(ThirdParty, "manuallyCreateOrUpdateUser")
           .mockResolvedValue({
             status: "OK",
             createdNewRecipeUser: true,
             recipeUserId,
             user: { id: "guest-user" },
           } as any);
-        const createNewSession = vi.spyOn(Session, "createNewSession")
+        const createNewSession = vi
+          .spyOn(Session, "createNewSession")
           .mockResolvedValue({} as any);
         const req = {
           getKeyValueFromQuery: (key: string) =>
@@ -3362,8 +3504,7 @@ describe("rownd-nodejs plugin", () => {
 
         const stUser = await SuperTokens.getUser(session!.getUserId());
         const instantLogin = stUser?.loginMethods.find(
-          (m) =>
-            m.recipeId === "thirdparty" && m.thirdParty?.id === "instant",
+          (m) => m.recipeId === "thirdparty" && m.thirdParty?.id === "instant",
         );
         expect(instantLogin).toBeDefined();
         expect(instantLogin?.thirdParty?.userId).toMatch(/^anon_/);
@@ -4241,7 +4382,9 @@ describe("rownd-nodejs plugin", () => {
           ]),
         );
 
-        const claims = await buildRowndSessionClaims(passwordlessResult.user.id);
+        const claims = await buildRowndSessionClaims(
+          passwordlessResult.user.id,
+        );
         expect(claims).toMatchObject({
           app_user_id: passwordlessResult.user.id,
           auth_level: "verified",
@@ -4658,7 +4801,9 @@ describe("rownd-nodejs plugin", () => {
         );
         expect(linkResult.status).toBe("OK");
 
-        const claims = await buildRowndSessionClaims(passwordlessResult.user.id);
+        const claims = await buildRowndSessionClaims(
+          passwordlessResult.user.id,
+        );
         expect(claims).toMatchObject({
           app_user_id: passwordlessResult.user.id,
           auth_level: "verified",
@@ -5528,7 +5673,11 @@ function makeRequest(query: Record<string, string>) {
   };
 }
 
-function makePublicConfig(apiDomain: string, apiBasePath: string, websiteDomain = "https://hub.example.com") {
+function makePublicConfig(
+  apiDomain: string,
+  apiBasePath: string,
+  websiteDomain = "https://hub.example.com",
+) {
   return {
     appInfo: {
       apiDomain: {
