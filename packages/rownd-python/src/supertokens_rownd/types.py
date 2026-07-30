@@ -35,8 +35,9 @@ class RowndTelemetryConfig:
 
 
 class RowndPluginKwargs(TypedDict, total=False):
-    rownd_app_key: str
-    rownd_app_secret: str
+    rownd_app_key: Optional[str]
+    rownd_app_secret: Optional[str]
+    disable_rownd_user_migration: bool
     api_base_path: str
     api_domain: str
     website_domain: str
@@ -58,8 +59,9 @@ class RowndCrossDeviceConfirmationBypassConfig(TypedDict):
 
 @dataclass
 class RowndPluginConfig:
-    rownd_app_key: str
-    rownd_app_secret: str
+    rownd_app_key: Optional[str] = None
+    rownd_app_secret: Optional[str] = None
+    disable_rownd_user_migration: bool = False
     # Must match InputAppInfo.api_base_path. The Python plugin API does not expose app_info.
     api_base_path: str = "/auth"
     # Should match InputAppInfo.api_domain so rewritten Rownd hub links can call the right API host.

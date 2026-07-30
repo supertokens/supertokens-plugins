@@ -4,6 +4,7 @@ import time
 import uuid
 import re
 from hashlib import sha256
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple, cast
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 
@@ -13,9 +14,13 @@ from supertokens_python.asyncio import delete_user, get_user
 from supertokens_python.framework.request import BaseRequest
 from supertokens_python.framework.response import BaseResponse
 from supertokens_python.recipe.accountlinking import asyncio as accountlinking_asyncio
-from supertokens_python.recipe.accountlinking.interfaces import CreatePrimaryUserOkResult, LinkAccountsOkResult
+from supertokens_python.recipe.accountlinking.interfaces import (
+    CreatePrimaryUserOkResult,
+    LinkAccountsOkResult,
+)
 from supertokens_python.recipe.accountlinking.types import AccountInfoWithRecipeId
 from supertokens_python.recipe.emailverification import asyncio as emailverification_asyncio
+from supertokens_python.recipe.multitenancy import asyncio as multitenancy_asyncio
 from supertokens_python.recipe.passwordless import asyncio as passwordless_asyncio
 from supertokens_python.recipe.session import SessionContainer
 from supertokens_python.recipe.session import asyncio as session_asyncio
@@ -38,7 +43,13 @@ from .constants import (
     ROWND_JWT_CLAIMS,
 )
 from .telemetry import record_error, record_success
-from .types import JsonDict, RowndClientProtocol, RowndPluginConfig, RowndPluginError, RowndTelemetryClient
+from .types import (
+    JsonDict,
+    RowndClientProtocol,
+    RowndPluginConfig,
+    RowndPluginError,
+    RowndTelemetryClient,
+)
 
 
 _active_config: Optional[RowndPluginConfig] = None
@@ -82,6 +93,10 @@ def get_requested_app_variant_id_from_request(request: BaseRequest) -> Optional[
     return request.get_query_param("app_variant_id") or None
 
 
+def resolve_tenant_id(request: BaseRequest) -> str:
+    return request.get_query_param("tenantId") or PUBLIC_TENANT_ID
+
+
 def get_requested_display_context_from_request(request: BaseRequest) -> Optional[str]:
     value = request.get_query_param("rownd_display_context")
     return value if value in {"browser", "mobile_app", "customer_web_view"} else None
@@ -101,7 +116,9 @@ def get_requested_oauth_login_challenge_from_request(request: BaseRequest) -> Op
     return value if isinstance(value, str) and value else None
 
 
-def assert_app_variant_is_configured(config: RowndPluginConfig, app_variant_id: Optional[str]) -> None:
+def assert_app_variant_is_configured(
+    config: RowndPluginConfig, app_variant_id: Optional[str]
+) -> None:
     if app_variant_id and config.sub_brands and app_variant_id not in config.sub_brands:
         raise RowndPluginError("Unknown Rownd app variant: %s" % app_variant_id)
 
@@ -115,7 +132,9 @@ def rewrite_link_path(
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
     query.update(search_params)
     if parsed.scheme and parsed.netloc:
-        return urlunparse(parsed._replace(path="/" + target_path.lstrip("/"), query=urlencode(query)))
+        return urlunparse(
+            parsed._replace(path="/" + target_path.lstrip("/"), query=urlencode(query))
+        )
     path = parsed.path.replace("auth/verify", target_path)
     return urlunparse(parsed._replace(path=path, query=urlencode(query)))
 
@@ -196,7 +215,9 @@ def normalize_redirect_to_path_for_client_domain(
         raise RowndPluginError("redirectToPath cannot be schemaless")
 
     normalized_client_domain = normalize_client_domain(client_domain)
-    base_url = "http://localhost" if normalized_client_domain.endswith("://") else normalized_client_domain
+    base_url = (
+        "http://localhost" if normalized_client_domain.endswith("://") else normalized_client_domain
+    )
     redirect_url = urlparse(urljoin(base_url.rstrip("/") + "/", redirect_to_path))
     has_explicit_scheme = re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", redirect_to_path) is not None
 
@@ -219,9 +240,13 @@ def assert_allowed_bypass_redirect_path(
     bypass_config = config.cross_device_confirmation_bypass or {}
     allowed_redirect_paths = bypass_config.get("allowed_redirect_paths", [])
     if not allowed_redirect_paths:
-        raise RowndPluginError("cross_device_confirmation_bypass.allowed_redirect_paths must be configured")
+        raise RowndPluginError(
+            "cross_device_confirmation_bypass.allowed_redirect_paths must be configured"
+        )
     if redirect_to_path not in allowed_redirect_paths:
-        raise RowndPluginError("redirectToPath is not allowed for confirmation bypass: %s" % redirect_to_path)
+        raise RowndPluginError(
+            "redirectToPath is not allowed for confirmation bypass: %s" % redirect_to_path
+        )
 
 
 def get_magic_link_bootstrap_params(
@@ -233,7 +258,7 @@ def get_magic_link_bootstrap_params(
     oauth_login_challenge: Optional[str] = None,
 ) -> Dict[str, str]:
     params = {
-        "appKey": config.rownd_app_key,
+        "appKey": config.rownd_app_key or "migration-disabled",
         "apiBasePath": config.api_base_path,
     }
     if config.api_domain:
@@ -379,9 +404,12 @@ def add_hub_bootstrap_params(
     target_path: str,
     config: RowndPluginConfig,
     user_context: Optional[UserContext],
+    user_input_code: Optional[str] = None,
 ) -> Optional[str]:
+    if not link:
+        return link
     params = {
-        "appKey": config.rownd_app_key,
+        "appKey": config.rownd_app_key or "migration-disabled",
         "apiBasePath": config.api_base_path,
     }
     if config.api_domain:
@@ -396,6 +424,8 @@ def add_hub_bootstrap_params(
         params["redirectToPath"] = user_context["rowndRedirectToPath"]
     if isinstance(user_context.get("rowndOAuthLoginChallenge"), str):
         params["oauthLoginChallenge"] = user_context["rowndOAuthLoginChallenge"]
+    if user_input_code:
+        params["passwordlessFlowType"] = "USER_INPUT_CODE_AND_MAGIC_LINK"
     client_domain = user_context.get("rowndClientDomain")
     client_domain_key = (
         client_domain
@@ -433,6 +463,7 @@ async def handle_guest_login(
     user_context: UserContext,
 ) -> BaseResponse:
     started_at = time.time()
+    tenant_id = resolve_tenant_id(request)
     try:
         body = await _json_body(request)
         app_variant_id = get_requested_app_variant_id_from_request(request)
@@ -446,10 +477,14 @@ async def handle_guest_login(
             if third_party_id == INSTANT_AUTH_METHOD_ID
             else "guest_%s" % uuid.uuid4()
         )
-        effective_auth_level = INSTANT_AUTH_METHOD_ID if third_party_id == INSTANT_AUTH_METHOD_ID else GUEST_AUTH_METHOD_ID
+        effective_auth_level = (
+            INSTANT_AUTH_METHOD_ID
+            if third_party_id == INSTANT_AUTH_METHOD_ID
+            else GUEST_AUTH_METHOD_ID
+        )
 
         result = await thirdparty_asyncio.manually_create_or_update_user(
-            tenant_id=PUBLIC_TENANT_ID,
+            tenant_id=tenant_id,
             third_party_id=third_party_id,
             third_party_user_id=third_party_user_id,
             email="%s@anonymous.local" % third_party_user_id,
@@ -466,20 +501,20 @@ async def handle_guest_login(
         }
         await session_asyncio.create_new_session(
             request,
-            PUBLIC_TENANT_ID,
+            tenant_id,
             result.recipe_user_id,
             payload,
             {},
             {**user_context, **({"rowndAppVariantId": app_variant_id} if app_variant_id else {})},
         )
-        await record_success(telemetry_client, started_at, PUBLIC_TENANT_ID, None, result.user.id)
+        await record_success(telemetry_client, started_at, tenant_id, None, result.user.id)
         return json_response(
             response,
             {"status": "OK", "createdNewRecipeUser": result.created_new_recipe_user},
         )
     except Exception as err:
         log_debug(config, "Guest login failed: %s" % err)
-        await record_error(telemetry_client, started_at, err, PUBLIC_TENANT_ID)
+        await record_error(telemetry_client, started_at, err, tenant_id)
         return json_response(response, {"status": "ERROR", "message": "Guest login failed"})
 
 
@@ -493,6 +528,7 @@ async def handle_migrate(
     user_context: UserContext,
 ) -> BaseResponse:
     started_at = time.time()
+    tenant_id = resolve_tenant_id(request)
     rownd_user_id = None
     supertokens_user_id = None
     try:
@@ -505,7 +541,7 @@ async def handle_migrate(
             log_debug(
                 config,
                 "Skipping migration because user does not exist in Rownd. tenantId: %s, rowndUserId: %s"
-                % (PUBLIC_TENANT_ID, rownd_user_id),
+                % (tenant_id, rownd_user_id),
             )
             return json_response(response, {"status": "OK"})
 
@@ -514,37 +550,80 @@ async def handle_migrate(
 
         if user is None:
             try:
-                await import_user(map_rownd_user_to_supertokens(rownd_user), supertokens_config)
+                await import_user(
+                    map_rownd_user_to_supertokens(
+                        rownd_user,
+                        tenant_id if tenant_id != PUBLIC_TENANT_ID else None,
+                    ),
+                    supertokens_config,
+                )
                 clear_supertokens_core_call_cache(user_context)
                 user = await get_user(rownd_user_id, user_context)
                 if user is None:
                     raise RowndPluginError("Imported user could not be resolved")
                 supertokens_user_id = user.id
-                recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else None
+                recipe_user_id = (
+                    user.login_methods[0].recipe_user_id if user.login_methods else None
+                )
             except Exception:
                 user = await get_user(rownd_user_id, user_context)
                 if user is None:
                     raise
                 supertokens_user_id = user.id
-                recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else None
+                recipe_user_id = (
+                    user.login_methods[0].recipe_user_id if user.login_methods else None
+                )
         else:
             supertokens_user_id = user.id
             recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else None
 
         if isinstance(supertokens_user_id, str):
             await record_rownd_app_variant_for_user(config, supertokens_user_id, app_variant_id)
+        tenant_login_method = (
+            next(
+                (
+                    method
+                    for method in user.login_methods
+                    if tenant_id in (getattr(method, "tenant_ids", None) or [])
+                ),
+                None,
+            )
+            if user
+            else None
+        )
+        if tenant_login_method is not None:
+            recipe_user_id = tenant_login_method.recipe_user_id
         if recipe_user_id is None:
             raise RowndPluginError("User not found or has no login methods")
 
-        await sync_imported_email_verification_state(recipe_user_id, supertokens_user_id if isinstance(supertokens_user_id, str) else None, user_context)
+        if tenant_login_method is None:
+            association = await multitenancy_asyncio.associate_user_to_tenant(
+                tenant_id,
+                recipe_user_id,
+                user_context,
+            )
+            if getattr(association, "status", None) != "OK":
+                raise RowndPluginError(
+                    "Failed to associate migrated user with tenant: %s"
+                    % getattr(association, "status", "ERROR")
+                )
+
+        await sync_imported_email_verification_state(
+            recipe_user_id,
+            supertokens_user_id if isinstance(supertokens_user_id, str) else None,
+            tenant_id,
+            user_context,
+        )
 
         await session_asyncio.create_new_session(
             request,
-            PUBLIC_TENANT_ID,
+            tenant_id,
             recipe_user_id,
             await build_rownd_session_claims(
                 config,
-                supertokens_user_id if isinstance(supertokens_user_id, str) else recipe_user_id.get_as_string(),
+                supertokens_user_id
+                if isinstance(supertokens_user_id, str)
+                else recipe_user_id.get_as_string(),
                 {},
                 app_variant_id,
             ),
@@ -552,17 +631,29 @@ async def handle_migrate(
             {**user_context, **({"rowndAppVariantId": app_variant_id} if app_variant_id else {})},
         )
         await record_success(
-            telemetry_client, started_at, PUBLIC_TENANT_ID, rownd_user_id, supertokens_user_id if isinstance(supertokens_user_id, str) else None
+            telemetry_client,
+            started_at,
+            tenant_id,
+            rownd_user_id,
+            supertokens_user_id if isinstance(supertokens_user_id, str) else None,
         )
         return json_response(response, {"status": "OK"})
     except Exception as err:
         log_debug(config, "Migration failed for Rownd user %s: %s" % (rownd_user_id, err))
         await record_error(
-            telemetry_client, started_at, err, PUBLIC_TENANT_ID, rownd_user_id, supertokens_user_id if isinstance(supertokens_user_id, str) else None
+            telemetry_client,
+            started_at,
+            err,
+            tenant_id,
+            rownd_user_id,
+            supertokens_user_id if isinstance(supertokens_user_id, str) else None,
         )
         return json_response(
             response,
-            {"status": "ERROR", "message": str(err) if isinstance(err, RowndPluginError) else "Migration failed"},
+            {
+                "status": "ERROR",
+                "message": str(err) if isinstance(err, RowndPluginError) else "Migration failed",
+            },
         )
 
 
@@ -576,10 +667,14 @@ def clear_supertokens_core_call_cache(user_context: UserContext) -> None:
         default_context["core_call_cache"] = {}
 
 
-async def handle_signout(session: Optional[SessionContainer], response: BaseResponse) -> BaseResponse:
+async def handle_signout(
+    session: Optional[SessionContainer], response: BaseResponse
+) -> BaseResponse:
     session = require_session(session)
     await session_asyncio.revoke_all_sessions_for_user(
-        session.get_user_id(), revoke_sessions_for_linked_accounts=True, tenant_id=session.get_tenant_id()
+        session.get_user_id(),
+        revoke_sessions_for_linked_accounts=True,
+        tenant_id=session.get_tenant_id(),
     )
     return json_response(response, {"status": "OK"})
 
@@ -588,7 +683,13 @@ async def handle_get_user(
     config: RowndPluginConfig, session: Optional[SessionContainer], response: BaseResponse
 ) -> BaseResponse:
     session = require_session(session)
-    return json_response(response, {"status": "OK", **(await get_rownd_compat_user(session.get_user_id(), config))})
+    return json_response(
+        response,
+        {
+            "status": "OK",
+            **(await get_rownd_compat_user(session.get_user_id(), config, session.get_tenant_id())),
+        },
+    )
 
 
 async def handle_update_user(
@@ -610,7 +711,9 @@ async def handle_update_user(
         code = permission_error.get("code")
         return json_response(response, permission_error, code if isinstance(code, int) else 400)
     if data_without_email:
-        await update_user_data(config, session.get_user_id(), data_without_email)
+        await update_user_data(
+            config, session.get_user_id(), data_without_email, session.get_tenant_id()
+        )
     email = data.get("email")
     if isinstance(email, str):
         return json_response(
@@ -622,24 +725,40 @@ async def handle_update_user(
                         config,
                         session,
                         email,
-                        {**user_context, **context, **({"rowndAppVariantId": app_variant_id} if app_variant_id else {})},
+                        {
+                            **user_context,
+                            **context,
+                            **({"rowndAppVariantId": app_variant_id} if app_variant_id else {}),
+                        },
                     )
                 ),
             },
         )
-    return json_response(response, {"status": "OK", **(await get_rownd_compat_user(session.get_user_id(), config))})
+    return json_response(
+        response,
+        {
+            "status": "OK",
+            **(await get_rownd_compat_user(session.get_user_id(), config, session.get_tenant_id())),
+        },
+    )
 
 
-async def handle_delete_user(session: Optional[SessionContainer], response: BaseResponse) -> BaseResponse:
+async def handle_delete_user(
+    session: Optional[SessionContainer], response: BaseResponse
+) -> BaseResponse:
     session = require_session(session)
     await delete_user(session.get_user_id(), remove_all_linked_accounts=True)
     return json_response(response, {"status": "OK"})
 
 
-async def handle_get_user_meta(session: Optional[SessionContainer], response: BaseResponse) -> BaseResponse:
+async def handle_get_user_meta(
+    session: Optional[SessionContainer], response: BaseResponse
+) -> BaseResponse:
     session = require_session(session)
     metadata = await get_user_metadata(session.get_user_id())
-    return json_response(response, {"status": "OK", "id": session.get_user_id(), "meta": public_metadata(metadata)})
+    return json_response(
+        response, {"status": "OK", "id": session.get_user_id(), "meta": public_metadata(metadata)}
+    )
 
 
 async def handle_update_user_meta(
@@ -650,20 +769,33 @@ async def handle_update_user_meta(
     meta = as_json_dict(body.get("meta"))
     internal_field = next((key for key in meta if is_internal_metadata_field(key)), None)
     if internal_field:
-        return json_response(response, {"status": "ERROR", "code": 403, "message": "field is not writable: %s" % internal_field}, 403)
+        return json_response(
+            response,
+            {
+                "status": "ERROR",
+                "code": 403,
+                "message": "field is not writable: %s" % internal_field,
+            },
+            403,
+        )
     updated = await update_user_metadata(session.get_user_id(), meta)
     return json_response(response, {"status": "OK", **updated})
 
 
 async def handle_get_user_field(
-    config: RowndPluginConfig, request: BaseRequest, response: BaseResponse, session: Optional[SessionContainer]
+    config: RowndPluginConfig,
+    request: BaseRequest,
+    response: BaseResponse,
+    session: Optional[SessionContainer],
 ) -> BaseResponse:
     session = require_session(session)
     field_name = request.get_query_param("field")
     if not field_name:
         return json_response(response, missing_field_response(), 400)
-    user = await get_rownd_compat_user(session.get_user_id(), config)
-    return json_response(response, {"status": "OK", "value": as_json_dict(user.get("data")).get(field_name)})
+    user = await get_rownd_compat_user(session.get_user_id(), config, session.get_tenant_id())
+    return json_response(
+        response, {"status": "OK", "value": as_json_dict(user.get("data")).get(field_name)}
+    )
 
 
 async def handle_update_user_field(
@@ -691,7 +823,10 @@ async def handle_update_user_field(
                         config,
                         session,
                         value,
-                        {**user_context, **({"rowndAppVariantId": app_variant_id} if app_variant_id else {})},
+                        {
+                            **user_context,
+                            **({"rowndAppVariantId": app_variant_id} if app_variant_id else {}),
+                        },
                     )
                 ),
             },
@@ -702,7 +837,17 @@ async def handle_update_user_field(
         return json_response(response, permission_error, code if isinstance(code, int) else 400)
     return json_response(
         response,
-        {"status": "OK", **(await update_user_data(config, session.get_user_id(), {field_name: body.get("value")}))},
+        {
+            "status": "OK",
+            **(
+                await update_user_data(
+                    config,
+                    session.get_user_id(),
+                    {field_name: body.get("value")},
+                    session.get_tenant_id(),
+                )
+            ),
+        },
     )
 
 
@@ -721,7 +866,11 @@ def as_json_dict(value: object) -> JsonDict:
 
 
 def as_json_list(value: object) -> List[JsonDict]:
-    return [cast(JsonDict, item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+    return (
+        [cast(JsonDict, item) for item in value if isinstance(item, dict)]
+        if isinstance(value, list)
+        else []
+    )
 
 
 async def get_user_metadata(user_id: str) -> JsonDict:
@@ -736,10 +885,15 @@ async def update_user_metadata(user_id: str, input_meta: JsonDict) -> JsonDict:
     return {"id": user_id, "meta": public_metadata(updated)}
 
 
-async def update_user_data(config: RowndPluginConfig, user_id: str, input_data: JsonDict) -> JsonDict:
+async def update_user_data(
+    config: RowndPluginConfig,
+    user_id: str,
+    input_data: JsonDict,
+    tenant_id: str = PUBLIC_TENANT_ID,
+) -> JsonDict:
     metadata = await get_user_metadata(user_id)
     await usermetadata_asyncio.update_user_metadata(user_id, {**metadata, **input_data})
-    return await get_rownd_compat_user(user_id, config)
+    return await get_rownd_compat_user(user_id, config, tenant_id)
 
 
 def public_metadata(metadata: JsonDict) -> JsonDict:
@@ -758,14 +912,20 @@ def can_update_user_data_field(config: RowndPluginConfig, field_name: str) -> bo
     schema_field = config.schema.get(field_name)
     if schema_field is None:
         return False
-    owned_by = "app" if field_name in {"google_id", "apple_id"} else schema_field.get("owned_by", "user")
+    owned_by = (
+        "app" if field_name in {"google_id", "apple_id"} else schema_field.get("owned_by", "user")
+    )
     return owned_by != "app" and schema_field.get("read_only") is not True
 
 
 def validate_writable_fields(config: RowndPluginConfig, fields: List[str]) -> Optional[JsonDict]:
     for field_name in fields:
         if not can_update_user_data_field(config, field_name):
-            return {"status": "ERROR", "code": 403, "message": "field is not writable: %s" % field_name}
+            return {
+                "status": "ERROR",
+                "code": 403,
+                "message": "field is not writable: %s" % field_name,
+            }
     return None
 
 
@@ -773,7 +933,11 @@ def missing_field_response() -> JsonDict:
     return {"status": "ERROR", "code": 400, "message": "field is required"}
 
 
-async def get_rownd_compat_user(user_id: str, config: Optional[RowndPluginConfig] = None) -> JsonDict:
+async def get_rownd_compat_user(
+    user_id: str,
+    config: Optional[RowndPluginConfig] = None,
+    tenant_id: str = PUBLIC_TENANT_ID,
+) -> JsonDict:
     metadata = await get_user_metadata(user_id)
     st_user = await get_user(user_id)
     if st_user is None:
@@ -796,7 +960,12 @@ async def get_rownd_compat_user(user_id: str, config: Optional[RowndPluginConfig
         if not is_identity_field(key) and not is_internal_metadata_field(key) and key in metadata:
             data[key] = metadata[key]
 
-    for method in st_user.login_methods:
+    tenant_login_methods = [
+        method
+        for method in st_user.login_methods
+        if tenant_id in (getattr(method, "tenant_ids", None) or [])
+    ]
+    for method in tenant_login_methods:
         if method.recipe_id == "passwordless":
             if method.email and not is_supertokens_fake_email(method.email):
                 verified_data["email"] = method.email
@@ -822,7 +991,8 @@ async def get_rownd_compat_user(user_id: str, config: Optional[RowndPluginConfig
     if verified_data.get("phone_number") is True and isinstance(data.get("phone_number"), str):
         verified_data["phone_number"] = data["phone_number"]
 
-    anonymous_id = get_anonymous_id(st_user.id, st_user, metadata)
+    tenant_user = cast(User, SimpleNamespace(login_methods=tenant_login_methods))
+    anonymous_id = get_anonymous_id(st_user.id, tenant_user, metadata)
     if anonymous_id:
         data.setdefault("anonymous_id", anonymous_id)
 
@@ -830,9 +1000,9 @@ async def get_rownd_compat_user(user_id: str, config: Optional[RowndPluginConfig
         if data.get(key) is None and schema_field.get("type") == "string":
             data[key] = ""
 
-    sorted_by_joined = sorted(st_user.login_methods, key=lambda method: method.time_joined)
+    sorted_by_joined = sorted(tenant_login_methods, key=lambda method: method.time_joined)
     first_method = sorted_by_joined[0] if sorted_by_joined else None
-    latest_session_info = await get_latest_session_info(st_user.id)
+    latest_session_info = await get_latest_session_info(st_user.id, tenant_id)
     latest_recipe_user_id = None
     if latest_session_info is not None:
         recipe_user_id = getattr(latest_session_info, "recipe_user_id", None)
@@ -842,7 +1012,7 @@ async def get_rownd_compat_user(user_id: str, config: Optional[RowndPluginConfig
         next(
             (
                 method
-                for method in st_user.login_methods
+                for method in tenant_login_methods
                 if method.recipe_user_id.get_as_string() == latest_recipe_user_id
             ),
             None,
@@ -851,7 +1021,11 @@ async def get_rownd_compat_user(user_id: str, config: Optional[RowndPluginConfig
         else None
     )
     if last_method is None:
-        last_method = max(st_user.login_methods, key=lambda method: method.time_joined) if st_user.login_methods else None
+        last_method = (
+            max(tenant_login_methods, key=lambda method: method.time_joined)
+            if tenant_login_methods
+            else None
+        )
     last_sign_in_at = getattr(latest_session_info, "time_created", st_user.time_joined)
     metadata_meta = {
         key: value
@@ -875,7 +1049,7 @@ async def get_rownd_compat_user(user_id: str, config: Optional[RowndPluginConfig
         "verified_data": verified_data,
         "state": original.get("state", "enabled"),
         "auth_level": get_effective_auth_level(
-            st_user,
+            tenant_user,
             original_auth_level if isinstance(original_auth_level, str) else None,
             verified_data,
         ),
@@ -889,12 +1063,12 @@ def iso_from_ms(value: int) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(value / 1000))
 
 
-async def get_latest_session_info(user_id: str):
+async def get_latest_session_info(user_id: str, tenant_id: str = PUBLIC_TENANT_ID):
     try:
         handles = await session_asyncio.get_all_session_handles_for_user(
             user_id,
             fetch_sessions_for_linked_accounts=True,
-            tenant_id=PUBLIC_TENANT_ID,
+            tenant_id=tenant_id,
         )
     except Exception:
         return None
@@ -915,7 +1089,10 @@ def get_third_party_info(method: LoginMethod) -> Tuple[Optional[str], Optional[s
 
 def is_guest_login_method(method: LoginMethod) -> bool:
     third_party_id, _ = get_third_party_info(method)
-    return method.recipe_id == "thirdparty" and third_party_id in {GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID}
+    return method.recipe_id == "thirdparty" and third_party_id in {
+        GUEST_AUTH_METHOD_ID,
+        INSTANT_AUTH_METHOD_ID,
+    }
 
 
 def has_only_guest_login_methods(user: Optional[User]) -> bool:
@@ -954,13 +1131,19 @@ def get_guest_auth_level(user: Optional[User]) -> Optional[str]:
 
 
 def get_effective_auth_level(
-    user: Optional[User], original_auth_level: Optional[str] = None, verified_data: Optional[JsonDict] = None
+    user: Optional[User],
+    original_auth_level: Optional[str] = None,
+    verified_data: Optional[JsonDict] = None,
 ) -> str:
-    if original_auth_level == INSTANT_AUTH_METHOD_ID:
-        return INSTANT_AUTH_METHOD_ID
     if has_verified_real_login_method(user):
         return "verified"
-    return get_guest_auth_level(user) or original_auth_level or ("verified" if verified_data else "unverified")
+    if original_auth_level == INSTANT_AUTH_METHOD_ID:
+        return INSTANT_AUTH_METHOD_ID
+    return (
+        get_guest_auth_level(user)
+        or original_auth_level
+        or ("verified" if verified_data else "unverified")
+    )
 
 
 def get_anonymous_id(user_id: str, user: Optional[User], metadata: JsonDict) -> Optional[str]:
@@ -972,7 +1155,7 @@ def get_anonymous_id(user_id: str, user: Optional[User], metadata: JsonDict) -> 
         for method in user.login_methods:
             third_party_id, _ = get_third_party_info(method)
             if method.recipe_id == "thirdparty" and third_party_id == GUEST_AUTH_METHOD_ID:
-                return "anon_%s" % user.id
+                return "anon_%s" % user_id
     return None
 
 
@@ -999,10 +1182,14 @@ async def build_rownd_session_claims(
     original = as_json_dict(metadata.get("original_rownd_user"))
     verified_data = as_json_dict(original.get("verified_data"))
     original_auth_level_value = original.get("auth_level")
-    original_auth_level = original_auth_level_value if isinstance(original_auth_level_value, str) else None
+    original_auth_level = (
+        original_auth_level_value if isinstance(original_auth_level_value, str) else None
+    )
     auth_level = get_effective_auth_level(user, original_auth_level, verified_data)
     app_user_id = as_json_dict(original.get("data")).get("user_id")
-    app_user_id = app_user_id or current_payload.get("app_user_id") or (user.id if user else user_id)
+    app_user_id = (
+        app_user_id or current_payload.get("app_user_id") or (user.id if user else user_id)
+    )
     is_anonymous = current_payload.get("is_anonymous") is True or auth_level in {
         GUEST_AUTH_METHOD_ID,
         INSTANT_AUTH_METHOD_ID,
@@ -1129,13 +1316,18 @@ async def build_standard_oauth_claims(user: User, scopes: List[str]) -> JsonDict
             )
 
     if "phone" in scopes:
-        phone_number = first_string(rownd_data.get("phone_number")) or (user.phone_numbers[0] if user.phone_numbers else None)
+        phone_number = first_string(rownd_data.get("phone_number")) or (
+            user.phone_numbers[0] if user.phone_numbers else None
+        )
         if phone_number:
             claims["phone_number"] = phone_number
             claims["phone_number_verified"] = is_oauth_claim_verified(
                 verified_data.get("phone_number"),
                 phone_number,
-                any(method.phone_number == phone_number and method.verified for method in user.login_methods),
+                any(
+                    method.phone_number == phone_number and method.verified
+                    for method in user.login_methods
+                ),
             )
 
     if "profile" in scopes:
@@ -1189,7 +1381,9 @@ def build_configured_session_claims(config: RowndPluginConfig, metadata: JsonDic
     return claims
 
 
-def build_rownd_audience(current_payload: JsonDict, config: RowndPluginConfig, app_variant_id: Optional[str]) -> JsonDict:
+def build_rownd_audience(
+    current_payload: JsonDict, config: RowndPluginConfig, app_variant_id: Optional[str]
+) -> JsonDict:
     _ = current_payload, config, app_variant_id
     # PyJWT rejects tokens containing `aud` unless an audience is passed during decode.
     # SuperTokens Python validates access tokens internally without an audience, so adding
@@ -1227,7 +1421,9 @@ async def record_rownd_app_variant_for_user(
     )
 
 
-def map_rownd_user_to_supertokens(rownd_user: JsonDict) -> JsonDict:
+def map_rownd_user_to_supertokens(
+    rownd_user: JsonDict, tenant_id: Optional[str] = None
+) -> JsonDict:
     login_methods = []
     data = as_json_dict(rownd_user.get("data"))
     verified_data = as_json_dict(rownd_user.get("verified_data"))
@@ -1237,19 +1433,62 @@ def map_rownd_user_to_supertokens(rownd_user: JsonDict) -> JsonDict:
     google_id = data.get("google_id")
     if isinstance(google_id, str) and google_id:
         email = data.get("email") or build_supertokens_fake_email(google_id, "google")
-        login_methods.append({"recipeId": "thirdparty", "thirdPartyId": "google", "thirdPartyUserId": google_id, "email": email, "isVerified": bool(data.get("email")) and bool(verified_data.get("google_id"))})
+        login_methods.append(
+            {
+                "recipeId": "thirdparty",
+                "thirdPartyId": "google",
+                "thirdPartyUserId": google_id,
+                "email": email,
+                "isVerified": bool(data.get("email")) and bool(verified_data.get("google_id")),
+                **({"tenantIds": [tenant_id]} if tenant_id else {}),
+            }
+        )
     apple_id = data.get("apple_id")
     if isinstance(apple_id, str) and apple_id:
         email = data.get("email") or build_supertokens_fake_email(apple_id, "apple")
-        login_methods.append({"recipeId": "thirdparty", "thirdPartyId": "apple", "thirdPartyUserId": apple_id, "email": email, "isVerified": bool(data.get("email")) and bool(verified_data.get("apple_id"))})
+        login_methods.append(
+            {
+                "recipeId": "thirdparty",
+                "thirdPartyId": "apple",
+                "thirdPartyUserId": apple_id,
+                "email": email,
+                "isVerified": bool(data.get("email")) and bool(verified_data.get("apple_id")),
+                **({"tenantIds": [tenant_id]} if tenant_id else {}),
+            }
+        )
     if data.get("phone_number"):
-        login_methods.append({"recipeId": "passwordless", "phoneNumber": data["phone_number"], "isVerified": bool(verified_data.get("phone_number"))})
+        login_methods.append(
+            {
+                "recipeId": "passwordless",
+                "phoneNumber": data["phone_number"],
+                "isVerified": bool(verified_data.get("phone_number")),
+                **({"tenantIds": [tenant_id]} if tenant_id else {}),
+            }
+        )
     if data.get("email") and not data.get("google_id") and not data.get("apple_id"):
-        login_methods.append({"recipeId": "passwordless", "email": data["email"], "isVerified": bool(verified_data.get("email"))})
+        login_methods.append(
+            {
+                "recipeId": "passwordless",
+                "email": data["email"],
+                "isVerified": bool(verified_data.get("email")),
+                **({"tenantIds": [tenant_id]} if tenant_id else {}),
+            }
+        )
     if not login_methods:
         auth_level = rownd_user.get("auth_level")
-        third_party_id = GUEST_AUTH_METHOD_ID if auth_level == GUEST_AUTH_METHOD_ID else INSTANT_AUTH_METHOD_ID
-        login_methods.append({"recipeId": "thirdparty", "thirdPartyId": third_party_id, "thirdPartyUserId": data["user_id"], "email": "%s@anonymous.local" % data["user_id"], "isVerified": False})
+        third_party_id = (
+            GUEST_AUTH_METHOD_ID if auth_level == GUEST_AUTH_METHOD_ID else INSTANT_AUTH_METHOD_ID
+        )
+        login_methods.append(
+            {
+                "recipeId": "thirdparty",
+                "thirdPartyId": third_party_id,
+                "thirdPartyUserId": data["user_id"],
+                "email": "%s@anonymous.local" % data["user_id"],
+                "isVerified": False,
+                **({"tenantIds": [tenant_id]} if tenant_id else {}),
+            }
+        )
 
     return {
         "externalUserId": data["user_id"],
@@ -1282,13 +1521,16 @@ async def import_user(user_import: JsonDict, supertokens_config: SupertokensConf
         raise RuntimeError("Bulk import failed with status %s: %s" % (res.status_code, res.text))
     data = res.json()
     if data.get("status") != "OK" or not data.get("user"):
-        raise RuntimeError("Bulk import failed: %s" % (data.get("message") or "Missing user in response"))
+        raise RuntimeError(
+            "Bulk import failed: %s" % (data.get("message") or "Missing user in response")
+        )
     return data["user"]
 
 
 async def sync_imported_email_verification_state(
     recipe_user_id: RecipeUserId,
     user_id: Optional[str],
+    tenant_id: str,
     user_context: UserContext,
 ) -> None:
     metadata = await get_user_metadata(user_id or recipe_user_id.get_as_string())
@@ -1300,12 +1542,12 @@ async def sync_imported_email_verification_state(
         return
     try:
         token_result = await emailverification_asyncio.create_email_verification_token(
-            PUBLIC_TENANT_ID, recipe_user_id, email, user_context
+            tenant_id, recipe_user_id, email, user_context
         )
         token = getattr(token_result, "token", None)
         if isinstance(token, str):
             await emailverification_asyncio.verify_email_using_token(
-                PUBLIC_TENANT_ID, token, False, user_context
+                tenant_id, token, False, user_context
             )
     except Exception:
         return
@@ -1319,13 +1561,23 @@ async def start_pending_email_verification(
 ) -> JsonDict:
     user_id = session.get_user_id()
     metadata = await get_user_metadata(user_id)
-    current_email = as_json_dict((await get_rownd_compat_user(user_id, config)).get("data")).get("email")
+    tenant_id = session.get_tenant_id()
+    current_email = as_json_dict(
+        (await get_rownd_compat_user(user_id, config, tenant_id)).get("data")
+    ).get("email")
     pending = as_json_list(metadata.get("rownd_pending_verification"))
-    pending_email_verifications = [item for item in pending if item.get("field") == "email"]
+    pending_email_verifications = [
+        item
+        for item in pending
+        if item.get("field") == "email" and (item.get("tenantId") or PUBLIC_TENANT_ID) == tenant_id
+    ]
     for verification in pending_email_verifications:
         pending_email = verification.get("value")
         await emailverification_asyncio.revoke_email_verification_tokens(
-            session.get_tenant_id(), session.get_recipe_user_id(), pending_email if isinstance(pending_email, str) else None, user_context
+            session.get_tenant_id(),
+            session.get_recipe_user_id(),
+            pending_email if isinstance(pending_email, str) else None,
+            user_context,
         )
 
     if current_email == email:
@@ -1335,24 +1587,33 @@ async def start_pending_email_verification(
                 {
                     **metadata,
                     "rownd_pending_verification": [
-                        item for item in pending if item.get("field") != "email"
+                        item
+                        for item in pending
+                        if item.get("field") != "email"
+                        or (item.get("tenantId") or PUBLIC_TENANT_ID) != tenant_id
                     ],
                 },
             )
-        return await get_rownd_compat_user(user_id, config)
+        return await get_rownd_compat_user(user_id, config, tenant_id)
 
     pending_verification = {
         "id": str(uuid.uuid4()),
         "field": "email",
         "value": email,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "tenantId": tenant_id,
     }
     await usermetadata_asyncio.update_user_metadata(
         user_id,
         {
             **metadata,
             "rownd_pending_verification": [
-                *[item for item in pending if item.get("field") != "email"],
+                *[
+                    item
+                    for item in pending
+                    if item.get("field") != "email"
+                    or (item.get("tenantId") or PUBLIC_TENANT_ID) != tenant_id
+                ],
                 pending_verification,
             ],
         },
@@ -1366,34 +1627,57 @@ async def start_pending_email_verification(
         {**user_context, "rowndPendingVerificationId": pending_verification["id"]},
     )
     if getattr(result, "status", None) == "EMAIL_ALREADY_VERIFIED_ERROR":
-        await complete_pending_email_verification(session.get_recipe_user_id(), email, user_context)
-    return await get_rownd_compat_user(user_id, config)
+        await complete_pending_email_verification(
+            session.get_recipe_user_id(), email, user_context, tenant_id
+        )
+    return await get_rownd_compat_user(user_id, config, tenant_id)
 
 
 async def complete_pending_email_verification(
     recipe_user_id: RecipeUserId,
     email: str,
     user_context: UserContext,
+    tenant_id: str = PUBLIC_TENANT_ID,
 ) -> Optional[Dict[str, object]]:
     user = await get_user(recipe_user_id.get_as_string(), user_context)
     user_id = user.id if user else recipe_user_id.get_as_string()
     metadata = await get_user_metadata(user_id)
     pending = as_json_list(metadata.get("rownd_pending_verification"))
-    pending_verification = next((item for item in pending if item.get("field") == "email" and item.get("value") == email), None)
+    pending_verification = next(
+        (
+            item
+            for item in pending
+            if item.get("field") == "email"
+            and item.get("value") == email
+            and (item.get("tenantId") or PUBLIC_TENANT_ID) == tenant_id
+        ),
+        None,
+    )
     if not pending_verification:
         return None
 
     metadata_user_id = user_id
     verified_recipe_user_id = recipe_user_id
-    passwordless_email_method = get_passwordless_email_login_method(user)
+    tenant_login_methods = [
+        method
+        for method in (user.login_methods if user else [])
+        if tenant_id in (getattr(method, "tenant_ids", None) or [])
+    ]
+    passwordless_email_method = get_passwordless_email_login_method(tenant_login_methods)
     if passwordless_email_method:
-        result = await passwordless_asyncio.update_user(passwordless_email_method.recipe_user_id, email=email, user_context=user_context)
+        result = await passwordless_asyncio.update_user(
+            passwordless_email_method.recipe_user_id, email=email, user_context=user_context
+        )
         if getattr(result, "status", "OK") != "OK":
-            raise RowndPluginError("Failed to update verified email method: %s" % getattr(result, "status", "ERROR"))
+            raise RowndPluginError(
+                "Failed to update verified email method: %s" % getattr(result, "status", "ERROR")
+            )
         verified_recipe_user_id = passwordless_email_method.recipe_user_id
-    elif has_only_guest_login_methods(user):
+    elif has_only_guest_login_methods(
+        cast(User, SimpleNamespace(login_methods=tenant_login_methods)) if user else None
+    ):
         allowed = await accountlinking_asyncio.is_sign_up_allowed(
-            PUBLIC_TENANT_ID,
+            tenant_id,
             AccountInfoWithRecipeId(recipe_id="passwordless", email=email),
             True,
             None,
@@ -1402,7 +1686,7 @@ async def complete_pending_email_verification(
         if not allowed:
             raise RowndPluginError("Passwordless sign up is not allowed for this email")
         passwordless_result = await passwordless_asyncio.signinup(
-            PUBLIC_TENANT_ID, email, None, None, user_context
+            tenant_id, email, None, None, user_context
         )
         verified_recipe_user_id = passwordless_result.recipe_user_id
         primary_result = await accountlinking_asyncio.create_primary_user(
@@ -1410,7 +1694,7 @@ async def complete_pending_email_verification(
         )
         if not isinstance(primary_result, CreatePrimaryUserOkResult):
             primary_user = await accountlinking_asyncio.create_primary_user_id_or_link_accounts(
-                PUBLIC_TENANT_ID, passwordless_result.recipe_user_id, None, user_context
+                tenant_id, passwordless_result.recipe_user_id, None, user_context
             )
         else:
             primary_user = primary_result.user
@@ -1418,21 +1702,33 @@ async def complete_pending_email_verification(
             recipe_user_id, primary_user.id, user_context
         )
         if not isinstance(link_result, LinkAccountsOkResult):
-            raise RowndPluginError("Failed to link guest account: %s" % getattr(link_result, "status", "ERROR"))
+            raise RowndPluginError(
+                "Failed to link guest account: %s" % getattr(link_result, "status", "ERROR")
+            )
         metadata_user_id = link_result.user.id
 
-    target_metadata = metadata if metadata_user_id == user_id else await get_user_metadata(metadata_user_id)
-    original = as_json_dict(target_metadata.get("original_rownd_user")) or as_json_dict(metadata.get("original_rownd_user")) or {
-        "data": {"user_id": metadata_user_id},
-        "verified_data": {},
-    }
+    target_metadata = (
+        metadata if metadata_user_id == user_id else await get_user_metadata(metadata_user_id)
+    )
+    original = (
+        as_json_dict(target_metadata.get("original_rownd_user"))
+        or as_json_dict(metadata.get("original_rownd_user"))
+        or {
+            "data": {"user_id": metadata_user_id},
+            "verified_data": {},
+        }
+    )
     target_pending = as_json_list(target_metadata.get("rownd_pending_verification"))
     updated = {
         **target_metadata,
         "rownd_pending_verification": [
             item
             for item in target_pending
-            if not (item.get("field") == "email" and item.get("value") == email)
+            if not (
+                item.get("field") == "email"
+                and item.get("value") == email
+                and (item.get("tenantId") or PUBLIC_TENANT_ID) == tenant_id
+            )
         ],
     }
     updated["original_rownd_user"] = {
@@ -1444,23 +1740,34 @@ async def complete_pending_email_verification(
     return {"user_id": metadata_user_id, "recipe_user_id": verified_recipe_user_id}
 
 
-def get_passwordless_email_login_method(user: Optional[User]) -> Optional[LoginMethod]:
-    if not user:
-        return None
-    return next((method for method in user.login_methods if method.recipe_id == "passwordless" and method.email), None)
+def get_passwordless_email_login_method(login_methods: List[LoginMethod]) -> Optional[LoginMethod]:
+    return next(
+        (method for method in login_methods if method.recipe_id == "passwordless" and method.email),
+        None,
+    )
 
 
 def is_guest_account_info(account_info: AccountInfoWithRecipeId) -> bool:
     third_party = getattr(account_info, "third_party", None)
-    return getattr(account_info, "recipe_id", None) == "thirdparty" and getattr(third_party, "id", None) in {GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID}
+    return getattr(account_info, "recipe_id", None) == "thirdparty" and getattr(
+        third_party, "id", None
+    ) in {GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID}
 
 
 def does_account_info_match_auth_method(user: User, account_info: AccountInfoWithRecipeId) -> bool:
     normalized_email = account_info.email.lower() if account_info.email else None
     if normalized_email:
-        return any(not is_guest_login_method(method) and method.email and method.email.lower() == normalized_email for method in user.login_methods)
+        return any(
+            not is_guest_login_method(method)
+            and method.email
+            and method.email.lower() == normalized_email
+            for method in user.login_methods
+        )
     if getattr(account_info, "phone_number", None):
-        return any(not is_guest_login_method(method) and method.phone_number == account_info.phone_number for method in user.login_methods)
+        return any(
+            not is_guest_login_method(method) and method.phone_number == account_info.phone_number
+            for method in user.login_methods
+        )
     return False
 
 
@@ -1477,7 +1784,9 @@ def deep_merge(base: JsonDict, overlay: JsonDict) -> JsonDict:
     return result
 
 
-def build_app_config(config: RowndPluginConfig, app_variant_id: Optional[str]) -> Optional[JsonDict]:
+def build_app_config(
+    config: RowndPluginConfig, app_variant_id: Optional[str]
+) -> Optional[JsonDict]:
     base_app = config.app_config or {}
     sub_brand = config.sub_brands.get(app_variant_id) if app_variant_id else None
     if app_variant_id and sub_brand is None:
@@ -1495,7 +1804,11 @@ def build_app_config(config: RowndPluginConfig, app_variant_id: Optional[str]) -
     if email_sign_in.get("enabled") and "email" not in schema:
         schema["email"] = {"display_name": "Email", "type": "string", "user_visible": True}
     if phone_sign_in.get("enabled") and "phone_number" not in schema:
-        schema["phone_number"] = {"display_name": "Phone number", "type": "string", "user_visible": True}
+        schema["phone_number"] = {
+            "display_name": "Phone number",
+            "type": "string",
+            "user_visible": True,
+        }
     if google_sign_in.get("enabled") and "google_id" not in schema:
         schema["google_id"] = {"display_name": "Google ID", "type": "string", "user_visible": False}
     if apple_sign_in.get("enabled") and "apple_id" not in schema:
@@ -1508,13 +1821,33 @@ def build_app_config(config: RowndPluginConfig, app_variant_id: Optional[str]) -
         **({"mobile": build_auth_mobile_config(auth.get("mobile"))} if auth.get("mobile") else {}),
         "sign_in_methods": sign_in_methods,
         "additional_fields": auth.get("additionalFields", []),
-        **({"remember_sign_in_method": auth["rememberSignInMethod"]} if "rememberSignInMethod" in auth else {}),
-        **({"use_explicit_sign_up_flow": auth["useExplicitSignUpFlow"]} if "useExplicitSignUpFlow" in auth else {}),
-        **({"allow_unverified_users": auth["allowUnverifiedUsers"]} if "allowUnverifiedUsers" in auth else {}),
-        **({"primary_sign_up_method": auth["primarySignUpMethod"]} if auth.get("primarySignUpMethod") else {}),
+        **(
+            {"remember_sign_in_method": auth["rememberSignInMethod"]}
+            if "rememberSignInMethod" in auth
+            else {}
+        ),
+        **(
+            {"use_explicit_sign_up_flow": auth["useExplicitSignUpFlow"]}
+            if "useExplicitSignUpFlow" in auth
+            else {}
+        ),
+        **(
+            {"allow_unverified_users": auth["allowUnverifiedUsers"]}
+            if "allowUnverifiedUsers" in auth
+            else {}
+        ),
+        **(
+            {"primary_sign_up_method": auth["primarySignUpMethod"]}
+            if auth.get("primarySignUpMethod")
+            else {}
+        ),
         **({"preferred_method": auth["preferredMethod"]} if auth.get("preferredMethod") else {}),
         **({"order": auth["order"]} if auth.get("order") else {}),
-        **({"instant_user": {"enabled": True}} if is_instant_anonymous_method(sign_in_method_items) else {}),
+        **(
+            {"instant_user": {"enabled": True}}
+            if is_instant_anonymous_method(sign_in_method_items)
+            else {}
+        ),
         "show_app_icon": branding.get("showAppIcon", False),
     }
     return {
@@ -1524,40 +1857,98 @@ def build_app_config(config: RowndPluginConfig, app_variant_id: Optional[str]) -
             "id": app.get("id", ""),
             "name": app.get("name", config.app_name),
             "icon": app.get("icon", ""),
-            **({"user_verification_fields": app["userVerificationFields"]} if app.get("userVerificationFields") else {}),
+            **(
+                {"user_verification_fields": app["userVerificationFields"]}
+                if app.get("userVerificationFields")
+                else {}
+            ),
             "schema": {key: normalize_schema_field(key, field) for key, field in schema.items()},
             "config": {
                 **({"capabilities": app["capabilities"]} if app.get("capabilities") else {}),
                 **({"web": app["web"]} if app.get("web") else {}),
                 **({"bottom_sheet": app["bottomSheet"]} if app.get("bottomSheet") else {}),
-                **({"profile_storage_version": app["profileStorageVersion"]} if app.get("profileStorageVersion") else {}),
+                **(
+                    {"profile_storage_version": app["profileStorageVersion"]}
+                    if app.get("profileStorageVersion")
+                    else {}
+                ),
                 "customizations": {
                     "primary_color": branding.get("primaryColor", "#5b5bd6"),
                     **({"logo": branding["logo"]} if branding.get("logo") else {}),
-                    **({"logo_dark_mode": branding["logoDarkMode"]} if branding.get("logoDarkMode") else {}),
-                    **({"animations": branding["animations"]} if branding.get("animations") else {}),
+                    **(
+                        {"logo_dark_mode": branding["logoDarkMode"]}
+                        if branding.get("logoDarkMode")
+                        else {}
+                    ),
+                    **(
+                        {"animations": branding["animations"]} if branding.get("animations") else {}
+                    ),
                 },
                 "hub": {
-                    **({"allowed_web_origins": app["allowedWebOrigins"]} if app.get("allowedWebOrigins") else {}),
+                    **(
+                        {"allowed_web_origins": app["allowedWebOrigins"]}
+                        if app.get("allowedWebOrigins")
+                        else {}
+                    ),
                     "customizations": {
                         "rounded_corners": branding.get("roundedCorners", True),
-                        **({"container_border_radius": branding["containerBorderRadius"]} if "containerBorderRadius" in branding else {}),
+                        **(
+                            {"container_border_radius": branding["containerBorderRadius"]}
+                            if "containerBorderRadius" in branding
+                            else {}
+                        ),
                         **({"placement": branding["placement"]} if "placement" in branding else {}),
-                        **({"primary_color": branding["hubPrimaryColor"]} if "hubPrimaryColor" in branding else {}),
-                        **({"primary_color_dark_mode": branding["primaryColorDarkMode"]} if "primaryColorDarkMode" in branding else {}),
-                        **({"background_color": branding["backgroundColor"]} if "backgroundColor" in branding else {}),
-                        **({"font_family": branding["fontFamily"]} if "fontFamily" in branding else {}),
-                        **({"hide_verification_icons": branding["hideVerificationIcons"]} if "hideVerificationIcons" in branding else {}),
+                        **(
+                            {"primary_color": branding["hubPrimaryColor"]}
+                            if "hubPrimaryColor" in branding
+                            else {}
+                        ),
+                        **(
+                            {"primary_color_dark_mode": branding["primaryColorDarkMode"]}
+                            if "primaryColorDarkMode" in branding
+                            else {}
+                        ),
+                        **(
+                            {"background_color": branding["backgroundColor"]}
+                            if "backgroundColor" in branding
+                            else {}
+                        ),
+                        **(
+                            {"font_family": branding["fontFamily"]}
+                            if "fontFamily" in branding
+                            else {}
+                        ),
+                        **(
+                            {"hide_verification_icons": branding["hideVerificationIcons"]}
+                            if "hideVerificationIcons" in branding
+                            else {}
+                        ),
                         "visual_swoops": branding.get("visualSwoops", True),
                         "blur_background": branding.get("blurBackground", True),
-                        **({"blur_background_opacity": branding["blurBackgroundOpacity"]} if "blurBackgroundOpacity" in branding else {}),
+                        **(
+                            {"blur_background_opacity": branding["blurBackgroundOpacity"]}
+                            if "blurBackgroundOpacity" in branding
+                            else {}
+                        ),
                         **({"offset_x": branding["offsetX"]} if "offsetX" in branding else {}),
                         **({"offset_y": branding["offsetY"]} if "offsetY" in branding else {}),
-                        **({"property_overrides": branding["propertyOverrides"]} if branding.get("propertyOverrides") else {}),
+                        **(
+                            {"property_overrides": branding["propertyOverrides"]}
+                            if branding.get("propertyOverrides")
+                            else {}
+                        ),
                         "dark_mode": branding.get("darkMode", "auto"),
                     },
-                    **({"custom_scripts": branding["customScripts"]} if branding.get("customScripts") else {}),
-                    **({"custom_styles": branding["customStyles"]} if branding.get("customStyles") else {}),
+                    **(
+                        {"custom_scripts": branding["customScripts"]}
+                        if branding.get("customScripts")
+                        else {}
+                    ),
+                    **(
+                        {"custom_styles": branding["customStyles"]}
+                        if branding.get("customStyles")
+                        else {}
+                    ),
                     "auth": hub_auth,
                     "legal": build_legal_config(app.get("legal")),
                     "profile": build_profile_config(app.get("profile")),
@@ -1628,8 +2019,14 @@ def build_sign_in_methods_config(methods_array: List[JsonDict]) -> JsonDict:
             "enabled": "google" in methods,
             "client_id": google.get("clientId", ""),
             "ios_client_id": google.get("iosClientId", ""),
-            "scopes": scopes if isinstance(scopes, list) and all(isinstance(item, str) for item in scopes) else [],
-            **({"sign_in_faster_with_google": sign_in_faster_with_google} if sign_in_faster_with_google in {"enabled", "disabled"} else {}),
+            "scopes": scopes
+            if isinstance(scopes, list) and all(isinstance(item, str) for item in scopes)
+            else [],
+            **(
+                {"sign_in_faster_with_google": sign_in_faster_with_google}
+                if sign_in_faster_with_google in {"enabled", "disabled"}
+                else {}
+            ),
             "one_tap": build_google_one_tap_config(google.get("oneTap")),
         },
         "apple": apple_config,
@@ -1644,10 +2041,26 @@ def build_auth_email_config(auth_email: object) -> JsonDict:
         "from_address": auth_email.get("fromAddress", "no-reply@rownd.io"),
         "image": auth_email.get("image", ""),
         **({"subject": auth_email["subject"]} if auth_email.get("subject") else {}),
-        **({"call_to_action_text": auth_email["callToActionText"]} if auth_email.get("callToActionText") else {}),
-        **({"verify_template": auth_email["verifyTemplate"]} if auth_email.get("verifyTemplate") else {}),
-        **({"custom_content": auth_email["customContent"]} if auth_email.get("customContent") else {}),
-        **({"custom_closing_content": auth_email["customClosingContent"]} if auth_email.get("customClosingContent") else {}),
+        **(
+            {"call_to_action_text": auth_email["callToActionText"]}
+            if auth_email.get("callToActionText")
+            else {}
+        ),
+        **(
+            {"verify_template": auth_email["verifyTemplate"]}
+            if auth_email.get("verifyTemplate")
+            else {}
+        ),
+        **(
+            {"custom_content": auth_email["customContent"]}
+            if auth_email.get("customContent")
+            else {}
+        ),
+        **(
+            {"custom_closing_content": auth_email["customClosingContent"]}
+            if auth_email.get("customClosingContent")
+            else {}
+        ),
     }
 
 
@@ -1656,10 +2069,26 @@ def build_auth_mobile_config(auth_mobile: object) -> JsonDict:
     return {
         **({"title": auth_mobile["title"]} if auth_mobile.get("title") else {}),
         **({"image": auth_mobile["image"]} if auth_mobile.get("image") else {}),
-        **({"call_to_action_text": auth_mobile["callToActionText"]} if auth_mobile.get("callToActionText") else {}),
-        **({"hyperlink_text": auth_mobile["hyperlinkText"]} if auth_mobile.get("hyperlinkText") else {}),
-        **({"hyperlink_redirect_url": auth_mobile["hyperlinkRedirectUrl"]} if auth_mobile.get("hyperlinkRedirectUrl") else {}),
-        **({"custom_content": auth_mobile["customContent"]} if auth_mobile.get("customContent") else {}),
+        **(
+            {"call_to_action_text": auth_mobile["callToActionText"]}
+            if auth_mobile.get("callToActionText")
+            else {}
+        ),
+        **(
+            {"hyperlink_text": auth_mobile["hyperlinkText"]}
+            if auth_mobile.get("hyperlinkText")
+            else {}
+        ),
+        **(
+            {"hyperlink_redirect_url": auth_mobile["hyperlinkRedirectUrl"]}
+            if auth_mobile.get("hyperlinkRedirectUrl")
+            else {}
+        ),
+        **(
+            {"custom_content": auth_mobile["customContent"]}
+            if auth_mobile.get("customContent")
+            else {}
+        ),
     }
 
 
@@ -1667,8 +2096,16 @@ def build_legal_config(legal: object) -> JsonDict:
     legal = as_json_dict(legal)
     return {
         **({"company_name": legal["companyName"]} if legal.get("companyName") else {}),
-        **({"privacy_policy_url": legal["privacyPolicyUrl"]} if legal.get("privacyPolicyUrl") else {}),
-        **({"terms_conditions_url": legal["termsConditionsUrl"]} if legal.get("termsConditionsUrl") else {}),
+        **(
+            {"privacy_policy_url": legal["privacyPolicyUrl"]}
+            if legal.get("privacyPolicyUrl")
+            else {}
+        ),
+        **(
+            {"terms_conditions_url": legal["termsConditionsUrl"]}
+            if legal.get("termsConditionsUrl")
+            else {}
+        ),
         **({"support_email": legal["supportEmail"]} if legal.get("supportEmail") else {}),
     }
 
@@ -1676,23 +2113,69 @@ def build_legal_config(legal: object) -> JsonDict:
 def build_profile_config(profile: object) -> JsonDict:
     profile = as_json_dict(profile)
     return {
-        **({"account_information": profile["accountInformation"]} if profile.get("accountInformation") else {}),
-        **({"personal_information": profile["personalInformation"]} if profile.get("personalInformation") else {}),
+        **(
+            {"account_information": profile["accountInformation"]}
+            if profile.get("accountInformation")
+            else {}
+        ),
+        **(
+            {"personal_information": profile["personalInformation"]}
+            if profile.get("personalInformation")
+            else {}
+        ),
         **({"preferences": profile["preferences"]} if profile.get("preferences") else {}),
         **({"sign_out_button": profile["signOutButton"]} if profile.get("signOutButton") else {}),
-        **({"delete_account_button": profile["deleteAccountButton"]} if profile.get("deleteAccountButton") else {}),
-        **({"add_sign_in_methods_button": profile["addSignInMethodsButton"]} if profile.get("addSignInMethodsButton") else {}),
+        **(
+            {"delete_account_button": profile["deleteAccountButton"]}
+            if profile.get("deleteAccountButton")
+            else {}
+        ),
+        **(
+            {"add_sign_in_methods_button": profile["addSignInMethodsButton"]}
+            if profile.get("addSignInMethodsButton")
+            else {}
+        ),
     }
 
 
 def build_custom_content_config(custom_content: object) -> JsonDict:
     custom_content = as_json_dict(custom_content)
     return {
-        **({"sign_in_modal": build_sign_in_modal_config(custom_content.get("signInModal"))} if custom_content.get("signInModal") else {}),
-        **({"profile_modal": custom_content["profileModal"]} if custom_content.get("profileModal") else {}),
-        **({"verification_modal": build_verification_modal_config(custom_content.get("verificationModal"))} if custom_content.get("verificationModal") else {}),
-        **({"sign_in_failure_modal": {"failure_message": as_json_dict(custom_content.get("signInFailureModal")).get("failureMessage")}} if custom_content.get("signInFailureModal") else {}),
-        **({"no_account_message": custom_content["noAccountMessage"]} if custom_content.get("noAccountMessage") else {}),
+        **(
+            {"sign_in_modal": build_sign_in_modal_config(custom_content.get("signInModal"))}
+            if custom_content.get("signInModal")
+            else {}
+        ),
+        **(
+            {"profile_modal": custom_content["profileModal"]}
+            if custom_content.get("profileModal")
+            else {}
+        ),
+        **(
+            {
+                "verification_modal": build_verification_modal_config(
+                    custom_content.get("verificationModal")
+                )
+            }
+            if custom_content.get("verificationModal")
+            else {}
+        ),
+        **(
+            {
+                "sign_in_failure_modal": {
+                    "failure_message": as_json_dict(custom_content.get("signInFailureModal")).get(
+                        "failureMessage"
+                    )
+                }
+            }
+            if custom_content.get("signInFailureModal")
+            else {}
+        ),
+        **(
+            {"no_account_message": custom_content["noAccountMessage"]}
+            if custom_content.get("noAccountMessage")
+            else {}
+        ),
         **({"mobile": custom_content["mobile"]} if custom_content.get("mobile") else {}),
     }
 
@@ -1702,12 +2185,36 @@ def build_sign_in_modal_config(sign_in_modal: object) -> JsonDict:
     return {
         **({"title": sign_in_modal["title"]} if sign_in_modal.get("title") else {}),
         **({"subtitle": sign_in_modal["subtitle"]} if sign_in_modal.get("subtitle") else {}),
-        **({"sign_in_title": sign_in_modal["signInTitle"]} if sign_in_modal.get("signInTitle") else {}),
-        **({"sign_up_title": sign_in_modal["signUpTitle"]} if sign_in_modal.get("signUpTitle") else {}),
-        **({"sign_in_subtitle": sign_in_modal["signInSubtitle"]} if sign_in_modal.get("signInSubtitle") else {}),
-        **({"sign_up_subtitle": sign_in_modal["signUpSubtitle"]} if sign_in_modal.get("signUpSubtitle") else {}),
-        **({"sign_in_button": sign_in_modal["signInButton"]} if sign_in_modal.get("signInButton") else {}),
-        **({"sign_up_button": sign_in_modal["signUpButton"]} if sign_in_modal.get("signUpButton") else {}),
+        **(
+            {"sign_in_title": sign_in_modal["signInTitle"]}
+            if sign_in_modal.get("signInTitle")
+            else {}
+        ),
+        **(
+            {"sign_up_title": sign_in_modal["signUpTitle"]}
+            if sign_in_modal.get("signUpTitle")
+            else {}
+        ),
+        **(
+            {"sign_in_subtitle": sign_in_modal["signInSubtitle"]}
+            if sign_in_modal.get("signInSubtitle")
+            else {}
+        ),
+        **(
+            {"sign_up_subtitle": sign_in_modal["signUpSubtitle"]}
+            if sign_in_modal.get("signUpSubtitle")
+            else {}
+        ),
+        **(
+            {"sign_in_button": sign_in_modal["signInButton"]}
+            if sign_in_modal.get("signInButton")
+            else {}
+        ),
+        **(
+            {"sign_up_button": sign_in_modal["signUpButton"]}
+            if sign_in_modal.get("signUpButton")
+            else {}
+        ),
     }
 
 
@@ -1715,13 +2222,19 @@ def build_verification_modal_config(verification_modal: object) -> JsonDict:
     verification_modal = as_json_dict(verification_modal)
     return {
         **({"title": verification_modal["title"]} if verification_modal.get("title") else {}),
-        **({"subtitle": verification_modal["subtitle"]} if verification_modal.get("subtitle") else {}),
+        **(
+            {"subtitle": verification_modal["subtitle"]}
+            if verification_modal.get("subtitle")
+            else {}
+        ),
     }
 
 
 def is_instant_anonymous_method(methods_array: List[JsonDict]) -> bool:
     return any(
-        isinstance(item, dict) and item.get("method") == "anonymous" and item.get("type") == "instant"
+        isinstance(item, dict)
+        and item.get("method") == "anonymous"
+        and item.get("type") == "instant"
         for item in methods_array
     )
 

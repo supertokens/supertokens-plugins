@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -14,6 +15,7 @@ from supertokens_rownd.plugin_implementation import (
     map_rownd_user_to_supertokens,
     normalize_redirect_to_path_for_client_domain,
     resolve_allowed_client_domain,
+    resolve_tenant_id,
 )
 from supertokens_rownd.types import RowndPluginConfig, RowndPluginError
 
@@ -84,6 +86,35 @@ def test_maps_email_passwordless_user():
     user_metadata = as_json_dict(mapped["userMetadata"])
     assert user_metadata["first_name"] == "Ada"
     assert user_metadata["source"] == "rownd"
+
+
+def test_maps_login_methods_to_requested_tenant():
+    mapped = map_rownd_user_to_supertokens(
+        {
+            "data": {"user_id": "user-1", "email": "a@example.com"},
+            "verified_data": {"email": True},
+        },
+        tenant_id="customer-a",
+    )
+
+    assert mapped["loginMethods"] == [
+        {
+            "recipeId": "passwordless",
+            "email": "a@example.com",
+            "isVerified": True,
+            "tenantIds": ["customer-a"],
+        }
+    ]
+
+
+def test_resolve_tenant_id_defaults_to_public():
+    assert (
+        resolve_tenant_id(cast(Any, SimpleNamespace(get_query_param=lambda name: None))) == "public"
+    )
+    assert (
+        resolve_tenant_id(cast(Any, SimpleNamespace(get_query_param=lambda name: "customer-a")))
+        == "customer-a"
+    )
 
 
 def test_maps_multiple_rownd_login_methods():
@@ -184,9 +215,7 @@ def test_preserves_rownd_app_variants_in_metadata():
 
     user_metadata = as_json_dict(mapped["userMetadata"])
     original_rownd_user = as_json_dict(user_metadata["original_rownd_user"])
-    assert original_rownd_user["attributes"] == {
-        "rownd:app_variants": ["variant_123"]
-    }
+    assert original_rownd_user["attributes"] == {"rownd:app_variants": ["variant_123"]}
 
 
 def test_handles_email_and_phone_user():
@@ -290,7 +319,9 @@ def test_confirmation_bypass_redirect_rejects_cross_domain_url():
 
 def test_confirmation_bypass_redirect_rejects_schemaless_url():
     with pytest.raises(RowndPluginError, match="redirectToPath cannot be schemaless"):
-        normalize_redirect_to_path_for_client_domain("//evil.example.com/profile", "https://app.example.com")
+        normalize_redirect_to_path_for_client_domain(
+            "//evil.example.com/profile", "https://app.example.com"
+        )
 
 
 def test_assert_allowed_bypass_redirect_path_requires_allowlist_match():
@@ -494,12 +525,16 @@ def test_custom_provider_omits_missing_optional_icons():
 
 
 @pytest.mark.asyncio
-async def test_rownd_compat_user_uses_latest_session_for_last_sign_in_method(monkeypatch: pytest.MonkeyPatch):
+async def test_rownd_compat_user_uses_latest_session_for_last_sign_in_method(
+    monkeypatch: pytest.MonkeyPatch,
+):
     async def get_user_metadata(user_id: str):
         return {}
 
     async def get_user(user_id: str, user_context=None):
-        passwordless_recipe_user_id = SimpleNamespace(get_as_string=lambda: "passwordless-recipe-user")
+        passwordless_recipe_user_id = SimpleNamespace(
+            get_as_string=lambda: "passwordless-recipe-user"
+        )
         google_recipe_user_id = SimpleNamespace(get_as_string=lambda: "google-recipe-user")
         return SimpleNamespace(
             id=user_id,
@@ -510,6 +545,7 @@ async def test_rownd_compat_user_uses_latest_session_for_last_sign_in_method(mon
                     email="user@example.com",
                     phone_number=None,
                     recipe_user_id=passwordless_recipe_user_id,
+                    tenant_ids=["public"],
                     time_joined=2000,
                     last_used=5000,
                 ),
@@ -520,13 +556,15 @@ async def test_rownd_compat_user_uses_latest_session_for_last_sign_in_method(mon
                     recipe_user_id=google_recipe_user_id,
                     third_party=SimpleNamespace(id="google", user_id="google-123"),
                     verified=True,
+                    tenant_ids=["public"],
                     time_joined=3000,
                     last_used=4000,
                 ),
             ],
         )
 
-    async def get_latest_session_info(user_id: str):
+    async def get_latest_session_info(user_id: str, tenant_id: str):
+        assert tenant_id == "public"
         return SimpleNamespace(
             recipe_user_id=SimpleNamespace(get_as_string=lambda: "passwordless-recipe-user"),
             time_created=6000,
@@ -572,23 +610,32 @@ async def test_rownd_compat_user_includes_provider_id_for_imported_linked_user(
                     recipe_id="passwordless",
                     email="linked@example.com",
                     phone_number=None,
-                    recipe_user_id=SimpleNamespace(get_as_string=lambda: "passwordless-recipe-user"),
+                    recipe_user_id=SimpleNamespace(
+                        get_as_string=lambda: "passwordless-recipe-user"
+                    ),
                     time_joined=2000,
                     verified=True,
+                    tenant_ids=["public"],
                 ),
                 SimpleNamespace(
                     recipe_id="thirdparty",
                     email="linked@example.com",
                     phone_number=None,
-                    recipe_user_id=SimpleNamespace(get_as_string=lambda: "%s-recipe-user" % provider_id),
-                    third_party=SimpleNamespace(id=provider_id, user_id="%s-linked-id" % provider_id),
+                    recipe_user_id=SimpleNamespace(
+                        get_as_string=lambda: "%s-recipe-user" % provider_id
+                    ),
+                    third_party=SimpleNamespace(
+                        id=provider_id, user_id="%s-linked-id" % provider_id
+                    ),
                     verified=True,
+                    tenant_ids=["public"],
                     time_joined=3000,
                 ),
             ],
         )
 
-    async def get_latest_session_info(user_id: str):
+    async def get_latest_session_info(user_id: str, tenant_id: str):
+        assert tenant_id == "public"
         return None
 
     monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)

@@ -4,7 +4,10 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional, cast
 
 import pytest
-from supertokens_python.recipe.accountlinking.types import AccountInfoWithRecipeId, ShouldNotAutomaticallyLink
+from supertokens_python.recipe.accountlinking.types import (
+    AccountInfoWithRecipeId,
+    ShouldNotAutomaticallyLink,
+)
 from supertokens_python.types import LoginMethod, User
 
 from supertokens_rownd import plugin
@@ -106,12 +109,17 @@ async def test_delivery_uses_mobile_https_client_domain():
     config = RowndPluginConfig(
         rownd_app_key="app-key",
         rownd_app_secret="secret",
-        client_domains={"mobile": "https://mobile.example.com", "browser": "https://app.example.com"},
+        client_domains={
+            "mobile": "https://mobile.example.com",
+            "browser": "https://app.example.com",
+        },
     )
     override = plugin.RowndEmailDeliveryOverride(
         cast(Any, original), config, "url_with_link_code", "account/login"
     )
-    template_vars = SimpleNamespace(url_with_link_code="https://api.example.com/auth/verify?linkCode=code")
+    template_vars = SimpleNamespace(
+        url_with_link_code="https://api.example.com/auth/verify?linkCode=code"
+    )
 
     await override.send_email(template_vars, {"rowndDisplayContext": "mobile_app"})
 
@@ -184,7 +192,9 @@ async def test_emailverification_delivery_uses_mobile_client_domain():
     override = plugin.RowndEmailDeliveryOverride(
         cast(Any, original), config, "email_verify_link", "account/verify-email"
     )
-    template_vars = SimpleNamespace(email_verify_link="https://api.example.com/auth/verify?token=token")
+    template_vars = SimpleNamespace(
+        email_verify_link="https://api.example.com/auth/verify?token=token"
+    )
 
     await override.send_email(template_vars, {"rowndDisplayContext": "mobile_app"})
 
@@ -237,17 +247,20 @@ async def test_passwordless_create_code_adds_rownd_context():
         None,
         None,
         "public",
-        cast(Any, SimpleNamespace(
-            request=FakeRequest(
-                {
-                    "app_variant_id": "variant_123",
-                    "rownd_display_context": "mobile_app",
-                    "rownd_redirect_to_path": "/dashboard",
-                    "rownd_client_domain": "admin",
-                    "rownd_oauth_login_challenge": "challenge_123",
-                }
-            )
-        )),
+        cast(
+            Any,
+            SimpleNamespace(
+                request=FakeRequest(
+                    {
+                        "app_variant_id": "variant_123",
+                        "rownd_display_context": "mobile_app",
+                        "rownd_redirect_to_path": "/dashboard",
+                        "rownd_client_domain": "admin",
+                        "rownd_oauth_login_challenge": "challenge_123",
+                    }
+                )
+            ),
+        ),
         {"existing": "value"},
     )
 
@@ -257,6 +270,53 @@ async def test_passwordless_create_code_adds_rownd_context():
         "rowndDisplayContext": "mobile_app",
         "rowndRedirectToPath": "/dashboard",
         "rowndClientDomain": "admin",
+        "rowndOAuthLoginChallenge": "challenge_123",
+    }
+
+
+async def test_passwordless_resend_code_adds_rownd_context():
+    captured_context: Dict[str, Any] = {}
+
+    async def resend_code_post(
+        device_id: str,
+        pre_auth_session_id: str,
+        session_: Any,
+        should_try_linking_with_session_user: Optional[bool],
+        tenant_id: str,
+        api_options: Any,
+        user_context: Dict[str, Any],
+    ):
+        captured_context.update(user_context)
+        return SimpleNamespace(status="OK")
+
+    original = SimpleNamespace(
+        create_code_post=None, consume_code_post=None, resend_code_post=resend_code_post
+    )
+    overridden = plugin._passwordless_api_override(make_config())(cast(Any, original))
+
+    await overridden.resend_code_post(
+        "device",
+        "pre-auth",
+        None,
+        None,
+        "public",
+        cast(
+            Any,
+            SimpleNamespace(
+                request=FakeRequest(
+                    {
+                        "app_variant_id": "variant_123",
+                        "rownd_oauth_login_challenge": "challenge_123",
+                    }
+                )
+            ),
+        ),
+        {"existing": "value"},
+    )
+
+    assert captured_context == {
+        "existing": "value",
+        "rowndAppVariantId": "variant_123",
         "rowndOAuthLoginChallenge": "challenge_123",
     }
 
@@ -271,6 +331,23 @@ async def test_passwordless_email_delivery_rewrites_oauth_login_challenge():
     await override.send_email(template_vars, {"rowndOAuthLoginChallenge": "challenge_123"})
 
     assert "oauthLoginChallenge=challenge_123" in original.template_vars.url_with_link_code
+
+
+async def test_passwordless_delivery_marks_combined_code_and_link_flow():
+    original = CapturingDelivery()
+    override = plugin.RowndEmailDeliveryOverride(
+        cast(Any, original), make_config(), "url_with_link_code", "account/login"
+    )
+    template_vars = SimpleNamespace(
+        url_with_link_code="/auth/verify?linkCode=code", user_input_code="123456"
+    )
+
+    await override.send_email(template_vars, {})
+
+    assert (
+        "passwordlessFlowType=USER_INPUT_CODE_AND_MAGIC_LINK"
+        in original.template_vars.url_with_link_code
+    )
 
 
 async def test_init_rejects_invalid_client_domain():
@@ -334,6 +411,21 @@ async def test_plugin_routes_use_explicit_api_base_path():
 
     assert "/api/auth/plugin/rownd/app-config" in paths
     assert "/api/auth/plugin/migrate-session" in paths
+
+
+async def test_disabled_migration_omits_migration_routes():
+    with pytest.warns(UserWarning, match="migration is disabled"):
+        rownd_plugin = plugin.init(
+            RowndPluginConfig(disable_rownd_user_migration=True, api_base_path="/api/auth")
+        )
+
+    route_handlers = cast(Any, rownd_plugin.route_handlers)
+    result = route_handlers(cast(Any, None), [], "0.31.3")
+    paths = {handler.path for handler in result.route_handlers}
+
+    assert "/api/auth/plugin/rownd/migrate" not in paths
+    assert "/api/auth/plugin/migrate-session" not in paths
+    assert "/api/auth/plugin/rownd/guest" in paths
 
 
 async def test_oauth_scopes_are_deduplicated():
@@ -506,7 +598,9 @@ async def test_rownd_oauth_user_info_picks_rownd_claims(monkeypatch: pytest.Monk
 async def test_passwordless_consume_records_app_variant(monkeypatch: pytest.MonkeyPatch):
     recorded: list[tuple[str, Optional[str]]] = []
 
-    async def record_variant(config: RowndPluginConfig, user_id: str, app_variant_id: Optional[str]):
+    async def record_variant(
+        config: RowndPluginConfig, user_id: str, app_variant_id: Optional[str]
+    ):
         recorded.append((user_id, app_variant_id))
 
     async def consume_code_post(
@@ -578,7 +672,9 @@ async def test_passwordless_consume_rejects_unknown_app_variant():
 async def test_thirdparty_sign_in_records_app_variant(monkeypatch: pytest.MonkeyPatch):
     recorded: list[tuple[str, Optional[str]]] = []
 
-    async def record_variant(config: RowndPluginConfig, user_id: str, app_variant_id: Optional[str]):
+    async def record_variant(
+        config: RowndPluginConfig, user_id: str, app_variant_id: Optional[str]
+    ):
         recorded.append((user_id, app_variant_id))
 
     async def sign_in_up_post(
@@ -644,10 +740,15 @@ async def test_thirdparty_sign_in_rejects_unknown_app_variant():
 
 
 async def test_emailverification_verify_completes_pending_email(monkeypatch: pytest.MonkeyPatch):
-    completed: list[tuple[str, str, Dict[str, Any]]] = []
+    completed: list[tuple[str, str, Dict[str, Any], str]] = []
 
-    async def complete_pending_email_verification(recipe_user_id: Any, email: str, user_context: Dict[str, Any]):
-        completed.append((recipe_user_id.get_as_string(), email, user_context))
+    async def complete_pending_email_verification(
+        recipe_user_id: Any,
+        email: str,
+        user_context: Dict[str, Any],
+        tenant_id: str,
+    ):
+        completed.append((recipe_user_id.get_as_string(), email, user_context, tenant_id))
 
     async def email_verify_post(
         token: str,
@@ -672,7 +773,7 @@ async def test_emailverification_verify_completes_pending_email(monkeypatch: pyt
 
     await overridden.email_verify_post("token", None, "public", cast(Any, None), {"source": "test"})
 
-    assert completed == [("recipe-user", "verified@example.com", {"source": "test"})]
+    assert completed == [("recipe-user", "verified@example.com", {"source": "test"}, "public")]
 
 
 async def test_accountlinking_links_guest_session_without_verification(

@@ -98,6 +98,12 @@ The plugin registers these routes below `api_base_path`:
 - `POST /plugin/migrate-session`
 - `POST /plugin/passwordless-cross-device-confirmation/validate`
 - `POST /plugin/rownd/signout`
+
+Migration and guest routes accept an optional `tenantId` query parameter and default to `public`. Compatibility user views, sessions, and pending email verification are scoped to that tenant; user metadata remains shared across tenant memberships.
+
+After all Rownd users have migrated, retain the compatibility routes without Rownd credentials by configuring `disable_rownd_user_migration=True`. This removes both migration routes; when no app key is configured, it uses an internal app key for passwordless and verification-link rewriting.
+
+Passwordless resend requests preserve Rownd display, redirect, client-domain, app-variant, and OAuth context. Combined OTP and magic-link deliveries add the Hub `passwordlessFlowType=USER_INPUT_CODE_AND_MAGIC_LINK` parameter; OTP-only deliveries are left unchanged.
 - `GET /plugin/rownd/user`
 - `PUT /plugin/rownd/user`
 - `DELETE /plugin/rownd/user`

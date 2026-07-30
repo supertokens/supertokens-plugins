@@ -38,12 +38,14 @@ class RowndClient:
         return data
 
     async def _request(self, method: str, path: str, json: Optional[JsonDict] = None) -> JsonDict:
-        headers = (
-            {
-                "x-rownd-app-key": self.config.rownd_app_key,
-                "x-rownd-app-secret": self.config.rownd_app_secret,
-            }
-        )
+        app_key = self.config.rownd_app_key
+        app_secret = self.config.rownd_app_secret
+        if app_key is None or app_secret is None:
+            raise RowndPluginError("Rownd credentials are required for Rownd API requests")
+        headers = {
+            "x-rownd-app-key": app_key,
+            "x-rownd-app-secret": app_secret,
+        }
         async with httpx.AsyncClient(timeout=10.0) as client:
             res = await client.request(
                 method,
