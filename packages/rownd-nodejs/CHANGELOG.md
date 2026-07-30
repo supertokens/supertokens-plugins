@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.6.2
+
+### Patch Changes
+
+- Add overrides for the otp flow
+
 ## 0.6.1
 
 ### Patch Changes
