@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.6.3
+
+### Patch Changes
+
+- Add appVariantId in the session payload
+
 ## 0.6.2
 
 ### Patch Changes
