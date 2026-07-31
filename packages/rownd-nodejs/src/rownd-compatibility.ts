@@ -172,7 +172,7 @@ export function mapRowndUserToSuperTokens(
   }
 
   if (loginMethods.length > 1) {
-    loginMethods[0].isPrimary = true;
+    loginMethods[0]!.isPrimary = true;
   }
 
   const userMetadata = buildRowndUserMetadata(rowndUser);

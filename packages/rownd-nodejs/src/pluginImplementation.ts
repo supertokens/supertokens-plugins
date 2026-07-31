@@ -35,6 +35,7 @@ import {
   getUserById,
   getUserMetadata,
   importUser,
+  reconcileRowndUserWithExistingLoginMethods,
   recordRowndAppVariantForUser,
   startPendingEmailVerification,
   updateUserData,
@@ -285,26 +286,21 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
           tenantId === PUBLIC_TENANT_ID ? undefined : tenantId,
         );
 
-        try {
+        const reconciled = await reconcileRowndUserWithExistingLoginMethods(
+          stUserImport,
+          tenantId,
+          userContext,
+        );
+        if (!reconciled) {
           await importUser(stUserImport, deps.stConfig.supertokens);
-          clearSuperTokensCoreCallCache(userContext);
-          user = await SuperTokens.getUser(rowndUserId, userContext);
-          if (!user) {
-            throw new Error("Imported user could not be resolved");
-          }
-          superTokensUserId = user.id;
-          recipeUserId = user.loginMethods[0]?.recipeUserId;
-        } catch (err) {
-          user = await SuperTokens.getUser(rowndUserId, userContext);
-          if (!user) {
-            throw err;
-          }
-          superTokensUserId = user.id;
-          recipeUserId = user.loginMethods[0]?.recipeUserId;
-          logDebugMessage(
-            `User already migrated (race condition). tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,
-          );
         }
+        clearSuperTokensCoreCallCache(userContext);
+        user = await SuperTokens.getUser(rowndUserId, userContext);
+        if (!user) {
+          throw new Error("Imported user could not be resolved");
+        }
+        superTokensUserId = user.id;
+        recipeUserId = user.loginMethods[0]?.recipeUserId;
 
         logDebugMessage(
           `User migrated successfully. tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,

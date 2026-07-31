@@ -3,6 +3,7 @@ import AccountLinking from "supertokens-node/recipe/accountlinking";
 import EmailVerification from "supertokens-node/recipe/emailverification";
 import Passwordless from "supertokens-node/recipe/passwordless";
 import Session from "supertokens-node/recipe/session";
+import ThirdParty from "supertokens-node/recipe/thirdparty";
 import { BooleanClaim } from "supertokens-node/recipe/session/claims";
 import type { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
@@ -109,6 +110,333 @@ export async function importUser(
   }
 
   return importResponse.user;
+}
+
+type SuperTokensUser = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
+type SuperTokensLoginMethod = SuperTokensUser["loginMethods"][number];
+type ImportLoginMethod = SuperTokensUserImport["loginMethods"][number];
+
+function matchesImportLoginMethod(
+  loginMethod: SuperTokensLoginMethod,
+  importMethod: ImportLoginMethod,
+) {
+  if (loginMethod.recipeId !== importMethod.recipeId) {
+    return false;
+  }
+
+  if (importMethod.recipeId === "thirdparty") {
+    return loginMethod.hasSameThirdPartyInfoAs({
+      id: importMethod.thirdPartyId,
+      userId: importMethod.thirdPartyUserId,
+    });
+  }
+
+  if (importMethod.recipeId === "passwordless") {
+    return importMethod.email
+      ? loginMethod.hasSameEmailAs(importMethod.email)
+      : loginMethod.hasSamePhoneNumberAs(importMethod.phoneNumber);
+  }
+
+  return loginMethod.hasSameEmailAs(importMethod.email);
+}
+
+function getImportMethodAccountInfo(importMethod: ImportLoginMethod) {
+  if (importMethod.recipeId === "thirdparty") {
+    return {
+      thirdParty: {
+        id: importMethod.thirdPartyId,
+        userId: importMethod.thirdPartyUserId,
+      },
+    };
+  }
+
+  if (importMethod.recipeId === "emailpassword") {
+    return { email: importMethod.email };
+  }
+
+  return importMethod.email
+    ? { email: importMethod.email }
+    : { phoneNumber: importMethod.phoneNumber! };
+}
+
+async function findExistingImportMethod(
+  importMethod: ImportLoginMethod,
+  tenantId: string,
+  userContext: JsonRecord,
+) {
+  const users = await SuperTokens.listUsersByAccountInfo(
+    tenantId,
+    getImportMethodAccountInfo(importMethod),
+    false,
+    userContext,
+  );
+
+  for (const user of users) {
+    const loginMethod = user.loginMethods.find(
+      (method) =>
+        method.tenantIds.includes(tenantId) &&
+        matchesImportLoginMethod(method, importMethod),
+    );
+    if (loginMethod) {
+      return { user, loginMethod };
+    }
+  }
+
+  return undefined;
+}
+
+async function createMissingLoginMethod(
+  importMethod: ImportLoginMethod,
+  tenantId: string,
+  userContext: JsonRecord,
+) {
+  if (importMethod.recipeId === "thirdparty") {
+    const result = await ThirdParty.manuallyCreateOrUpdateUser(
+      tenantId,
+      importMethod.thirdPartyId,
+      importMethod.thirdPartyUserId,
+      importMethod.email,
+      importMethod.isVerified,
+      undefined,
+      userContext,
+    );
+    if (result.status !== "OK") {
+      throw new Error(
+        `Failed to create migrated third-party login method: ${result.status}`,
+      );
+    }
+    return result.recipeUserId;
+  }
+
+  if (importMethod.recipeId === "passwordless") {
+    const result = importMethod.email
+      ? await Passwordless.signInUp({
+        tenantId,
+        email: importMethod.email,
+        userContext,
+      })
+      : await Passwordless.signInUp({
+        tenantId,
+        phoneNumber: importMethod.phoneNumber!,
+        userContext,
+      });
+
+    if (importMethod.email && !importMethod.isVerified) {
+      await EmailVerification.unverifyEmail(
+        result.recipeUserId,
+        importMethod.email,
+        userContext,
+      );
+    }
+    return result.recipeUserId;
+  }
+
+  throw new Error(
+    `Cannot reconcile unsupported login method: ${importMethod.recipeId}`,
+  );
+}
+
+async function ensurePrimaryUser(
+  user: SuperTokensUser,
+  recipeUserId: SuperTokensLoginMethod["recipeUserId"],
+  superTokensUserId: string,
+  userContext: JsonRecord,
+) {
+  if (user.isPrimaryUser) {
+    return superTokensUserId;
+  }
+
+  const result = await AccountLinking.createPrimaryUser(
+    recipeUserId,
+    userContext,
+  );
+  if (result.status === "OK") {
+    return recipeUserId.getAsString();
+  }
+  if (
+    result.status ===
+    "RECIPE_USER_ID_ALREADY_LINKED_WITH_PRIMARY_USER_ID_ERROR"
+  ) {
+    return result.primaryUserId;
+  }
+
+  throw new Error(
+    "A migrated login method belongs to a different primary user",
+  );
+}
+
+async function resolveSuperTokensUserId(
+  userId: string,
+  userContext: JsonRecord,
+) {
+  const mapping = await SuperTokens.getUserIdMapping({
+    userId,
+    userIdType: "EXTERNAL",
+    userContext,
+  });
+  return mapping.status === "OK" ? mapping.superTokensUserId : userId;
+}
+
+async function assertRowndUserIdCanBeMapped(
+  superTokensUserId: string,
+  rowndUserId: string,
+  userContext: JsonRecord,
+) {
+  const externalMapping = await SuperTokens.getUserIdMapping({
+    userId: rowndUserId,
+    userIdType: "EXTERNAL",
+    userContext,
+  });
+  if (externalMapping.status === "OK") {
+    if (externalMapping.superTokensUserId !== superTokensUserId) {
+      throw new Error(
+        "The Rownd user ID is already mapped to another SuperTokens user",
+      );
+    }
+    return true;
+  }
+
+  const internalMapping = await SuperTokens.getUserIdMapping({
+    userId: superTokensUserId,
+    userIdType: "SUPERTOKENS",
+    userContext,
+  });
+  if (
+    internalMapping.status === "OK" &&
+    internalMapping.externalUserId !== rowndUserId
+  ) {
+    throw new Error(
+      "The SuperTokens user is already mapped to another external user ID",
+    );
+  }
+  if (internalMapping.status === "OK") {
+    return true;
+  }
+
+  return false;
+}
+
+async function createRowndUserIdMapping(
+  superTokensUserId: string,
+  rowndUserId: string,
+  userContext: JsonRecord,
+) {
+  const result = await SuperTokens.createUserIdMapping({
+    superTokensUserId,
+    externalUserId: rowndUserId,
+    force: true,
+    userContext,
+  });
+  if (result.status !== "OK") {
+    throw new Error(
+      `Failed to map migrated Rownd user ID: ${result.status}`,
+    );
+  }
+}
+
+export async function reconcileRowndUserWithExistingLoginMethods(
+  stUser: SuperTokensUserImport,
+  tenantId: string,
+  userContext: JsonRecord,
+) {
+  if (!stUser.externalUserId) {
+    throw new Error("Migrated Rownd user has no external user ID");
+  }
+
+  const matches = (await Promise.all(
+    stUser.loginMethods.map((method) =>
+      findExistingImportMethod(method, tenantId, userContext),
+    ),
+  )).filter(
+    (match): match is NonNullable<Awaited<ReturnType<typeof findExistingImportMethod>>> =>
+      !!match,
+  );
+
+  if (matches.length === 0) {
+    return false;
+  }
+
+  const ownerIds = new Set(matches.map(({ user }) => user.id));
+  if (ownerIds.size > 1) {
+    throw new Error(
+      "Migrated login methods belong to different SuperTokens users",
+    );
+  }
+
+  const target = matches[0]!;
+  const targetSuperTokensUserId = await resolveSuperTokensUserId(
+    target.user.id,
+    userContext,
+  );
+  const mappingAlreadyExists = await assertRowndUserIdCanBeMapped(
+    targetSuperTokensUserId,
+    stUser.externalUserId,
+    userContext,
+  );
+  const primaryUserId = await ensurePrimaryUser(
+    target.user,
+    target.loginMethod.recipeUserId,
+    targetSuperTokensUserId,
+    userContext,
+  );
+
+  for (const importMethod of stUser.loginMethods) {
+    const existingMethod = matches.find(({ loginMethod }) =>
+      matchesImportLoginMethod(loginMethod, importMethod),
+    );
+    if (existingMethod) {
+      continue;
+    }
+
+    const recipeUserId = await createMissingLoginMethod(
+      importMethod,
+      tenantId,
+      userContext,
+    );
+    const createdUser = await SuperTokens.getUser(
+      recipeUserId.getAsString(),
+      userContext,
+    );
+    if (!createdUser) {
+      throw new Error("Created migrated login method was not found");
+    }
+    if (createdUser.id === primaryUserId) {
+      continue;
+    }
+
+    const linkResult = await AccountLinking.linkAccounts(
+      recipeUserId,
+      primaryUserId,
+      userContext,
+    );
+    if (
+      linkResult.status ===
+      "RECIPE_USER_ID_ALREADY_LINKED_WITH_ANOTHER_PRIMARY_USER_ID_ERROR" &&
+      linkResult.primaryUserId === primaryUserId
+    ) {
+      continue;
+    }
+    if (linkResult.status !== "OK") {
+      throw new Error(
+        `Failed to link migrated login method: ${linkResult.status}`,
+      );
+    }
+  }
+
+  await UserMetadata.updateUserMetadata(
+    primaryUserId,
+    stUser.userMetadata,
+    userContext,
+  );
+  if (!mappingAlreadyExists) {
+    await createRowndUserIdMapping(
+      primaryUserId,
+      stUser.externalUserId,
+      userContext,
+    );
+  }
+
+  return true;
 }
 
 export async function recordRowndAppVariantForUser(

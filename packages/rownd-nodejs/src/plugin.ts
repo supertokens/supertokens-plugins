@@ -119,9 +119,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
       const rowndClient =
         !pluginConfig.disableRowndUserMigration && pluginConfig.rowndAppSecret
           ? createInstance({
-              app_key: pluginConfig.rowndAppKey,
-              app_secret: pluginConfig.rowndAppSecret,
-            })
+            app_key: pluginConfig.rowndAppKey,
+            app_secret: pluginConfig.rowndAppSecret,
+          })
           : undefined;
       const telemetryClient = createClient(pluginConfig.telemetry);
       let hubBootstrapParams: Record<string, string> | undefined;
@@ -169,11 +169,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
 
         const rewrittenLink = clientBaseUrl
           ? rewriteLinkToBaseUrl(
-              input[linkKey],
-              targetPath,
-              clientBaseUrl,
-              bootstrapParams,
-            )
+            input[linkKey],
+            targetPath,
+            clientBaseUrl,
+            bootstrapParams,
+          )
           : rewriteLinkPath(input[linkKey], targetPath, bootstrapParams);
 
         return {
@@ -247,14 +247,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               },
               ...(!pluginConfig.disableRowndUserMigration
                 ? [
-                    {
-                      path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate`,
-                      method: "post" as const,
-                      handler: withRequestHandler(
-                        handleMigrate(routeHandlerDeps),
-                      ),
-                    },
-                  ]
+                  {
+                    path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate`,
+                    method: "post" as const,
+                    handler: withRequestHandler(
+                      handleMigrate(routeHandlerDeps),
+                    ),
+                  },
+                ]
                 : []),
               {
                 path: `${apiBasePath}/plugin/passwordless-cross-device-confirmation/validate`,
@@ -267,14 +267,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               },
               ...(!pluginConfig.disableRowndUserMigration
                 ? [
-                    {
-                      path: `${apiBasePath}/plugin/migrate-session`,
-                      method: "post" as const,
-                      handler: withRequestHandler(
-                        handleMigrate(routeHandlerDeps),
-                      ),
-                    },
-                  ]
+                  {
+                    path: `${apiBasePath}/plugin/migrate-session`,
+                    method: "post" as const,
+                    handler: withRequestHandler(
+                      handleMigrate(routeHandlerDeps),
+                    ),
+                  },
+                ]
                 : []),
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/signout`,
@@ -416,9 +416,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                          originalImplementation,
-                          builder,
-                        )
+                        originalImplementation,
+                        builder,
+                      )
                       : originalImplementation;
 
                     return {
@@ -440,9 +440,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalSmsDeliveryOverride
                       ? originalSmsDeliveryOverride(
-                          originalImplementation,
-                          builder,
-                        )
+                        originalImplementation,
+                        builder,
+                      )
                       : originalImplementation;
 
                     return {
@@ -634,9 +634,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   override: (originalImplementation, builder) => {
                     const implementation = originalEmailDeliveryOverride
                       ? originalEmailDeliveryOverride(
-                          originalImplementation,
-                          builder,
-                        )
+                        originalImplementation,
+                        builder,
+                      )
                       : originalImplementation;
 
                     return {
