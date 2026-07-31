@@ -75,6 +75,10 @@ const mockRowndClient = {
   fetchUserInfo: vi.fn(),
 };
 
+const ACCOUNT_LINKING_TEST_LICENSE =
+  "N2uEOdEzd1XZZ5VBSTGYaM7Ia4s8wAqRWFAxLqTYrB6GQ=" +
+  "vssOLo3c=PkFgcExkaXs=IA-d9UWccoNKsyUgNhOhcKtM1bjC5OLrYRpTAgN-2EbKYsQGGQRQHuUN4EO1V";
+
 vi.mock("@rownd/node", () => ({
   createInstance: () => mockRowndClient,
 }));
@@ -118,6 +122,16 @@ describe("rownd-nodejs plugin", () => {
 
     const importMappedPort = importContainer.getMappedPort(3567);
     importCoreConnectionURI = `http://${importContainer.getHost()}:${importMappedPort}`;
+    const licenseResponse = await fetch(`${importCoreConnectionURI}/ee/license`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ licenseKey: ACCOUNT_LINKING_TEST_LICENSE }),
+    });
+    if (!licenseResponse.ok) {
+      throw new Error(
+        `Failed to enable account linking for import tests: ${licenseResponse.status} ${await licenseResponse.text()}`,
+      );
+    }
 
     container = await new GenericContainer("supertokens/supertokens-postgresql")
       .withExposedPorts(3567)
@@ -288,6 +302,9 @@ describe("rownd-nodejs plugin", () => {
           (method) => method.tenantIds?.[0] === "tenant-a",
         ),
       ).toBe(true);
+      expect(user.loginMethods.filter((method) => method.isPrimary)).toEqual([
+        user.loginMethods[0],
+      ]);
     });
 
     it("throws when the Rownd payload has no data object", () => {
@@ -1457,6 +1474,7 @@ describe("rownd-nodejs plugin", () => {
         status: "OK",
         user: signInUpResult.user,
       });
+
       const thirdPartyApis = (
         init(pluginConfig) as any
       ).overrideMap.thirdparty.apis({
@@ -1479,6 +1497,44 @@ describe("rownd-nodejs plugin", () => {
           "rownd:app_variants"
         ],
       ).toEqual(["variant_123"]);
+    });
+
+    it("adds the current app variant to new session claims", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        appConfig: { id: "app_xyz" },
+        subBrands: {
+          variant_123: {
+            id: "app_xyz",
+            variant: { id: "variant_123" },
+          },
+        },
+      };
+      const { server: s, port } = await setup(coreConnectionURI, pluginConfig);
+      server = s;
+      testPORT = port;
+
+      const signInUpResult = await Passwordless.signInUp({
+        email: "session-variant@example.com",
+        tenantId: "public",
+      });
+      const sessionFunctions = (init(pluginConfig) as any).overrideMap.session.functions({
+        createNewSession: vi.fn().mockImplementation(async (input) => input),
+      });
+
+      const session = await sessionFunctions.createNewSession({
+        userId: signInUpResult.user.id,
+        recipeUserId: signInUpResult.user.loginMethods[0].recipeUserId,
+        tenantId: "public",
+        accessTokenPayload: {},
+        userContext: { rowndAppVariantId: "variant_123" },
+      });
+
+      expect(session.accessTokenPayload.aud).toEqual([
+        "app:app_xyz",
+        "app_variant:variant_123",
+      ]);
     });
 
     it("rejects third-party sign in for unknown app variants", async () => {
@@ -1887,7 +1943,7 @@ describe("rownd-nodejs plugin", () => {
         expect(user?.loginMethods[0].thirdParty?.id).toBe("google");
       });
 
-      it("migrates and links a Rownd user when one of multiple login methods already exists", async () => {
+      it("migrates and links a Rownd user with multiple login methods", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
@@ -1895,18 +1951,6 @@ describe("rownd-nodejs plugin", () => {
         const email = "existing-google-plus-phone@example.com";
         const googleId = "google-existing-plus-phone";
         const phoneNumber = "+15555550123";
-
-        const existingGoogleUser = await ThirdParty.manuallyCreateOrUpdateUser(
-          "public",
-          "google",
-          googleId,
-          email,
-          true,
-        );
-        expect(existingGoogleUser.status).toBe("OK");
-        if (existingGoogleUser.status !== "OK") {
-          throw new Error("failed to create existing google user");
-        }
 
         mockRowndClient.validateToken.mockResolvedValue({
           user_id: rowndUserId,
@@ -2912,6 +2956,11 @@ describe("rownd-nodejs plugin", () => {
               name: "Variant App",
               variant: { id: "variant_123", name: "Variant App" },
             },
+            variant_456: {
+              id: "app_xyz",
+              name: "Other Variant App",
+              variant: { id: "variant_456", name: "Other Variant App" },
+            },
           },
         });
         server = s;
@@ -2928,6 +2977,10 @@ describe("rownd-nodejs plugin", () => {
         );
         await recordRowndAppVariantForUser(
           signInUpResult.user.id,
+          "variant_456",
+        );
+        await recordRowndAppVariantForUser(
+          signInUpResult.user.id,
           "variant_123",
         );
 
@@ -2936,7 +2989,7 @@ describe("rownd-nodejs plugin", () => {
           (metadata.metadata as any).original_rownd_user.attributes[
             "rownd:app_variants"
           ],
-        ).toEqual(["variant_123"]);
+        ).toEqual(["variant_123", "variant_456"]);
       });
 
       it("rejects unknown app variants", async () => {
@@ -3405,12 +3458,20 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("should create a guest user and a session with correct claims (default auth_level)", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: { id: "app_xyz" },
+          subBrands: {
+            variant_123: {
+              id: "app_xyz",
+              variant: { id: "variant_123" },
+            },
+          },
+        });
         server = s;
         testPORT = port;
 
         const res = await fetch(
-          `http://localhost:${testPORT}/auth/plugin/rownd/guest`,
+          `http://localhost:${testPORT}/auth/plugin/rownd/guest?app_variant_id=variant_123`,
           {
             method: "POST",
             headers: {
@@ -3453,10 +3514,21 @@ describe("rownd-nodejs plugin", () => {
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(true);
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(true);
         expect(accessTokenPayload["anonymous_id"]).toMatch(/^anon_/);
+        expect(accessTokenPayload.aud).toEqual([
+          "app:app_xyz",
+          "app_variant:variant_123",
+        ]);
         await expect(
           session?.getClaimValue(RowndIsAnonymousClaim),
         ).resolves.toBe(true);
         expect(accessTokenPayload["app_user_id"]).toBe(stUser?.id);
+
+        const metadata = await getUserMetadata(stUser!.id);
+        expect(
+          (metadata.metadata as any).original_rownd_user.attributes[
+            "rownd:app_variants"
+          ],
+        ).toEqual(["variant_123"]);
 
         const guestLogin = stUser?.loginMethods.find(
           (m) => m.recipeId === "thirdparty" && m.thirdParty?.id === "guest",

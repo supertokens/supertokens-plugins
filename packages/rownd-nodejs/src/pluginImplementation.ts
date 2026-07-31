@@ -197,6 +197,8 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
         );
       }
 
+      await recordRowndAppVariantForUser(response.user.id, appVariantId);
+
       await Session.createNewSession(
         req,
         res,

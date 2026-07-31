@@ -592,11 +592,16 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
             functions: (originalImplementation) => ({
               ...originalImplementation,
               createNewSession: async (input) => {
+                const appVariantId =
+                  typeof input.userContext.rowndAppVariantId === "string"
+                    ? input.userContext.rowndAppVariantId
+                    : undefined;
                 const [rowndSessionClaims, rowndIsAnonymousClaim] =
                   await Promise.all([
                     buildRowndSessionClaims(
                       input.userId,
                       input.accessTokenPayload,
+                      appVariantId,
                     ),
                     RowndIsAnonymousClaim.build(
                       input.userId,

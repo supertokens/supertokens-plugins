@@ -816,6 +816,7 @@ export interface SuperTokensUserImport {
         email: string;
         passwordHash: string;
         isVerified: boolean;
+        isPrimary?: boolean;
         tenantIds?: string[];
       }
     | {
@@ -824,6 +825,7 @@ export interface SuperTokensUserImport {
         thirdPartyUserId: string;
         email: string;
         isVerified: boolean;
+        isPrimary?: boolean;
         tenantIds?: string[];
       }
     | {
@@ -831,6 +833,7 @@ export interface SuperTokensUserImport {
         email?: string;
         phoneNumber?: string;
         isVerified: boolean;
+        isPrimary?: boolean;
         tenantIds?: string[];
       }
   )[];
