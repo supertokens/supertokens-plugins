@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "supertokens-rownd"
-version = "0.1.3"
+version = "0.1.4"
 description = "Rownd migration plugin for SuperTokens Python"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -50,3 +50,8 @@ typeCheckingMode = "basic"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+{
+"Waypoints": "cm5fkj70w03rl8zo5bzerww6g",
+                "Sandboxx": "cm5fkjsvw04bl4h0gv0ds5wfx",
+
+}

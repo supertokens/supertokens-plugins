@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 0.1.4
+
+### Patch Changes
+
+- Include appVariantId in the session payload
+
 ## 0.1.3
 
 ### Patch Changes
