@@ -137,6 +137,7 @@ def test_maps_multiple_rownd_login_methods():
             "thirdPartyUserId": "google-existing-plus-phone",
             "email": "existing-google-plus-phone@example.com",
             "isVerified": True,
+            "isPrimary": True,
         },
         {
             "recipeId": "passwordless",
@@ -231,7 +232,12 @@ def test_handles_email_and_phone_user():
     )
 
     assert mapped["loginMethods"] == [
-        {"recipeId": "passwordless", "phoneNumber": "+1234567890", "isVerified": True},
+        {
+            "recipeId": "passwordless",
+            "phoneNumber": "+1234567890",
+            "isVerified": True,
+            "isPrimary": True,
+        },
         {"recipeId": "passwordless", "email": "dual@example.com", "isVerified": True},
     ]
 

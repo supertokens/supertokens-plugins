@@ -6,7 +6,7 @@ import httpx
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
-from supertokens_python.asyncio import get_user
+from supertokens_python.asyncio import create_user_id_mapping, get_user
 from supertokens_python.recipe.accountlinking import asyncio as accountlinking_asyncio
 from supertokens_python.recipe.emailverification import asyncio as emailverification_asyncio
 from supertokens_python.recipe.passwordless import asyncio as passwordless_asyncio
@@ -281,6 +281,110 @@ async def test_migrate_google_user_successfully(core_url: str, rownd_client: Moc
     assert user.login_methods[0].recipe_id == "thirdparty"
     assert user.login_methods[0].third_party is not None
     assert user.login_methods[0].third_party.id == "google"
+
+
+async def test_migrate_links_missing_method_to_existing_user(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "py-existing-google-plus-phone"
+    email = "py-existing-google-plus-phone@example.com"
+    google_id = "py-google-existing-plus-phone"
+    phone_number = "+15555550123"
+    existing = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="google",
+        third_party_user_id=google_id,
+        email=email,
+        is_verified=True,
+        user_context={},
+    )
+    existing = cast(Any, existing)
+    await usermetadata_asyncio.update_user_metadata(
+        existing.user.id,
+        {"existing_metadata": "preserved"},
+    )
+    existing_metadata = await usermetadata_asyncio.get_user_metadata(existing.user.id)
+    assert existing_metadata.metadata["existing_metadata"] == "preserved"
+
+    res = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "data": {
+                "user_id": rownd_user_id,
+                "google_id": google_id,
+                "phone_number": phone_number,
+                "email": email,
+            },
+            "verified_data": {"google_id": True, "phone_number": True},
+        },
+    )
+
+    assert res.json() == {"status": "OK"}
+    user = await get_user(rownd_user_id)
+    assert user is not None
+    assert user.is_primary_user is True
+    assert user.id == rownd_user_id
+    assert len(user.login_methods) == 2
+    assert any(
+        method.third_party is not None
+        and method.third_party.id == "google"
+        and method.third_party.user_id == google_id
+        for method in user.login_methods
+    )
+    assert any(method.phone_number == phone_number for method in user.login_methods)
+    metadata = await usermetadata_asyncio.get_user_metadata(rownd_user_id)
+    assert metadata.metadata["existing_metadata"] == "preserved"
+    assert await get_user(existing.user.id) is not None
+
+
+async def test_migrate_does_not_modify_user_mapped_to_another_external_id(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "py-conflicting-mapping"
+    email = "py-conflicting-mapping@example.com"
+    google_id = "py-google-conflicting-mapping"
+    phone_number = "+15555550124"
+    existing = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="google",
+        third_party_user_id=google_id,
+        email=email,
+        is_verified=True,
+        user_context={},
+    )
+    existing = cast(Any, existing)
+    mapping = await create_user_id_mapping(
+        existing.user.id,
+        "another-rownd-user",
+        user_context={},
+    )
+    assert getattr(mapping, "status", "OK") == "OK"
+
+    res = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "data": {
+                "user_id": rownd_user_id,
+                "google_id": google_id,
+                "phone_number": phone_number,
+                "email": email,
+            },
+            "verified_data": {"google_id": True, "phone_number": True},
+        },
+    )
+
+    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    unchanged_user = await get_user(existing.user.id)
+    assert unchanged_user is not None
+    assert unchanged_user.is_primary_user is False
+    assert len(unchanged_user.login_methods) == 1
+    assert all(method.phone_number != phone_number for method in unchanged_user.login_methods)
 
 
 async def test_migrate_existing_user_does_not_duplicate(core_url: str, rownd_client: MockRowndClient):
@@ -1052,10 +1156,14 @@ async def test_app_config_returns_anonymous_guest_config(
 
 
 async def test_guest_login_creates_session_with_claims(core_url: str, rownd_client: MockRowndClient):
-    client = make_client(core_url, rownd_client)
+    client = make_client(
+        core_url,
+        rownd_client,
+        plugin_config={"sub_brands": {"variant_123": {"id": "app_xyz"}}},
+    )
 
     res = client.post(
-        "/auth/plugin/rownd/guest",
+        "/auth/plugin/rownd/guest?app_variant_id=variant_123",
         headers={"Content-Type": "application/json", **session_headers()},
         json={"auth_level": "guest"},
     )
@@ -1069,6 +1177,10 @@ async def test_guest_login_creates_session_with_claims(core_url: str, rownd_clie
     payload = st_session.get_access_token_payload()
     assert payload["auth_level"] == "guest"
     assert payload["is_anonymous"] is True
+    metadata = await usermetadata_asyncio.get_user_metadata(st_session.get_user_id())
+    assert metadata.metadata["original_rownd_user"]["attributes"]["rownd:app_variants"] == [
+        "variant_123"
+    ]
 
 
 async def test_guest_login_uses_instant_provider_for_instant_auth_level(

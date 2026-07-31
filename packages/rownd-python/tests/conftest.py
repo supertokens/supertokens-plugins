@@ -46,6 +46,12 @@ from supertokens_rownd import init as rownd_init
 from supertokens_rownd.types import RowndPluginConfig, RowndPluginError
 
 
+ACCOUNT_LINKING_TEST_LICENSE = (
+    "N2uEOdEzd1XZZ5VBSTGYaM7Ia4s8wAqRWFAxLqTYrB6GQ="
+    "vssOLo3c=PkFgcExkaXs=IA-d9UWccoNKsyUgNhOhcKtM1bjC5OLrYRpTAgN-2EbKYsQGGQRQHuUN4EO1V"
+)
+
+
 class MockRowndClient:
     def __init__(self) -> None:
         self.user_id = "rownd-user"
@@ -129,6 +135,12 @@ def core_url():
         while time.time() < deadline:
             try:
                 if httpx.get(url + "/hello", timeout=2.0).status_code == 200:
+                    license_response = httpx.put(
+                        url + "/ee/license",
+                        json={"licenseKey": ACCOUNT_LINKING_TEST_LICENSE},
+                        timeout=2.0,
+                    )
+                    license_response.raise_for_status()
                     yield url
                     return
             except Exception:
