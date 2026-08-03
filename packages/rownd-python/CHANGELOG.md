@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 0.1.5
+
+### Patch Changes
+
+- Fix default account linking setup
+
 ## 0.1.4
 
 ### Patch Changes
