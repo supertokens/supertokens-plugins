@@ -541,26 +541,52 @@ export async function shouldLinkRowndAccounts(
     >
   >,
 ) {
-  const [newAccountInfo, , session] = input;
+  const [newAccountInfo, existingUser, session, tenantId, userContext] = input;
 
-  if (!session) {
+  if (session) {
+    const currentUser = await SuperTokens.getUser(session.getUserId());
+
+    if (hasOnlyGuestLoginMethods(currentUser)) {
+      return {
+        shouldAutomaticallyLink: true,
+        shouldRequireVerification: false,
+      };
+    }
+
+    if (
+      currentUser &&
+      !isGuestAccountInfo(newAccountInfo) &&
+      doesAccountInfoMatchAuthMethod(currentUser, newAccountInfo, tenantId)
+    ) {
+      return {
+        shouldAutomaticallyLink: true,
+        shouldRequireVerification: true,
+      };
+    }
+
     return undefined;
   }
 
-  const currentUser = await SuperTokens.getUser(session.getUserId());
-
-  if (hasOnlyGuestLoginMethods(currentUser)) {
-    return {
-      shouldAutomaticallyLink: true,
-      shouldRequireVerification: false,
-    };
-  }
-
-  if (!currentUser || isGuestAccountInfo(newAccountInfo)) {
+  const email = newAccountInfo?.email;
+  if (!email || isGuestAccountInfo(newAccountInfo)) {
     return undefined;
   }
+  const accountInfo = { ...newAccountInfo, email };
 
-  if (doesAccountInfoMatchAuthMethod(currentUser, newAccountInfo)) {
+  const matchingUsers = existingUser
+    ? [existingUser]
+    : await SuperTokens.listUsersByAccountInfo(
+      tenantId,
+      { email },
+      true,
+      userContext,
+    );
+
+  if (
+    matchingUsers.some((user) =>
+      hasVerifiedMatchingEmailLoginMethod(user, accountInfo, tenantId),
+    )
+  ) {
     return {
       shouldAutomaticallyLink: true,
       shouldRequireVerification: true,
@@ -651,6 +677,7 @@ function doesAccountInfoMatchAuthMethod(
     phoneNumber?: string;
     thirdParty?: { id: string; userId: string };
   },
+  tenantId: string,
 ) {
   if (!user) {
     return false;
@@ -659,7 +686,12 @@ function doesAccountInfoMatchAuthMethod(
   const normalizedEmail = accountInfo.email?.toLowerCase();
   if (normalizedEmail) {
     return user.loginMethods.some((method) => {
-      if (isGuestLoginMethod(method) || !method.email) {
+      if (
+        isGuestLoginMethod(method) ||
+        !method.tenantIds.includes(tenantId) ||
+        !method.email ||
+        !method.verified
+      ) {
         return false;
       }
 
@@ -671,12 +703,65 @@ function doesAccountInfoMatchAuthMethod(
     return user.loginMethods.some((method) => {
       return (
         !isGuestLoginMethod(method) &&
+        method.tenantIds.includes(tenantId) &&
+        method.verified &&
         method.phoneNumber === accountInfo.phoneNumber
       );
     });
   }
 
   return false;
+}
+
+function hasVerifiedMatchingEmailLoginMethod(
+  user: NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>,
+  accountInfo: {
+    recipeId: string;
+    email: string;
+    thirdParty?: { id: string; userId: string };
+  },
+  tenantId: string,
+) {
+  const normalizedEmail = accountInfo.email.toLowerCase();
+  const thirdParty = accountInfo.thirdParty;
+
+  if (
+    accountInfo.recipeId === "thirdparty" &&
+    thirdParty &&
+    user.loginMethods.some(
+      (method) => {
+        const existingThirdParty = method.thirdParty;
+        return (
+          method.recipeId === "thirdparty" &&
+          method.tenantIds.includes(tenantId) &&
+          existingThirdParty?.id === thirdParty.id &&
+          existingThirdParty.userId !== thirdParty.userId
+        );
+      },
+    )
+  ) {
+    return false;
+  }
+
+  return user.loginMethods.some((method) => {
+    if (
+      isGuestLoginMethod(method) ||
+      !method.tenantIds.includes(tenantId) ||
+      !method.verified ||
+      method.email?.toLowerCase() !== normalizedEmail
+    ) {
+      return false;
+    }
+
+    if (method.recipeId !== accountInfo.recipeId) {
+      return true;
+    }
+
+    return (
+      method.recipeId === "thirdparty" &&
+      method.thirdParty?.id !== accountInfo.thirdParty?.id
+    );
+  });
 }
 
 function hasVerifiedRealLoginMethod(

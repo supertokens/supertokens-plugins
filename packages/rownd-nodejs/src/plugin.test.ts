@@ -191,9 +191,120 @@ describe("rownd-nodejs plugin", () => {
   });
 
   describe("shouldLinkRowndAccounts", () => {
-    it("does not enable account linking without a session", async () => {
+    it("does not enable account linking without account information", async () => {
       await expect(
         shouldLinkRowndAccounts([undefined, undefined, undefined] as any),
+      ).resolves.toBeUndefined();
+    });
+
+    it("links verified matching email methods without a session", async () => {
+      const { server: s, port } = await setup(importCoreConnectionURI);
+      server = s;
+      testPORT = port;
+      const email = `default-linking-${randomUUID()}@example.com`;
+      await Passwordless.signInUp({ tenantId: "public", email });
+
+      await expect(
+        shouldLinkRowndAccounts([
+          {
+            recipeId: "thirdparty",
+            email,
+            thirdParty: { id: "google", userId: "default-linking-google" },
+          },
+          undefined,
+          undefined,
+          "public",
+          {},
+        ] as any),
+      ).resolves.toEqual({
+        shouldAutomaticallyLink: true,
+        shouldRequireVerification: true,
+      });
+    });
+
+    it("does not link an unverified matching email method", async () => {
+      await expect(
+        shouldLinkRowndAccounts([
+          {
+            recipeId: "thirdparty",
+            email: "unverified-link-target@example.com",
+            thirdParty: { id: "google", userId: "unverified-google" },
+          },
+          {
+            loginMethods: [
+              {
+                recipeId: "passwordless",
+                email: "unverified-link-target@example.com",
+                verified: false,
+                tenantIds: ["public"],
+              },
+            ],
+          },
+          undefined,
+          "public",
+          {},
+        ] as any),
+      ).resolves.toBeUndefined();
+    });
+
+    it("does not link using a verified method from another tenant", async () => {
+      const email = "cross-tenant-link-target@example.com";
+
+      await expect(
+        shouldLinkRowndAccounts([
+          {
+            recipeId: "thirdparty",
+            email,
+            thirdParty: { id: "google", userId: "cross-tenant-google" },
+          },
+          {
+            loginMethods: [
+              {
+                recipeId: "passwordless",
+                email,
+                verified: true,
+                tenantIds: ["tenant-b"],
+              },
+            ],
+          },
+          undefined,
+          "tenant-a",
+          {},
+        ] as any),
+      ).resolves.toBeUndefined();
+    });
+
+    it("does not link a different identity from the same provider", async () => {
+      const email = "same-provider-link-target@example.com";
+
+      await expect(
+        shouldLinkRowndAccounts([
+          {
+            recipeId: "thirdparty",
+            email,
+            thirdParty: { id: "google", userId: "second-google-user" },
+          },
+          {
+            loginMethods: [
+              {
+                recipeId: "passwordless",
+                email,
+                verified: true,
+                tenantIds: ["public"],
+              },
+              {
+                recipeId: "thirdparty",
+                email,
+                verified: true,
+                tenantIds: ["public"],
+                thirdParty: { id: "google", userId: "first-google-user" },
+              },
+            ],
+          },
+          undefined,
+          "public",
+          {},
+        ] as any),
       ).resolves.toBeUndefined();
     });
 
@@ -257,6 +368,8 @@ describe("rownd-nodejs plugin", () => {
           },
           undefined,
           session,
+          "public",
+          {},
         ] as any),
       ).resolves.toEqual({
         shouldAutomaticallyLink: true,
@@ -272,6 +385,8 @@ describe("rownd-nodejs plugin", () => {
           },
           undefined,
           session,
+          "public",
+          {},
         ] as any),
       ).resolves.toBeUndefined();
     });
@@ -3769,13 +3884,58 @@ describe("rownd-nodejs plugin", () => {
         },
       );
 
+      it("links third-party login to an existing passwordless account with the same email", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const email = `linked-auth-methods-${randomUUID()}@example.com`;
+        const providerUserId = `google-${randomUUID()}`;
+        const passwordless = await createPasswordlessSessionForUser(email);
+
+        const linkingResult = await signInUpWithTestProvider({
+          providerId: "google",
+          providerUserId,
+          email,
+        });
+
+        expect(linkingResult.status).toBe("OK");
+        expect(linkingResult.user.id).toBe(passwordless.userId);
+
+        const linkedUser = await SuperTokens.getUser(passwordless.userId);
+        expect(linkedUser?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email,
+            }),
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              email,
+              thirdParty: {
+                id: "google",
+                userId: providerUserId,
+              },
+            }),
+          ]),
+        );
+
+        const subsequentThirdPartyLogin = await signInUpWithTestProvider({
+          providerId: "google",
+          providerUserId,
+          email,
+        });
+
+        expect(subsequentThirdPartyLogin.status).toBe("OK");
+        expect(subsequentThirdPartyLogin.user.id).toBe(passwordless.userId);
+      });
+
       it.each([
         { providerId: "google", field: "google_id" },
         { providerId: "apple", field: "apple_id" },
       ])(
         "includes $field from a $providerId login method linked after migration",
         async ({ providerId, field }) => {
-          const { server: s, port } = await setup(coreConnectionURI);
+          const { server: s, port } = await setup(importCoreConnectionURI);
           server = s;
           testPORT = port;
           const email = `${providerId}-linked-after-migration@example.com`;
@@ -3784,15 +3944,6 @@ describe("rownd-nodejs plugin", () => {
             email,
             tenantId: "public",
           });
-          const passwordlessSession =
-            await Session.createNewSessionWithoutRequestResponse(
-              "public",
-              passwordlessResult.recipeUserId,
-              {},
-              {},
-              true,
-            );
-
           await UserMetadata.updateUserMetadata(passwordlessResult.user.id, {
             original_rownd_user: {
               state: "enabled",
@@ -3812,8 +3963,6 @@ describe("rownd-nodejs plugin", () => {
             providerId,
             providerUserId,
             email,
-            sessionAccessToken: passwordlessSession.getAccessToken(),
-            shouldTryLinkingWithSessionUser: true,
           });
           expect(thirdPartyResult.status).toBe("OK");
           expect(thirdPartyResult.user.loginMethods).toEqual(
@@ -3825,14 +3974,13 @@ describe("rownd-nodejs plugin", () => {
               }),
             ]),
           );
-          const accessToken =
-            thirdPartyResult.accessToken ??
-            passwordlessSession.getAccessToken();
+          const accessToken = thirdPartyResult.accessToken;
+          expect(accessToken).toBeDefined();
 
           const res = await fetch(
             `http://localhost:${testPORT}/auth/plugin/rownd/user`,
             {
-              headers: getAuthedHeaders(accessToken),
+              headers: getAuthedHeaders(accessToken!),
             },
           );
 
@@ -3854,7 +4002,7 @@ describe("rownd-nodejs plugin", () => {
       ])(
         "includes linked $providerId id in verified_data for an imported Rownd user",
         async ({ providerId, field }) => {
-          const { server: s, port } = await setup(coreConnectionURI);
+          const { server: s, port } = await setup(importCoreConnectionURI);
           server = s;
           testPORT = port;
           const rowndUserId = `${providerId}-imported-linked-user`;
@@ -3866,15 +4014,6 @@ describe("rownd-nodejs plugin", () => {
             tenantId: "public",
           });
           const importedUser = passwordlessResult.user;
-          const passwordlessSession =
-            await Session.createNewSessionWithoutRequestResponse(
-              "public",
-              passwordlessResult.recipeUserId,
-              {},
-              {},
-              true,
-            );
-
           await UserMetadata.updateUserMetadata(importedUser.id, {
             original_rownd_user: {
               state: "enabled",
@@ -3906,8 +4045,6 @@ describe("rownd-nodejs plugin", () => {
             providerId,
             providerUserId,
             email,
-            sessionAccessToken: passwordlessSession.getAccessToken(),
-            shouldTryLinkingWithSessionUser: true,
           });
           expect(thirdPartyResult.status).toBe("OK");
           expect(thirdPartyResult.user.loginMethods).toEqual(
@@ -3926,14 +4063,13 @@ describe("rownd-nodejs plugin", () => {
           expect(
             (staleMetadata.metadata as any).original_rownd_user.verified_data,
           ).toEqual({ email: true });
-          const accessToken =
-            thirdPartyResult.accessToken ??
-            passwordlessSession.getAccessToken();
+          const accessToken = thirdPartyResult.accessToken;
+          expect(accessToken).toBeDefined();
 
           const res = await fetch(
             `http://localhost:${testPORT}/auth/plugin/rownd/user`,
             {
-              headers: getAuthedHeaders(accessToken),
+              headers: getAuthedHeaders(accessToken!),
             },
           );
 
@@ -5766,15 +5902,10 @@ describe("rownd-nodejs plugin", () => {
       providerId: string;
       providerUserId: string;
       email: string;
-      sessionAccessToken?: string;
-      shouldTryLinkingWithSessionUser?: boolean;
     }) {
       const res = await fetch(`http://localhost:${testPORT}/auth/signinup`, {
         method: "POST",
         headers: {
-          ...(input.sessionAccessToken
-            ? { Authorization: `Bearer ${input.sessionAccessToken}` }
-            : {}),
           rid: "thirdparty",
           "content-type": "application/json",
           "fdi-version": "3.1",
@@ -5787,8 +5918,6 @@ describe("rownd-nodejs plugin", () => {
             email: input.email,
             emailVerified: true,
           },
-          shouldTryLinkingWithSessionUser:
-            input.shouldTryLinkingWithSessionUser ?? false,
         }),
       });
       const body = await res.json();
@@ -5893,7 +6022,6 @@ async function setup(
           AccountLinking.init({
             shouldDoAutomaticAccountLinking: async () => ({
               shouldAutomaticallyLink: false,
-              shouldRequireVerification: false,
             }),
           }),
           Session.init(),
