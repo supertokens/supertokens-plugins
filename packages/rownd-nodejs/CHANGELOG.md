@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.6.4
+
+### Patch Changes
+
+- Fix default account linking
+
 ## 0.6.3
 
 ### Patch Changes
