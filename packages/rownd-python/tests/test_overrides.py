@@ -8,6 +8,7 @@ from supertokens_python.recipe.accountlinking.types import (
     AccountInfoWithRecipeId,
     ShouldNotAutomaticallyLink,
 )
+from supertokens_python.recipe.thirdparty.types import ThirdPartyInfo
 from supertokens_python.types import LoginMethod, User
 
 from supertokens_rownd import plugin
@@ -804,13 +805,108 @@ async def test_accountlinking_links_guest_session_without_verification(
     assert result.should_require_verification is False
 
 
-async def test_accountlinking_does_not_link_without_session():
+async def test_accountlinking_does_not_link_without_session(monkeypatch: pytest.MonkeyPatch):
+    async def list_users_by_account_info(*_args: Any, **_kwargs: Any):
+        return []
+
+    monkeypatch.setattr(
+        "supertokens_python.asyncio.list_users_by_account_info", list_users_by_account_info
+    )
     original_config = SimpleNamespace(should_do_automatic_account_linking=None)
     overridden = cast(Any, plugin._accountlinking_config_override()(cast(Any, original_config)))
 
     result = await overridden.should_do_automatic_account_linking(
         AccountInfoWithRecipeId(recipe_id="passwordless", email="user@example.com"),
         None,
+        None,
+        "public",
+        {},
+    )
+
+    assert isinstance(result, ShouldNotAutomaticallyLink)
+
+
+async def test_accountlinking_links_verified_matching_email_without_session():
+    original_config = SimpleNamespace(should_do_automatic_account_linking=None)
+    overridden = cast(Any, plugin._accountlinking_config_override()(cast(Any, original_config)))
+    email = "user@example.com"
+    existing_user = SimpleNamespace(
+        login_methods=[
+            SimpleNamespace(
+                recipe_id="passwordless",
+                email=email,
+                verified=True,
+                tenant_ids=["public"],
+                third_party=None,
+            )
+        ]
+    )
+
+    result = await overridden.should_do_automatic_account_linking(
+        AccountInfoWithRecipeId(
+            recipe_id="thirdparty",
+            email=email,
+            third_party=ThirdPartyInfo("google-user", "google"),
+        ),
+        existing_user,
+        None,
+        "public",
+        {},
+    )
+
+    assert result.should_require_verification is True
+
+
+@pytest.mark.parametrize(
+    "login_methods",
+    [
+        [
+            SimpleNamespace(
+                recipe_id="passwordless",
+                email="user@example.com",
+                verified=False,
+                tenant_ids=["public"],
+                third_party=None,
+            )
+        ],
+        [
+            SimpleNamespace(
+                recipe_id="passwordless",
+                email="user@example.com",
+                verified=True,
+                tenant_ids=["tenant-b"],
+                third_party=None,
+            )
+        ],
+        [
+            SimpleNamespace(
+                recipe_id="passwordless",
+                email="user@example.com",
+                verified=True,
+                tenant_ids=["public"],
+                third_party=None,
+            ),
+            SimpleNamespace(
+                recipe_id="thirdparty",
+                email="user@example.com",
+                verified=True,
+                tenant_ids=["public"],
+                third_party=SimpleNamespace(id="google", user_id="other-google-user"),
+            ),
+        ],
+    ],
+)
+async def test_accountlinking_rejects_unsafe_matching_email_methods(login_methods: list[Any]):
+    original_config = SimpleNamespace(should_do_automatic_account_linking=None)
+    overridden = cast(Any, plugin._accountlinking_config_override()(cast(Any, original_config)))
+
+    result = await overridden.should_do_automatic_account_linking(
+        AccountInfoWithRecipeId(
+            recipe_id="thirdparty",
+            email="user@example.com",
+            third_party=ThirdPartyInfo("google-user", "google"),
+        ),
+        SimpleNamespace(login_methods=login_methods),
         None,
         "public",
         {},
@@ -830,6 +926,8 @@ async def test_accountlinking_links_matching_real_session_with_verification(
                     email="user@example.com",
                     phone_number=None,
                     third_party=None,
+                    verified=True,
+                    tenant_ids=["public"],
                 )
             ]
         )

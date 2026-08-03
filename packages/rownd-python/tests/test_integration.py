@@ -6,7 +6,7 @@ import httpx
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
-from supertokens_python.asyncio import create_user_id_mapping, get_user
+from supertokens_python.asyncio import create_user_id_mapping, get_user, get_user_count
 from supertokens_python.recipe.accountlinking import asyncio as accountlinking_asyncio
 from supertokens_python.recipe.emailverification import asyncio as emailverification_asyncio
 from supertokens_python.recipe.passwordless import asyncio as passwordless_asyncio
@@ -1453,6 +1453,50 @@ async def test_get_user_includes_provider_id_for_linked_thirdparty_user(
     assert res.status_code == 200
     assert body["data"]["google_id"] == "google-linked-thirdparty-id"
     assert body["verified_data"]["google_id"] == "google-linked-thirdparty-id"
+
+
+async def test_verified_thirdparty_login_links_existing_passwordless_account(
+    core_url: str, rownd_client: MockRowndClient
+):
+    make_client(core_url, rownd_client)
+    email = "automatic-link-passwordless-thirdparty@example.com"
+    initial_count = await get_user_count(tenant_id="public")
+    passwordless = await passwordless_asyncio.signinup("public", email, None, None, {})
+
+    thirdparty = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="google",
+        third_party_user_id="automatic-link-google-user",
+        email=email,
+        is_verified=True,
+        user_context={},
+    )
+    assert getattr(thirdparty, "status", "OK") == "OK"
+    thirdparty = cast(Any, thirdparty)
+
+    assert thirdparty.user.id == passwordless.user.id
+    assert await get_user_count(tenant_id="public") == initial_count + 1
+    linked_user = await get_user(passwordless.user.id)
+    assert linked_user is not None
+    assert {method.recipe_id for method in linked_user.login_methods} == {
+        "passwordless",
+        "thirdparty",
+    }
+
+    later_login = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="google",
+        third_party_user_id="automatic-link-google-user",
+        email=email,
+        is_verified=True,
+        user_context={},
+    )
+    assert getattr(later_login, "status", "OK") == "OK"
+    later_login = cast(Any, later_login)
+
+    assert later_login.user.id == passwordless.user.id
+    assert later_login.recipe_user_id == thirdparty.recipe_user_id
+    assert await get_user_count(tenant_id="public") == initial_count + 1
 
 
 async def test_update_user_data_and_reject_app_owned_fields(

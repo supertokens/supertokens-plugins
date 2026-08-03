@@ -2029,20 +2029,69 @@ def is_guest_account_info(account_info: AccountInfoWithRecipeId) -> bool:
     ) in {GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID}
 
 
-def does_account_info_match_auth_method(user: User, account_info: AccountInfoWithRecipeId) -> bool:
+def does_account_info_match_auth_method(
+    user: User, account_info: AccountInfoWithRecipeId, tenant_id: str
+) -> bool:
     normalized_email = account_info.email.lower() if account_info.email else None
     if normalized_email:
         return any(
             not is_guest_login_method(method)
+            and tenant_id in method.tenant_ids
+            and method.verified
             and method.email
             and method.email.lower() == normalized_email
             for method in user.login_methods
         )
     if getattr(account_info, "phone_number", None):
         return any(
-            not is_guest_login_method(method) and method.phone_number == account_info.phone_number
+            not is_guest_login_method(method)
+            and tenant_id in method.tenant_ids
+            and method.verified
+            and method.phone_number == account_info.phone_number
             for method in user.login_methods
         )
+    return False
+
+
+def has_verified_matching_email_login_method(
+    user: User, account_info: AccountInfoWithRecipeId, tenant_id: str
+) -> bool:
+    if not account_info.email:
+        return False
+
+    incoming_third_party = getattr(account_info, "third_party", None)
+    if account_info.recipe_id == "thirdparty" and incoming_third_party is not None:
+        for method in user.login_methods:
+            existing_third_party = method.third_party
+            if (
+                method.recipe_id == "thirdparty"
+                and tenant_id in method.tenant_ids
+                and existing_third_party is not None
+                and existing_third_party.id == incoming_third_party.id
+                and existing_third_party.user_id != incoming_third_party.user_id
+            ):
+                return False
+
+    normalized_email = account_info.email.lower()
+    for method in user.login_methods:
+        if (
+            is_guest_login_method(method)
+            or tenant_id not in method.tenant_ids
+            or not method.verified
+            or not method.email
+            or method.email.lower() != normalized_email
+        ):
+            continue
+        if method.recipe_id != account_info.recipe_id:
+            return True
+        if method.recipe_id == "thirdparty":
+            existing_third_party = method.third_party
+            if (
+                existing_third_party is not None
+                and incoming_third_party is not None
+                and existing_third_party.id != incoming_third_party.id
+            ):
+                return True
     return False
 
 

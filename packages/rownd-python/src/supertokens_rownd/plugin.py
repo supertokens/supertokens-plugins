@@ -57,7 +57,7 @@ from supertokens_python.recipe.thirdparty.interfaces import (
 )
 from supertokens_python.recipe.thirdparty.provider import Provider, RedirectUriInfo
 from supertokens_python.types import RecipeUserId, User
-from supertokens_python.types.base import UserContext
+from supertokens_python.types.base import AccountInfoInput, UserContext
 from supertokens_python.types.recipe import BaseAPIInterface, BaseRecipeInterface
 
 from .constants import HANDLE_BASE_PATH, PLUGIN_ID, PLUGIN_SDK_VERSION, PLUGIN_VERSION
@@ -87,6 +87,7 @@ from .plugin_implementation import (
     handle_update_user_field,
     handle_update_user_meta,
     handle_validate_passwordless_confirmation_bypass,
+    has_verified_matching_email_login_method,
     has_only_guest_login_methods,
     is_guest_account_info,
     normalize_rownd_oauth_scopes,
@@ -907,15 +908,35 @@ def _accountlinking_config_override():
             tenant_id: str,
             user_context: UserContext,
         ):
-            if session_:
-                from supertokens_python.asyncio import get_user
+            from supertokens_python.asyncio import get_user, list_users_by_account_info
 
+            if session_:
                 current_user = await get_user(session_.get_user_id(), user_context)
                 if has_only_guest_login_methods(current_user):
                     return ShouldAutomaticallyLink(should_require_verification=False)
                 if current_user is not None and not is_guest_account_info(new_account_info):
-                    if does_account_info_match_auth_method(current_user, new_account_info):
+                    if does_account_info_match_auth_method(
+                        current_user, new_account_info, tenant_id
+                    ):
                         return ShouldAutomaticallyLink(should_require_verification=True)
+            elif new_account_info.email and not is_guest_account_info(new_account_info):
+                matching_users = (
+                    [user]
+                    if user is not None
+                    else await list_users_by_account_info(
+                        tenant_id,
+                        AccountInfoInput(email=new_account_info.email),
+                        True,
+                        user_context,
+                    )
+                )
+                if any(
+                    has_verified_matching_email_login_method(
+                        matching_user, new_account_info, tenant_id
+                    )
+                    for matching_user in matching_users
+                ):
+                    return ShouldAutomaticallyLink(should_require_verification=True)
 
             if original_should_link:
                 return await original_should_link(
