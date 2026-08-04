@@ -82,11 +82,19 @@ init(
                 # Should match InputAppInfo.website_domain when using passwordless confirmation bypass.
                 website_domain="https://example.com",
                 app_name="My App",
+                app_config={
+                    "auth": {
+                        "enforceSameDevicePasswordlessSignIn": True,
+                    }
+                },
             )
         ]
     ),
 )
 ```
+
+`app_config.auth.enforceSameDevicePasswordlessSignIn` controls the Hub UI policy for
+passwordless flows originating from `mobile_app`. It does not enforce server-side device binding.
 
 ## Routes
 
