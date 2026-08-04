@@ -394,6 +394,59 @@ def test_clear_supertokens_core_call_cache_handles_known_cache_keys():
     }
 
 
+@pytest.mark.parametrize(
+    ("input_auth", "expected"),
+    [
+        pytest.param({"enforceSameDevicePasswordlessSignIn": True}, True, id="enabled"),
+        pytest.param({"enforceSameDevicePasswordlessSignIn": False}, False, id="disabled"),
+        pytest.param({}, None, id="omitted"),
+    ],
+)
+def test_same_device_passwordless_policy_maps_to_hub_auth(input_auth: dict, expected: Any):
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        app_config={"auth": input_auth},
+    )
+
+    body = build_app_config(config, None)
+
+    assert body is not None
+    app = as_json_dict(body.get("app"))
+    app_config = as_json_dict(app.get("config"))
+    hub = as_json_dict(app_config.get("hub"))
+    hub_auth = as_json_dict(hub.get("auth"))
+    if expected is None:
+        assert "enforce_same_device_passwordless_sign_in" not in hub_auth
+    else:
+        assert hub_auth["enforce_same_device_passwordless_sign_in"] is expected
+    assert "enforce_same_device_passwordless_sign_in" not in as_json_dict(hub_auth.get("mobile"))
+
+
+def test_sub_brand_can_override_same_device_passwordless_policy_without_replacing_auth():
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        app_config={
+            "auth": {
+                "enforceSameDevicePasswordlessSignIn": True,
+                "rememberSignInMethod": True,
+            }
+        },
+        sub_brands={"variant_123": {"auth": {"enforceSameDevicePasswordlessSignIn": False}}},
+    )
+
+    body = build_app_config(config, "variant_123")
+
+    assert body is not None
+    app = as_json_dict(body.get("app"))
+    app_config = as_json_dict(app.get("config"))
+    hub = as_json_dict(app_config.get("hub"))
+    hub_auth = as_json_dict(hub.get("auth"))
+    assert hub_auth["enforce_same_device_passwordless_sign_in"] is False
+    assert hub_auth["remember_sign_in_method"] is True
+
+
 def test_google_sign_in_method_matches_node_config_shape():
     config = RowndPluginConfig(
         rownd_app_key="app-key",

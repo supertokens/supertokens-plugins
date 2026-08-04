@@ -2161,6 +2161,15 @@ def build_app_config(
             else {}
         ),
         **(
+            {
+                "enforce_same_device_passwordless_sign_in": auth[
+                    "enforceSameDevicePasswordlessSignIn"
+                ]
+            }
+            if "enforceSameDevicePasswordlessSignIn" in auth
+            else {}
+        ),
+        **(
             {"primary_sign_up_method": auth["primarySignUpMethod"]}
             if auth.get("primarySignUpMethod")
             else {}

@@ -969,6 +969,7 @@ async def test_app_config_returns_auth_mobile_verification_and_capabilities(
                 },
                 "auth": {
                     "allowUnverifiedUsers": True,
+                    "enforceSameDevicePasswordlessSignIn": True,
                     "email": {
                         "fromAddress": "Acme <login@acme.com>",
                         "image": "https://cdn.acme.com/email.png",
@@ -1001,6 +1002,7 @@ async def test_app_config_returns_auth_mobile_verification_and_capabilities(
         "com.acme.app"
     ]
     assert auth["allow_unverified_users"] is True
+    assert auth["enforce_same_device_passwordless_sign_in"] is True
     assert auth["email"] == {
         "from_address": "Acme <login@acme.com>",
         "image": "https://cdn.acme.com/email.png",
