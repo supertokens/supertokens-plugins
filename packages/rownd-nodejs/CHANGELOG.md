@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.6.5
+
+### Patch Changes
+
+- Add option to enforce passwordless sign in on the same device
+
 ## 0.6.4
 
 ### Patch Changes
