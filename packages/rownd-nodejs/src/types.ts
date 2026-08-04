@@ -294,6 +294,11 @@ export type RowndLegal = {
 
 export type RowndAuthConfig = {
   /**
+   * Requires passwordless sign-in to complete on the originating device for supported Hub UI flows.
+   * @default false
+   */
+  enforceSameDevicePasswordlessSignIn?: boolean;
+  /**
    * Whether the hub should preselect the user's previous sign-in method.
    * @default true
    */

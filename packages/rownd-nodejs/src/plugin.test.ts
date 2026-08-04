@@ -3014,6 +3014,40 @@ describe("rownd-nodejs plugin", () => {
         expect(body.app.config.hub.auth.order).toEqual(authOrder);
       });
 
+      it.each([
+        {
+          description: "true",
+          auth: { enforceSameDevicePasswordlessSignIn: true },
+          expectedValue: true,
+        },
+        {
+          description: "false",
+          auth: { enforceSameDevicePasswordlessSignIn: false },
+          expectedValue: false,
+        },
+        { description: "omitted", auth: {}, expectedValue: undefined },
+      ])(
+        "maps enforceSameDevicePasswordlessSignIn when $description",
+        async ({ auth, expectedValue }) => {
+          const { server: s, port } = await setup(coreConnectionURI, {
+            appConfig: {
+              auth,
+            },
+          });
+          server = s;
+          testPORT = port;
+
+          const res = await fetch(
+            `http://localhost:${testPORT}/auth/plugin/rownd/app-config`,
+          );
+          const body = await res.json();
+
+          expect(
+            body.app.config.hub.auth.enforce_same_device_passwordless_sign_in,
+          ).toBe(expectedValue);
+        },
+      );
+
       it("returns branding fields from plugin config", async () => {
         const { server: s, port } = await setup(coreConnectionURI, {
           appConfig: {

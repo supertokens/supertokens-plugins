@@ -100,6 +100,22 @@ RowndMigrationPlugin.init({
 });
 ```
 
+### Same-device Passwordless Hub Policy
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  appConfig: {
+    auth: {
+      enforceSameDevicePasswordlessSignIn: true,
+    },
+  },
+});
+```
+
+This is a supported Hub UI policy scoped by the Hub to passwordless flows originating from `mobile_app`. It is not server-side device binding.
+
 ### Passwordless Confirmation Bypass
 
 Use `createMagicLinkWithConfirmationBypass` when your backend needs to create a passwordless magic link that can be opened on a different device without showing the SuperTokens cross-device confirmation prompt.

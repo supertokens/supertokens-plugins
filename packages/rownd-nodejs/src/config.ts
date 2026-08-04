@@ -406,6 +406,12 @@ export function buildRowndAppConfig(
             ...(auth.mobile ? { mobile: buildAuthMobileConfig(auth.mobile) } : {}),
             sign_in_methods: signInMethods,
             additional_fields: auth.additionalFields ?? [],
+            ...(auth.enforceSameDevicePasswordlessSignIn !== undefined
+              ? {
+                enforce_same_device_passwordless_sign_in:
+                    auth.enforceSameDevicePasswordlessSignIn,
+              }
+              : {}),
             ...(auth.rememberSignInMethod !== undefined
               ? { remember_sign_in_method: auth.rememberSignInMethod }
               : {}),
