@@ -12,6 +12,7 @@ import {
   ROWND_JWT_CLAIMS,
 } from "./constants";
 import { getPluginConfig } from "./config";
+import { MIGRATION_ORIGIN_SESSION_DATA_KEY } from "./internal-constants";
 import type {
   RowndUser,
   RowndUserMetadata,
@@ -30,6 +31,16 @@ export type RowndPendingVerification = {
   value: string;
   created_at: string;
   tenantId?: string;
+  normalizedValue?: string;
+  purpose?: "UPDATE_PASSWORDLESS" | "ADD_PASSWORDLESS" | "UPGRADE_GUEST";
+  primaryUserId?: string;
+  initiatingRecipeUserId?: string;
+  initiatingSessionHandle?: string;
+  verificationRecipeUserId?: string;
+  passwordlessRecipeUserId?: string;
+  tenantIds?: string[];
+  expires_at?: string;
+  status?: "PENDING" | "VERIFIED" | "COMMITTING" | "CONFLICT";
 };
 
 export type RowndCompatUserResponse = {
@@ -57,6 +68,8 @@ const IDENTITY_USER_DATA_FIELDS = new Set([
 
 const INTERNAL_METADATA_FIELDS = new Set([
   "original_rownd_user",
+  "rownd_email_recipe_user_id",
+  "rownd_migration_complete",
   "rownd_pending_verification",
 ]);
 
@@ -101,31 +114,23 @@ export function mapRowndUserToSuperTokens(
   }
 
   if (rowndUserData.google_id) {
-    const googleEmail =
-      rowndUserData.email ??
-      buildSuperTokensFakeEmail(rowndUserData.google_id, "google");
-
     loginMethods.push({
       recipeId: "thirdparty",
       thirdPartyId: "google",
       thirdPartyUserId: rowndUserData.google_id,
-      email: googleEmail,
-      isVerified: !!rowndUserData.email && !!rowndUserVerifiedData.google_id,
+      email: buildSuperTokensFakeEmail(rowndUserData.google_id, "google"),
+      isVerified: false,
       ...(tenantId ? { tenantIds: [tenantId] } : {}),
     });
   }
 
   if (rowndUserData.apple_id) {
-    const appleEmail =
-      rowndUserData.email ??
-      buildSuperTokensFakeEmail(rowndUserData.apple_id, "apple");
-
     loginMethods.push({
       recipeId: "thirdparty",
       thirdPartyId: "apple",
       thirdPartyUserId: rowndUserData.apple_id,
-      email: appleEmail,
-      isVerified: !!rowndUserData.email && !!rowndUserVerifiedData.apple_id,
+      email: buildSuperTokensFakeEmail(rowndUserData.apple_id, "apple"),
+      isVerified: false,
       ...(tenantId ? { tenantIds: [tenantId] } : {}),
     });
   }
@@ -139,13 +144,7 @@ export function mapRowndUserToSuperTokens(
     });
   }
 
-  // Only add passwordless email if no thirdparty methods exist,
-  // as thirdparty methods already include the email.
-  if (
-    rowndUserData.email &&
-    !rowndUserData.google_id &&
-    !rowndUserData.apple_id
-  ) {
+  if (rowndUserData.email) {
     loginMethods.push({
       recipeId: "passwordless",
       email: rowndUserData.email,
@@ -188,6 +187,7 @@ export function buildRowndUserMetadata(rowndUser: RowndUser): JSONObject {
   const metadata: JsonRecord = {
     ...((rowndUser.meta || {}) as JsonRecord),
     original_rownd_user: rowndUser as unknown as JsonValue,
+    rownd_migration_complete: true,
   };
 
   for (const [key, value] of Object.entries(rowndUser.data || {})) {
@@ -230,9 +230,14 @@ export function buildConfiguredSessionClaims(metadata?: RowndMetadata): JsonReco
       continue;
     }
 
+    const claimName = field.session_claim_name || key;
+    if (claimName === MIGRATION_ORIGIN_SESSION_DATA_KEY) {
+      continue;
+    }
+
     const value = metadata.original_rownd_user?.data?.[key] ?? metadata[key];
     if (value !== undefined) {
-      claims[field.session_claim_name || key] = value as JsonValue;
+      claims[claimName] = value as JsonValue;
     }
   }
 

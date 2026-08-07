@@ -39,6 +39,16 @@ export function assertRowndAppVariantIsConfigured(appVariantId?: string) {
   }
 }
 
+export function isEmailSignInEnabled(
+  config: RowndPluginNormalisedConfig,
+  appVariantId?: string,
+) {
+  const methods = appVariantId && config.subBrands?.[appVariantId]?.signInMethods
+    ? config.subBrands[appVariantId].signInMethods
+    : config.appConfig?.signInMethods;
+  return methods?.some((method) => method.method === "email") === true;
+}
+
 const BUILTIN_SIGN_IN_METHOD_KEYS = [
   "email",
   "phone",

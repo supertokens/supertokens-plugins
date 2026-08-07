@@ -27,9 +27,11 @@ import { enableDebugLogs, logDebugMessage } from "./logger";
 import { createClient } from "./telemetry/createTelemetryClient";
 import {
   assertRowndAppVariantIsConfigured,
+  isEmailSignInEnabled,
   setPluginConfig,
   setSuperTokensConfig,
 } from "./config";
+import { RowndEmailChangeError } from "./errors";
 import {
   applyRowndOAuthResourceParams,
   buildRowndOAuthPayload,
@@ -99,6 +101,7 @@ function applyRowndPasswordlessRequestContext(
 
 const verifyRowndUserSessionOptions: VerifySessionOptions = {
   sessionRequired: true,
+  checkDatabase: true,
   overrideGlobalClaimValidators: (validators) =>
     validators.filter((validator) => {
       return (
@@ -106,6 +109,11 @@ const verifyRowndUserSessionOptions: VerifySessionOptions = {
         validator.claim.key !== EmailVerificationClaim.key
       );
     }),
+};
+
+const verifyRowndUserWriteSessionOptions: VerifySessionOptions = {
+  ...verifyRowndUserSessionOptions,
+  checkDatabase: true,
 };
 
 export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
@@ -215,6 +223,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               "RowndMigrationPlugin: EmailVerification recipe is not initialized. Verified email profile updates will fail.",
             );
           }
+          if (
+            isEmailSignInEnabled(pluginConfig) &&
+            !supertokens.isRecipeInitialized("passwordless")
+          ) {
+            console.warn(
+              "RowndMigrationPlugin: Passwordless recipe is not initialized. Email profile updates will fail.",
+            );
+          }
         },
         routeHandlers(stConfig) {
           setSuperTokensConfig(stConfig);
@@ -294,25 +310,34 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user`,
                 method: "put" as const,
-                verifySessionOptions: verifyRowndUserSessionOptions,
-                handler: withRequestHandler(handleUpdateUser()),
+                verifySessionOptions: verifyRowndUserWriteSessionOptions,
+                handler: withRequestHandler(handleUpdateUser(routeHandlerDeps)),
               },
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user`,
                 method: "delete" as const,
-                verifySessionOptions: { sessionRequired: true },
+                verifySessionOptions: {
+                  sessionRequired: true,
+                  checkDatabase: true,
+                },
                 handler: withRequestHandler(handleDeleteUser()),
               },
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user/meta`,
                 method: "get" as const,
-                verifySessionOptions: { sessionRequired: true },
+                verifySessionOptions: {
+                  sessionRequired: true,
+                  checkDatabase: true,
+                },
                 handler: withRequestHandler(handleGetUserMeta()),
               },
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user/meta`,
                 method: "put" as const,
-                verifySessionOptions: { sessionRequired: true },
+                verifySessionOptions: {
+                  sessionRequired: true,
+                  checkDatabase: true,
+                },
                 handler: withRequestHandler(handleUpdateUserMeta()),
               },
               {
@@ -324,8 +349,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user/field`,
                 method: "put" as const,
-                verifySessionOptions: verifyRowndUserSessionOptions,
-                handler: withRequestHandler(handleUpdateUserField()),
+                verifySessionOptions: verifyRowndUserWriteSessionOptions,
+                handler: withRequestHandler(handleUpdateUserField(routeHandlerDeps)),
               },
             ],
           };
@@ -569,6 +594,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               return {
                 ...config,
                 shouldDoAutomaticAccountLinking: async (...input) => {
+                  if (
+                    input[4]?.rowndDisableAutomaticAccountLinking === true
+                  ) {
+                    return {
+                      shouldAutomaticallyLink: false,
+                      shouldRequireVerification: false,
+                    };
+                  }
                   const rowndLinkingDecision =
                     await shouldLinkRowndAccounts(input);
                   if (rowndLinkingDecision) {
@@ -671,27 +704,33 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const response =
                   await originalImplementation.verifyEmailPOST(input);
                 if (response.status === "OK") {
-                  const verificationResult =
-                    await completePendingEmailVerification({
+                  let verificationResult;
+                  try {
+                    verificationResult = await completePendingEmailVerification({
                       recipeUserId: response.user.recipeUserId,
                       email: response.user.email,
                       tenantId: input.tenantId,
+                      sessionHandle: input.session?.getHandle(),
                       userContext: input.userContext,
                     });
+                  } catch (error) {
+                    if (error instanceof RowndEmailChangeError) {
+                      return {
+                        status: "GENERAL_ERROR" as const,
+                        message: error.message,
+                      };
+                    }
+                    throw error;
+                  }
 
                   const session = input.session;
                   const shouldReplaceSession =
                     session &&
                     verificationResult &&
-                    (session.getUserId(input.userContext) !==
-                      verificationResult.userId ||
-                      session
-                        .getRecipeUserId(input.userContext)
-                        .getAsString() !==
-                        verificationResult.recipeUserId.getAsString());
+                    session.getHandle() ===
+                      verificationResult.initiatingSessionHandle;
 
-                  if (shouldReplaceSession) {
-                    await session.revokeSession(input.userContext);
+                  if (shouldReplaceSession && verificationResult) {
                     response.newSession = await Session.createNewSession(
                       input.options.req,
                       input.options.res,
@@ -743,6 +782,15 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           );
         }
       }
+      if (
+        config.emailChange?.maxSessionAgeSeconds !== undefined &&
+        (!Number.isFinite(config.emailChange.maxSessionAgeSeconds) ||
+          config.emailChange.maxSessionAgeSeconds <= 0)
+      ) {
+        throw new Error(
+          "emailChange.maxSessionAgeSeconds must be a positive number",
+        );
+      }
       for (const [key, value] of Object.entries(config.clientDomains ?? {})) {
         validateClientDomainUrl(key, value);
       }
@@ -757,6 +805,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         schema: config.schema,
         appConfig: config.appConfig,
         subBrands: config.subBrands,
+        emailChange: {
+          maxSessionAgeSeconds: config.emailChange?.maxSessionAgeSeconds ?? 600,
+        },
       };
     },
   );

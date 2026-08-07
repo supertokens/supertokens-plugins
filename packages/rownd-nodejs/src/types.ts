@@ -710,6 +710,15 @@ export interface RowndPluginConfig {
   appConfig?: RowndAppConfigInput;
   // Optional sub-brand/app-variant app configs keyed by Rownd application variant ID.
   subBrands?: Record<string, RowndSubBrandConfigInput>;
+  emailChange?: {
+    /**
+     * Positive, finite maximum age in seconds for a native SuperTokens session
+     * to initiate a verified sign-in email change. Migration-originated, guest,
+     * and instant sessions cannot use the profile email-change flow.
+     * @default 600
+     */
+    maxSessionAgeSeconds?: number;
+  };
 }
 
 export type RowndClientDomains = {
@@ -781,12 +790,24 @@ export type RowndUser = JSONObject & {
 
 export type RowndUserMetadata = {
   original_rownd_user?: RowndUser;
+  rownd_email_recipe_user_id?: string;
+  rownd_migration_complete?: boolean;
   rownd_pending_verification?: Array<{
     id: string;
     field: string;
     value: string;
     created_at: string;
     tenantId?: string;
+    normalizedValue?: string;
+    purpose?: "UPDATE_PASSWORDLESS" | "ADD_PASSWORDLESS" | "UPGRADE_GUEST";
+    primaryUserId?: string;
+    initiatingRecipeUserId?: string;
+    initiatingSessionHandle?: string;
+    verificationRecipeUserId?: string;
+    passwordlessRecipeUserId?: string;
+    tenantIds?: string[];
+    expires_at?: string;
+    status?: "PENDING" | "VERIFIED" | "COMMITTING" | "CONFLICT";
   }>;
   [key: string]: unknown;
 };
@@ -809,6 +830,9 @@ export interface RowndPluginNormalisedConfig {
   schema?: RowndSchema;
   appConfig?: RowndAppConfigInput;
   subBrands?: Record<string, RowndSubBrandConfigInput>;
+  emailChange: {
+    maxSessionAgeSeconds: number;
+  };
 }
 
 export interface SuperTokensUserImport {

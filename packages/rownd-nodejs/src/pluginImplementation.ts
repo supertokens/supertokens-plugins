@@ -13,17 +13,20 @@ import {
   INSTANT_AUTH_METHOD_ID,
   PUBLIC_TENANT_ID,
 } from "./constants";
-import { RowndPluginError } from "./errors";
+import { RowndEmailChangeError, RowndPluginError } from "./errors";
+import { MIGRATION_ORIGIN_SESSION_DATA_KEY } from "./internal-constants";
 import { logDebugMessage } from "./logger";
 import type { RowndPluginNormalisedConfig } from "./types";
 import { createClient } from "./telemetry/createTelemetryClient";
 import {
   assertRowndAppVariantIsConfigured,
   buildRowndAppConfig,
+  isEmailSignInEnabled,
 } from "./config";
 import {
   buildRowndAudience,
   canUpdateUserDataField,
+  hasOnlyGuestLoginMethods,
   isInternalMetadataField,
   mapRowndUserToSuperTokens,
 } from "./rownd-compatibility";
@@ -279,8 +282,11 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       }
 
       user = await SuperTokens.getUser(rowndUserId, userContext);
+      const existingMetadata = user
+        ? await getUserMetadata(user.id)
+        : undefined;
 
-      if (!user) {
+      if (!user || existingMetadata?.rownd_migration_complete !== true) {
         const stUserImport = mapRowndUserToSuperTokens(
           rowndUser,
           tenantId === PUBLIC_TENANT_ID ? undefined : tenantId,
@@ -292,6 +298,9 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
           userContext,
         );
         if (!reconciled) {
+          if (user) {
+            throw new Error("Incomplete migrated user could not be reconciled");
+          }
           await importUser(stUserImport, deps.stConfig.supertokens);
         }
         clearSuperTokensCoreCallCache(userContext);
@@ -326,15 +335,36 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         throw new Error("User not found or has no login methods");
       }
 
-      if (!tenantLoginMethod) {
-        const associationResult = await MultiTenancy.associateUserToTenant(
-          tenantId,
-          recipeUserId,
-          userContext,
-        );
-        if (associationResult.status !== "OK") {
-          throw new Error(`Failed to associate migrated user with tenant: ${associationResult.status}`);
+      const newlyAssociatedRecipeUserIds = [];
+      try {
+        for (const loginMethod of user?.loginMethods ?? []) {
+          if (loginMethod.tenantIds.includes(tenantId)) continue;
+
+          const associationResult = await MultiTenancy.associateUserToTenant(
+            tenantId,
+            loginMethod.recipeUserId,
+            userContext,
+          );
+          if (associationResult.status !== "OK") {
+            throw new Error(
+              `Failed to associate migrated user with tenant: ${associationResult.status}`,
+            );
+          }
+          if (!associationResult.wasAlreadyAssociated) {
+            newlyAssociatedRecipeUserIds.push(loginMethod.recipeUserId);
+          }
         }
+      } catch (error) {
+        await Promise.all(
+          newlyAssociatedRecipeUserIds.map((associatedRecipeUserId) =>
+            MultiTenancy.disassociateUserFromTenant(
+              tenantId!,
+              associatedRecipeUserId,
+              userContext,
+            ),
+          ),
+        );
+        throw error;
       }
 
       await Session.createNewSession(
@@ -345,7 +375,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         {
           ...buildRowndAudience({}, appVariantId),
         },
-        {},
+        { [MIGRATION_ORIGIN_SESSION_DATA_KEY]: true },
         userContext,
       );
 
@@ -403,7 +433,7 @@ export function handleGetUser() {
   };
 }
 
-export function handleUpdateUser() {
+export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
   return async (
     req: SuperTokensRequest,
     _res: SuperTokensResponse,
@@ -419,8 +449,15 @@ export function handleUpdateUser() {
       ...payload.context,
     };
     const { email, ...dataWithoutEmail } = inputData;
-    const hasEmailUpdate =
-      hasOwn(inputData, "email") && typeof email === "string";
+    const hasEmailField = hasOwn(inputData, "email");
+    if (hasEmailField && (typeof email !== "string" || email.trim().length === 0)) {
+      return {
+        status: "ERROR" as const,
+        code: 400,
+        message: "email must be a non-empty string",
+      };
+    }
+    const hasEmailUpdate = hasEmailField && typeof email === "string";
     const permissionError = validateWritableFields(
       Object.keys(dataWithoutEmail),
     );
@@ -429,29 +466,65 @@ export function handleUpdateUser() {
       return permissionError;
     }
 
+    const currentEmail = hasEmailUpdate
+      ? (await getUserById(session!.getUserId(), session!.getTenantId())).data.email
+      : undefined;
+    const changesEmail = hasEmailUpdate &&
+      (typeof currentEmail !== "string" ||
+        currentEmail.trim().toLowerCase() !== email.trim().toLowerCase());
+
+    if (changesEmail) {
+      const sessionError = await validateEmailChangeSession(
+        deps,
+        session!,
+        appVariantId,
+        requestUserContext,
+      );
+      if (sessionError) return sessionError;
+    }
+
+    if (hasEmailUpdate) {
+      try {
+        const pendingVerificationResult = await startPendingEmailVerification({
+          userId: session!.getUserId(),
+          recipeUserId: session!.getRecipeUserId(),
+          initiatingSessionHandle: session!.getHandle(),
+          tenantId: session!.getTenantId(),
+          email,
+          pendingVerificationId: randomUUID(),
+          userContext: appVariantId
+            ? { ...requestUserContext, rowndAppVariantId: appVariantId }
+            : requestUserContext,
+        });
+        const updateResult = Object.keys(dataWithoutEmail).length > 0
+          ? await updateUserData(
+            session!.getUserId(),
+            dataWithoutEmail,
+            session!.getTenantId(),
+          )
+          : pendingVerificationResult;
+        return {
+          status: "OK" as const,
+          ...updateResult,
+        };
+      } catch (error) {
+        if (error instanceof RowndEmailChangeError) {
+          return {
+            status: "ERROR" as const,
+            code: error.httpStatus,
+            message: error.message,
+          };
+        }
+        throw error;
+      }
+    }
+
     if (Object.keys(dataWithoutEmail).length > 0) {
       await updateUserData(
         session!.getUserId(),
         dataWithoutEmail,
         session!.getTenantId(),
       );
-    }
-
-    if (hasEmailUpdate) {
-      const pendingVerificationResult = await startPendingEmailVerification({
-        userId: session!.getUserId(),
-        recipeUserId: session!.getRecipeUserId(),
-        tenantId: session!.getTenantId(),
-        email,
-        pendingVerificationId: randomUUID(),
-        userContext: appVariantId
-          ? { ...requestUserContext, rowndAppVariantId: appVariantId }
-          : requestUserContext,
-      });
-      return {
-        status: "OK" as const,
-        ...pendingVerificationResult,
-      };
     }
 
     const user = await getUserById(session!.getUserId(), session!.getTenantId());
@@ -559,7 +632,7 @@ export function handleGetUserField() {
   };
 }
 
-export function handleUpdateUserField() {
+export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
   return async (
     req: SuperTokensRequest,
     _res: SuperTokensResponse,
@@ -574,21 +647,58 @@ export function handleUpdateUserField() {
     }
 
     const payload = parseUpdateFieldBody(await getJsonBody(req));
-    if (field === "email" && typeof payload.value === "string") {
-      const pendingVerificationResult = await startPendingEmailVerification({
-        userId: session!.getUserId(),
-        recipeUserId: session!.getRecipeUserId(),
-        tenantId: session!.getTenantId(),
-        email: payload.value,
-        pendingVerificationId: randomUUID(),
-        userContext: appVariantId
-          ? { ...userContext, rowndAppVariantId: appVariantId }
-          : userContext,
-      });
-      return {
-        status: "OK" as const,
-        ...pendingVerificationResult,
-      };
+    if (field === "email") {
+      if (typeof payload.value !== "string" || payload.value.trim().length === 0) {
+        return {
+          status: "ERROR" as const,
+          code: 400,
+          message: "email must be a non-empty string",
+        };
+      }
+
+      const currentEmail = (
+        await getUserById(session!.getUserId(), session!.getTenantId())
+      ).data.email;
+      const changesEmail =
+        typeof currentEmail !== "string" ||
+        currentEmail.trim().toLowerCase() !==
+          payload.value.trim().toLowerCase();
+      if (changesEmail) {
+        const sessionError = await validateEmailChangeSession(
+          deps,
+          session!,
+          appVariantId,
+          userContext,
+        );
+        if (sessionError) return sessionError;
+      }
+
+      try {
+        const pendingVerificationResult = await startPendingEmailVerification({
+          userId: session!.getUserId(),
+          recipeUserId: session!.getRecipeUserId(),
+          initiatingSessionHandle: session!.getHandle(),
+          tenantId: session!.getTenantId(),
+          email: payload.value,
+          pendingVerificationId: randomUUID(),
+          userContext: appVariantId
+            ? { ...userContext, rowndAppVariantId: appVariantId }
+            : userContext,
+        });
+        return {
+          status: "OK" as const,
+          ...pendingVerificationResult,
+        };
+      } catch (error) {
+        if (error instanceof RowndEmailChangeError) {
+          return {
+            status: "ERROR" as const,
+            code: error.httpStatus,
+            message: error.message,
+          };
+        }
+        throw error;
+      }
     }
 
     const permissionError = validateWritableFields([field]);
@@ -605,6 +715,64 @@ export function handleUpdateUserField() {
       status: "OK" as const,
       ...updateUserDataResult,
     };
+  };
+}
+
+async function validateEmailChangeSession(
+  deps: RowndRouteHandlerDeps,
+  session: NonNullable<SuperTokensSession>,
+  appVariantId: string | undefined,
+  userContext: SuperTokensUserContext,
+) {
+  if (!isEmailSignInEnabled(deps.pluginConfig, appVariantId)) {
+    return {
+      status: "ERROR" as const,
+      code: 403,
+      message: "email sign-in is not enabled",
+    };
+  }
+  if (
+    !SuperTokens.isRecipeInitialized("passwordless") ||
+    !SuperTokens.isRecipeInitialized("emailverification")
+  ) {
+    return {
+      status: "ERROR" as const,
+      code: 503,
+      message: "email sign-in is not available",
+    };
+  }
+
+  const user = await SuperTokens.getUser(session.getUserId(userContext), userContext);
+  if (hasOnlyGuestLoginMethods(user)) {
+    return {
+      status: "ERROR" as const,
+      code: 403,
+      message: "guest accounts cannot change sign-in email",
+    };
+  }
+
+  const sessionData = await session.getSessionDataFromDatabase(userContext);
+  const isMigrationOriginated =
+    isRecord(sessionData) &&
+    sessionData[MIGRATION_ORIGIN_SESSION_DATA_KEY] === true;
+  if (isMigrationOriginated) {
+    return recentAuthenticationRequiredResponse();
+  }
+
+  const authenticationTime = await session.getTimeCreated(userContext);
+  const sessionAgeMs = Date.now() - authenticationTime;
+  if (sessionAgeMs > deps.pluginConfig.emailChange.maxSessionAgeSeconds * 1000) {
+    return recentAuthenticationRequiredResponse();
+  }
+
+  return undefined;
+}
+
+function recentAuthenticationRequiredResponse() {
+  return {
+    status: "ERROR" as const,
+    code: 403,
+    message: "recent authentication is required to change email",
   };
 }
 

@@ -42,6 +42,7 @@ import { init } from "./plugin";
 import { RowndPluginConfig, RowndTelemetryClient } from "./types";
 import { ROWND_PLUGIN_ERROR_MESSAGES } from "./errors";
 import { DEFAULT_ROWND_SCHEMA, ROWND_JWT_CLAIMS } from "./constants";
+import { MIGRATION_ORIGIN_SESSION_DATA_KEY } from "./internal-constants";
 import {
   buildRowndOAuthPayload,
   mapRowndUserToSuperTokens,
@@ -467,6 +468,7 @@ describe("rownd-nodejs plugin", () => {
             },
           ],
           userMetadata: {
+            rownd_migration_complete: true,
             original_rownd_user: {
               data: {
                 user_id: rowndUserId,
@@ -519,6 +521,7 @@ describe("rownd-nodejs plugin", () => {
           },
         ],
         userMetadata: {
+          rownd_migration_complete: true,
           original_rownd_user: {
             data: {
               user_id: "rownd-missing-verified-data",
@@ -548,6 +551,7 @@ describe("rownd-nodejs plugin", () => {
           },
         ],
         userMetadata: {
+          rownd_migration_complete: true,
           original_rownd_user: {
             data: {
               user_id: "rownd-metadata-fallback",
@@ -581,6 +585,7 @@ describe("rownd-nodejs plugin", () => {
           },
         ],
         userMetadata: {
+          rownd_migration_complete: true,
           original_rownd_user: {
             data: {
               user_id: "rownd-variant-user",
@@ -1762,16 +1767,26 @@ describe("rownd-nodejs plugin", () => {
         const recipeUserId = {
           getAsString: () => "migration-recipe-user",
         } as any;
+        const secondRecipeUserId = {
+          getAsString: () => "migration-second-recipe-user",
+        } as any;
         const associateUserToTenant = vi
           .spyOn(MultiTenancy, "associateUserToTenant")
           .mockResolvedValue({ status: "OK", wasAlreadyAssociated: false });
         const createNewSession = vi
           .spyOn(Session, "createNewSession")
           .mockResolvedValue({} as any);
+        vi.spyOn(UserMetadata, "getUserMetadata").mockResolvedValue({
+          status: "OK",
+          metadata: { rownd_migration_complete: true },
+        });
         vi.spyOn(SuperTokens, "getUser").mockResolvedValue({
           id: rowndUserId,
           tenantIds: [],
-          loginMethods: [{ recipeUserId, tenantIds: [] }],
+          loginMethods: [
+            { recipeUserId, tenantIds: [] },
+            { recipeUserId: secondRecipeUserId, tenantIds: [] },
+          ],
         } as any);
         setRowndClient(mockRowndClient);
         mockRowndClient.validateToken.mockResolvedValue({
@@ -1815,13 +1830,19 @@ describe("rownd-nodejs plugin", () => {
           recipeUserId,
           userContext,
         );
+        expect(associateUserToTenant).toHaveBeenCalledWith(
+          tenantId,
+          secondRecipeUserId,
+          userContext,
+        );
+        expect(associateUserToTenant).toHaveBeenCalledTimes(2);
         expect(createNewSession).toHaveBeenCalledWith(
           req,
           res,
           tenantId,
           recipeUserId,
           {},
-          {},
+          { [MIGRATION_ORIGIN_SESSION_DATA_KEY]: true },
           userContext,
         );
       });
@@ -2053,13 +2074,245 @@ describe("rownd-nodejs plugin", () => {
           await getMigratedUserByRowndUserId("rownd-user-google");
         expect(migratedUser).toBeDefined();
         const user = migratedUser!.user;
-        expect(user?.loginMethods.length).toBe(1);
-        expect(user?.loginMethods[0].recipeId).toBe("thirdparty");
-        expect(user?.loginMethods[0].thirdParty?.id).toBe("google");
+        expect(user?.loginMethods).toHaveLength(2);
+        const googleMethod = user?.loginMethods.find(
+          (method) => method.recipeId === "thirdparty",
+        );
+        const passwordlessMethod = user?.loginMethods.find(
+          (method) => method.recipeId === "passwordless",
+        );
+        expect(googleMethod?.thirdParty?.id).toBe("google");
+        expect(googleMethod?.email).toBe(
+          buildExpectedFakeEmail("g-123", "google"),
+        );
+        expect(googleMethod?.verified).toBe(false);
+        expect(passwordlessMethod?.email).toBe("g@example.com");
+        expect(passwordlessMethod?.verified).toBe(false);
+      });
+
+      it("does not reconcile an unverified Rownd email with an existing account", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const email = "unverified-migration-collision@example.com";
+        const existingUser = await Passwordless.signInUp({
+          tenantId: "public",
+          email,
+        });
+
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: "rownd-unverified-email-collision",
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: "rownd-unverified-email-collision",
+          data: {
+            user_id: "rownd-unverified-email-collision",
+            google_id: "google-unverified-email-collision",
+            email,
+          },
+          verified_data: { google_id: true },
+        });
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+
+        expect(res.status).toBe(400);
+        await expect(res.json()).resolves.toEqual({
+          status: "ERROR",
+          message: "Migration failed",
+        });
+        expect(
+          await SuperTokens.getUser(existingUser.user.id),
+        ).toMatchObject({
+          id: existingUser.user.id,
+          loginMethods: [
+            expect.objectContaining({ recipeId: "passwordless", email }),
+          ],
+        });
+        expect(
+          await SuperTokens.getUser("rownd-unverified-email-collision"),
+        ).toBeUndefined();
+        await expect(
+          SuperTokens.listUsersByAccountInfo(
+            "public",
+            {
+              thirdParty: {
+                id: "google",
+                userId: "google-unverified-email-collision",
+              },
+            },
+            false,
+          ),
+        ).resolves.toHaveLength(0);
+      });
+
+      it("preflights a later unverified email collision before linking an earlier phone method", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const rowndUserId = "rownd-late-email-collision";
+        const googleId = "google-late-email-collision";
+        const phoneNumber = "+15555550129";
+        const collisionEmail = "late-email-collision@example.com";
+        const providerUser = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          googleId,
+          "provider-before-collision@example.com",
+          true,
+        );
+        expect(providerUser.status).toBe("OK");
+        if (providerUser.status !== "OK") {
+          throw new Error("failed to create provider user");
+        }
+        const emailOwner = await Passwordless.signInUp({
+          tenantId: "public",
+          email: collisionEmail,
+        });
+
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: rowndUserId,
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: rowndUserId,
+          data: {
+            user_id: rowndUserId,
+            google_id: googleId,
+            phone_number: phoneNumber,
+            email: collisionEmail,
+          },
+          verified_data: {
+            google_id: true,
+            phone_number: true,
+          },
+        });
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+
+        expect(res.status).toBe(400);
+        await expect(res.json()).resolves.toEqual({
+          status: "ERROR",
+          message: "Migration failed",
+        });
+        const unchangedProvider = await SuperTokens.getUser(
+          providerUser.user.id,
+        );
+        expect(unchangedProvider?.isPrimaryUser).toBe(false);
+        expect(unchangedProvider?.loginMethods).toEqual([
+          expect.objectContaining({
+            recipeId: "thirdparty",
+            thirdParty: { id: "google", userId: googleId },
+          }),
+        ]);
+        await expect(
+          SuperTokens.listUsersByAccountInfo(
+            "public",
+            { phoneNumber },
+            false,
+          ),
+        ).resolves.toHaveLength(0);
+        expect(
+          (await SuperTokens.getUser(emailOwner.user.id))?.loginMethods,
+        ).toEqual([
+          expect.objectContaining({
+            recipeId: "passwordless",
+            email: collisionEmail,
+          }),
+        ]);
+        await expect(
+          SuperTokens.getUserIdMapping({
+            userId: rowndUserId,
+            userIdType: "EXTERNAL",
+          }),
+        ).resolves.toEqual({ status: "UNKNOWN_MAPPING_ERROR" });
+      });
+
+      it("does not link another account's unverified contact to a matched provider", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const rowndUserId = "rownd-provider-contact-collision";
+        const googleId = "google-provider-contact-collision";
+        const collisionEmail = "provider-contact-collision@example.com";
+        const providerUser = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          googleId,
+          "provider-authoritative@example.com",
+          true,
+        );
+        expect(providerUser.status).toBe("OK");
+        if (providerUser.status !== "OK") {
+          throw new Error("failed to create provider user");
+        }
+        const contactOwner = await Passwordless.signInUp({
+          tenantId: "public",
+          email: collisionEmail,
+        });
+
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: rowndUserId,
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: rowndUserId,
+          data: {
+            user_id: rowndUserId,
+            google_id: googleId,
+            email: collisionEmail,
+          },
+          verified_data: { google_id: true },
+        });
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+
+        expect(res.status).toBe(400);
+        await expect(res.json()).resolves.toEqual({
+          status: "ERROR",
+          message: "Migration failed",
+        });
+        expect(
+          (await SuperTokens.getUser(providerUser.user.id))?.loginMethods,
+        ).toEqual([
+          expect.objectContaining({
+            recipeId: "thirdparty",
+            thirdParty: { id: "google", userId: googleId },
+            email: "provider-authoritative@example.com",
+          }),
+        ]);
+        expect(
+          (await SuperTokens.getUser(contactOwner.user.id))?.loginMethods,
+        ).toEqual([
+          expect.objectContaining({
+            recipeId: "passwordless",
+            email: collisionEmail,
+          }),
+        ]);
+        expect(await SuperTokens.getUser(rowndUserId)).toBeUndefined();
       });
 
       it("migrates and links a Rownd user when one of multiple login methods already exists", async () => {
-        const { server: s, port } = await setup(importCoreConnectionURI);
+        const { server: s, port } = await setup(
+          importCoreConnectionURI,
+          undefined,
+          { enableEmailVerification: true },
+        );
         server = s;
         testPORT = port;
         const rowndUserId = "rownd-existing-google-plus-phone";
@@ -2123,15 +2376,23 @@ describe("rownd-nodejs plugin", () => {
 
         const linkedUser = await SuperTokens.getUser(session!.getUserId());
         expect(linkedUser?.isPrimaryUser).toBe(true);
+        expect(linkedUser?.loginMethods).toHaveLength(3);
         expect(linkedUser?.loginMethods).toEqual(
           expect.arrayContaining([
             expect.objectContaining({
               recipeId: "thirdparty",
               thirdParty: { id: "google", userId: googleId },
+              email,
             }),
             expect.objectContaining({
               recipeId: "passwordless",
               phoneNumber,
+              verified: true,
+            }),
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email,
+              verified: true,
             }),
           ]),
         );
@@ -2347,7 +2608,25 @@ describe("rownd-nodejs plugin", () => {
 
         const migratedUser =
           await getMigratedUserByRowndUserId("rownd-ev-google");
-        expect(migratedUser?.user.loginMethods[0].recipeId).toBe("thirdparty");
+        expect(migratedUser?.user.loginMethods).toHaveLength(2);
+        expect(migratedUser?.user.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: expect.objectContaining({
+                id: "google",
+                userId: "google-ev-id",
+              }),
+              email: buildExpectedFakeEmail("google-ev-id", "google"),
+              verified: false,
+            }),
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email: "rownd-ev-google@example.com",
+              verified: false,
+            }),
+          ]),
+        );
       });
 
       it("error if the auth header is missing", async () => {
@@ -4412,6 +4691,326 @@ describe("rownd-nodejs plugin", () => {
         expect(body.message).toBe("field is not writable: employee_id");
       });
 
+      it("rejects email changes when email sign-in is disabled", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+          enableEmailSignIn: false,
+        });
+        server = s;
+        testPORT = port;
+        const { accessToken, userId } = await createPasswordlessSessionForUser(
+          "email-disabled-user@example.com",
+        );
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: {
+                email: "email-disabled-new@example.com",
+                first_name: "Not saved",
+              },
+            }),
+          },
+        );
+
+        expect(res.status).toBe(403);
+        const metadata = await UserMetadata.getUserMetadata(userId);
+        expect((metadata.metadata as any).first_name).toBeUndefined();
+        expect((metadata.metadata as any).rownd_pending_verification).toBeUndefined();
+      });
+
+      it("updates other fields when a disabled email method is unchanged", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+          enableEmailSignIn: false,
+        });
+        server = s;
+        testPORT = port;
+        const { accessToken } = await createPasswordlessSessionForUser(
+          "unchanged-disabled-email@example.com",
+        );
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: {
+                email: " UNCHANGED-DISABLED-EMAIL@example.com ",
+                first_name: "Saved",
+              },
+            }),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.data.email).toBe("unchanged-disabled-email@example.com");
+        expect(body.data.first_name).toBe("Saved");
+      });
+
+      it("allows a fresh native SuperTokens session to change email", async () => {
+        const { server: s, port } = await setup(
+          coreConnectionURI,
+          { emailChange: { maxSessionAgeSeconds: 600 } },
+          { enableEmailVerification: true },
+        );
+        server = s;
+        testPORT = port;
+        const { accessToken } = await createPasswordlessSessionForUser(
+          "fresh-native-email-user@example.com",
+        );
+
+        const res = await requestEmailChange(
+          accessToken,
+          "fresh-native-email-user-new@example.com",
+        );
+
+        expect(res.status).toBe(200);
+        expect((await res.json()).status).toBe("OK");
+      });
+
+      it("rejects an aged native SuperTokens session", async () => {
+        const { server: s, port } = await setup(
+          coreConnectionURI,
+          { emailChange: { maxSessionAgeSeconds: 0.001 } },
+          { enableEmailVerification: true },
+        );
+        server = s;
+        testPORT = port;
+        const { accessToken, userId } = await createPasswordlessSessionForUser(
+          "stale-email-user@example.com",
+        );
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        const res = await requestEmailChange(
+          accessToken,
+          "stale-email-new@example.com",
+        );
+
+        expect(res.status).toBe(403);
+        await expect(res.json()).resolves.toEqual({
+          status: "ERROR",
+          code: 403,
+          message: "recent authentication is required to change email",
+        });
+        const metadata = await UserMetadata.getUserMetadata(userId);
+        expect((metadata.metadata as any).rownd_pending_verification).toBeUndefined();
+      });
+
+      it("rejects a migrated session from a refreshed Rownd token with fresh iat", async () => {
+        const { server: s, port } = await setup(
+          importCoreConnectionURI,
+          {
+            emailChange: { maxSessionAgeSeconds: 600 },
+            schema: {
+              migration_origin_override: {
+                display_name: "Migration origin override",
+                type: "boolean",
+                user_visible: false,
+                include_in_session_claims: true,
+                session_claim_name: MIGRATION_ORIGIN_SESSION_DATA_KEY,
+              },
+            },
+          },
+          { enableEmailVerification: true },
+        );
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser(
+          "fresh-rownd-iat-user",
+          "fresh-rownd-iat-user@example.com",
+          {
+            validatedToken: {
+              decoded_token: { iat: Math.floor(Date.now() / 1000) },
+            },
+            rowndUserData: { migration_origin_override: false },
+          },
+        );
+        const session = await Session.getSessionWithoutRequestResponse(
+          accessToken,
+        );
+        expect(session.getAccessTokenPayload()).not.toHaveProperty(
+          MIGRATION_ORIGIN_SESSION_DATA_KEY,
+        );
+        await expect(session.getSessionDataFromDatabase()).resolves.toMatchObject({
+          [MIGRATION_ORIGIN_SESSION_DATA_KEY]: true,
+        });
+
+        const res = await requestEmailChange(
+          accessToken,
+          "fresh-rownd-iat-user-new@example.com",
+        );
+
+        expect(res.status).toBe(403);
+        await expect(res.json()).resolves.toEqual({
+          status: "ERROR",
+          code: 403,
+          message: "recent authentication is required to change email",
+        });
+      });
+
+      it("rejects a migrated session when the Rownd token has no iat", async () => {
+        const { server: s, port } = await setup(
+          importCoreConnectionURI,
+          { emailChange: { maxSessionAgeSeconds: 600 } },
+          { enableEmailVerification: true },
+        );
+        server = s;
+        testPORT = port;
+        const accessToken = await createSessionForUser(
+          "missing-rownd-iat-user",
+          "missing-rownd-iat-user@example.com",
+        );
+
+        const res = await requestEmailChange(
+          accessToken,
+          "missing-rownd-iat-user-new@example.com",
+        );
+
+        expect(res.status).toBe(403);
+        await expect(res.json()).resolves.toEqual({
+          status: "ERROR",
+          code: 403,
+          message: "recent authentication is required to change email",
+        });
+      });
+
+      it("marks and rejects every session created by repeated migration", async () => {
+        const { server: s, port } = await setup(
+          importCoreConnectionURI,
+          { emailChange: { maxSessionAgeSeconds: 600 } },
+          { enableEmailVerification: true },
+        );
+        server = s;
+        testPORT = port;
+        const firstAccessToken = await createSessionForUser(
+          "repeated-migration-session-user",
+          "repeated-migration-session-user@example.com",
+        );
+        const secondAccessToken = await createSessionForUser(
+          "repeated-migration-session-user",
+          "repeated-migration-session-user@example.com",
+        );
+        const sessions = await Promise.all(
+          [firstAccessToken, secondAccessToken].map((accessToken) =>
+            Session.getSessionWithoutRequestResponse(accessToken),
+          ),
+        );
+
+        expect(sessions[0].getHandle()).not.toBe(sessions[1].getHandle());
+        for (const session of sessions) {
+          await expect(
+            session.getSessionDataFromDatabase(),
+          ).resolves.toMatchObject({
+            [MIGRATION_ORIGIN_SESSION_DATA_KEY]: true,
+          });
+        }
+
+        for (const [index, accessToken] of [
+          firstAccessToken,
+          secondAccessToken,
+        ].entries()) {
+          const res = await requestEmailChange(
+            accessToken,
+            `repeated-migration-session-user-new-${index}@example.com`,
+          );
+          expect(res.status).toBe(403);
+          await expect(res.json()).resolves.toMatchObject({
+            status: "ERROR",
+            code: 403,
+            message: "recent authentication is required to change email",
+          });
+        }
+      });
+
+      it("keeps the original native authentication age after session refresh", async () => {
+        const { server: s, port } = await setup(
+          coreConnectionURI,
+          { emailChange: { maxSessionAgeSeconds: 0.001 } },
+          { enableEmailVerification: true },
+        );
+        server = s;
+        testPORT = port;
+        const { refreshToken, sessionHandle } =
+          await createPasswordlessSessionForUser(
+            "refreshed-stale-native-user@example.com",
+          );
+        const originalSessionInfo = await Session.getSessionInformation(
+          sessionHandle,
+        );
+        expect(originalSessionInfo).toBeDefined();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        const refreshedSession =
+          await Session.refreshSessionWithoutRequestResponse(refreshToken, true);
+        const refreshedSessionInfo = await Session.getSessionInformation(
+          refreshedSession.getHandle(),
+        );
+        expect(refreshedSession.getHandle()).toBe(sessionHandle);
+        expect(refreshedSessionInfo?.timeCreated).toBe(
+          originalSessionInfo?.timeCreated,
+        );
+
+        const res = await requestEmailChange(
+          refreshedSession.getAccessToken(),
+          "refreshed-stale-native-user-new@example.com",
+        );
+
+        expect(res.status).toBe(403);
+        await expect(res.json()).resolves.toEqual({
+          status: "ERROR",
+          code: 403,
+          message: "recent authentication is required to change email",
+        });
+      });
+
+      it("updates other fields from a stale session when email is unchanged", async () => {
+        const { server: s, port } = await setup(
+          coreConnectionURI,
+          { emailChange: { maxSessionAgeSeconds: 0.001 } },
+          { enableEmailVerification: true },
+        );
+        server = s;
+        testPORT = port;
+        const { accessToken } = await createPasswordlessSessionForUser(
+          "unchanged-stale-email@example.com",
+        );
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: {
+                email: "unchanged-stale-email@example.com",
+                first_name: "Saved",
+              },
+            }),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.data.email).toBe("unchanged-stale-email@example.com");
+        expect(body.data.first_name).toBe("Saved");
+      });
+
       it("defers email updates until verification completes", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
@@ -4468,20 +5067,14 @@ describe("rownd-nodejs plugin", () => {
           );
         expect(tokenResponse.status).toBe("OK");
 
-        const verifyRes = await fetch(
-          `http://localhost:${testPORT}/auth/user/email/verify`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              method: "token",
-              token:
-                tokenResponse.status === "OK" ? tokenResponse.token : "unused",
-            }),
-          },
+        const verifyRes = await verifyEmailToken(
+          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+          accessToken,
         );
         expect(verifyRes.status).toBe(200);
         await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+        const replacementAccessToken = verifyRes.headers.get("st-access-token");
+        expect(replacementAccessToken).toBeTruthy();
 
         metadata = await UserMetadata.getUserMetadata(userId);
         expect((metadata.metadata as any).original_rownd_user.data.email).toBe(
@@ -4503,6 +5096,536 @@ describe("rownd-nodejs plugin", () => {
         expect(passwordlessMethod?.email).toBe("new-email-update@example.com");
         expect(passwordlessMethod?.recipeUserId.getAsString()).toBe(
           recipeUserId.getAsString(),
+        );
+      });
+
+      it("clears COMMITTING and fails closed after a generic Core failure immediately after the transition", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const currentEmail = "committing-failure-current@example.com";
+        const targetEmail = "committing-failure-target@example.com";
+        const initiatingUser =
+          await createPasswordlessSessionForUser(currentEmail);
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(initiatingUser.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ data: { email: targetEmail } }),
+          },
+        );
+        expect(updateRes.status).toBe(200);
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            initiatingUser.recipeUserId,
+            targetEmail,
+          );
+        expect(tokenResponse.status).toBe("OK");
+        if (tokenResponse.status !== "OK") {
+          throw new Error("failed to create email verification token");
+        }
+        await expect(
+          EmailVerification.verifyEmailUsingToken(
+            "public",
+            tokenResponse.token,
+            false,
+          ),
+        ).resolves.toMatchObject({ status: "OK" });
+
+        let statusAtFailure: string | undefined;
+        vi.spyOn(Session, "getSessionInformation").mockImplementationOnce(
+          async () => {
+            const metadata = await UserMetadata.getUserMetadata(
+              initiatingUser.userId,
+            );
+            statusAtFailure = (metadata.metadata as any)
+              .rownd_pending_verification[0]?.status;
+            throw new Error("session Core request failed after COMMITTING");
+          },
+        );
+
+        await expect(
+          completePendingEmailVerification({
+            recipeUserId: initiatingUser.recipeUserId,
+            email: targetEmail,
+            sessionHandle: initiatingUser.sessionHandle,
+          }),
+        ).rejects.toThrow("session Core request failed after COMMITTING");
+        expect(statusAtFailure).toBe("COMMITTING");
+
+        const user = await SuperTokens.getUser(initiatingUser.userId);
+        expect(
+          user?.loginMethods.find(
+            (method) =>
+              method.recipeUserId.getAsString() ===
+              initiatingUser.recipeUserId.getAsString(),
+          )?.email,
+        ).toBe(currentEmail);
+        const metadata = await UserMetadata.getUserMetadata(
+          initiatingUser.userId,
+        );
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
+          [],
+        );
+        await expect(
+          EmailVerification.isEmailVerified(
+            initiatingUser.recipeUserId,
+            targetEmail,
+          ),
+        ).resolves.toBe(false);
+        await expect(
+          Session.getAllSessionHandlesForUser(
+            initiatingUser.userId,
+            true,
+            "public",
+          ),
+        ).resolves.toEqual([]);
+        await expect(
+          EmailVerification.verifyEmailUsingToken(
+            "public",
+            tokenResponse.token,
+            false,
+          ),
+        ).resolves.toEqual({
+          status: "EMAIL_VERIFICATION_INVALID_TOKEN_ERROR",
+        });
+      });
+
+      it("rejects the revoked pre-change token on every account-management route", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const currentEmail = "revoked-route-current@example.com";
+        const targetEmail = "revoked-route-target@example.com";
+        const { accessToken, userId, recipeUserId } =
+          await createPasswordlessSessionForUser(currentEmail);
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ data: { email: targetEmail } }),
+          },
+        );
+        expect(updateRes.status).toBe(200);
+
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            recipeUserId,
+            targetEmail,
+          );
+        expect(tokenResponse.status).toBe("OK");
+        const verifyRes = await verifyEmailToken(
+          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+          accessToken,
+        );
+        expect(verifyRes.status).toBe(200);
+        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+        const replacementAccessToken = verifyRes.headers.get("st-access-token");
+        expect(replacementAccessToken).toBeTruthy();
+
+        const revokedProfileRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          { headers: getAuthedHeaders(accessToken) },
+        );
+        const revokedMetaGetRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/meta`,
+          { headers: getAuthedHeaders(accessToken) },
+        );
+        const revokedMetaPutRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/meta`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ meta: { revoked_token_write: true } }),
+          },
+        );
+        const revokedDeleteRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "DELETE",
+            headers: getAuthedHeaders(accessToken),
+          },
+        );
+
+        expect([
+          revokedProfileRes.status,
+          revokedMetaGetRes.status,
+          revokedMetaPutRes.status,
+          revokedDeleteRes.status,
+        ]).toEqual([401, 401, 401, 401]);
+        expect(await SuperTokens.getUser(userId)).toBeDefined();
+        const metadata = await UserMetadata.getUserMetadata(userId);
+        expect((metadata.metadata as any).revoked_token_write).toBeUndefined();
+
+        const replacementProfileRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          { headers: getAuthedHeaders(replacementAccessToken!) },
+        );
+        expect(replacementProfileRes.status).toBe(200);
+        expect((await replacementProfileRes.json()).data.email).toBe(
+          targetEmail,
+        );
+      });
+
+      it("revokes an old-email session raced after the first account revocation", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const currentEmail = "revocation-race-current@example.com";
+        const targetEmail = "revocation-race-target@example.com";
+        const initiatingUser =
+          await createPasswordlessSessionForUser(currentEmail);
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(initiatingUser.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ data: { email: targetEmail } }),
+          },
+        );
+        expect(updateRes.status).toBe(200);
+
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            initiatingUser.recipeUserId,
+            targetEmail,
+          );
+        expect(tokenResponse.status).toBe("OK");
+
+        const originalRevokeAllSessionsForUser =
+          Session.revokeAllSessionsForUser;
+        let accountRevocationCount = 0;
+        let racedSessionHandle: string | undefined;
+        vi.spyOn(Session, "revokeAllSessionsForUser").mockImplementation(
+          async (...input) => {
+            const result = await originalRevokeAllSessionsForUser(...input);
+            accountRevocationCount += 1;
+            if (accountRevocationCount === 1) {
+              const racedSignIn = await Passwordless.signInUp({
+                tenantId: "public",
+                email: currentEmail,
+              });
+              const racedSession =
+                await Session.createNewSessionWithoutRequestResponse(
+                  "public",
+                  racedSignIn.recipeUserId,
+                  {},
+                  {},
+                  true,
+                );
+              racedSessionHandle = racedSession.getHandle();
+            }
+            return result;
+          },
+        );
+
+        const verifyRes = await verifyEmailToken(
+          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+          initiatingUser.accessToken,
+        );
+        expect(verifyRes.status).toBe(200);
+        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+        expect(accountRevocationCount).toBe(2);
+        expect(racedSessionHandle).toBeDefined();
+        await expect(
+          Session.getSessionInformation(racedSessionHandle!),
+        ).resolves.toBeUndefined();
+
+        const replacementAccessToken = verifyRes.headers.get("st-access-token");
+        expect(replacementAccessToken).toBeTruthy();
+        const replacementSession =
+          await Session.getSessionWithoutRequestResponse(
+            replacementAccessToken!,
+          );
+        expect(replacementSession?.getUserId()).toBe(initiatingUser.userId);
+        const replacementProfileRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          { headers: getAuthedHeaders(replacementAccessToken!) },
+        );
+        expect(replacementProfileRes.status).toBe(200);
+      });
+
+      it("compensates credential state after a later generic Core failure", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const currentEmail = "revocation-failure-current@example.com";
+        const targetEmail = "revocation-failure-target@example.com";
+        const initiatingUser =
+          await createPasswordlessSessionForUser(currentEmail);
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(initiatingUser.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ data: { email: targetEmail } }),
+          },
+        );
+        expect(updateRes.status).toBe(200);
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            initiatingUser.recipeUserId,
+            targetEmail,
+          );
+        expect(tokenResponse.status).toBe("OK");
+        if (tokenResponse.status !== "OK") {
+          throw new Error("failed to create email verification token");
+        }
+        await expect(
+          EmailVerification.verifyEmailUsingToken(
+            "public",
+            tokenResponse.token,
+            false,
+          ),
+        ).resolves.toMatchObject({ status: "OK" });
+
+        const originalRevokeAllSessionsForUser =
+          Session.revokeAllSessionsForUser;
+        let accountRevocationCount = 0;
+        let emailAtSecondRevocation: string | undefined;
+        vi.spyOn(Session, "revokeAllSessionsForUser").mockImplementation(
+          async (...input) => {
+            accountRevocationCount += 1;
+            if (accountRevocationCount === 2) {
+              emailAtSecondRevocation = (
+                await SuperTokens.getUser(initiatingUser.userId)
+              )?.loginMethods.find(
+                (method) =>
+                  method.recipeUserId.getAsString() ===
+                  initiatingUser.recipeUserId.getAsString(),
+              )?.email;
+              throw new Error("second account revocation failed");
+            }
+            return originalRevokeAllSessionsForUser(...input);
+          },
+        );
+
+        await expect(
+          completePendingEmailVerification({
+            recipeUserId: initiatingUser.recipeUserId,
+            email: targetEmail,
+            sessionHandle: initiatingUser.sessionHandle,
+          }),
+        ).rejects.toThrow("second account revocation failed");
+        expect(accountRevocationCount).toBe(3);
+        expect(emailAtSecondRevocation).toBe(targetEmail);
+
+        const user = await SuperTokens.getUser(initiatingUser.userId);
+        expect(
+          user?.loginMethods.find(
+            (method) =>
+              method.recipeUserId.getAsString() ===
+              initiatingUser.recipeUserId.getAsString(),
+          )?.email,
+        ).toBe(currentEmail);
+        const metadata = await UserMetadata.getUserMetadata(
+          initiatingUser.userId,
+        );
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
+          [],
+        );
+        await expect(
+          EmailVerification.isEmailVerified(
+            initiatingUser.recipeUserId,
+            targetEmail,
+          ),
+        ).resolves.toBe(false);
+        await expect(
+          Session.getAllSessionHandlesForUser(
+            initiatingUser.userId,
+            true,
+            "public",
+          ),
+        ).resolves.toEqual([]);
+      });
+
+      it("rejects completion after the initiating session is revoked", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const { accessToken, sessionHandle, userId, recipeUserId } =
+          await createPasswordlessSessionForUser(
+            "revoked-session-current@example.com",
+          );
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: { email: "revoked-session-target@example.com" },
+            }),
+          },
+        );
+        expect(updateRes.status).toBe(200);
+        await expect(Session.revokeSession(sessionHandle)).resolves.toBe(true);
+
+        await expect(
+          completePendingEmailVerification({
+            recipeUserId,
+            email: "revoked-session-target@example.com",
+            sessionHandle,
+          }),
+        ).rejects.toThrow(
+          "email change session is no longer active; start the email change again",
+        );
+
+        const user = await SuperTokens.getUser(userId);
+        expect(
+          user?.loginMethods.find(
+            (method) => method.recipeId === "passwordless" && method.email,
+          )?.email,
+        ).toBe("revoked-session-current@example.com");
+        const metadata = await UserMetadata.getUserMetadata(userId);
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
+          [],
+        );
+      });
+
+      it("does not replace an unrelated callback session", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const initiatingUser = await createPasswordlessSessionForUser(
+          "unrelated-session-current@example.com",
+        );
+        const unrelatedUser = await createPasswordlessSessionForUser(
+          "unrelated-session-other@example.com",
+        );
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(initiatingUser.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: { email: "unrelated-session-target@example.com" },
+            }),
+          },
+        );
+        expect(updateRes.status).toBe(200);
+
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            initiatingUser.recipeUserId,
+            "unrelated-session-target@example.com",
+          );
+        expect(tokenResponse.status).toBe("OK");
+
+        const verifyRes = await verifyEmailToken(
+          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+          unrelatedUser.accessToken,
+        );
+        expect(verifyRes.status).toBe(200);
+        await expect(verifyRes.json()).resolves.toEqual({
+          status: "GENERAL_ERROR",
+          message:
+            "email change session is no longer active; start the email change again",
+        });
+        expect(verifyRes.headers.get("st-access-token")).toBeNull();
+        await expect(
+          Session.getSessionInformation(unrelatedUser.sessionHandle),
+        ).resolves.toBeDefined();
+      });
+
+      it("cleans up verification when email ownership changes before completion", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const changingUser = await createPasswordlessSessionForUser(
+          "ownership-race-current@example.com",
+        );
+        const targetEmail = "ownership-race-target@example.com";
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(changingUser.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ data: { email: targetEmail } }),
+          },
+        );
+        expect(updateRes.status).toBe(200);
+        await Passwordless.signInUp({ tenantId: "public", email: targetEmail });
+
+        const tokenResponse =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            changingUser.recipeUserId,
+            targetEmail,
+          );
+        expect(tokenResponse.status).toBe("OK");
+
+        const verifyRes = await verifyEmailToken(
+          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+          changingUser.accessToken,
+        );
+        expect(verifyRes.status).toBe(200);
+        await expect(verifyRes.json()).resolves.toEqual({
+          status: "GENERAL_ERROR",
+          message: "email cannot be used for this account",
+        });
+        await expect(
+          EmailVerification.isEmailVerified(
+            changingUser.recipeUserId,
+            targetEmail,
+          ),
+        ).resolves.toBe(false);
+        const metadata = await UserMetadata.getUserMetadata(
+          changingUser.userId,
+        );
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
+          [],
         );
       });
 
@@ -4554,7 +5677,10 @@ describe("rownd-nodejs plugin", () => {
         );
         expect(resetRes.status).toBe(200);
 
-        const staleVerifyRes = await verifyEmailToken(staleToken || "unused");
+        const staleVerifyRes = await verifyEmailToken(
+          staleToken || "unused",
+          accessToken,
+        );
         const staleVerifyBody = await staleVerifyRes.json();
         expect(staleVerifyBody.status).not.toBe("OK");
 
@@ -4574,256 +5700,41 @@ describe("rownd-nodejs plugin", () => {
         );
       });
 
-      it("converts a guest into a passwordless primary user after email verification", async () => {
-        const { server: s, port } = await setup(coreConnectionURI, undefined, {
-          enableEmailVerification: true,
-        });
-        server = s;
-        testPORT = port;
-        const guestSession = await createGuestSession();
-        const verifiedEmail = "guest-primary@example.com";
+      it.each(["guest", "instant"] as const)(
+        "rejects profile email changes for %s accounts",
+        async (authLevel) => {
+          const { server: s, port } = await setup(coreConnectionURI, undefined, {
+            enableEmailVerification: true,
+          });
+          server = s;
+          testPORT = port;
+          const guestSession = await createGuestSession(authLevel);
 
-        const res = await fetch(
-          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
-          {
-            method: "PUT",
-            headers: {
-              ...getAuthedHeaders(guestSession.accessToken),
-              "Content-Type": "application/json",
+          const res = await fetch(
+            `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+            {
+              method: "PUT",
+              headers: {
+                ...getAuthedHeaders(guestSession.accessToken),
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                data: { email: `${authLevel}-profile-email@example.com` },
+              }),
             },
-            body: JSON.stringify({ data: { email: verifiedEmail } }),
-          },
-        );
-
-        expect(res.status).toBe(200);
-        const body = await res.json();
-        expect(body.data.email).not.toBe(verifiedEmail);
-        expect(body.verified_data.email).toBeUndefined();
-
-        const tokenResponse =
-          await EmailVerification.createEmailVerificationToken(
-            "public",
-            guestSession.recipeUserId,
-            verifiedEmail,
           );
-        expect(tokenResponse.status).toBe("OK");
 
-        const verifyRes = await verifyEmailToken(
-          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
-        );
-        expect(verifyRes.status).toBe(200);
-        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
-
-        const passwordlessResult = await Passwordless.signInUp({
-          email: verifiedEmail,
-          tenantId: "public",
-        });
-        const linkedUser = await SuperTokens.getUser(
-          passwordlessResult.user.id,
-        );
-        expect(linkedUser?.isPrimaryUser).toBe(true);
-        expect(linkedUser?.loginMethods).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              recipeId: "passwordless",
-              email: verifiedEmail,
-            }),
-            expect.objectContaining({
-              recipeId: "thirdparty",
-              thirdParty: expect.objectContaining({ id: "guest" }),
-            }),
-          ]),
-        );
-
-        const passwordlessMetadata = await UserMetadata.getUserMetadata(
-          passwordlessResult.user.id,
-        );
-        expect(
-          (passwordlessMetadata.metadata as any).rownd_pending_verification,
-        ).toEqual([]);
-      });
-
-      it("converts an instant user into a verified passwordless user without anonymous fields", async () => {
-        const { server: s, port } = await setup(coreConnectionURI, undefined, {
-          enableEmailVerification: true,
-        });
-        server = s;
-        testPORT = port;
-        const instantSession = await createGuestSession("instant");
-        const verifiedEmail = "instant-primary@example.com";
-
-        const res = await fetch(
-          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
-          {
-            method: "PUT",
-            headers: {
-              ...getAuthedHeaders(instantSession.accessToken),
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ data: { email: verifiedEmail } }),
-          },
-        );
-
-        expect(res.status).toBe(200);
-        const body = await res.json();
-        expect(body.auth_level).toBe("instant");
-        expect(body.data).not.toHaveProperty("anonymous_id");
-        expect(body.verified_data.email).toBeUndefined();
-
-        const tokenResponse =
-          await EmailVerification.createEmailVerificationToken(
-            "public",
-            instantSession.recipeUserId,
-            verifiedEmail,
+          expect(res.status).toBe(403);
+          const metadata = await UserMetadata.getUserMetadata(
+            guestSession.recipeUserId.getAsString(),
           );
-        expect(tokenResponse.status).toBe("OK");
+          expect(
+            (metadata.metadata as any).rownd_pending_verification,
+          ).toBeUndefined();
+        },
+      );
 
-        const verifyRes = await verifyEmailToken(
-          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
-        );
-        expect(verifyRes.status).toBe(200);
-        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
-
-        const passwordlessResult = await Passwordless.signInUp({
-          email: verifiedEmail,
-          tenantId: "public",
-        });
-        const linkedUser = await SuperTokens.getUser(
-          passwordlessResult.user.id,
-        );
-        expect(linkedUser?.isPrimaryUser).toBe(true);
-        expect(linkedUser?.loginMethods).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              recipeId: "passwordless",
-              email: verifiedEmail,
-            }),
-            expect.objectContaining({
-              recipeId: "thirdparty",
-              thirdParty: expect.objectContaining({ id: "instant" }),
-            }),
-          ]),
-        );
-
-        const claims = await buildRowndSessionClaims(
-          passwordlessResult.user.id,
-        );
-        expect(claims).toMatchObject({
-          app_user_id: passwordlessResult.user.id,
-          auth_level: "verified",
-          is_verified_user: true,
-          [ROWND_JWT_CLAIMS.AppUserId]: passwordlessResult.user.id,
-          [ROWND_JWT_CLAIMS.AuthLevel]: "verified",
-          [ROWND_JWT_CLAIMS.IsVerifiedUser]: true,
-        });
-        expect(claims).not.toHaveProperty("anonymous_id");
-        expect(claims).not.toHaveProperty(ROWND_JWT_CLAIMS.IsAnonymous);
-      });
-
-      it("allows instant users to start email verification when email verification is required", async () => {
-        const { server: s, port } = await setup(coreConnectionURI, undefined, {
-          enableEmailVerification: true,
-          emailVerificationMode: "REQUIRED",
-        });
-        server = s;
-        testPORT = port;
-        const instantSession = await createGuestSession("instant");
-
-        const res = await fetch(
-          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
-          {
-            method: "PUT",
-            headers: {
-              ...getAuthedHeaders(instantSession.accessToken),
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              data: { email: "required-instant-primary@example.com" },
-            }),
-          },
-        );
-
-        expect(res.status).toBe(200);
-        const body = await res.json();
-        expect(body.status).toBe("OK");
-        expect(body.auth_level).toBe("instant");
-        expect(body.verified_data.email).toBeUndefined();
-      });
-
-      it("replaces the instant session with a verified passwordless session after email verification", async () => {
-        const { server: s, port } = await setup(coreConnectionURI, undefined, {
-          enableEmailVerification: true,
-        });
-        server = s;
-        testPORT = port;
-        const instantSession = await createGuestSession("instant");
-        const verifiedEmail = "instant-session-replacement@example.com";
-
-        const updateRes = await fetch(
-          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
-          {
-            method: "PUT",
-            headers: {
-              ...getAuthedHeaders(instantSession.accessToken),
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ data: { email: verifiedEmail } }),
-          },
-        );
-        expect(updateRes.status).toBe(200);
-
-        const tokenResponse =
-          await EmailVerification.createEmailVerificationToken(
-            "public",
-            instantSession.recipeUserId,
-            verifiedEmail,
-          );
-        expect(tokenResponse.status).toBe("OK");
-
-        const verifyRes = await verifyEmailToken(
-          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
-          instantSession.accessToken,
-        );
-        expect(verifyRes.status).toBe(200);
-        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
-
-        const newAccessToken = verifyRes.headers.get("st-access-token");
-        expect(newAccessToken).toBeTruthy();
-        expect(newAccessToken).not.toBe(instantSession.accessToken);
-
-        const newSession = await Session.getSessionWithoutRequestResponse(
-          newAccessToken!,
-        );
-        expect(newSession).toBeDefined();
-        const payload = newSession!.getAccessTokenPayload();
-
-        expect(payload.auth_level).toBe("verified");
-        expect(payload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("verified");
-        expect(payload.is_verified_user).toBe(true);
-        expect(payload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(true);
-        await expect(
-          newSession?.getClaimValue(RowndIsAnonymousClaim),
-        ).resolves.toBe(false);
-        expect(payload[ROWND_JWT_CLAIMS.IsAnonymous]).toBeUndefined();
-        expect(payload["st-ev"]?.v).toBe(true);
-
-        const linkedUser = await SuperTokens.getUser(newSession!.getUserId());
-        expect(linkedUser?.isPrimaryUser).toBe(true);
-        expect(linkedUser?.loginMethods).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              recipeId: "passwordless",
-              email: verifiedEmail,
-            }),
-            expect.objectContaining({
-              recipeId: "thirdparty",
-              thirdParty: expect.objectContaining({ id: "instant" }),
-            }),
-          ]),
-        );
-      });
-
-      it("links a guest into an existing passwordless primary for the verified email", async () => {
+      it("rejects a guest email change owned by another account", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
         });
@@ -4848,48 +5759,35 @@ describe("rownd-nodejs plugin", () => {
             }),
           },
         );
-        expect(res.status).toBe(200);
+        expect(res.status).toBe(403);
+        await expect(res.json()).resolves.toEqual({
+          status: "ERROR",
+          code: 403,
+          message: "guest accounts cannot change sign-in email",
+        });
 
-        const tokenResponse =
-          await EmailVerification.createEmailVerificationToken(
-            "public",
-            guestSession.recipeUserId,
-            "existing-primary@example.com",
-          );
-        expect(tokenResponse.status).toBe("OK");
-
-        const verifyRes = await verifyEmailToken(
-          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
-        );
-        expect(verifyRes.status).toBe(200);
-        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
-
-        const linkedUser = await SuperTokens.getUser(
+        const existingUser = await SuperTokens.getUser(
           existingPasswordless.user.id,
         );
-        expect(linkedUser?.isPrimaryUser).toBe(true);
-        expect(linkedUser?.loginMethods).toEqual(
+        expect(existingUser?.loginMethods).toHaveLength(1);
+        const guestUser = await SuperTokens.getUser(
+          guestSession.recipeUserId.getAsString(),
+        );
+        expect(guestUser?.loginMethods).toEqual(
           expect.arrayContaining([
-            expect.objectContaining({
-              recipeId: "passwordless",
-              email: "existing-primary@example.com",
-            }),
             expect.objectContaining({
               recipeId: "thirdparty",
               thirdParty: expect.objectContaining({ id: "guest" }),
             }),
           ]),
         );
-
-        const metadata = await UserMetadata.getUserMetadata(
-          existingPasswordless.user.id,
-        );
-        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
-          [],
-        );
+        const guestMetadata = await UserMetadata.getUserMetadata(guestUser!.id);
+        expect(
+          (guestMetadata.metadata as any).rownd_pending_verification,
+        ).toBeUndefined();
       });
 
-      it("preserves existing primary metadata when linking a guest by verified email", async () => {
+      it("preserves account metadata when rejecting an email ownership conflict", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
         });
@@ -4932,21 +5830,7 @@ describe("rownd-nodejs plugin", () => {
             }),
           },
         );
-        expect(res.status).toBe(200);
-
-        const tokenResponse =
-          await EmailVerification.createEmailVerificationToken(
-            "public",
-            guestSession.recipeUserId,
-            "existing-primary-metadata@example.com",
-          );
-        expect(tokenResponse.status).toBe("OK");
-
-        const verifyRes = await verifyEmailToken(
-          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
-        );
-        expect(verifyRes.status).toBe(200);
-        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+        expect(res.status).toBe(403);
 
         const metadata = await UserMetadata.getUserMetadata(
           existingPasswordless.user.id,
@@ -4967,12 +5851,14 @@ describe("rownd-nodejs plugin", () => {
                 source: "primary",
               }),
             }),
-            rownd_pending_verification: [],
           }),
         );
+        expect(
+          (metadata.metadata as any).rownd_pending_verification,
+        ).toBeUndefined();
       });
 
-      it("does not add a passwordless email method for users that already have real auth", async () => {
+      it("adds a passwordless email method without changing third-party identity", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
         });
@@ -4980,6 +5866,17 @@ describe("rownd-nodejs plugin", () => {
         testPORT = port;
         const thirdPartyUser = await createThirdPartySessionForUser(
           "thirdparty-email-user@example.com",
+        );
+        const secondTenantId = `email-change-${randomUUID()}`;
+        await MultiTenancy.createOrUpdateTenant(secondTenantId);
+        const associationResult = await MultiTenancy.associateUserToTenant(
+          secondTenantId,
+          thirdPartyUser.recipeUserId,
+        );
+        expect(associationResult.status).toBe("OK");
+        const originalUser = await SuperTokens.getUser(thirdPartyUser.userId);
+        const originalThirdPartyMethod = originalUser?.loginMethods.find(
+          (method) => method.recipeId === "thirdparty",
         );
 
         const res = await fetch(
@@ -5008,38 +5905,41 @@ describe("rownd-nodejs plugin", () => {
           );
         expect(tokenResponse.status).toBe("OK");
 
-        const verifyRes = await fetch(
-          `http://localhost:${testPORT}/auth/user/email/verify`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              method: "token",
-              token:
-                tokenResponse.status === "OK" ? tokenResponse.token : "unused",
-            }),
-          },
+        const verifyRes = await verifyEmailToken(
+          tokenResponse.status === "OK" ? tokenResponse.token : "unused",
+          thirdPartyUser.accessToken,
         );
         expect(verifyRes.status).toBe(200);
         await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+        const replacementAccessToken = verifyRes.headers.get("st-access-token");
+        expect(replacementAccessToken).toBeTruthy();
 
         const updatedUser = await SuperTokens.getUser(thirdPartyUser.userId);
-        expect(
-          updatedUser?.loginMethods.some(
-            (method) =>
-              method.recipeId === "thirdparty" &&
-              method.thirdParty?.id === "google",
-          ),
-        ).toBe(true);
-        expect(
-          updatedUser?.loginMethods.some(
-            (method) =>
-              method.recipeId === "passwordless" &&
-              method.email === "thirdparty-updated@example.com",
-          ),
-        ).toBe(false);
-        expect(updatedUser?.loginMethods).toHaveLength(1);
-        expect(updatedUser?.isPrimaryUser).not.toBe(true);
+        const updatedThirdPartyMethod = updatedUser?.loginMethods.find(
+          (method) => method.recipeId === "thirdparty",
+        );
+        const passwordlessMethod = updatedUser?.loginMethods.find(
+          (method) => method.recipeId === "passwordless" && method.email,
+        );
+        expect(updatedUser?.id).toBe(thirdPartyUser.userId);
+        expect(updatedUser?.isPrimaryUser).toBe(true);
+        expect(updatedUser?.loginMethods).toHaveLength(2);
+        expect(updatedThirdPartyMethod?.recipeUserId.getAsString()).toBe(
+          originalThirdPartyMethod?.recipeUserId.getAsString(),
+        );
+        expect(updatedThirdPartyMethod?.thirdParty).toEqual(
+          originalThirdPartyMethod?.thirdParty,
+        );
+        expect(updatedThirdPartyMethod?.email).toBe(
+          "thirdparty-email-user@example.com",
+        );
+        expect(passwordlessMethod?.email).toBe(
+          "thirdparty-updated@example.com",
+        );
+        expect(passwordlessMethod?.verified).toBe(true);
+        expect(passwordlessMethod?.tenantIds).toEqual(
+          expect.arrayContaining(["public", secondTenantId]),
+        );
 
         const metadata = await UserMetadata.getUserMetadata(
           thirdPartyUser.userId,
@@ -5053,6 +5953,79 @@ describe("rownd-nodejs plugin", () => {
         expect((metadata.metadata as any).rownd_pending_verification).toEqual(
           [],
         );
+
+        const profileRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          { headers: getAuthedHeaders(replacementAccessToken!) },
+        );
+        const profile = await profileRes.json();
+        expect(profile.data.email).toBe("thirdparty-updated@example.com");
+        expect(profile.verified_data.email).toBe(
+          "thirdparty-updated@example.com",
+        );
+      });
+
+      it("removes a new passwordless method when metadata finalization fails", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const thirdPartyUser = await createThirdPartySessionForUser(
+          "metadata-failure-provider@example.com",
+        );
+        const targetEmail = "metadata-failure-target@example.com";
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(thirdPartyUser.accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ data: { email: targetEmail } }),
+          },
+        );
+        expect(updateRes.status).toBe(200);
+
+        const originalUpdateUserMetadata = UserMetadata.updateUserMetadata;
+        const metadataUpdate = vi
+          .spyOn(UserMetadata, "updateUserMetadata")
+          .mockImplementation((userId, update, userContext) => {
+            if (
+              (update as any).original_rownd_user?.data?.email === targetEmail
+            ) {
+              return Promise.reject(new Error("metadata finalization failed"));
+            }
+            return originalUpdateUserMetadata(userId, update, userContext);
+          });
+
+        await expect(
+          completePendingEmailVerification({
+            recipeUserId: thirdPartyUser.recipeUserId,
+            email: targetEmail,
+            sessionHandle: thirdPartyUser.sessionHandle,
+          }),
+        ).rejects.toThrow("metadata finalization failed");
+        metadataUpdate.mockRestore();
+
+        const user = await SuperTokens.getUser(thirdPartyUser.userId);
+        expect(user?.loginMethods).toEqual([
+          expect.objectContaining({
+            recipeId: "thirdparty",
+            email: "metadata-failure-provider@example.com",
+          }),
+        ]);
+        const metadata = await UserMetadata.getUserMetadata(
+          thirdPartyUser.userId,
+        );
+        expect((metadata.metadata as any).original_rownd_user.data.email).toBe(
+          "metadata-failure-provider@example.com",
+        );
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
+          [],
+        );
       });
 
       it("removes duplicate matching pending email verifications on completion", async () => {
@@ -5061,24 +6034,34 @@ describe("rownd-nodejs plugin", () => {
         });
         server = s;
         testPORT = port;
-        const { userId, recipeUserId } = await createPasswordlessSessionForUser(
-          "duplicate-pending-current@example.com",
+        const { accessToken, sessionHandle, userId, recipeUserId } =
+          await createPasswordlessSessionForUser(
+            "duplicate-pending-current@example.com",
+          );
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(accessToken),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              data: { email: "duplicate-pending-target@example.com" },
+            }),
+          },
         );
+        expect(updateRes.status).toBe(200);
+
+        const pendingMetadata = await UserMetadata.getUserMetadata(userId);
+        const pendingVerification = (pendingMetadata.metadata as any)
+          .rownd_pending_verification[0];
 
         await UserMetadata.updateUserMetadata(userId, {
           rownd_pending_verification: [
-            {
-              id: "duplicate-email-1",
-              field: "email",
-              value: "duplicate-pending-target@example.com",
-              created_at: "2026-01-01T00:00:00.000Z",
-            },
-            {
-              id: "duplicate-email-2",
-              field: "email",
-              value: "duplicate-pending-target@example.com",
-              created_at: "2026-01-01T00:00:00.000Z",
-            },
+            pendingVerification,
+            { ...pendingVerification, id: "duplicate-email-2" },
             {
               id: "future-phone-verification",
               field: "phone_number",
@@ -5091,6 +6074,7 @@ describe("rownd-nodejs plugin", () => {
         await completePendingEmailVerification({
           recipeUserId,
           email: "duplicate-pending-target@example.com",
+          sessionHandle,
         });
 
         const metadata = await UserMetadata.getUserMetadata(userId);
@@ -5757,11 +6741,18 @@ describe("rownd-nodejs plugin", () => {
     async function createSessionForUser(
       userId: string,
       email = `${userId}@example.com`,
+      options?: {
+        validatedToken?: Record<string, unknown>;
+        rowndUserData?: Record<string, unknown>;
+      },
     ) {
-      mockRowndClient.validateToken.mockResolvedValue({ user_id: userId });
+      mockRowndClient.validateToken.mockResolvedValue({
+        user_id: userId,
+        ...options?.validatedToken,
+      });
       mockRowndClient.fetchUserInfo.mockResolvedValue({
         app_user_id: userId,
-        data: { user_id: userId, email },
+        data: { ...options?.rowndUserData, user_id: userId, email },
         verified_data: { email: true },
         meta: { created: "2026-01-01T00:00:00.000Z" },
       });
@@ -5818,9 +6809,13 @@ describe("rownd-nodejs plugin", () => {
         {},
         true,
       );
+      const sessionTokens = session.getAllSessionTokensDangerously();
+      expect(sessionTokens.refreshToken).toBeTruthy();
 
       return {
         accessToken: session.getAccessToken(),
+        refreshToken: sessionTokens.refreshToken!,
+        sessionHandle: session.getHandle(),
         userId: user.id,
         recipeUserId: recipeUserId!,
       };
@@ -5918,6 +6913,7 @@ describe("rownd-nodejs plugin", () => {
 
       return {
         accessToken: session.getAccessToken(),
+        sessionHandle: session.getHandle(),
         userId: user.id,
         recipeUserId: signInUpResponse.recipeUserId,
       };
@@ -5930,6 +6926,17 @@ describe("rownd-nodejs plugin", () => {
         "fdi-version": "1.18",
         "st-auth-mode": "header",
       };
+    }
+
+    async function requestEmailChange(accessToken: string, email: string) {
+      return fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
+        method: "PUT",
+        headers: {
+          ...getAuthedHeaders(accessToken),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ data: { email } }),
+      });
     }
 
     async function signInUpWithTestProvider(input: {
@@ -6032,6 +7039,7 @@ async function setup(
   config?: Partial<RowndPluginConfig>,
   options?: {
     enableEmailVerification?: boolean;
+    enableEmailSignIn?: boolean;
     emailVerificationMode?: "OPTIONAL" | "REQUIRED";
     emailVerificationLinks?: string[];
   },
@@ -6108,6 +7116,10 @@ async function setup(
               rowndAppKey: "test-key",
               rowndAppSecret: "test-secret",
               enableDebugLogs: true,
+              ...(options?.enableEmailVerification &&
+              options.enableEmailSignIn !== false
+                ? { appConfig: { signInMethods: [{ method: "email" }] } }
+                : {}),
               ...config,
             } as RowndPluginConfig),
           ],

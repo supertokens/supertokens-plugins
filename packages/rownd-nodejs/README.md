@@ -15,7 +15,7 @@ npm install @supertokens-plugins/rownd-nodejs
 Initialize the plugin in your SuperTokens backend configuration.
 
 > [!IMPORTANT]
-> This plugin always requires the `Session` and `UserMetadata` recipes. Enable `Passwordless` for email/phone, `ThirdParty` for Google/Apple/guest/anonymous users, `EmailVerification` for verified email profile updates, and `AccountLinking` when migrated Rownd users may have multiple supported login methods.
+> This plugin always requires the `Session` and `UserMetadata` recipes. Enable `Passwordless` for email/phone, `ThirdParty` for Google/Apple/guest/anonymous users, and `EmailVerification` for verified email profile updates. `AccountLinking` is required for email changes and whenever migrated Rownd users may have multiple supported login methods.
 
 ```typescript
 import SuperTokens from "supertokens-node";
@@ -63,6 +63,52 @@ The plugin logs a warning during initialization while migration is disabled.
 
 Without `disableRowndUserMigration: true`, both `rowndAppKey` and
 `rowndAppSecret` are required.
+
+### Email Changes
+
+When email sign-in is configured, changing the Rownd profile email starts a
+verified, account-wide passwordless email change. The plugin updates the
+account's existing passwordless email method or creates and links one when the
+account does not have one. Third-party and email-password methods are not
+modified.
+
+Email changes for established accounts require a database-checked native
+SuperTokens session created within the last ten minutes by default. Normal
+session refresh does not reset this window. Sessions created by the Rownd
+migration endpoint remain usable but cannot authorize email credential changes,
+because Rownd token issuance does not prove recent interactive authentication.
+Guest and instant accounts must use a supported sign-up flow instead. The target
+email is rejected when it belongs to another account; the plugin never merges
+accounts as a side effect of a profile edit. The change applies to every tenant
+associated with the account.
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  appConfig: {
+    signInMethods: [{ method: "email" }],
+  },
+  emailChange: {
+    maxSessionAgeSeconds: 600,
+  },
+});
+```
+
+If the active app or sub-brand `signInMethods` does not enable email, profile
+email updates are rejected rather than creating a hidden authentication method.
+`Passwordless`, `EmailVerification`, and `AccountLinking` must be initialized
+when email changes are enabled, and Passwordless must use `EMAIL` or
+`EMAIL_OR_PHONE` as its contact method.
+
+The old email remains active until verification succeeds. Pending changes
+expire after 15 minutes, and starting another change revokes the previous
+pending token. Email ownership is checked across every SuperTokens tenant both
+when the change starts and when verification completes. A conflicting owner or
+an account with multiple passwordless email methods must be repaired before the
+change can proceed. Verification must use the same active session that started
+the change. Completion revokes every account session and returns a replacement
+for that initiating session.
 
 ### Session Claim Fields
 

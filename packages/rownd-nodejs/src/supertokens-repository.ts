@@ -1,6 +1,7 @@
 import SuperTokens from "supertokens-node";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
 import EmailVerification from "supertokens-node/recipe/emailverification";
+import MultiTenancy from "supertokens-node/recipe/multitenancy";
 import Passwordless from "supertokens-node/recipe/passwordless";
 import Session from "supertokens-node/recipe/session";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
@@ -16,7 +17,7 @@ import {
   PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM,
   PUBLIC_TENANT_ID,
 } from "./constants";
-import { RowndPluginError } from "./errors";
+import { RowndEmailChangeError, RowndPluginError } from "./errors";
 import { assertRowndAppVariantIsConfigured, getPluginConfig, getSuperTokensConfig } from "./config";
 import type { SuperTokensUserImport } from "./types";
 import {
@@ -159,7 +160,7 @@ function getImportMethodAccountInfo(importMethod: ImportLoginMethod) {
     : { phoneNumber: importMethod.phoneNumber! };
 }
 
-async function findExistingImportMethod(
+async function inspectImportMethod(
   importMethod: ImportLoginMethod,
   tenantId: string,
   userContext: JsonRecord,
@@ -171,25 +172,35 @@ async function findExistingImportMethod(
     userContext,
   );
 
-  for (const user of users) {
-    const loginMethod = user.loginMethods.find(
-      (method) =>
-        method.tenantIds.includes(tenantId) &&
-        matchesImportLoginMethod(method, importMethod),
-    );
-    if (loginMethod) {
-      return { user, loginMethod };
-    }
-  }
+  const owners = users.flatMap((user) =>
+    user.loginMethods
+      .filter(
+        (method) =>
+          method.tenantIds.includes(tenantId) &&
+          matchesImportLoginMethod(method, importMethod),
+      )
+      .map((loginMethod) => ({ user, loginMethod })),
+  );
+  const match = owners.find(
+    ({ loginMethod }) =>
+      importMethod.recipeId === "thirdparty" ||
+      (importMethod.isVerified && loginMethod.verified),
+  );
 
-  return undefined;
+  return { importMethod, owners, match };
 }
 
 async function createMissingLoginMethod(
   importMethod: ImportLoginMethod,
   tenantId: string,
+  primaryUserId: string,
   userContext: JsonRecord,
 ) {
+  const reconciliationUserContext = {
+    ...userContext,
+    rowndDisableAutomaticAccountLinking: true,
+  };
+
   if (importMethod.recipeId === "thirdparty") {
     const result = await ThirdParty.manuallyCreateOrUpdateUser(
       tenantId,
@@ -198,14 +209,22 @@ async function createMissingLoginMethod(
       importMethod.email,
       importMethod.isVerified,
       undefined,
-      userContext,
+      reconciliationUserContext,
     );
     if (result.status !== "OK") {
       throw new Error(
         `Failed to create migrated third-party login method: ${result.status}`,
       );
     }
-    return result.recipeUserId;
+    if (!result.createdNewRecipeUser && result.user.id !== primaryUserId) {
+      throw new Error(
+        "Migrated third-party login method belongs to another SuperTokens user",
+      );
+    }
+    return {
+      recipeUserId: result.recipeUserId,
+      createdNewRecipeUser: result.createdNewRecipeUser,
+    };
   }
 
   if (importMethod.recipeId === "passwordless") {
@@ -213,22 +232,44 @@ async function createMissingLoginMethod(
       ? await Passwordless.signInUp({
         tenantId,
         email: importMethod.email,
-        userContext,
+        userContext: reconciliationUserContext,
       })
       : await Passwordless.signInUp({
         tenantId,
         phoneNumber: importMethod.phoneNumber!,
-        userContext,
+        userContext: reconciliationUserContext,
       });
 
-    if (importMethod.email && !importMethod.isVerified) {
-      await EmailVerification.unverifyEmail(
-        result.recipeUserId,
-        importMethod.email,
-        userContext,
+    if (!result.createdNewRecipeUser && result.user.id !== primaryUserId) {
+      throw new Error(
+        "Migrated passwordless login method belongs to another SuperTokens user",
       );
     }
-    return result.recipeUserId;
+
+    if (importMethod.email && !importMethod.isVerified) {
+      try {
+        await EmailVerification.unverifyEmail(
+          result.recipeUserId,
+          importMethod.email,
+          userContext,
+        );
+      } catch (error) {
+        if (result.createdNewRecipeUser) {
+          await Promise.allSettled([
+            SuperTokens.deleteUser(
+              result.recipeUserId.getAsString(),
+              false,
+              userContext,
+            ),
+          ]);
+        }
+        throw error;
+      }
+    }
+    return {
+      recipeUserId: result.recipeUserId,
+      createdNewRecipeUser: result.createdNewRecipeUser,
+    };
   }
 
   throw new Error(
@@ -324,13 +365,33 @@ async function createRowndUserIdMapping(
   const result = await SuperTokens.createUserIdMapping({
     superTokensUserId,
     externalUserId: rowndUserId,
-    force: true,
+    force: false,
     userContext,
   });
+  if (result.status === "USER_ID_MAPPING_ALREADY_EXISTS_ERROR") {
+    const existingMapping = await SuperTokens.getUserIdMapping({
+      userId: rowndUserId,
+      userIdType: "EXTERNAL",
+      userContext,
+    });
+    if (
+      existingMapping.status === "OK" &&
+      existingMapping.superTokensUserId === superTokensUserId
+    ) {
+      return false;
+    }
+  }
   if (result.status !== "OK") {
     throw new Error(
       `Failed to map migrated Rownd user ID: ${result.status}`,
     );
+  }
+  return true;
+}
+
+async function runCompensations(compensations: Array<() => Promise<void>>) {
+  for (const compensate of [...compensations].reverse()) {
+    await Promise.allSettled([compensate()]);
   }
 }
 
@@ -343,24 +404,17 @@ export async function reconcileRowndUserWithExistingLoginMethods(
     throw new Error("Migrated Rownd user has no external user ID");
   }
 
-  const matches = (await Promise.all(
+  const inspections = await Promise.all(
     stUser.loginMethods.map((method) =>
-      findExistingImportMethod(method, tenantId, userContext),
+      inspectImportMethod(method, tenantId, userContext),
     ),
-  )).filter(
-    (match): match is NonNullable<Awaited<ReturnType<typeof findExistingImportMethod>>> =>
-      !!match,
+  );
+  const matches = inspections.flatMap(({ match }) =>
+    match ? [match] : [],
   );
 
   if (matches.length === 0) {
     return false;
-  }
-
-  const ownerIds = new Set(matches.map(({ user }) => user.id));
-  if (ownerIds.size > 1) {
-    throw new Error(
-      "Migrated login methods belong to different SuperTokens users",
-    );
   }
 
   const target = matches[0]!;
@@ -368,72 +422,128 @@ export async function reconcileRowndUserWithExistingLoginMethods(
     target.user.id,
     userContext,
   );
-  const mappingAlreadyExists = await assertRowndUserIdCanBeMapped(
-    targetSuperTokensUserId,
-    stUser.externalUserId,
-    userContext,
+  const ownerSuperTokensUserIds = await Promise.all(
+    inspections.flatMap(({ owners }) =>
+      owners.map(({ user }) =>
+        resolveSuperTokensUserId(user.id, userContext),
+      ),
+    ),
   );
-  const primaryUserId = await ensurePrimaryUser(
-    target.user,
-    target.loginMethod.recipeUserId,
-    targetSuperTokensUserId,
-    userContext,
-  );
-
-  for (const importMethod of stUser.loginMethods) {
-    const existingMethod = matches.find(({ loginMethod }) =>
-      matchesImportLoginMethod(loginMethod, importMethod),
+  if (
+    ownerSuperTokensUserIds.some(
+      (ownerId) => ownerId !== targetSuperTokensUserId,
+    )
+  ) {
+    throw new Error(
+      "A migrated login method belongs to a different SuperTokens user",
     );
-    if (existingMethod) {
-      continue;
-    }
-
-    const recipeUserId = await createMissingLoginMethod(
-      importMethod,
-      tenantId,
-      userContext,
-    );
-    const createdUser = await SuperTokens.getUser(
-      recipeUserId.getAsString(),
-      userContext,
-    );
-    if (!createdUser) {
-      throw new Error("Created migrated login method was not found");
-    }
-    if (createdUser.id === primaryUserId) {
-      continue;
-    }
-
-    const linkResult = await AccountLinking.linkAccounts(
-      recipeUserId,
-      primaryUserId,
-      userContext,
-    );
-    if (
-      linkResult.status ===
-      "RECIPE_USER_ID_ALREADY_LINKED_WITH_ANOTHER_PRIMARY_USER_ID_ERROR" &&
-      linkResult.primaryUserId === primaryUserId
-    ) {
-      continue;
-    }
-    if (linkResult.status !== "OK") {
-      throw new Error(
-        `Failed to link migrated login method: ${linkResult.status}`,
-      );
-    }
   }
-
-  await UserMetadata.updateUserMetadata(
-    primaryUserId,
-    stUser.userMetadata,
-    userContext,
+  const unsupportedMethod = inspections.find(
+    ({ importMethod, match }) =>
+      !match && importMethod.recipeId === "emailpassword",
   );
-  if (!mappingAlreadyExists) {
-    await createRowndUserIdMapping(
-      primaryUserId,
+  if (unsupportedMethod) {
+    throw new Error(
+      `Cannot reconcile unsupported login method: ${unsupportedMethod.importMethod.recipeId}`,
+    );
+  }
+  const mappingAlreadyExists =
+    targetSuperTokensUserId === stUser.externalUserId ||
+    await assertRowndUserIdCanBeMapped(
+      targetSuperTokensUserId,
       stUser.externalUserId,
       userContext,
     );
+  const compensations: Array<() => Promise<void>> = [];
+  try {
+    const primaryUserId = await ensurePrimaryUser(
+      target.user,
+      target.loginMethod.recipeUserId,
+      targetSuperTokensUserId,
+      userContext,
+    );
+    for (const { importMethod, match } of inspections) {
+      if (match) {
+        continue;
+      }
+
+      const verifiedMatchingEmailMethod =
+        importMethod.recipeId === "passwordless" &&
+        importMethod.email !== undefined &&
+        target.user.loginMethods.find(
+          (method) =>
+            method.tenantIds.includes(tenantId) &&
+            method.verified &&
+            method.hasSameEmailAs(importMethod.email!),
+        );
+      const createdMethod = await createMissingLoginMethod(
+        verifiedMatchingEmailMethod
+          ? { ...importMethod, isVerified: true }
+          : importMethod,
+        tenantId,
+        primaryUserId,
+        userContext,
+      );
+      const { recipeUserId } = createdMethod;
+      if (createdMethod.createdNewRecipeUser) {
+        compensations.push(async () => {
+          await SuperTokens.deleteUser(
+            recipeUserId.getAsString(),
+            false,
+            userContext,
+          );
+        });
+      }
+      const createdUser = await SuperTokens.getUser(
+        recipeUserId.getAsString(),
+        userContext,
+      );
+      if (!createdUser) {
+        throw new Error("Created migrated login method was not found");
+      }
+      if (createdUser.id !== primaryUserId) {
+        const linkResult = await AccountLinking.linkAccounts(
+          recipeUserId,
+          primaryUserId,
+          userContext,
+        );
+        const alreadyLinkedToTarget =
+          linkResult.status ===
+            "RECIPE_USER_ID_ALREADY_LINKED_WITH_ANOTHER_PRIMARY_USER_ID_ERROR" &&
+          linkResult.primaryUserId === primaryUserId;
+        if (linkResult.status !== "OK" && !alreadyLinkedToTarget) {
+          throw new Error(
+            `Failed to link migrated login method: ${linkResult.status}`,
+          );
+        }
+      }
+    }
+
+    if (!mappingAlreadyExists) {
+      const mappingCreated = await createRowndUserIdMapping(
+        primaryUserId,
+        stUser.externalUserId,
+        userContext,
+      );
+      if (mappingCreated) {
+        compensations.push(async () => {
+          await SuperTokens.deleteUserIdMapping({
+            userId: stUser.externalUserId!,
+            userIdType: "EXTERNAL",
+            force: false,
+            userContext,
+          });
+        });
+      }
+    }
+    await UserMetadata.updateUserMetadata(
+      primaryUserId,
+      stUser.userMetadata,
+      userContext,
+    );
+  } catch (error) {
+    await runCompensations(compensations);
+    throw error;
   }
 
   return true;
@@ -596,8 +706,11 @@ export async function createMagicLinkWithConfirmationBypass(
   return rewrittenUrl.toString();
 }
 
-export async function getUserMetadata(userId: string): Promise<RowndMetadata> {
-  const metadata = await UserMetadata.getUserMetadata(userId);
+export async function getUserMetadata(
+  userId: string,
+  userContext?: Record<string, any>,
+): Promise<RowndMetadata> {
+  const metadata = await UserMetadata.getUserMetadata(userId, userContext);
   return (metadata.metadata || {}) as RowndMetadata;
 }
 
@@ -664,17 +777,36 @@ export async function getUserById(
     }
   }
 
-  const verifiedData: JsonRecord = {
-    ...((originalRowndUser?.verified_data || {}) as JsonRecord),
-  };
-
-  const tenantLoginMethods = stUser.loginMethods.filter((method) =>
-    method.tenantIds.includes(tenantId),
+  const originalVerifiedData = (originalRowndUser?.verified_data || {}) as JsonRecord;
+  const verifiedData: JsonRecord = Object.fromEntries(
+    Object.entries(originalVerifiedData).filter(([key]) => key !== "email"),
   );
+
+  const tenantLoginMethods = stUser.loginMethods
+    .filter((method) => method.tenantIds.includes(tenantId))
+    .sort((a, b) =>
+      a.timeJoined - b.timeJoined ||
+      a.recipeUserId.getAsString().localeCompare(b.recipeUserId.getAsString()),
+    );
+  const canonicalEmailMethod = tenantLoginMethods.find(
+    (method) =>
+      method.recipeUserId.getAsString() === metadata.rownd_email_recipe_user_id &&
+      method.email &&
+      !isSuperTokensFakeEmail(method.email),
+  );
+  if (canonicalEmailMethod?.email) {
+    data.email = canonicalEmailMethod.email;
+    if (canonicalEmailMethod.verified) {
+      verifiedData.email = canonicalEmailMethod.email;
+    }
+  }
+
   for (const method of tenantLoginMethods) {
     if (method.recipeId === "passwordless") {
       if (method.email && !isSuperTokensFakeEmail(method.email)) {
-        verifiedData.email = method.email;
+        if (verifiedData.email === undefined && method.verified) {
+          verifiedData.email = method.email;
+        }
         if (data.email === undefined) data.email = method.email;
       }
       if (method.phoneNumber) {
@@ -688,7 +820,8 @@ export async function getUserById(
       if (
         method.verified &&
         method.email &&
-        !isSuperTokensFakeEmail(method.email)
+        !isSuperTokensFakeEmail(method.email) &&
+        verifiedData.email === undefined
       ) {
         verifiedData.email = method.email;
       }
@@ -840,45 +973,111 @@ export async function startPendingEmailVerification(input: {
   email: string;
   tenantId: string;
   pendingVerificationId: string;
+  initiatingSessionHandle: string;
   userContext?: JsonRecord;
 }) {
   const metadata = await getUserMetadata(input.userId);
+  const user = await SuperTokens.getUser(input.userId, input.userContext);
+  if (!user) {
+    throw new RowndPluginError("ROWND_USER_NOT_FOUND");
+  }
+
+  const normalizedEmail = normalizeEmail(input.email);
+  if (!normalizedEmail) {
+    throw new RowndEmailChangeError(
+      "INVALID_EMAIL",
+      400,
+      "email must be a non-empty string",
+    );
+  }
+
   const currentEmail = (await getUserById(input.userId, input.tenantId)).data.email;
   const pendingVerifications = getPendingVerifications(metadata);
   const pendingEmailVerifications = pendingVerifications.filter(
-    (pendingVerification) =>
-      pendingVerification.field === "email" &&
-      (pendingVerification.tenantId ?? PUBLIC_TENANT_ID) === input.tenantId,
+    (pendingVerification) => pendingVerification.field === "email",
   );
+  if (
+    pendingEmailVerifications.some(
+      (pendingVerification) => pendingVerification.status === "COMMITTING",
+    )
+  ) {
+    throw new RowndEmailChangeError(
+      "CONFLICT",
+      409,
+      "an email change is already being committed",
+    );
+  }
 
-  if (currentEmail === input.email) {
+  if (
+    typeof currentEmail === "string" &&
+    normalizeEmail(currentEmail) === normalizedEmail
+  ) {
     for (const pendingVerification of pendingEmailVerifications) {
       await EmailVerification.revokeEmailVerificationTokens(
-        input.tenantId,
-        input.recipeUserId,
+        pendingVerification.tenantId ?? PUBLIC_TENANT_ID,
+        getVerificationRecipeUserId(user, pendingVerification, input.recipeUserId),
         pendingVerification.value,
         input.userContext,
       );
     }
 
-    if (pendingEmailVerifications.length > 0) {
-      await UserMetadata.updateUserMetadata(input.userId, {
+    const currentPasswordlessMethod = getPasswordlessEmailLoginMethods(
+      user.loginMethods,
+    ).find(
+      (method) =>
+        method.verified &&
+        method.email &&
+        normalizeEmail(method.email) === normalizedEmail,
+    );
+    const updatedMetadata = currentPasswordlessMethod
+      ? buildVerifiedEmailMetadata(
+        metadata,
+        input.userId,
+        normalizedEmail,
+        currentPasswordlessMethod.recipeUserId.getAsString(),
+      )
+      : {
         ...metadata,
         rownd_pending_verification: pendingVerifications.filter(
-          (pendingVerification) =>
-            pendingVerification.field !== "email" ||
-            (pendingVerification.tenantId ?? PUBLIC_TENANT_ID) !== input.tenantId,
+          (pendingVerification) => pendingVerification.field !== "email",
         ),
-      });
+      };
+    if (pendingEmailVerifications.length > 0 || currentPasswordlessMethod) {
+      await UserMetadata.updateUserMetadata(input.userId, updatedMetadata);
     }
 
     return getUserById(input.userId, input.tenantId);
   }
 
+  await assertEmailAvailableForUser(normalizedEmail, user.id, input.userContext);
+
+  const passwordlessEmailMethods = getPasswordlessEmailLoginMethods(user.loginMethods);
+  if (passwordlessEmailMethods.length > 1) {
+    throw new RowndEmailChangeError(
+      "AMBIGUOUS",
+      409,
+      "the account has multiple email sign-in methods",
+    );
+  }
+
+  const passwordlessEmailMethod = passwordlessEmailMethods[0];
+  if (hasOnlyGuestLoginMethods(user)) {
+    throw new RowndEmailChangeError(
+      "CONFLICT",
+      403,
+      "guest accounts cannot change sign-in email",
+    );
+  }
+  const purpose = passwordlessEmailMethod
+    ? "UPDATE_PASSWORDLESS"
+    : "ADD_PASSWORDLESS";
+  const verificationRecipeUserId = passwordlessEmailMethod?.recipeUserId ?? input.recipeUserId;
+  const tenantIds = getAccountTenantIds(user, input.tenantId);
+
   for (const pendingVerification of pendingEmailVerifications) {
     await EmailVerification.revokeEmailVerificationTokens(
-      input.tenantId,
-      input.recipeUserId,
+      pendingVerification.tenantId ?? PUBLIC_TENANT_ID,
+      getVerificationRecipeUserId(user, pendingVerification, input.recipeUserId),
       pendingVerification.value,
       input.userContext,
     );
@@ -890,6 +1089,18 @@ export async function startPendingEmailVerification(input: {
     value: input.email,
     created_at: new Date().toISOString(),
     tenantId: input.tenantId,
+    normalizedValue: normalizedEmail,
+    purpose,
+    primaryUserId: user.id,
+    initiatingRecipeUserId: input.recipeUserId.getAsString(),
+    initiatingSessionHandle: input.initiatingSessionHandle,
+    verificationRecipeUserId: verificationRecipeUserId.getAsString(),
+    ...(passwordlessEmailMethod
+      ? { passwordlessRecipeUserId: passwordlessEmailMethod.recipeUserId.getAsString() }
+      : {}),
+    tenantIds,
+    expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    status: "PENDING",
   };
 
   await UserMetadata.updateUserMetadata(input.userId, {
@@ -897,31 +1108,52 @@ export async function startPendingEmailVerification(input: {
     rownd_pending_verification: [
       ...pendingVerifications.filter(
         (pendingVerification) =>
-          pendingVerification.field !== "email" ||
-          (pendingVerification.tenantId ?? PUBLIC_TENANT_ID) !== input.tenantId,
+          pendingVerification.field !== "email",
       ),
       pendingVerification,
     ],
   });
 
-  const response = await EmailVerification.sendEmailVerificationEmail(
-    input.tenantId,
-    input.userId,
-    input.recipeUserId,
-    input.email,
-    {
-      ...input.userContext,
-      rowndPendingVerificationId: pendingVerification.id,
-    },
-  );
+  try {
+    await EmailVerification.revokeEmailVerificationTokens(
+      input.tenantId,
+      verificationRecipeUserId,
+      normalizedEmail,
+      input.userContext,
+    );
+    await EmailVerification.unverifyEmail(
+      verificationRecipeUserId,
+      normalizedEmail,
+      input.userContext,
+    );
+    const response = await EmailVerification.sendEmailVerificationEmail(
+      input.tenantId,
+      input.userId,
+      verificationRecipeUserId,
+      normalizedEmail,
+      {
+        ...input.userContext,
+        rowndPendingVerificationId: pendingVerification.id,
+      },
+    );
 
-  if (response.status === "EMAIL_ALREADY_VERIFIED_ERROR") {
-    await completePendingEmailVerification({
-      recipeUserId: input.recipeUserId,
-      email: input.email,
-      tenantId: input.tenantId,
-      userContext: input.userContext,
+    if (response.status !== "OK") {
+      throw new Error("A fresh email verification could not be created");
+    }
+  } catch (error) {
+    await EmailVerification.revokeEmailVerificationTokens(
+      input.tenantId,
+      verificationRecipeUserId,
+      normalizedEmail,
+      input.userContext,
+    );
+    await UserMetadata.updateUserMetadata(input.userId, {
+      ...metadata,
+      rownd_pending_verification: pendingVerifications.filter(
+        (verification) => verification.field !== "email",
+      ),
     });
+    throw error;
   }
 
   return getUserById(input.userId, input.tenantId);
@@ -931,11 +1163,14 @@ export async function completePendingEmailVerification(input: {
   recipeUserId: Parameters<typeof AccountLinking.createPrimaryUser>[0];
   email: string;
   tenantId?: string;
+  sessionHandle?: string;
   userContext?: JsonRecord;
 }): Promise<
   | {
       userId: string;
       recipeUserId: Parameters<typeof AccountLinking.createPrimaryUser>[0];
+      initiatingSessionHandle: string;
+      replaceSession: true;
     }
   | undefined
 > {
@@ -947,132 +1182,294 @@ export async function completePendingEmailVerification(input: {
   const userId = user?.id ?? input.recipeUserId.getAsString();
   const metadata = await getUserMetadata(userId);
   const pendingVerifications = getPendingVerifications(metadata);
+  const normalizedEmail = normalizeEmail(input.email);
   const pendingVerification = pendingVerifications.find(
-    (pendingVerification) => isMatchingPendingEmailVerification(
-      pendingVerification,
-      input.email,
-      tenantId,
-    ),
+    (pendingVerification) =>
+      isMatchingPendingEmailVerification(
+        pendingVerification,
+        normalizedEmail,
+        tenantId,
+      ) &&
+      (!pendingVerification.verificationRecipeUserId ||
+        pendingVerification.verificationRecipeUserId === input.recipeUserId.getAsString()),
   );
 
   if (!pendingVerification) {
     return;
   }
 
-  let metadataUserId = userId;
-  let verifiedRecipeUserId = input.recipeUserId;
-  const tenantLoginMethods = user?.loginMethods.filter((method) =>
-    method.tenantIds.includes(tenantId),
-  ) ?? [];
-  const passwordlessEmailMethod = getPasswordlessEmailLoginMethod(
-    tenantLoginMethods,
-  );
-  if (passwordlessEmailMethod) {
-    const updateResult = await Passwordless.updateUser({
-      recipeUserId: passwordlessEmailMethod.recipeUserId,
-      email: input.email,
-      userContext: input.userContext,
-    });
+  const initiatingSessionHandle =
+    pendingVerification.initiatingSessionHandle;
+  if (
+    pendingVerification.status !== "PENDING" ||
+    !initiatingSessionHandle ||
+    initiatingSessionHandle !== input.sessionHandle
+  ) {
+    return rejectInactivePendingEmailVerification(
+      userId,
+      pendingVerification,
+      input.recipeUserId,
+      normalizedEmail,
+      input.userContext,
+    );
+  }
 
-    if (updateResult.status !== "OK") {
-      throw new Error(
-        `Failed to update verified email method: ${updateResult.status}`,
+  type CompletionPhase = "PENDING" | "COMMITTING" | "COMPLETED";
+  let completionPhase: CompletionPhase = "PENDING";
+  let metadataUserId = userId;
+  let rollbackCredentialChange: (() => Promise<void>) | undefined;
+  try {
+    if (
+      pendingVerification.expires_at &&
+      Date.parse(pendingVerification.expires_at) <= Date.now()
+    ) {
+      throw new RowndEmailChangeError(
+        "CONFLICT",
+        409,
+        "email verification expired; start the email change again",
       );
     }
 
-    verifiedRecipeUserId = passwordlessEmailMethod.recipeUserId;
-  } else if (hasOnlyGuestLoginMethods(user
-    ? { ...user, loginMethods: tenantLoginMethods }
-    : user)) {
-    const isPasswordlessSignUpAllowed = await AccountLinking.isSignUpAllowed(
-      tenantId,
-      {
-        recipeId: "passwordless",
-        email: input.email,
-      },
+    await assertEmailAvailableForUser(normalizedEmail, userId, input.userContext);
+    completionPhase = "COMMITTING";
+    await markPendingEmailVerificationStatus(
+      userId,
+      pendingVerification.id,
+      "COMMITTING",
+      input.userContext,
+    );
+
+    const initiatingSession = await Session.getSessionInformation(
+      initiatingSessionHandle,
+      input.userContext,
+    );
+    if (
+      !initiatingSession ||
+    initiatingSession.userId !== userId ||
+    initiatingSession.tenantId !== tenantId ||
+    !(await Session.revokeSession(initiatingSessionHandle, input.userContext))
+    ) {
+      return rejectInactivePendingEmailVerification(
+        userId,
+        pendingVerification,
+        input.recipeUserId,
+        normalizedEmail,
+        input.userContext,
+      );
+    }
+    await Session.revokeAllSessionsForUser(
+      userId,
       true,
       undefined,
       input.userContext,
     );
-
-    if (!isPasswordlessSignUpAllowed) {
-      throw new Error("Passwordless sign up is not allowed for this email");
+    const committingMetadata = await getUserMetadata(userId);
+    const committingVerification = getPendingVerifications(
+      committingMetadata,
+    ).find((verification) => verification.field === "email");
+    if (
+      committingVerification?.id !== pendingVerification.id ||
+    committingVerification.status !== "COMMITTING"
+    ) {
+      return rejectInactivePendingEmailVerification(
+        userId,
+        pendingVerification,
+        input.recipeUserId,
+        normalizedEmail,
+        input.userContext,
+      );
     }
 
-    const passwordlessUser = await Passwordless.signInUp({
-      email: input.email,
-      tenantId,
-      userContext: input.userContext,
-    });
-    verifiedRecipeUserId = passwordlessUser.recipeUserId;
-
-    const primaryUserResult = await AccountLinking.createPrimaryUser(
-      passwordlessUser.recipeUserId,
-      input.userContext,
+    let verifiedRecipeUserId = input.recipeUserId;
+    let canonicalEmailRecipeUserId: string;
+    const passwordlessEmailMethod = findPendingPasswordlessMethod(
+      user,
+      pendingVerification,
     );
+    if (
+      !pendingVerification.purpose &&
+    user &&
+    getPasswordlessEmailLoginMethods(user.loginMethods).length > 1
+    ) {
+      throw new RowndEmailChangeError(
+        "AMBIGUOUS",
+        409,
+        "the account has multiple email sign-in methods",
+      );
+    }
+    if (pendingVerification.purpose === "UPDATE_PASSWORDLESS" ||
+      (!pendingVerification.purpose && passwordlessEmailMethod)) {
+      if (!passwordlessEmailMethod) {
+        throw new RowndEmailChangeError(
+          "CONFLICT",
+          409,
+          "the email sign-in method changed before verification completed",
+        );
+      }
+      const newlyAssociatedTenantIds = await associateRecipeUserToTenants(
+        getAccountTenantIds(user!, tenantId).filter(
+          (associatedTenantId) =>
+            !passwordlessEmailMethod.tenantIds.includes(associatedTenantId),
+        ),
+        passwordlessEmailMethod.recipeUserId,
+        input.userContext,
+      );
+      const previousEmail = passwordlessEmailMethod.email!;
+      rollbackCredentialChange = async () => {
+        try {
+          await Passwordless.updateUser({
+            recipeUserId: passwordlessEmailMethod.recipeUserId,
+            email: previousEmail,
+            userContext: input.userContext,
+          });
+        } finally {
+          await rollbackTenantAssociations(
+            newlyAssociatedTenantIds,
+            passwordlessEmailMethod.recipeUserId,
+            input.userContext,
+          );
+        }
+      };
+      const updateResult = await Passwordless.updateUser({
+        recipeUserId: passwordlessEmailMethod.recipeUserId,
+        email: normalizedEmail,
+        userContext: input.userContext,
+      });
 
-    const primaryUserId =
-      primaryUserResult.status === "OK"
-        ? primaryUserResult.user.id
-        : primaryUserResult.status ===
-            "RECIPE_USER_ID_ALREADY_LINKED_WITH_PRIMARY_USER_ID_ERROR"
-          ? primaryUserResult.primaryUserId
-          : passwordlessUser.user.id;
+      if (updateResult.status !== "OK") {
+        throw emailOwnershipConflict();
+      }
 
-    if (userId !== primaryUserId) {
-      const linkResult = await AccountLinking.linkAccounts(
-        input.recipeUserId,
-        primaryUserId,
+      canonicalEmailRecipeUserId = passwordlessEmailMethod.recipeUserId.getAsString();
+      verifiedRecipeUserId = findInitiatingRecipeUserId(user, pendingVerification) ?? input.recipeUserId;
+    } else if (pendingVerification.purpose === "UPGRADE_GUEST" ||
+      (!pendingVerification.purpose && hasOnlyGuestLoginMethods(user))) {
+      throw new RowndEmailChangeError(
+        "CONFLICT",
+        403,
+        "guest email upgrades must be restarted through a supported sign-up flow",
+      );
+    } else {
+      const primaryUserId = await ensureStablePrimaryUser(
+        user,
+        pendingVerification,
+        input.userContext,
+      );
+      const passwordlessUser = await Passwordless.signInUp({
+        email: normalizedEmail,
+        tenantId,
+        userContext: {
+          ...input.userContext,
+          rowndDisableAutomaticAccountLinking: true,
+        },
+      });
+      if (passwordlessUser.status !== "OK") {
+        throw emailOwnershipConflict();
+      }
+
+      if (!passwordlessUser.createdNewRecipeUser && passwordlessUser.user.id !== primaryUserId) {
+        throw emailOwnershipConflict();
+      }
+
+      let newlyAssociatedTenantIds: string[] = [];
+      rollbackCredentialChange = async () => {
+        if (passwordlessUser.createdNewRecipeUser) {
+          await SuperTokens.deleteUser(
+            passwordlessUser.recipeUserId.getAsString(),
+            false,
+            input.userContext,
+          );
+        } else {
+          await rollbackTenantAssociations(
+            newlyAssociatedTenantIds,
+            passwordlessUser.recipeUserId,
+            input.userContext,
+          );
+        }
+      };
+      newlyAssociatedTenantIds = await associateRecipeUserToTenants(
+        getAccountTenantIds(user!, tenantId).filter(
+          (associatedTenantId) =>
+            !passwordlessUser.user.loginMethods.some(
+              (method) =>
+                method.recipeUserId.getAsString() ===
+                  passwordlessUser.recipeUserId.getAsString() &&
+                method.tenantIds.includes(associatedTenantId),
+            ),
+        ),
+        passwordlessUser.recipeUserId,
         input.userContext,
       );
 
-      if (linkResult.status !== "OK") {
-        throw new Error(
-          `Failed to link verified email method: ${linkResult.status}`,
+      if (passwordlessUser.user.id !== primaryUserId) {
+        const linkResult = await AccountLinking.linkAccounts(
+          passwordlessUser.recipeUserId,
+          primaryUserId,
+          input.userContext,
         );
+        if (linkResult.status !== "OK") {
+          throw emailOwnershipConflict();
+        }
       }
+
+      metadataUserId = primaryUserId;
+      canonicalEmailRecipeUserId = passwordlessUser.recipeUserId.getAsString();
+      verifiedRecipeUserId = findInitiatingRecipeUserId(user, pendingVerification) ?? input.recipeUserId;
     }
 
-    metadataUserId = primaryUserId;
-  }
+    await Session.revokeAllSessionsForUser(
+      metadataUserId,
+      true,
+      undefined,
+      input.userContext,
+    );
+    const targetMetadata = await getUserMetadata(metadataUserId);
+    const updatedMetadata = buildVerifiedEmailMetadata(
+      targetMetadata,
+      metadataUserId,
+      normalizedEmail,
+      canonicalEmailRecipeUserId,
+      metadata.original_rownd_user,
+    );
 
-  const targetMetadata =
-    metadataUserId === userId ? metadata : await getUserMetadata(metadataUserId);
-  const originalRowndUser =
-    targetMetadata.original_rownd_user ?? metadata.original_rownd_user;
-  const targetPendingVerifications = getPendingVerifications(targetMetadata);
-  const updatedMetadata: RowndMetadata = {
-    ...targetMetadata,
-    ...(originalRowndUser
-      ? {
-        original_rownd_user: {
-          ...originalRowndUser,
-          data: {
-            ...originalRowndUser.data,
-            email: input.email,
-          },
-          verified_data: {
-            ...originalRowndUser.verified_data,
-            email: input.email,
-          },
-        },
+    await UserMetadata.updateUserMetadata(metadataUserId, updatedMetadata);
+    completionPhase = "COMPLETED";
+
+    return {
+      userId: metadataUserId,
+      recipeUserId: verifiedRecipeUserId,
+      initiatingSessionHandle,
+      replaceSession: true,
+    };
+  } catch (error) {
+    if (completionPhase !== "COMPLETED") {
+      if (rollbackCredentialChange) {
+        await Promise.allSettled([rollbackCredentialChange()]);
       }
-      : {}),
-    rownd_pending_verification: targetPendingVerifications.filter(
-      (verification) => !isMatchingPendingEmailVerification(
-        verification,
-        input.email,
-        tenantId,
-      ),
-    ),
-  };
-
-  await UserMetadata.updateUserMetadata(metadataUserId, updatedMetadata);
-
-  return {
-    userId: metadataUserId,
-    recipeUserId: verifiedRecipeUserId,
-  };
+      if (completionPhase === "COMMITTING") {
+        await Promise.allSettled(
+          [...new Set([userId, metadataUserId])].map((sessionUserId) =>
+            Session.revokeAllSessionsForUser(
+              sessionUserId,
+              true,
+              undefined,
+              input.userContext,
+            ),
+          ),
+        );
+      }
+      await Promise.allSettled([
+        cleanupPendingEmailVerification(
+          userId,
+          pendingVerification,
+          input.recipeUserId,
+          normalizedEmail,
+          input.userContext,
+        ),
+      ]);
+    }
+    throw error;
+  }
 }
 
 function isMatchingPendingEmailVerification(
@@ -1081,8 +1478,294 @@ function isMatchingPendingEmailVerification(
   tenantId: string,
 ) {
   return verification.field === "email" &&
-    verification.value === email &&
+    normalizeEmail(verification.normalizedValue ?? verification.value) === email &&
     (verification.tenantId ?? PUBLIC_TENANT_ID) === tenantId;
+}
+
+function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
+}
+
+function getPasswordlessEmailLoginMethods(loginMethods: SuperTokensLoginMethod[]) {
+  return loginMethods.filter(
+    (method) => method.recipeId === "passwordless" && !!method.email,
+  );
+}
+
+function getAccountTenantIds(user: SuperTokensUser, currentTenantId: string) {
+  return [...new Set([
+    currentTenantId,
+    ...user.loginMethods.flatMap((method) => method.tenantIds),
+  ])];
+}
+
+async function associateRecipeUserToTenants(
+  tenantIds: string[],
+  recipeUserId: SuperTokensLoginMethod["recipeUserId"],
+  userContext?: Record<string, any>,
+) {
+  const newlyAssociatedTenantIds: string[] = [];
+  let associationWithUnknownOutcome: string | undefined;
+  try {
+    for (const tenantId of tenantIds) {
+      associationWithUnknownOutcome = tenantId;
+      const result = await MultiTenancy.associateUserToTenant(
+        tenantId,
+        recipeUserId,
+        userContext,
+      );
+      associationWithUnknownOutcome = undefined;
+      if (result.status !== "OK") {
+        throw emailOwnershipConflict();
+      }
+      if (!result.wasAlreadyAssociated) {
+        newlyAssociatedTenantIds.push(tenantId);
+      }
+    }
+    return newlyAssociatedTenantIds;
+  } catch (error) {
+    await rollbackTenantAssociations(
+      [...new Set([
+        ...newlyAssociatedTenantIds,
+        ...(associationWithUnknownOutcome
+          ? [associationWithUnknownOutcome]
+          : []),
+      ])],
+      recipeUserId,
+      userContext,
+    );
+    throw error;
+  }
+}
+
+async function rollbackTenantAssociations(
+  tenantIds: string[],
+  recipeUserId: SuperTokensLoginMethod["recipeUserId"],
+  userContext?: Record<string, any>,
+) {
+  await Promise.all(
+    tenantIds.map((tenantId) =>
+      MultiTenancy.disassociateUserFromTenant(
+        tenantId,
+        recipeUserId,
+        userContext,
+      ),
+    ),
+  );
+}
+
+function getVerificationRecipeUserId(
+  user: SuperTokensUser,
+  verification: RowndPendingVerification,
+  fallback: SuperTokensLoginMethod["recipeUserId"],
+) {
+  return user.loginMethods.find(
+    (method) =>
+      method.recipeUserId.getAsString() === verification.verificationRecipeUserId,
+  )?.recipeUserId ?? fallback;
+}
+
+async function assertEmailAvailableForUser(
+  email: string,
+  userId: string,
+  userContext?: Record<string, any>,
+) {
+  const tenants = await MultiTenancy.listAllTenants(userContext);
+  const tenantIds = [...new Set([
+    PUBLIC_TENANT_ID,
+    ...tenants.tenants.map((tenant) => tenant.tenantId),
+  ])];
+  const users = await Promise.all(
+    tenantIds.map((tenantId) =>
+      SuperTokens.listUsersByAccountInfo(
+        tenantId,
+        { email },
+        false,
+        userContext,
+      ),
+    ),
+  );
+
+  if (users.flat().some((owner) => owner.id !== userId)) {
+    throw emailOwnershipConflict();
+  }
+}
+
+function emailOwnershipConflict() {
+  return new RowndEmailChangeError(
+    "CONFLICT",
+    409,
+    "email cannot be used for this account",
+  );
+}
+
+function findPendingPasswordlessMethod(
+  user: SuperTokensUser | undefined,
+  pendingVerification: RowndPendingVerification,
+) {
+  if (!user) return undefined;
+
+  const methods = getPasswordlessEmailLoginMethods(user.loginMethods);
+  if (pendingVerification.passwordlessRecipeUserId) {
+    return methods.find(
+      (method) =>
+        method.recipeUserId.getAsString() === pendingVerification.passwordlessRecipeUserId,
+    );
+  }
+  return methods.length === 1 ? methods[0] : undefined;
+}
+
+function findInitiatingRecipeUserId(
+  user: SuperTokensUser | undefined,
+  pendingVerification: RowndPendingVerification,
+) {
+  return user?.loginMethods.find(
+    (method) =>
+      method.recipeUserId.getAsString() === pendingVerification.initiatingRecipeUserId,
+  )?.recipeUserId;
+}
+
+async function ensureStablePrimaryUser(
+  user: SuperTokensUser | undefined,
+  pendingVerification: RowndPendingVerification,
+  userContext?: Record<string, any>,
+) {
+  if (!user) {
+    throw new RowndPluginError("ROWND_USER_NOT_FOUND");
+  }
+  if (user.isPrimaryUser) {
+    return user.id;
+  }
+
+  const anchor = findInitiatingRecipeUserId(user, pendingVerification) ?? user.loginMethods[0]?.recipeUserId;
+  if (!anchor) {
+    throw emailOwnershipConflict();
+  }
+  const primaryResult = await AccountLinking.createPrimaryUser(anchor, userContext);
+  if (primaryResult.status === "OK") {
+    return primaryResult.user.id;
+  }
+  if (
+    primaryResult.status ===
+    "RECIPE_USER_ID_ALREADY_LINKED_WITH_PRIMARY_USER_ID_ERROR"
+  ) {
+    return primaryResult.primaryUserId;
+  }
+  throw emailOwnershipConflict();
+}
+
+async function removePendingEmailVerification(
+  userId: string,
+  pendingVerificationId: string,
+  userContext?: Record<string, any>,
+) {
+  const metadata = await getUserMetadata(userId, userContext);
+  await UserMetadata.updateUserMetadata(
+    userId,
+    {
+      rownd_pending_verification: getPendingVerifications(metadata).filter(
+        (verification) => verification.id !== pendingVerificationId,
+      ),
+    },
+    userContext,
+  );
+}
+
+async function markPendingEmailVerificationStatus(
+  userId: string,
+  pendingVerificationId: string,
+  status: NonNullable<RowndPendingVerification["status"]>,
+  userContext?: Record<string, any>,
+) {
+  const metadata = await getUserMetadata(userId, userContext);
+  await UserMetadata.updateUserMetadata(
+    userId,
+    {
+      rownd_pending_verification: getPendingVerifications(metadata).map(
+        (verification) =>
+          verification.id === pendingVerificationId
+            ? { ...verification, status }
+            : verification,
+      ),
+    },
+    userContext,
+  );
+}
+
+async function rejectInactivePendingEmailVerification(
+  userId: string,
+  pendingVerification: RowndPendingVerification,
+  recipeUserId: SuperTokensLoginMethod["recipeUserId"],
+  email: string,
+  userContext?: Record<string, any>,
+): Promise<never> {
+  await cleanupPendingEmailVerification(
+    userId,
+    pendingVerification,
+    recipeUserId,
+    email,
+    userContext,
+  );
+  throw new RowndEmailChangeError(
+    "CONFLICT",
+    409,
+    "email change session is no longer active; start the email change again",
+  );
+}
+
+async function cleanupPendingEmailVerification(
+  userId: string,
+  pendingVerification: RowndPendingVerification,
+  recipeUserId: SuperTokensLoginMethod["recipeUserId"],
+  email: string,
+  userContext?: Record<string, any>,
+) {
+  try {
+    await EmailVerification.unverifyEmail(recipeUserId, email, userContext);
+  } finally {
+    await removePendingEmailVerification(
+      userId,
+      pendingVerification.id,
+      userContext,
+    );
+  }
+}
+
+function buildVerifiedEmailMetadata(
+  metadata: RowndMetadata,
+  userId: string,
+  email: string,
+  canonicalEmailRecipeUserId: string,
+  fallbackOriginalRowndUser?: RowndMetadata["original_rownd_user"],
+): RowndMetadata {
+  const compatibilityUser = metadata.original_rownd_user ?? fallbackOriginalRowndUser ?? {
+    state: "enabled",
+    auth_level: "verified",
+    data: { user_id: userId },
+    verified_data: {},
+    groups: [],
+    meta: {},
+  };
+
+  return {
+    ...metadata,
+    original_rownd_user: {
+      ...compatibilityUser,
+      data: {
+        ...compatibilityUser.data,
+        user_id: compatibilityUser.data.user_id ?? userId,
+        email,
+      },
+      verified_data: {
+        ...compatibilityUser.verified_data,
+        email,
+      },
+    },
+    rownd_email_recipe_user_id: canonicalEmailRecipeUserId,
+    rownd_pending_verification: getPendingVerifications(metadata).filter(
+      (verification) => verification.field !== "email",
+    ),
+  };
 }
 
 export async function updateUserMetadata(
@@ -1105,12 +1788,4 @@ export async function updateUserMetadata(
       ),
     ) as JsonRecord,
   };
-}
-
-function getPasswordlessEmailLoginMethod(
-  loginMethods: NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>["loginMethods"],
-) {
-  return loginMethods.find((method) => {
-    return method.recipeId === "passwordless" && !!method.email;
-  });
 }
