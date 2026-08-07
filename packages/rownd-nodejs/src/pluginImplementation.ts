@@ -14,7 +14,6 @@ import {
   PUBLIC_TENANT_ID,
 } from "./constants";
 import { RowndEmailChangeError, RowndPluginError } from "./errors";
-import { MIGRATION_ORIGIN_SESSION_DATA_KEY } from "./internal-constants";
 import { logDebugMessage } from "./logger";
 import type { RowndPluginNormalisedConfig } from "./types";
 import { createClient } from "./telemetry/createTelemetryClient";
@@ -375,7 +374,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         {
           ...buildRowndAudience({}, appVariantId),
         },
-        { [MIGRATION_ORIGIN_SESSION_DATA_KEY]: true },
+        {},
         userContext,
       );
 
@@ -749,14 +748,6 @@ async function validateEmailChangeSession(
       code: 403,
       message: "guest accounts cannot change sign-in email",
     };
-  }
-
-  const sessionData = await session.getSessionDataFromDatabase(userContext);
-  const isMigrationOriginated =
-    isRecord(sessionData) &&
-    sessionData[MIGRATION_ORIGIN_SESSION_DATA_KEY] === true;
-  if (isMigrationOriginated) {
-    return recentAuthenticationRequiredResponse();
   }
 
   const authenticationTime = await session.getTimeCreated(userContext);

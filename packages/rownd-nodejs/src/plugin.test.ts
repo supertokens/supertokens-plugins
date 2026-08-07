@@ -42,7 +42,6 @@ import { init } from "./plugin";
 import { RowndPluginConfig, RowndTelemetryClient } from "./types";
 import { ROWND_PLUGIN_ERROR_MESSAGES } from "./errors";
 import { DEFAULT_ROWND_SCHEMA, ROWND_JWT_CLAIMS } from "./constants";
-import { MIGRATION_ORIGIN_SESSION_DATA_KEY } from "./internal-constants";
 import {
   buildRowndOAuthPayload,
   mapRowndUserToSuperTokens,
@@ -1842,7 +1841,7 @@ describe("rownd-nodejs plugin", () => {
           tenantId,
           recipeUserId,
           {},
-          { [MIGRATION_ORIGIN_SESSION_DATA_KEY]: true },
+          {},
           userContext,
         );
       });
@@ -4808,59 +4807,7 @@ describe("rownd-nodejs plugin", () => {
         expect((metadata.metadata as any).rownd_pending_verification).toBeUndefined();
       });
 
-      it("rejects a migrated session from a refreshed Rownd token with fresh iat", async () => {
-        const { server: s, port } = await setup(
-          importCoreConnectionURI,
-          {
-            emailChange: { maxSessionAgeSeconds: 600 },
-            schema: {
-              migration_origin_override: {
-                display_name: "Migration origin override",
-                type: "boolean",
-                user_visible: false,
-                include_in_session_claims: true,
-                session_claim_name: MIGRATION_ORIGIN_SESSION_DATA_KEY,
-              },
-            },
-          },
-          { enableEmailVerification: true },
-        );
-        server = s;
-        testPORT = port;
-        const accessToken = await createSessionForUser(
-          "fresh-rownd-iat-user",
-          "fresh-rownd-iat-user@example.com",
-          {
-            validatedToken: {
-              decoded_token: { iat: Math.floor(Date.now() / 1000) },
-            },
-            rowndUserData: { migration_origin_override: false },
-          },
-        );
-        const session = await Session.getSessionWithoutRequestResponse(
-          accessToken,
-        );
-        expect(session.getAccessTokenPayload()).not.toHaveProperty(
-          MIGRATION_ORIGIN_SESSION_DATA_KEY,
-        );
-        await expect(session.getSessionDataFromDatabase()).resolves.toMatchObject({
-          [MIGRATION_ORIGIN_SESSION_DATA_KEY]: true,
-        });
-
-        const res = await requestEmailChange(
-          accessToken,
-          "fresh-rownd-iat-user-new@example.com",
-        );
-
-        expect(res.status).toBe(403);
-        await expect(res.json()).resolves.toEqual({
-          status: "ERROR",
-          code: 403,
-          message: "recent authentication is required to change email",
-        });
-      });
-
-      it("rejects a migrated session when the Rownd token has no iat", async () => {
+      it("allows a freshly migrated session to change email", async () => {
         const { server: s, port } = await setup(
           importCoreConnectionURI,
           { emailChange: { maxSessionAgeSeconds: 600 } },
@@ -4869,69 +4816,17 @@ describe("rownd-nodejs plugin", () => {
         server = s;
         testPORT = port;
         const accessToken = await createSessionForUser(
-          "missing-rownd-iat-user",
-          "missing-rownd-iat-user@example.com",
+          "freshly-migrated-user",
+          "freshly-migrated-user@example.com",
         );
 
         const res = await requestEmailChange(
           accessToken,
-          "missing-rownd-iat-user-new@example.com",
+          "freshly-migrated-user-new@example.com",
         );
 
-        expect(res.status).toBe(403);
-        await expect(res.json()).resolves.toEqual({
-          status: "ERROR",
-          code: 403,
-          message: "recent authentication is required to change email",
-        });
-      });
-
-      it("marks and rejects every session created by repeated migration", async () => {
-        const { server: s, port } = await setup(
-          importCoreConnectionURI,
-          { emailChange: { maxSessionAgeSeconds: 600 } },
-          { enableEmailVerification: true },
-        );
-        server = s;
-        testPORT = port;
-        const firstAccessToken = await createSessionForUser(
-          "repeated-migration-session-user",
-          "repeated-migration-session-user@example.com",
-        );
-        const secondAccessToken = await createSessionForUser(
-          "repeated-migration-session-user",
-          "repeated-migration-session-user@example.com",
-        );
-        const sessions = await Promise.all(
-          [firstAccessToken, secondAccessToken].map((accessToken) =>
-            Session.getSessionWithoutRequestResponse(accessToken),
-          ),
-        );
-
-        expect(sessions[0].getHandle()).not.toBe(sessions[1].getHandle());
-        for (const session of sessions) {
-          await expect(
-            session.getSessionDataFromDatabase(),
-          ).resolves.toMatchObject({
-            [MIGRATION_ORIGIN_SESSION_DATA_KEY]: true,
-          });
-        }
-
-        for (const [index, accessToken] of [
-          firstAccessToken,
-          secondAccessToken,
-        ].entries()) {
-          const res = await requestEmailChange(
-            accessToken,
-            `repeated-migration-session-user-new-${index}@example.com`,
-          );
-          expect(res.status).toBe(403);
-          await expect(res.json()).resolves.toMatchObject({
-            status: "ERROR",
-            code: 403,
-            message: "recent authentication is required to change email",
-          });
-        }
+        expect(res.status).toBe(200);
+        expect((await res.json()).status).toBe("OK");
       });
 
       it("keeps the original native authentication age after session refresh", async () => {

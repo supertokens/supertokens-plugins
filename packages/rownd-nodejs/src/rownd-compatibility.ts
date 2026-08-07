@@ -12,7 +12,6 @@ import {
   ROWND_JWT_CLAIMS,
 } from "./constants";
 import { getPluginConfig } from "./config";
-import { MIGRATION_ORIGIN_SESSION_DATA_KEY } from "./internal-constants";
 import type {
   RowndUser,
   RowndUserMetadata,
@@ -231,10 +230,6 @@ export function buildConfiguredSessionClaims(metadata?: RowndMetadata): JsonReco
     }
 
     const claimName = field.session_claim_name || key;
-    if (claimName === MIGRATION_ORIGIN_SESSION_DATA_KEY) {
-      continue;
-    }
-
     const value = metadata.original_rownd_user?.data?.[key] ?? metadata[key];
     if (value !== undefined) {
       claims[claimName] = value as JsonValue;

@@ -74,13 +74,10 @@ modified.
 
 Email changes for established accounts require a database-checked native
 SuperTokens session created within the last ten minutes by default. Normal
-session refresh does not reset this window. Sessions created by the Rownd
-migration endpoint remain usable but cannot authorize email credential changes,
-because Rownd token issuance does not prove recent interactive authentication.
-Guest and instant accounts must use a supported sign-up flow instead. The target
-email is rejected when it belongs to another account; the plugin never merges
-accounts as a side effect of a profile edit. The change applies to every tenant
-associated with the account.
+session refresh does not reset this window. Guest and instant accounts must use
+a supported sign-up flow instead. The target email is rejected when it belongs
+to another account; the plugin never merges accounts as a side effect of a
+profile edit. The change applies to every tenant associated with the account.
 
 ```typescript
 RowndMigrationPlugin.init({
