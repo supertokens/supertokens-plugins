@@ -30,16 +30,10 @@ export type RowndPendingVerification = {
   value: string;
   created_at: string;
   tenantId?: string;
-  normalizedValue?: string;
-  purpose?: "UPDATE_PASSWORDLESS" | "ADD_PASSWORDLESS" | "UPGRADE_GUEST";
-  primaryUserId?: string;
-  initiatingRecipeUserId?: string;
+  purpose?: "UPDATE_PASSWORDLESS" | "ADD_PASSWORDLESS";
   initiatingSessionHandle?: string;
   verificationRecipeUserId?: string;
-  passwordlessRecipeUserId?: string;
-  tenantIds?: string[];
-  expires_at?: string;
-  status?: "PENDING" | "VERIFIED" | "COMMITTING" | "CONFLICT";
+  status?: "PENDING" | "COMMITTING";
 };
 
 export type RowndCompatUserResponse = {

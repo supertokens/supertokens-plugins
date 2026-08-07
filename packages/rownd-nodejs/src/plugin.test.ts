@@ -4912,7 +4912,7 @@ describe("rownd-nodejs plugin", () => {
         });
         server = s;
         testPORT = port;
-        const { accessToken, userId, recipeUserId } =
+        const { accessToken, userId, recipeUserId, sessionHandle } =
           await createPasswordlessSessionForUser(
             "email-update-user@example.com",
           );
@@ -4927,7 +4927,7 @@ describe("rownd-nodejs plugin", () => {
             },
             body: JSON.stringify({
               data: {
-                email: "new-email-update@example.com",
+                email: " New-Email-Update@Example.com ",
                 first_name: "Grace",
               },
             }),
@@ -4942,16 +4942,19 @@ describe("rownd-nodejs plugin", () => {
         expect(body.verified_data.email).toBe("email-update-user@example.com");
 
         let metadata = await UserMetadata.getUserMetadata(userId);
-        expect(metadata.metadata).toEqual(
-          expect.objectContaining({
-            rownd_pending_verification: [
-              expect.objectContaining({
-                field: "email",
-                value: "new-email-update@example.com",
-              }),
-            ],
-          }),
-        );
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual([
+          {
+            id: expect.any(String),
+            field: "email",
+            value: " New-Email-Update@Example.com ",
+            created_at: expect.any(String),
+            tenantId: "public",
+            purpose: "UPDATE_PASSWORDLESS",
+            initiatingSessionHandle: sessionHandle,
+            verificationRecipeUserId: recipeUserId.getAsString(),
+            status: "PENDING",
+          },
+        ]);
         expect((metadata.metadata as any).email).toBeUndefined();
 
         const tokenResponse =
@@ -4992,6 +4995,98 @@ describe("rownd-nodejs plugin", () => {
         expect(passwordlessMethod?.recipeUserId.getAsString()).toBe(
           recipeUserId.getAsString(),
         );
+      });
+
+      it("rejects unsupported pending email-change purposes", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const currentEmail = "unsupported-purpose-current@example.com";
+        const targetEmail = "unsupported-purpose-target@example.com";
+        const initiatingUser =
+          await createPasswordlessSessionForUser(currentEmail);
+
+        const updateRes = await requestEmailChange(
+          initiatingUser.accessToken,
+          targetEmail,
+        );
+        expect(updateRes.status).toBe(200);
+
+        const metadata = await UserMetadata.getUserMetadata(
+          initiatingUser.userId,
+        );
+        const pendingVerification = (metadata.metadata as any)
+          .rownd_pending_verification[0];
+        await UserMetadata.updateUserMetadata(initiatingUser.userId, {
+          rownd_pending_verification: [
+            { ...pendingVerification, purpose: "UPGRADE_GUEST" },
+          ],
+        });
+
+        await expect(
+          completePendingEmailVerification({
+            recipeUserId: initiatingUser.recipeUserId,
+            email: targetEmail,
+            sessionHandle: initiatingUser.sessionHandle,
+          }),
+        ).rejects.toThrow(
+          "email change session is no longer active; start the email change again",
+        );
+
+        const user = await SuperTokens.getUser(initiatingUser.userId);
+        expect(user?.loginMethods[0]?.email).toBe(currentEmail);
+        const finalMetadata = await UserMetadata.getUserMetadata(
+          initiatingUser.userId,
+        );
+        expect(
+          (finalMetadata.metadata as any).rownd_pending_verification,
+        ).toEqual([]);
+      });
+
+      it("rejects completion when the initiating recipe user is detached", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const currentEmail = "detached-session-current@example.com";
+        const targetEmail = "detached-session-target@example.com";
+        const initiatingUser =
+          await createPasswordlessSessionForUser(currentEmail);
+
+        const updateRes = await requestEmailChange(
+          initiatingUser.accessToken,
+          targetEmail,
+        );
+        expect(updateRes.status).toBe(200);
+
+        const originalGetUser = SuperTokens.getUser;
+        let getUserCallCount = 0;
+        const getUser = vi
+          .spyOn(SuperTokens, "getUser")
+          .mockImplementation(async (...input) => {
+            const user = await originalGetUser(...input);
+            getUserCallCount += 1;
+            return getUserCallCount === 2 && user
+              ? { ...user, loginMethods: [] }
+              : user;
+          });
+
+        await expect(
+          completePendingEmailVerification({
+            recipeUserId: initiatingUser.recipeUserId,
+            email: targetEmail,
+            sessionHandle: initiatingUser.sessionHandle,
+          }),
+        ).rejects.toThrow(
+          "email change session is no longer active; start the email change again",
+        );
+        getUser.mockRestore();
+
+        const user = await SuperTokens.getUser(initiatingUser.userId);
+        expect(user?.loginMethods[0]?.email).toBe(currentEmail);
       });
 
       it("clears COMMITTING and fails closed after a generic Core failure immediately after the transition", async () => {
