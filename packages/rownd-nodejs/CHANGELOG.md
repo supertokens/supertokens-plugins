@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.6.6
+
+### Patch Changes
+
+- Fix the email change flow
+
 ## 0.6.5
 
 ### Patch Changes
