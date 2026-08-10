@@ -49,3 +49,7 @@ export const HUB_LOGIN_PAGE_PATH = "/account/login";
 export const HUB_VERIFY_EMAIL_PAGE_PATH = "/account/verify-email";
 export const PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM =
   "bypassDeviceConfirmation";
+export const PENDING_EMAIL_VERIFICATION_QUERY_PARAM =
+  "rowndPendingVerificationId";
+export const NATIVE_EMAIL_VERIFICATION_UPGRADE_REQUIRED_MESSAGE =
+  "native email verification requires a Rownd SDK upgrade";

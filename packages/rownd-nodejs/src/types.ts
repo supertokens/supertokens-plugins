@@ -721,6 +721,18 @@ export interface RowndPluginConfig {
   };
 }
 
+/**
+ * Compatibility metadata accepted in profile update request bodies.
+ * These values select client routing behavior; they do not grant permission to
+ * change or verify an email address.
+ */
+export interface RowndEmailChangeRequestContext {
+  rowndDisplayContext?: "browser" | "mobile_app" | "customer_web_view";
+  rowndClientDomain?: string;
+  /** Indicates that the native container can complete email verification. */
+  rowndNativeEmailVerification?: boolean;
+}
+
 export type RowndClientDomains = {
   mobile?: string;
   browser?: string;

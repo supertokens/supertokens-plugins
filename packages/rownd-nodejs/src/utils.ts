@@ -127,12 +127,18 @@ export function parseUpdateMetaBody(value: unknown): { meta?: JsonRecord } {
   return { meta: value.meta };
 }
 
-export function parseUpdateFieldBody(value: unknown): { value?: JsonValue } {
+export function parseUpdateFieldBody(value: unknown): {
+  value?: JsonValue;
+  context?: JsonRecord;
+} {
   if (!isJsonRecord(value) || !hasOwn(value, "value")) {
     return {};
   }
 
-  return { value: value.value as JsonValue };
+  return {
+    value: value.value as JsonValue,
+    ...(isJsonRecord(value.context) ? { context: value.context } : {}),
+  };
 }
 
 export function missingFieldResponse() {

@@ -68,16 +68,21 @@ Without `disableRowndUserMigration: true`, both `rowndAppKey` and
 
 When email sign-in is configured, changing the Rownd profile email starts a
 verified, account-wide passwordless email change. The plugin updates the
-account's existing passwordless email method or creates and links one when the
-account does not have one. Third-party and email-password methods are not
-modified.
+account's existing passwordless email method. For an account containing only
+real third-party methods, it creates and links a new passwordless method after
+verification. Third-party and email-password login identifiers are not modified.
+For additions, the initiating third-party recipe user acts as the
+EmailVerification subject because the Passwordless recipe user does not exist
+until proof succeeds.
 
 Email changes for established accounts require a database-checked native
 SuperTokens session created within the last ten minutes by default. Normal
 session refresh does not reset this window. Guest and instant accounts must use
 a supported sign-up flow instead. The target email is rejected when it belongs
 to another account; the plugin never merges accounts as a side effect of a
-profile edit. The change applies to every tenant associated with the account.
+profile edit. Profile metadata is account-wide. A new passwordless method is
+associated only with the tenant that initiated the change; an existing method
+retains its current tenant associations.
 
 ```typescript
 RowndMigrationPlugin.init({
@@ -98,14 +103,45 @@ email updates are rejected rather than creating a hidden authentication method.
 when email changes are enabled, and Passwordless must use `EMAIL` or
 `EMAIL_OR_PHONE` as its contact method.
 
-The old email remains active until verification succeeds. Pending changes
-expire after 15 minutes, and starting another change revokes the previous
-pending token. Email ownership is checked across every SuperTokens tenant both
-when the change starts and when verification completes. A conflicting owner or
-an account with multiple passwordless email methods must be repaired before the
-change can proceed. Verification must use the same active session that started
-the change. Completion revokes every account session and returns a replacement
-for that initiating session.
+The old email remains active until verification succeeds. A pending change
+remains usable only while its underlying SuperTokens verification token,
+pending metadata, and initiating session remain valid. Starting another change
+revokes the previous pending token. Email ownership is checked across every
+SuperTokens tenant both when the change starts and when verification completes.
+A conflicting owner or an account with multiple Passwordless login methods must
+be repaired before the change can proceed. Accounts with only real third-party
+methods can add a Passwordless method; guest and instant methods cannot.
+Phone-only Passwordless methods are supported, and adding an email preserves the
+phone number. Verification must use the same active session that started the
+change. Completion revokes every account
+session and returns a replacement for that initiating session.
+
+Native clients using `rowndDisplayContext: "mobile_app"` must also send
+`rowndNativeEmailVerification: true` in the validated `context` object for
+`PUT /plugin/rownd/user` and `PUT /plugin/rownd/user/field` email changes. Older
+clients receive HTTP 426 before pending metadata is created or verification
+email is sent. Browser requests do not require this flag. It is capability and
+routing metadata only; session, recent-authentication, email ownership, and
+verification checks remain authoritative.
+
+Pending email-change links preserve the raw SuperTokens verification token.
+Custom email-delivery overrides must preserve all existing query parameters, including
+`token`, `rowndPendingVerificationId`, `apiDomain`, `apiBasePath`, `tenantId`
+when present, and Hub bootstrap parameters. The pending marker selects the
+email-change flow; without it, verification remains an ordinary SuperTokens
+verification and does not change the Passwordless login method. Removing the
+marker can consume the raw token without completing the credential change. This
+denial-of-service case is accepted: the plugin intentionally does not classify
+or wrap Core tokens, and each pending link carries exactly one raw `token` value.
+Native clients require the API parameters to match their trusted SuperTokens
+configuration before providing a session token.
+
+SuperTokens atomically consumes its verification token, but user-metadata
+updates are read/modify/write operations without compare-and-swap. Concurrent
+profile writes can still overwrite pending-operation metadata. A process crash
+between Core token consumption and terminal cleanup can leave stale pending
+metadata until it is repaired. Terminal operations attempt to remove their
+pending record; cleanup or rollback failures require reconciliation.
 
 ### Session Claim Fields
 

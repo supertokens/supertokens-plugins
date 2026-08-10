@@ -19,6 +19,7 @@ import {
   HANDLE_BASE_PATH,
   HUB_VERIFY_EMAIL_PAGE_PATH,
   HUB_LOGIN_PAGE_PATH,
+  PENDING_EMAIL_VERIFICATION_QUERY_PARAM,
   PLUGIN_ID,
   PLUGIN_SDK_VERSION,
 } from "./constants";
@@ -43,7 +44,10 @@ import { setRowndClient } from "./rownd-repository";
 import {
   buildRowndSessionClaims,
   completePendingEmailVerification,
+  addPendingEmailVerificationMarker,
+  getPendingEmailVerificationIdFromUserContext,
   recordRowndAppVariantForUser,
+  resolvePendingEmailVerificationToken,
   RowndIsAnonymousClaim,
 } from "./supertokens-repository";
 import {
@@ -71,6 +75,8 @@ import {
 } from "./pluginImplementation";
 
 const DISABLED_MIGRATION_ROWND_APP_KEY = "migration-disabled";
+const PENDING_EMAIL_VERIFICATION_SESSION_ERROR =
+  "email change verification requires the initiating session";
 
 function applyRowndPasswordlessRequestContext(
   req: Parameters<typeof getRequestedDisplayContextFromRequest>[0],
@@ -138,6 +144,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         input: T,
         linkKey: keyof T,
         targetPath: string,
+        additionalParams: Record<string, string> = {},
       ) => {
         const appVariantId = input?.userContext?.rowndAppVariantId as
           | string
@@ -169,6 +176,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           ...(typeof oauthLoginChallenge === "string"
             ? { oauthLoginChallenge }
             : {}),
+          ...additionalParams,
         };
 
         if (!input[linkKey]) {
@@ -675,11 +683,31 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     return {
                       ...implementation,
                       sendEmail: async (input) => {
+                        const pendingVerificationId =
+                          getPendingEmailVerificationIdFromUserContext(
+                            input.userContext,
+                          );
+                        const deliveryInput = pendingVerificationId
+                          ? {
+                            ...input,
+                            emailVerifyLink:
+                              addPendingEmailVerificationMarker({
+                                pendingVerificationId,
+                                emailVerifyLink: input.emailVerifyLink,
+                              }),
+                          }
+                          : input;
                         return implementation.sendEmail({
                           ...addHubBootstrapParams(
-                            input,
+                            deliveryInput,
                             "emailVerifyLink",
                             HUB_VERIFY_EMAIL_PAGE_PATH,
+                            pendingVerificationId
+                              ? {
+                                [PENDING_EMAIL_VERIFICATION_QUERY_PARAM]:
+                                  pendingVerificationId,
+                              }
+                              : {},
                           ),
                         });
                       },
@@ -701,9 +729,31 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   );
                 }
 
-                const response =
-                  await originalImplementation.verifyEmailPOST(input);
-                if (response.status === "OK") {
+                const pendingVerificationId =
+                  input.options.req.getKeyValueFromQuery(
+                    PENDING_EMAIL_VERIFICATION_QUERY_PARAM,
+                  );
+                const pendingToken =
+                  await resolvePendingEmailVerificationToken({
+                    token: input.token,
+                    queryPendingVerificationId: pendingVerificationId,
+                    tenantId: input.tenantId,
+                    session: input.session,
+                    userContext: input.userContext,
+                  });
+                if (pendingToken.status === "INVALID_PENDING") {
+                  return {
+                    status: "GENERAL_ERROR" as const,
+                    message: PENDING_EMAIL_VERIFICATION_SESSION_ERROR,
+                  };
+                }
+
+                const response = await originalImplementation.verifyEmailPOST(
+                  pendingToken.status === "OK"
+                    ? { ...input, token: pendingToken.coreToken }
+                    : input,
+                );
+                if (response.status === "OK" && pendingToken.status === "OK") {
                   let verificationResult;
                   try {
                     verificationResult = await completePendingEmailVerification({
@@ -711,6 +761,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       email: response.user.email,
                       tenantId: input.tenantId,
                       sessionHandle: input.session?.getHandle(),
+                      pendingVerificationId:
+                        pendingToken.pendingVerificationId,
+                      pendingUserId: pendingToken.userId,
                       userContext: input.userContext,
                     });
                   } catch (error) {
@@ -731,15 +784,21 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       verificationResult.initiatingSessionHandle;
 
                   if (shouldReplaceSession && verificationResult) {
-                    response.newSession = await Session.createNewSession(
-                      input.options.req,
-                      input.options.res,
-                      session.getTenantId(input.userContext),
-                      verificationResult.recipeUserId,
-                      {},
-                      {},
-                      input.userContext,
-                    );
+                    try {
+                      response.newSession = await Session.createNewSession(
+                        input.options.req,
+                        input.options.res,
+                        session.getTenantId(input.userContext),
+                        verificationResult.recipeUserId,
+                        {},
+                        {},
+                        input.userContext,
+                      );
+                    } catch (error) {
+                      await verificationResult
+                        .rollbackOnSessionReplacementFailure();
+                      throw error;
+                    }
                   }
                 }
 

@@ -11,11 +11,15 @@ import type {
 import {
   GUEST_AUTH_METHOD_ID,
   INSTANT_AUTH_METHOD_ID,
+  NATIVE_EMAIL_VERIFICATION_UPGRADE_REQUIRED_MESSAGE,
   PUBLIC_TENANT_ID,
 } from "./constants";
 import { RowndEmailChangeError, RowndPluginError } from "./errors";
 import { logDebugMessage } from "./logger";
-import type { RowndPluginNormalisedConfig } from "./types";
+import type {
+  RowndEmailChangeRequestContext,
+  RowndPluginNormalisedConfig,
+} from "./types";
 import { createClient } from "./telemetry/createTelemetryClient";
 import {
   assertRowndAppVariantIsConfigured,
@@ -25,7 +29,6 @@ import {
 import {
   buildRowndAudience,
   canUpdateUserDataField,
-  hasOnlyGuestLoginMethods,
   isInternalMetadataField,
   mapRowndUserToSuperTokens,
 } from "./rownd-compatibility";
@@ -418,6 +421,51 @@ function clearSuperTokensCoreCallCache(userContext: SuperTokensUserContext) {
   }
 }
 
+function buildEmailChangeUserContext(
+  userContext: SuperTokensUserContext,
+  payloadContext?: Record<string, unknown>,
+): SuperTokensUserContext & RowndEmailChangeRequestContext {
+  const displayContext = payloadContext?.rowndDisplayContext;
+  const emailChangeContext: RowndEmailChangeRequestContext = {
+    ...(displayContext === "browser" ||
+    displayContext === "mobile_app" ||
+    displayContext === "customer_web_view"
+      ? { rowndDisplayContext: displayContext }
+      : {}),
+    ...(typeof payloadContext?.rowndClientDomain === "string"
+      ? { rowndClientDomain: payloadContext.rowndClientDomain }
+      : {}),
+    ...(typeof payloadContext?.rowndNativeEmailVerification === "boolean"
+      ? {
+        rowndNativeEmailVerification:
+            payloadContext.rowndNativeEmailVerification,
+      }
+      : {}),
+  };
+
+  return {
+    ...userContext,
+    ...emailChangeContext,
+  };
+}
+
+function nativeEmailVerificationUpgradeRequired(
+  context: RowndEmailChangeRequestContext,
+) {
+  return (
+    context.rowndDisplayContext === "mobile_app" &&
+    context.rowndNativeEmailVerification !== true
+  );
+}
+
+function nativeEmailVerificationUpgradeRequiredResponse() {
+  return {
+    status: "ERROR" as const,
+    code: 426,
+    message: NATIVE_EMAIL_VERIFICATION_UPGRADE_REQUIRED_MESSAGE,
+  };
+}
+
 export function handleGetUser() {
   return async (
     _req: SuperTokensRequest,
@@ -443,10 +491,10 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
     assertRowndAppVariantIsConfigured(appVariantId);
     const payload = parseUpdateUserBody(await getJsonBody(req));
     const inputData = payload.data ?? {};
-    const requestUserContext = {
-      ...userContext,
-      ...payload.context,
-    };
+    const requestUserContext = buildEmailChangeUserContext(
+      userContext,
+      payload.context,
+    );
     const { email, ...dataWithoutEmail } = inputData;
     const hasEmailField = hasOwn(inputData, "email");
     if (hasEmailField && (typeof email !== "string" || email.trim().length === 0)) {
@@ -473,6 +521,9 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
         currentEmail.trim().toLowerCase() !== email.trim().toLowerCase());
 
     if (changesEmail) {
+      if (nativeEmailVerificationUpgradeRequired(requestUserContext)) {
+        return nativeEmailVerificationUpgradeRequiredResponse();
+      }
       const sessionError = await validateEmailChangeSession(
         deps,
         session!,
@@ -646,6 +697,10 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
     }
 
     const payload = parseUpdateFieldBody(await getJsonBody(req));
+    const requestUserContext = buildEmailChangeUserContext(
+      userContext,
+      payload.context,
+    );
     if (field === "email") {
       if (typeof payload.value !== "string" || payload.value.trim().length === 0) {
         return {
@@ -663,11 +718,14 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
         currentEmail.trim().toLowerCase() !==
           payload.value.trim().toLowerCase();
       if (changesEmail) {
+        if (nativeEmailVerificationUpgradeRequired(requestUserContext)) {
+          return nativeEmailVerificationUpgradeRequiredResponse();
+        }
         const sessionError = await validateEmailChangeSession(
           deps,
           session!,
           appVariantId,
-          userContext,
+          requestUserContext,
         );
         if (sessionError) return sessionError;
       }
@@ -681,8 +739,8 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
           email: payload.value,
           pendingVerificationId: randomUUID(),
           userContext: appVariantId
-            ? { ...userContext, rowndAppVariantId: appVariantId }
-            : userContext,
+            ? { ...requestUserContext, rowndAppVariantId: appVariantId }
+            : requestUserContext,
         });
         return {
           status: "OK" as const,
@@ -738,15 +796,6 @@ async function validateEmailChangeSession(
       status: "ERROR" as const,
       code: 503,
       message: "email sign-in is not available",
-    };
-  }
-
-  const user = await SuperTokens.getUser(session.getUserId(userContext), userContext);
-  if (hasOnlyGuestLoginMethods(user)) {
-    return {
-      status: "ERROR" as const,
-      code: 403,
-      message: "guest accounts cannot change sign-in email",
     };
   }
 
