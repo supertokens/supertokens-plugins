@@ -1817,6 +1817,7 @@ async def inspect_import_method(
             owner
             for owner in owners
             if method_import.get("recipeId") == "thirdparty"
+            or method_import.get("recipeId") == "passwordless"
             or (method_import.get("isVerified") is True and owner[1].verified)
         ),
         None,

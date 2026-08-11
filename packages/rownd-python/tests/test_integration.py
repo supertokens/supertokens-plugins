@@ -331,7 +331,7 @@ async def test_migrate_google_user_successfully(core_url: str, rownd_client: Moc
     assert passwordless_method.verified is False
 
 
-async def test_migrate_does_not_reconcile_unverified_email_collision(
+async def test_migrate_reconciles_unverified_rownd_email_with_existing_passwordless_account(
     core_url: str, rownd_client: MockRowndClient
 ):
     client = make_client(core_url, rownd_client)
@@ -352,11 +352,28 @@ async def test_migrate_does_not_reconcile_unverified_email_collision(
         },
     )
 
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
-    unchanged_owner = await get_user(owner.user.id)
-    assert unchanged_owner is not None
-    assert len(unchanged_owner.login_methods) == 1
-    assert unchanged_owner.login_methods[0].email == email
+    assert res.status_code == 200
+    assert res.json() == {"status": "OK"}
+    access_token = res.headers.get("st-access-token")
+    assert access_token is not None
+    session = await session_asyncio.get_session_without_request_response(access_token)
+    assert session is not None
+    assert session.get_user_id() == "migration-unverified-collision"
+    mapping = await get_user_id_mapping("migration-unverified-collision", "EXTERNAL", {})
+    assert getattr(mapping, "supertokens_user_id", None) == owner.user.id
+    migrated_user = await get_user("migration-unverified-collision")
+    assert migrated_user is not None
+    assert any(
+        method.recipe_id == "passwordless" and method.email == email
+        for method in migrated_user.login_methods
+    )
+    assert any(
+        method.recipe_id == "thirdparty"
+        and method.third_party is not None
+        and method.third_party.id == "google"
+        and method.third_party.user_id == "migration-unverified-google"
+        for method in migrated_user.login_methods
+    )
     google_owners = await supertokens_list_users_by_account_info(
         "public",
         AccountInfoInput(
@@ -365,7 +382,7 @@ async def test_migrate_does_not_reconcile_unverified_email_collision(
         False,
         {},
     )
-    assert google_owners == []
+    assert len(google_owners) == 1
 
 
 async def test_migration_preflights_later_collision_before_creating_phone_method(
