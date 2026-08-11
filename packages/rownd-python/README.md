@@ -109,9 +109,10 @@ The plugin registers these routes below `api_base_path`:
 
 Migration and guest routes accept an optional `tenantId` query parameter and default to `public`. Compatibility user views, sessions, and pending email verification are scoped to that tenant; user metadata remains shared across tenant memberships.
 
-Rownd passwordless identifiers are authoritative during migration. The plugin updates
-or adds the passwordless method on the matched account and maps it to the Rownd user
-ID. Migration fails if imported identities belong to different SuperTokens users.
+Rownd passwordless identifiers are authoritative during migration. The plugin reuses
+matching Passwordless identities, creates missing imported methods, and maps the
+resulting account to the Rownd user ID. Migration fails if imported identities belong
+to different SuperTokens users.
 
 After all Rownd users have migrated, retain the compatibility routes without Rownd credentials by configuring `disable_rownd_user_migration=True`. This removes both migration routes; when no app key is configured, it uses an internal app key for passwordless and verification-link rewriting.
 
@@ -141,8 +142,9 @@ When email sign-in is configured, changing the profile email starts a verified,
 account-wide passwordless email change. The plugin updates an existing Passwordless
 method, including a phone-only method without removing its phone number. For accounts
 containing only real third-party methods, it creates and links a Passwordless method
-after verification. Guest, instant, mixed, and ambiguous account topologies are
-rejected. Configure the maximum native-session age:
+after verification. Guest/instant-only accounts, mixed accounts without an existing
+Passwordless method, and ambiguous Passwordless topologies are rejected. Configure
+the maximum age of the initiating SuperTokens session:
 
 ```python
 RowndMigrationPlugin(
@@ -163,7 +165,8 @@ Native clients using `rowndDisplayContext: "mobile_app"` must send
 `rowndNativeEmailVerification: true` in the request `context`. Older clients receive
 HTTP 426 before metadata or email-delivery side effects. Only validated display,
 client-domain, and native-capability values are propagated; request-provided redirect
-paths are ignored.
+paths are ignored. This applies to both `PUT /plugin/rownd/user` and
+`PUT /plugin/rownd/user/field`.
 
 Pending email-change links retain the raw SuperTokens `token` and add
 `rowndPendingVerificationId`. Custom email delivery must preserve both parameters.

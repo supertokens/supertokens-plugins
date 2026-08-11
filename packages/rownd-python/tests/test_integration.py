@@ -2390,6 +2390,175 @@ async def test_route_replacement_session_failure_rolls_back_email_change(
     )
 
 
+async def test_marked_email_change_fails_closed_when_target_becomes_owned_before_completion(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    delivery_links: list[str] = []
+    client = make_client(
+        core_url,
+        rownd_client,
+        enable_email_verification=True,
+        email_verification_links=delivery_links,
+    )
+    current_email = "ownership-race-current@example.com"
+    target_email = "ownership-race-target@example.com"
+    sign_in = await passwordless_asyncio.signinup(
+        "public", current_email, None, None, {}
+    )
+    initiating_session = await session_asyncio.create_new_session_without_request_response(
+        "public", sign_in.recipe_user_id, {}, {}, True
+    )
+    await session_asyncio.create_new_session_without_request_response(
+        "public", sign_in.recipe_user_id, {}, {}, True
+    )
+
+    update_res = client.put(
+        "/auth/plugin/rownd/user",
+        headers={
+            **auth_headers(initiating_session.get_access_token()),
+            "Content-Type": "application/json",
+        },
+        json={"data": {"email": target_email}},
+    )
+    assert update_res.status_code == 200
+    assert len(delivery_links) == 1
+    delivered_query = parse_qs(urlparse(delivery_links[0]).query)
+    original_assert_email_available = impl.assert_email_available_for_user
+    new_owner: Any = None
+
+    async def claim_email_after_completion_preflight(*args: Any, **kwargs: Any):
+        nonlocal new_owner
+        await original_assert_email_available(*args, **kwargs)
+        new_owner = await passwordless_asyncio.signinup(
+            "public", target_email, None, None, {}
+        )
+
+    monkeypatch.setattr(
+        impl, "assert_email_available_for_user", claim_email_after_completion_preflight
+    )
+
+    verify_res = client.post(
+        "/auth/user/email/verify?rowndPendingVerificationId=%s"
+        % delivered_query["rowndPendingVerificationId"][0],
+        headers={
+            **auth_headers(initiating_session.get_access_token()),
+            "Content-Type": "application/json",
+            "rid": "emailverification",
+        },
+        json={"method": "token", "token": delivered_query["token"][0]},
+    )
+
+    assert verify_res.json() == {
+        "status": "GENERAL_ERROR",
+        "message": "email cannot be used for this account",
+    }
+    unchanged_user = await get_user(sign_in.user.id)
+    assert unchanged_user is not None
+    assert unchanged_user.login_methods[0].email == current_email
+    owner = await get_user(new_owner.user.id)
+    assert owner is not None
+    assert owner.login_methods[0].email == target_email
+    metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
+    assert metadata.metadata["rownd_pending_verification"] == []
+    assert not await emailverification_asyncio.is_email_verified(
+        sign_in.recipe_user_id, target_email
+    )
+    assert await session_asyncio.get_all_session_handles_for_user(
+        sign_in.user.id, True, None, {}
+    ) == []
+
+
+async def test_add_passwordless_finalization_failure_removes_created_method_and_cleans_security_state(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    delivery_links: list[str] = []
+    client = make_client(
+        core_url,
+        rownd_client,
+        enable_email_verification=True,
+        email_verification_links=delivery_links,
+    )
+    target_email = "add-passwordless-finalization@example.com"
+    third_party = cast(
+        Any,
+        await thirdparty_asyncio.manually_create_or_update_user(
+            tenant_id="public",
+            third_party_id="google",
+            third_party_user_id="add-passwordless-finalization-google",
+            email="add-passwordless-provider@example.com",
+            is_verified=True,
+            user_context={},
+        ),
+    )
+    initiating_session = await session_asyncio.create_new_session_without_request_response(
+        "public", third_party.recipe_user_id, {}, {}, True
+    )
+    await session_asyncio.create_new_session_without_request_response(
+        "public", third_party.recipe_user_id, {}, {}, True
+    )
+    update_res = client.put(
+        "/auth/plugin/rownd/user",
+        headers={
+            **auth_headers(initiating_session.get_access_token()),
+            "Content-Type": "application/json",
+        },
+        json={"data": {"email": target_email}},
+    )
+    assert update_res.status_code == 200
+    assert len(delivery_links) == 1
+    delivered_query = parse_qs(urlparse(delivery_links[0]).query)
+    original_update_user_metadata = impl.usermetadata_asyncio.update_user_metadata
+    linked_method_seen = False
+
+    async def fail_finalization(user_id: str, metadata_update: dict, *args: Any, **kwargs: Any):
+        nonlocal linked_method_seen
+        rownd_user = metadata_update.get("original_rownd_user", {})
+        if rownd_user.get("data", {}).get("email") == target_email:
+            user_at_failure = await get_user(user_id)
+            linked_method_seen = user_at_failure is not None and any(
+                method.recipe_id == "passwordless" and method.email == target_email
+                for method in user_at_failure.login_methods
+            )
+            raise RuntimeError("email metadata finalization failed")
+        return await original_update_user_metadata(user_id, metadata_update, *args, **kwargs)
+
+    monkeypatch.setattr(
+        impl.usermetadata_asyncio, "update_user_metadata", fail_finalization
+    )
+    verify_res = client.post(
+        "/auth/user/email/verify?rowndPendingVerificationId=%s"
+        % delivered_query["rowndPendingVerificationId"][0],
+        headers={
+            **auth_headers(initiating_session.get_access_token()),
+            "Content-Type": "application/json",
+            "rid": "emailverification",
+        },
+        json={"method": "token", "token": delivered_query["token"][0]},
+    )
+
+    assert verify_res.status_code == 500
+    assert linked_method_seen is True
+    compensated_user = await get_user(third_party.user.id)
+    assert compensated_user is not None
+    assert len(compensated_user.login_methods) == 1
+    assert compensated_user.login_methods[0].recipe_id == "thirdparty"
+    metadata = await usermetadata_asyncio.get_user_metadata(third_party.user.id)
+    assert metadata.metadata.get("rownd_pending_verification") == []
+    assert await supertokens_list_users_by_account_info(
+        "public", AccountInfoInput(email=target_email), False, {}
+    ) == []
+    assert not await emailverification_asyncio.is_email_verified(
+        third_party.recipe_user_id, target_email
+    )
+    assert await session_asyncio.get_all_session_handles_for_user(
+        third_party.user.id, True, None, {}
+    ) == []
+
+
 @pytest.mark.parametrize("callback_session", ["missing", "revoked", "different"])
 async def test_marked_verification_rejects_invalid_callback_session_before_token_consumption(
     core_url: str,

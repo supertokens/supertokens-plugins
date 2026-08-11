@@ -135,7 +135,7 @@ def core_url():
         postgres.start()
 
         core = (
-            DockerContainer("supertokens/supertokens-postgresql")
+            DockerContainer("supertokens/supertokens-postgresql:12.0.10")
             .with_network(network)
             .with_env(
                 "POSTGRESQL_CONNECTION_URI",
