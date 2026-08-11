@@ -2121,7 +2121,7 @@ describe("rownd-nodejs plugin", () => {
         expect(passwordlessMethod?.verified).toBe(false);
       });
 
-      it("does not reconcile an unverified Rownd email with an existing account", async () => {
+      it("reconciles an unverified Rownd email with its existing passwordless account", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
@@ -2148,26 +2148,48 @@ describe("rownd-nodejs plugin", () => {
           `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
           {
             method: "POST",
-            headers: { Authorization: "Bearer some-token" },
+            headers: {
+              Authorization: "Bearer some-token",
+              rid: "session",
+              "fdi-version": "1.18",
+              "st-auth-mode": "header",
+            },
           },
         );
 
-        expect(res.status).toBe(400);
-        await expect(res.json()).resolves.toEqual({
-          status: "ERROR",
-          message: "Migration failed",
+        expect(res.status).toBe(200);
+        await expect(res.json()).resolves.toEqual({ status: "OK" });
+        const accessToken = res.headers.get("st-access-token");
+        expect(accessToken).toBeTruthy();
+        const session = await Session.getSessionWithoutRequestResponse(
+          accessToken!,
+        );
+        expect(session.getUserId()).toBe("rownd-unverified-email-collision");
+
+        await expect(
+          SuperTokens.getUserIdMapping({
+            userId: "rownd-unverified-email-collision",
+            userIdType: "EXTERNAL",
+          }),
+        ).resolves.toMatchObject({
+          status: "OK",
+          superTokensUserId: existingUser.user.id,
         });
-        expect(
-          await SuperTokens.getUser(existingUser.user.id),
-        ).toMatchObject({
-          id: existingUser.user.id,
-          loginMethods: [
+        const migratedUser = await SuperTokens.getUser(
+          "rownd-unverified-email-collision",
+        );
+        expect(migratedUser?.loginMethods).toEqual(
+          expect.arrayContaining([
             expect.objectContaining({ recipeId: "passwordless", email }),
-          ],
-        });
-        expect(
-          await SuperTokens.getUser("rownd-unverified-email-collision"),
-        ).toBeUndefined();
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: {
+                id: "google",
+                userId: "google-unverified-email-collision",
+              },
+            }),
+          ]),
+        );
         await expect(
           SuperTokens.listUsersByAccountInfo(
             "public",
@@ -2179,7 +2201,7 @@ describe("rownd-nodejs plugin", () => {
             },
             false,
           ),
-        ).resolves.toHaveLength(0);
+        ).resolves.toHaveLength(1);
       });
 
       it("preflights a later unverified email collision before linking an earlier phone method", async () => {

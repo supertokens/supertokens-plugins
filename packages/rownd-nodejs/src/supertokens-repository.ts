@@ -201,6 +201,7 @@ async function inspectImportMethod(
   const match = owners.find(
     ({ loginMethod }) =>
       importMethod.recipeId === "thirdparty" ||
+      importMethod.recipeId === "passwordless" ||
       (importMethod.isVerified && loginMethod.verified),
   );
 
@@ -429,7 +430,6 @@ export async function reconcileRowndUserWithExistingLoginMethods(
   const matches = inspections.flatMap(({ match }) =>
     match ? [match] : [],
   );
-
   if (matches.length === 0) {
     return false;
   }

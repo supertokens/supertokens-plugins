@@ -269,6 +269,7 @@ Unauthenticated migration and guest routes accept an optional `tenantId` query p
 - **Non-public tenant**: `POST /auth/plugin/rownd/migrate?tenantId=tenant-a`
 - **Headers**: `Authorization: Bearer <Rownd_JWT>`. Header-token clients should also send `rid: session`, `fdi-version: 1.18`, and `st-auth-mode: header`.
 - **Description**: Validates the Rownd JWT, imports new users with their Rownd profile data, ensures the selected login method is associated with the requested SuperTokens tenant, and then creates a new SuperTokens session in that tenant. Header-token clients must receive `st-access-token`, `st-refresh-token`, and `front-token` response headers.
+- **Identity reconciliation**: Rownd passwordless identifiers are authoritative during migration. The plugin updates or adds the passwordless method on the matched account and maps it to the Rownd user ID. Migration fails if different imported identities are already owned by different SuperTokens primary users.
 
 ### Guest
 
