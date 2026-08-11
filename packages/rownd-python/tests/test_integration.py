@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+
 import pytest
 import jwt
 import httpx
@@ -1739,7 +1741,7 @@ async def test_user_email_update_stores_pending_verification(
     res = client.put(
         "/auth/plugin/rownd/user",
         headers={**auth_headers(access_token), "Content-Type": "application/json"},
-        json={"data": {"email": "new-email@example.com", "first_name": "Grace"}},
+        json={"data": {"email": " New-Email@Example.com ", "first_name": "Grace"}},
     )
 
     assert res.status_code == 200
@@ -1752,17 +1754,41 @@ async def test_user_email_update_stores_pending_verification(
     pending = metadata.metadata["rownd_pending_verification"]
     assert len(pending) == 1
     assert pending[0]["field"] == "email"
-    assert pending[0]["value"] == "new-email@example.com"
-    assert pending[0]["normalizedValue"] == "new-email@example.com"
-    assert pending[0]["purpose"] == "UPDATE_PASSWORDLESS"
-    assert pending[0]["primaryUserId"] == user_id
-    assert pending[0]["initiatingRecipeUserId"] == sign_in.recipe_user_id.get_as_string()
-    assert pending[0]["initiatingSessionHandle"] == st_session.get_handle()
-    assert pending[0]["verificationRecipeUserId"] == sign_in.recipe_user_id.get_as_string()
-    assert pending[0]["passwordlessRecipeUserId"] == sign_in.recipe_user_id.get_as_string()
-    assert pending[0]["tenantIds"] == ["public"]
-    assert pending[0]["status"] == "PENDING"
-    assert pending[0]["expires_at"]
+    assert pending[0] == {
+        "id": pending[0]["id"],
+        "field": "email",
+        "value": " New-Email@Example.com ",
+        "created_at": pending[0]["created_at"],
+        "tenantId": "public",
+        "purpose": "UPDATE_PASSWORDLESS",
+        "initiatingSessionHandle": st_session.get_handle(),
+        "verificationRecipeUserId": sign_in.recipe_user_id.get_as_string(),
+        "status": "PENDING",
+    }
+
+    result = await complete_pending_email_verification(
+        sign_in.recipe_user_id,
+        "new-email@example.com",
+        {},
+        "public",
+        st_session.get_handle(),
+    )
+
+    assert result is not None
+    user = await get_user(user_id)
+    assert user is not None
+    assert user.login_methods[0].email == "new-email@example.com"
+    metadata = await usermetadata_asyncio.get_user_metadata(user_id)
+    assert metadata.metadata["original_rownd_user"]["data"]["email"] == (
+        "new-email@example.com"
+    )
+    assert metadata.metadata["original_rownd_user"]["verified_data"]["email"] == (
+        "new-email@example.com"
+    )
+    assert metadata.metadata["rownd_email_recipe_user_id"] == (
+        sign_in.recipe_user_id.get_as_string()
+    )
+    assert metadata.metadata["rownd_pending_verification"] == []
 
 
 async def test_fresh_migrated_session_can_start_email_change(
@@ -2312,6 +2338,221 @@ async def test_email_verification_rejects_revoked_initiating_session(
     assert user is not None
     assert user.login_methods[0].email == "revoked-current@example.com"
     metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
+    assert metadata.metadata["rownd_pending_verification"] == []
+
+
+async def test_email_verification_rejects_unsupported_pending_purpose(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    current_email = "unsupported-purpose-current@example.com"
+    target_email = "unsupported-purpose-target@example.com"
+    sign_in, st_session = await start_native_email_change(client, current_email, target_email)
+    metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
+    pending = metadata.metadata["rownd_pending_verification"][0]
+    await usermetadata_asyncio.update_user_metadata(
+        sign_in.user.id,
+        {"rownd_pending_verification": [{**pending, "purpose": "UPGRADE_GUEST"}]},
+    )
+
+    with pytest.raises(RowndEmailChangeError, match="email change session is no longer active"):
+        await complete_pending_email_verification(
+            sign_in.recipe_user_id, target_email, {}, "public", st_session.get_handle()
+        )
+
+    user = await get_user(sign_in.user.id)
+    assert user is not None
+    assert user.login_methods[0].email == current_email
+    metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
+    assert metadata.metadata["rownd_pending_verification"] == []
+
+
+async def test_email_verification_rejects_detached_initiating_method(
+    core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch
+):
+    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    current_email = "detached-session-current@example.com"
+    target_email = "detached-session-target@example.com"
+    sign_in, st_session = await start_native_email_change(client, current_email, target_email)
+    original_get_user = impl.get_user
+    get_user_calls = 0
+
+    async def get_user_with_detached_method(*args: Any, **kwargs: Any):
+        nonlocal get_user_calls
+        user = await original_get_user(*args, **kwargs)
+        get_user_calls += 1
+        if get_user_calls == 2 and user is not None:
+            return SimpleNamespace(
+                id=user.id, is_primary_user=user.is_primary_user, login_methods=[]
+            )
+        return user
+
+    monkeypatch.setattr(impl, "get_user", get_user_with_detached_method)
+    with pytest.raises(RowndEmailChangeError, match="email change session is no longer active"):
+        await complete_pending_email_verification(
+            sign_in.recipe_user_id, target_email, {}, "public", st_session.get_handle()
+        )
+
+    monkeypatch.setattr(impl, "get_user", original_get_user)
+    user = await get_user(sign_in.user.id)
+    assert user is not None
+    assert user.login_methods[0].email == current_email
+
+
+async def test_email_verification_rejects_changed_passwordless_topology(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    target_email = "topology-target@example.com"
+    third_party = cast(
+        Any,
+        await thirdparty_asyncio.manually_create_or_update_user(
+            tenant_id="public",
+            third_party_id="google",
+            third_party_user_id="topology-google-user",
+            email="topology-google@example.com",
+            is_verified=True,
+            user_context={},
+        ),
+    )
+    st_session = await session_asyncio.create_new_session_without_request_response(
+        "public", third_party.recipe_user_id, {}, {}, True
+    )
+    update_res = client.put(
+        "/auth/plugin/rownd/user",
+        headers={
+            **auth_headers(st_session.get_access_token()),
+            "Content-Type": "application/json",
+        },
+        json={"data": {"email": target_email}},
+    )
+    assert update_res.status_code == 200
+    primary = await accountlinking_asyncio.create_primary_user(third_party.recipe_user_id, {})
+    assert getattr(primary, "status", "OK") == "OK"
+    passwordless = await passwordless_asyncio.signinup(
+        "public", "topology-added@example.com", None, None, {}
+    )
+    linked = await accountlinking_asyncio.link_accounts(
+        passwordless.recipe_user_id, third_party.user.id, {}
+    )
+    assert getattr(linked, "status", "OK") == "OK"
+
+    with pytest.raises(
+        RowndEmailChangeError,
+        match="the email sign-in methods changed before verification completed",
+    ):
+        await complete_pending_email_verification(
+            third_party.recipe_user_id, target_email, {}, "public", st_session.get_handle()
+        )
+
+    user = await get_user(third_party.user.id)
+    assert user is not None
+    assert all(method.email != target_email for method in user.login_methods)
+
+
+async def test_replacing_legacy_pending_verification_revokes_tokens_for_all_methods(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    current_email = "legacy-revocation-current@example.com"
+    old_target_email = "legacy-revocation-old@example.com"
+    sign_in, st_session = await start_native_email_change(
+        client, current_email, old_target_email
+    )
+    primary = await accountlinking_asyncio.create_primary_user(sign_in.recipe_user_id, {})
+    assert getattr(primary, "status", "OK") == "OK"
+    third_party = cast(
+        Any,
+        await thirdparty_asyncio.manually_create_or_update_user(
+            tenant_id="public",
+            third_party_id="google",
+            third_party_user_id="legacy-revocation-google-user",
+            email="legacy-revocation-google@example.com",
+            is_verified=True,
+            user_context={},
+        ),
+    )
+    linked = await accountlinking_asyncio.link_accounts(
+        third_party.recipe_user_id, sign_in.user.id, {}
+    )
+    assert getattr(linked, "status", "OK") == "OK"
+    token_result = await emailverification_asyncio.create_email_verification_token(
+        "public", third_party.recipe_user_id, old_target_email, {}
+    )
+    token = getattr(token_result, "token", None)
+    assert isinstance(token, str)
+    metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
+    pending = metadata.metadata["rownd_pending_verification"][0]
+    legacy_pending = {
+        key: value
+        for key, value in pending.items()
+        if key not in {"verificationRecipeUserId", "status"}
+    }
+    await usermetadata_asyncio.update_user_metadata(
+        sign_in.user.id, {"rownd_pending_verification": [legacy_pending]}
+    )
+
+    replacement_res = client.put(
+        "/auth/plugin/rownd/user",
+        headers={
+            **auth_headers(st_session.get_access_token()),
+            "Content-Type": "application/json",
+        },
+        json={"data": {"email": "legacy-revocation-new@example.com"}},
+    )
+
+    assert replacement_res.status_code == 200
+    verification_result = await emailverification_asyncio.verify_email_using_token(
+        "public", token, False, {}
+    )
+    assert verification_result.__class__.__name__ == "VerifyEmailUsingTokenInvalidTokenError"
+
+
+async def test_email_verification_completes_valid_legacy_pending_record_without_status(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    target_email = "legacy-completion-target@example.com"
+    sign_in, st_session = await start_native_email_change(
+        client, "legacy-completion-current@example.com", target_email
+    )
+    metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
+    pending = metadata.metadata["rownd_pending_verification"][0]
+    legacy_pending = {
+        key: pending[key]
+        for key in (
+            "id",
+            "field",
+            "value",
+            "created_at",
+            "tenantId",
+            "purpose",
+            "initiatingSessionHandle",
+            "verificationRecipeUserId",
+        )
+    }
+    await usermetadata_asyncio.update_user_metadata(
+        sign_in.user.id, {"rownd_pending_verification": [legacy_pending]}
+    )
+
+    result = await complete_pending_email_verification(
+        sign_in.recipe_user_id,
+        target_email,
+        {},
+        "public",
+        st_session.get_handle(),
+    )
+
+    assert result is not None
+    user = await get_user(sign_in.user.id)
+    assert user is not None
+    assert user.login_methods[0].email == target_email
+    metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
+    assert metadata.metadata["original_rownd_user"]["data"]["email"] == target_email
+    assert metadata.metadata["original_rownd_user"]["verified_data"]["email"] == target_email
+    assert metadata.metadata["rownd_email_recipe_user_id"] == (
+        sign_in.recipe_user_id.get_as_string()
+    )
     assert metadata.metadata["rownd_pending_verification"] == []
 
 

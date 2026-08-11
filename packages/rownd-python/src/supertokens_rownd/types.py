@@ -68,16 +68,10 @@ class RowndPendingVerification(TypedDict, total=False):
     value: str
     created_at: str
     tenantId: str
-    normalizedValue: str
-    purpose: Literal["UPDATE_PASSWORDLESS", "ADD_PASSWORDLESS", "UPGRADE_GUEST"]
-    primaryUserId: str
-    initiatingRecipeUserId: str
+    purpose: Literal["UPDATE_PASSWORDLESS", "ADD_PASSWORDLESS"]
     initiatingSessionHandle: str
     verificationRecipeUserId: str
-    passwordlessRecipeUserId: str
-    tenantIds: List[str]
-    expires_at: str
-    status: Literal["PENDING", "VERIFIED", "COMMITTING", "CONFLICT"]
+    status: Literal["PENDING", "COMMITTING"]
 
 
 @dataclass
