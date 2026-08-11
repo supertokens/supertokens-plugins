@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.6.7
+
+### Patch Changes
+
+- Support email changes for thirdparty users and fix the import flow
+
 ## 0.6.6
 
 ### Patch Changes

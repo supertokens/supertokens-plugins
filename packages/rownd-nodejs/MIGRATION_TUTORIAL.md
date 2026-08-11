@@ -129,7 +129,7 @@ For native/header-token clients, call the endpoint with `rid: session`, `fdi-ver
 
 `Session` and `UserMetadata` are required for migration. `ThirdParty` is required for Google, Apple, guest, and anonymous login methods. `Passwordless` is required for email and phone login methods. `EmailVerification` is required for verified email profile updates. `AccountLinking` should be initialized so migrated identities can link according to your account-linking policy.
 
-The example above enables automatic linking with verification required so migrated Rownd identities can attach to matching verified SuperTokens users. Review trusted providers, verified identifiers, and guest upgrade flows before using the same policy in production.
+The example above enables automatic linking with verification required so migrated Rownd identities can attach to matching verified SuperTokens users. During migration, Rownd passwordless identifiers are authoritative and can anchor reconciliation even when the exported `verified_data` does not contain that identifier. Migration still fails when imported identities belong to different SuperTokens primary users. Review this trust policy, provider identities, and guest upgrade flows before using the same policy in production.
 
 Do not expose SuperTokens Core directly to the public internet. Use a Core API key for any shared or deployed instance, and store Rownd, OAuth, and Core credentials in environment variables or a secret manager.
 
