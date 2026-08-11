@@ -4,6 +4,12 @@
 
 ### Patch Changes
 
+- Fix migration and email verification
+
+## 0.1.7
+
+### Patch Changes
+
 - Secure email changes, support third-party and phone-only accounts, and fix Rownd identity reconciliation
 - Require `context.rowndNativeEmailVerification: true` for mobile email changes; unsupported clients receive HTTP 426
 - Require custom verification delivery to preserve `token` and `rowndPendingVerificationId`
