@@ -134,7 +134,11 @@ The plugin exposes Rownd-compatible user/session behavior for migrated and new S
 ### Email Changes
 
 When email sign-in is configured, changing the profile email starts a verified,
-account-wide passwordless email change. Configure the maximum native-session age:
+account-wide passwordless email change. The plugin updates an existing Passwordless
+method, including a phone-only method without removing its phone number. For accounts
+containing only real third-party methods, it creates and links a Passwordless method
+after verification. Guest, instant, mixed, and ambiguous account topologies are
+rejected. Configure the maximum native-session age:
 
 ```python
 RowndMigrationPlugin(
@@ -146,10 +150,25 @@ RowndMigrationPlugin(
 ```
 
 The flow requires Passwordless, EmailVerification, and AccountLinking. It rejects
-stale, guest, and instant sessions, checks target ownership across all tenants, and
-binds the 15-minute pending verification to the initiating session. Completion
-revokes all account sessions and returns a replacement session. The old email remains
-active until verification succeeds.
+stale sessions, checks target ownership across all tenants, and binds pending
+verification metadata to the initiating user, session, tenant, purpose, and status
+before consuming the Core token. Completion revokes all account sessions and returns
+a replacement session. The old email remains active until verification succeeds.
+
+Native clients using `rowndDisplayContext: "mobile_app"` must send
+`rowndNativeEmailVerification: true` in the request `context`. Older clients receive
+HTTP 426 before metadata or email-delivery side effects. Only validated display,
+client-domain, and native-capability values are propagated; request-provided redirect
+paths are ignored.
+
+Pending email-change links retain the raw SuperTokens `token` and add
+`rowndPendingVerificationId`. Custom email delivery must preserve both parameters.
+The marker selects the profile-change flow and requires the initiating session.
+Unmarked verification remains ordinary SuperTokens verification and is
+session-optional; removing the marker can therefore consume the raw token without
+completing the credential change. Concurrent duplicate consumption allows at most
+one completion. Failed completion and replacement-session creation are compensated;
+rollback failures require account reconciliation.
 
 ### Passwordless Confirmation Bypass
 

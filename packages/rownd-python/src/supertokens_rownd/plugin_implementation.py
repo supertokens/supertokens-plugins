@@ -8,7 +8,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from hashlib import sha256
 from types import SimpleNamespace
-from typing import Awaitable, Callable, Dict, List, NoReturn, Optional, Tuple, cast
+from typing import Any, Awaitable, Callable, Dict, List, NoReturn, Optional, Tuple, Union, cast
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
@@ -51,6 +51,8 @@ from .constants import (
     IDENTITY_USER_DATA_FIELDS,
     INSTANT_AUTH_METHOD_ID,
     INTERNAL_METADATA_FIELDS,
+    NATIVE_EMAIL_VERIFICATION_UPGRADE_REQUIRED_MESSAGE,
+    PENDING_EMAIL_VERIFICATION_QUERY_PARAM,
     PUBLIC_TENANT_ID,
     PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM,
     ROWND_OAUTH_LOGIN_CHALLENGE_PARAM,
@@ -61,6 +63,7 @@ from .types import (
     JsonDict,
     RowndClientProtocol,
     RowndEmailChangeError,
+    RowndEmailChangeRequestContext,
     RowndPluginConfig,
     RowndPluginError,
     RowndTelemetryClient,
@@ -69,6 +72,7 @@ from .types import (
 
 _active_config: Optional[RowndPluginConfig] = None
 SUPERTOKENS_FAKE_EMAIL_DOMAIN = "stfakeemail.supertokens.com"
+_PENDING_EMAIL_VERIFICATION_USER_CONTEXT_KEY = "_rowndPendingEmailVerificationId"
 
 
 def set_active_rownd_config(config: RowndPluginConfig) -> None:
@@ -434,6 +438,7 @@ def add_hub_bootstrap_params(
     config: RowndPluginConfig,
     user_context: Optional[UserContext],
     user_input_code: Optional[str] = None,
+    additional_params: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     if not link:
         return link
@@ -455,6 +460,7 @@ def add_hub_bootstrap_params(
         params["oauthLoginChallenge"] = user_context["rowndOAuthLoginChallenge"]
     if user_input_code:
         params["passwordlessFlowType"] = "USER_INPUT_CODE_AND_MAGIC_LINK"
+    params.update(additional_params or {})
     client_domain = user_context.get("rowndClientDomain")
     client_domain_key = (
         client_domain
@@ -467,6 +473,57 @@ def add_hub_bootstrap_params(
     if client_base_url:
         return rewrite_link_to_base_url(link, target_path, client_base_url, params)
     return rewrite_link_path(link, target_path, params)
+
+
+def get_pending_email_verification_id_from_user_context(
+    user_context: UserContext,
+) -> Optional[str]:
+    value = user_context.get(_PENDING_EMAIL_VERIFICATION_USER_CONTEXT_KEY)
+    return value if isinstance(value, str) else None
+
+
+def add_pending_email_verification_marker(
+    email_verify_link: Optional[str], pending_verification_id: str
+) -> Optional[str]:
+    if not email_verify_link:
+        return email_verify_link
+    parsed = urlparse(email_verify_link)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    if not query.get("token"):
+        raise RuntimeError("Pending email verification link has no Core token")
+    query[PENDING_EMAIL_VERIFICATION_QUERY_PARAM] = pending_verification_id
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def build_email_change_user_context(
+    user_context: UserContext, payload_context: JsonDict
+) -> UserContext:
+    context: RowndEmailChangeRequestContext = {}
+    display_context = payload_context.get("rowndDisplayContext")
+    if display_context in {"browser", "mobile_app", "customer_web_view"}:
+        context["rowndDisplayContext"] = cast(Any, display_context)
+    client_domain = payload_context.get("rowndClientDomain")
+    if isinstance(client_domain, str):
+        context["rowndClientDomain"] = client_domain
+    native_verification = payload_context.get("rowndNativeEmailVerification")
+    if isinstance(native_verification, bool):
+        context["rowndNativeEmailVerification"] = native_verification
+    return {**user_context, **context}
+
+
+def native_email_verification_upgrade_required(user_context: UserContext) -> bool:
+    return (
+        user_context.get("rowndDisplayContext") == "mobile_app"
+        and user_context.get("rowndNativeEmailVerification") is not True
+    )
+
+
+def native_email_verification_upgrade_required_response() -> JsonDict:
+    return {
+        "status": "ERROR",
+        "code": 426,
+        "message": NATIVE_EMAIL_VERIFICATION_UPGRADE_REQUIRED_MESSAGE,
+    }
 
 
 async def handle_app_config(
@@ -773,12 +830,13 @@ async def handle_update_user(
         changes_email = not isinstance(current_email, str) or normalize_email(
             current_email
         ) != normalize_email(email)
-        request_context = {
-            **user_context,
-            **context,
-            **({"rowndAppVariantId": app_variant_id} if app_variant_id else {}),
-        }
+        request_context = build_email_change_user_context(user_context, context)
+        if app_variant_id:
+            request_context["rowndAppVariantId"] = app_variant_id
         if changes_email:
+            if native_email_verification_upgrade_required(request_context):
+                upgrade = native_email_verification_upgrade_required_response()
+                return json_response(response, upgrade, 426)
             session_error = await validate_email_change_session(
                 config, session, app_variant_id, request_context
             )
@@ -897,13 +955,17 @@ async def handle_update_user_field(
                 session.get_user_id(), config, session.get_tenant_id()
             )).get("data")
         ).get("email")
-        context = {
-            **user_context,
-            **({"rowndAppVariantId": app_variant_id} if app_variant_id else {}),
-        }
+        context = build_email_change_user_context(
+            user_context, as_json_dict(body.get("context"))
+        )
+        if app_variant_id:
+            context["rowndAppVariantId"] = app_variant_id
         if not isinstance(current_email, str) or normalize_email(
             current_email
         ) != normalize_email(value):
+            if native_email_verification_upgrade_required(context):
+                upgrade = native_email_verification_upgrade_required_response()
+                return json_response(response, upgrade, 426)
             session_error = await validate_email_change_session(
                 config, session, app_variant_id, context
             )
@@ -961,13 +1023,6 @@ async def validate_email_change_session(
         "emailverification"
     ):
         return {"status": "ERROR", "code": 503, "message": "email sign-in is not available"}
-    user = await get_user(session.get_user_id(user_context), user_context)
-    if has_only_guest_login_methods(user):
-        return {
-            "status": "ERROR",
-            "code": 403,
-            "message": "guest accounts cannot change sign-in email",
-        }
     session_age_ms = time.time() * 1000 - await session.get_time_created(user_context)
     max_session_age = config.email_change.get("max_session_age_seconds", 600)
     if session_age_ms > cast(float, max_session_age) * 1000:
@@ -1246,6 +1301,14 @@ def get_third_party_info(method: LoginMethod) -> Tuple[Optional[str], Optional[s
 def is_guest_login_method(method: LoginMethod) -> bool:
     third_party_id, _ = get_third_party_info(method)
     return method.recipe_id == "thirdparty" and third_party_id in {
+        GUEST_AUTH_METHOD_ID,
+        INSTANT_AUTH_METHOD_ID,
+    }
+
+
+def is_real_third_party_method(method: LoginMethod) -> bool:
+    third_party_id, _ = get_third_party_info(method)
+    return method.recipe_id == "thirdparty" and third_party_id not in {
         GUEST_AUTH_METHOD_ID,
         INSTANT_AUTH_METHOD_ID,
     }
@@ -2082,6 +2145,38 @@ async def start_pending_email_verification(
     normalized_email = normalize_email(email)
     if not normalized_email:
         raise RowndEmailChangeError("INVALID_EMAIL", 400, "email must be a non-empty string")
+    passwordless_methods = [
+        method for method in user.login_methods if method.recipe_id == "passwordless"
+    ]
+    if len(passwordless_methods) > 1:
+        raise RowndEmailChangeError(
+            "AMBIGUOUS", 409, "the account has multiple email sign-in methods"
+        )
+    passwordless_method = passwordless_methods[0] if passwordless_methods else None
+    if passwordless_method and tenant_id not in passwordless_method.tenant_ids:
+        raise RowndEmailChangeError(
+            "CONFLICT", 409, "the account passwordless sign-in method belongs to another tenant"
+        )
+    initiating_login_method = next(
+        (
+            method
+            for method in user.login_methods
+            if method.recipe_user_id.get_as_string()
+            == session.get_recipe_user_id().get_as_string()
+            and tenant_id in method.tenant_ids
+        ),
+        None,
+    )
+    can_add_passwordless = (
+        passwordless_method is None
+        and initiating_login_method is not None
+        and is_real_third_party_method(initiating_login_method)
+        and all(is_real_third_party_method(method) for method in user.login_methods)
+    )
+    if passwordless_method is None and not can_add_passwordless:
+        raise RowndEmailChangeError(
+            "CONFLICT", 409, "the account has no passwordless sign-in method"
+        )
     current_email = as_json_dict(
         (await get_rownd_compat_user(user_id, config, tenant_id)).get("data")
     ).get("email")
@@ -2105,8 +2200,9 @@ async def start_pending_email_verification(
         current_passwordless_method = next(
             (
                 method
-                for method in get_passwordless_email_login_methods(user.login_methods)
-                if method.verified
+                for method in user.login_methods
+                if method.recipe_id == "passwordless"
+                and method.verified
                 and method.email
                 and normalize_email(method.email) == normalized_email
             ),
@@ -2136,22 +2232,10 @@ async def start_pending_email_verification(
         return await get_rownd_compat_user(user_id, config, tenant_id)
 
     await assert_email_available_for_user(normalized_email, user.id, user_context)
-    passwordless_email_methods = get_passwordless_email_login_methods(user.login_methods)
-    if len(passwordless_email_methods) > 1:
-        raise RowndEmailChangeError(
-            "AMBIGUOUS", 409, "the account has multiple email sign-in methods"
-        )
-    if has_only_guest_login_methods(user):
-        raise RowndEmailChangeError(
-            "CONFLICT", 403, "guest accounts cannot change sign-in email"
-        )
-    passwordless_email_method = (
-        passwordless_email_methods[0] if passwordless_email_methods else None
-    )
-    purpose = "UPDATE_PASSWORDLESS" if passwordless_email_method else "ADD_PASSWORDLESS"
+    purpose = "UPDATE_PASSWORDLESS" if passwordless_method else "ADD_PASSWORDLESS"
     verification_recipe_user_id = (
-        passwordless_email_method.recipe_user_id
-        if passwordless_email_method
+        passwordless_method.recipe_user_id
+        if passwordless_method
         else session.get_recipe_user_id()
     )
     for verification in pending_email_verifications:
@@ -2163,8 +2247,9 @@ async def start_pending_email_verification(
         )
 
     now = datetime.now(timezone.utc)
+    pending_verification_id = str(uuid.uuid4())
     pending_verification = {
-        "id": str(uuid.uuid4()),
+        "id": pending_verification_id,
         "field": "email",
         "value": email,
         "created_at": now.isoformat().replace("+00:00", "Z"),
@@ -2200,7 +2285,10 @@ async def start_pending_email_verification(
             user_id,
             verification_recipe_user_id,
             normalized_email,
-            user_context,
+            {
+                **user_context,
+                _PENDING_EMAIL_VERIFICATION_USER_CONTEXT_KEY: pending_verification_id,
+            },
         )
         if getattr(result, "status", None) != "OK":
             raise RuntimeError("A fresh email verification could not be created")
@@ -2209,18 +2297,64 @@ async def start_pending_email_verification(
             await emailverification_asyncio.revoke_email_verification_tokens(
                 tenant_id, verification_recipe_user_id, normalized_email, user_context
             )
-        await usermetadata_asyncio.update_user_metadata(
-            user_id,
-            {
-                **metadata,
-                "rownd_pending_verification": [
-                    item for item in pending if item.get("field") != "email"
-                ],
-            },
-            user_context,
+        await remove_pending_email_verification(
+            user_id, pending_verification_id, user_context
         )
         raise
     return await get_rownd_compat_user(user_id, config, tenant_id)
+
+
+async def resolve_pending_email_verification_token(
+    token: str,
+    query_pending_verification_id: Optional[str],
+    tenant_id: str,
+    session: Optional[SessionContainer],
+    user_context: UserContext,
+) -> Dict[str, str]:
+    if query_pending_verification_id is None:
+        return {"status": "NOT_PENDING"}
+    if session is None:
+        return {"status": "INVALID_PENDING"}
+
+    session_handle = session.get_handle()
+    session_user_id = session.get_user_id(user_context)
+    session_tenant_id = session.get_tenant_id(user_context)
+    if session_tenant_id != tenant_id:
+        return {"status": "INVALID_PENDING"}
+    session_information = await session_asyncio.get_session_information(
+        session_handle, user_context
+    )
+    if (
+        session_information is None
+        or session_information.session_handle != session_handle
+        or session_information.user_id != session_user_id
+        or session_information.tenant_id != session_tenant_id
+    ):
+        return {"status": "INVALID_PENDING"}
+
+    metadata = await get_user_metadata(session_user_id, user_context)
+    pending_verification = next(
+        (
+            verification
+            for verification in get_pending_verifications(metadata)
+            if verification.get("id") == query_pending_verification_id
+            and verification.get("field") == "email"
+            and verification.get("status") == "PENDING"
+            and verification.get("initiatingSessionHandle") == session_handle
+            and (verification.get("tenantId") or PUBLIC_TENANT_ID) == tenant_id
+            and verification.get("purpose")
+            in {"UPDATE_PASSWORDLESS", "ADD_PASSWORDLESS"}
+        ),
+        None,
+    )
+    if pending_verification is None:
+        return {"status": "INVALID_PENDING"}
+    return {
+        "status": "OK",
+        "core_token": token,
+        "pending_verification_id": query_pending_verification_id,
+        "user_id": session_user_id,
+    }
 
 
 async def complete_pending_email_verification(
@@ -2229,9 +2363,21 @@ async def complete_pending_email_verification(
     user_context: UserContext,
     tenant_id: str = PUBLIC_TENANT_ID,
     session_handle: Optional[str] = None,
+    pending_verification_id: Optional[str] = None,
+    pending_user_id: Optional[str] = None,
 ) -> Optional[Dict[str, object]]:
     user = await get_user(recipe_user_id.get_as_string(), user_context)
     user_id = user.id if user else recipe_user_id.get_as_string()
+    if pending_user_id and user_id != pending_user_id:
+        if pending_verification_id:
+            await remove_pending_email_verification(
+                pending_user_id, pending_verification_id, user_context
+            )
+        raise RowndEmailChangeError(
+            "CONFLICT",
+            409,
+            "email change session is no longer active; start the email change again",
+        )
     metadata = await get_user_metadata(user_id, user_context)
     pending = get_pending_verifications(metadata)
     normalized_email = normalize_email(email)
@@ -2239,7 +2385,8 @@ async def complete_pending_email_verification(
         (
             item
             for item in pending
-            if item.get("field") == "email"
+            if (not pending_verification_id or item.get("id") == pending_verification_id)
+            and item.get("field") == "email"
             and normalize_email(cast(str, item["value"])) == normalized_email
             and (item.get("tenantId") or PUBLIC_TENANT_ID) == tenant_id
             and (
@@ -2250,14 +2397,24 @@ async def complete_pending_email_verification(
         None,
     )
     if not pending_verification:
+        if pending_verification_id:
+            try:
+                await emailverification_asyncio.unverify_email(
+                    recipe_user_id, normalized_email, user_context
+                )
+            finally:
+                await remove_pending_email_verification(
+                    user_id, pending_verification_id, user_context
+                )
+            raise RowndEmailChangeError(
+                "CONFLICT",
+                409,
+                "email change session is no longer active; start the email change again",
+            )
         return None
 
     purpose = pending_verification.get("purpose")
-    if (
-        purpose is not None
-        and purpose != "UPDATE_PASSWORDLESS"
-        and purpose != "ADD_PASSWORDLESS"
-    ):
+    if purpose != "UPDATE_PASSWORDLESS" and purpose != "ADD_PASSWORDLESS":
         await reject_inactive_pending_email_verification(
             user_id, pending_verification, recipe_user_id, normalized_email, user_context
         )
@@ -2276,14 +2433,9 @@ async def complete_pending_email_verification(
         )
 
     completion_phase = "PENDING"
-    metadata_user_id = user_id
     rollback_credential_change: Optional[Callable[[], Awaitable[None]]] = None
     try:
         await assert_email_available_for_user(normalized_email, user_id, user_context)
-        completion_phase = "COMMITTING"
-        await mark_pending_email_verification_status(
-            user_id, cast(str, pending_verification["id"]), "COMMITTING", user_context
-        )
         initiating_session = await session_asyncio.get_session_information(
             cast(str, initiating_session_handle), user_context
         )
@@ -2291,9 +2443,6 @@ async def complete_pending_email_verification(
             initiating_session is None
             or initiating_session.user_id != user_id
             or initiating_session.tenant_id != tenant_id
-            or not await session_asyncio.revoke_session(
-                cast(str, initiating_session_handle), user_context
-            )
         ):
             await reject_inactive_pending_email_verification(
                 user_id, pending_verification, recipe_user_id, normalized_email, user_context
@@ -2317,7 +2466,33 @@ async def complete_pending_email_verification(
             await reject_inactive_pending_email_verification(
                 user_id, pending_verification, recipe_user_id, normalized_email, user_context
             )
-        user = current_user
+        passwordless_method = find_pending_passwordless_method(
+            current_user, pending_verification, tenant_id
+        )
+        can_add_passwordless = (
+            purpose == "ADD_PASSWORDLESS"
+            and all(is_real_third_party_method(method) for method in current_user.login_methods)
+            and is_real_third_party_method(initiating_login_method)
+            and pending_verification.get("verificationRecipeUserId")
+            == initiating_login_method.recipe_user_id.get_as_string()
+        )
+        if (purpose == "UPDATE_PASSWORDLESS" and passwordless_method is None) or (
+            purpose == "ADD_PASSWORDLESS" and not can_add_passwordless
+        ):
+            await reject_inactive_pending_email_verification(
+                user_id, pending_verification, recipe_user_id, normalized_email, user_context
+            )
+
+        completion_phase = "COMMITTING"
+        await mark_pending_email_verification_status(
+            user_id, cast(str, pending_verification["id"]), "COMMITTING", user_context
+        )
+        if not await session_asyncio.revoke_session(
+            cast(str, initiating_session_handle), user_context
+        ):
+            await reject_inactive_pending_email_verification(
+                user_id, pending_verification, recipe_user_id, normalized_email, user_context
+            )
         initiating_recipe_user_id = initiating_login_method.recipe_user_id
         await session_asyncio.revoke_all_sessions_for_user(
             user_id, True, None, user_context
@@ -2340,82 +2515,35 @@ async def complete_pending_email_verification(
                 user_id, pending_verification, recipe_user_id, normalized_email, user_context
             )
 
-        verified_recipe_user_id = recipe_user_id
-        passwordless_email_method = find_pending_passwordless_method(
-            user, pending_verification
-        )
-        if (
-            not pending_verification.get("purpose")
-            and user
-            and len(get_passwordless_email_login_methods(user.login_methods)) > 1
-        ):
-            raise RowndEmailChangeError(
-                "AMBIGUOUS", 409, "the account has multiple email sign-in methods"
-            )
-        if purpose == "UPDATE_PASSWORDLESS" or (
-            not purpose and passwordless_email_method is not None
-        ):
-            if passwordless_email_method is None:
-                raise RowndEmailChangeError(
-                    "CONFLICT",
-                    409,
-                    "the email sign-in method changed before verification completed",
-                )
-            newly_associated_tenants = await associate_recipe_user_to_tenants(
-                [
-                    associated_tenant
-                    for associated_tenant in get_account_tenant_ids(cast(User, user), tenant_id)
-                    if associated_tenant not in passwordless_email_method.tenant_ids
-                ],
-                passwordless_email_method.recipe_user_id,
-                user_context,
-            )
-            previous_email = cast(str, passwordless_email_method.email)
+        if purpose == "UPDATE_PASSWORDLESS":
+            if passwordless_method is None:
+                raise RowndPluginError("User not found in Rownd")
+            previous_email = passwordless_method.email
 
             async def rollback_update() -> None:
-                try:
-                    await passwordless_asyncio.update_user(
-                        passwordless_email_method.recipe_user_id,
-                        email=previous_email,
-                        user_context=user_context,
-                    )
-                finally:
-                    await rollback_tenant_associations(
-                        newly_associated_tenants,
-                        passwordless_email_method.recipe_user_id,
-                        user_context,
+                rollback_result = await passwordless_asyncio.update_user(
+                    passwordless_method.recipe_user_id,
+                    email=previous_email,
+                    user_context=user_context,
+                )
+                if rollback_result.__class__.__name__ != "UpdateUserOkResult":
+                    raise RuntimeError(
+                        "Passwordless credential rollback failed with status %s"
+                        % rollback_result.__class__.__name__
                     )
 
-            rollback_credential_change = rollback_update
             update_result = await passwordless_asyncio.update_user(
-                passwordless_email_method.recipe_user_id,
+                passwordless_method.recipe_user_id,
                 email=normalized_email,
                 user_context=user_context,
             )
             if update_result.__class__.__name__ != "UpdateUserOkResult":
                 raise email_ownership_conflict()
+            rollback_credential_change = rollback_update
             canonical_email_recipe_user_id = (
-                passwordless_email_method.recipe_user_id.get_as_string()
-            )
-            verified_recipe_user_id = initiating_recipe_user_id
-        elif not purpose and has_only_guest_login_methods(user):
-            raise RowndEmailChangeError(
-                "CONFLICT",
-                403,
-                "guest email upgrades must be restarted through a supported sign-up flow",
+                passwordless_method.recipe_user_id.get_as_string()
             )
         else:
-            if purpose == "ADD_PASSWORDLESS" and get_passwordless_email_login_methods(
-                user.login_methods
-            ):
-                raise RowndEmailChangeError(
-                    "CONFLICT",
-                    409,
-                    "the email sign-in methods changed before verification completed",
-                )
-            primary_user_id = await ensure_stable_primary_user(
-                user, initiating_recipe_user_id, user_context
-            )
             passwordless_user = await passwordless_asyncio.signinup(
                 tenant_id,
                 normalized_email,
@@ -2423,89 +2551,138 @@ async def complete_pending_email_verification(
                 None,
                 {**user_context, "rowndDisableAutomaticAccountLinking": True},
             )
-            if (
-                not passwordless_user.created_new_recipe_user
-                and passwordless_user.user.id != primary_user_id
-            ):
+            if not passwordless_user.created_new_recipe_user:
                 raise email_ownership_conflict()
-            newly_associated_tenants: List[str] = []
 
             async def rollback_add() -> None:
-                if passwordless_user.created_new_recipe_user:
-                    await delete_user(
-                        passwordless_user.recipe_user_id.get_as_string(),
-                        remove_all_linked_accounts=False,
-                        user_context=user_context,
-                    )
-                else:
-                    await rollback_tenant_associations(
-                        newly_associated_tenants,
-                        passwordless_user.recipe_user_id,
-                        user_context,
-                    )
+                await delete_user(
+                    passwordless_user.recipe_user_id.get_as_string(),
+                    remove_all_linked_accounts=False,
+                    user_context=user_context,
+                )
 
             rollback_credential_change = rollback_add
-            newly_associated_tenants = await associate_recipe_user_to_tenants(
-                [
-                    associated_tenant
-                    for associated_tenant in get_account_tenant_ids(cast(User, user), tenant_id)
-                    if not any(
-                        method.recipe_user_id.get_as_string()
-                        == passwordless_user.recipe_user_id.get_as_string()
-                        and associated_tenant in method.tenant_ids
-                        for method in passwordless_user.user.login_methods
-                    )
-                ],
-                passwordless_user.recipe_user_id,
+            await assert_email_available_for_user(
+                normalized_email,
+                [user_id, passwordless_user.user.id],
                 user_context,
             )
-            if passwordless_user.user.id != primary_user_id:
-                link_result = await accountlinking_asyncio.link_accounts(
-                    passwordless_user.recipe_user_id, primary_user_id, user_context
+            primary_user_id = await ensure_stable_primary_user(
+                current_user, initiating_recipe_user_id, user_context
+            )
+            if primary_user_id != user_id:
+                raise RowndEmailChangeError(
+                    "CONFLICT", 409, "the account changed before email verification completed"
                 )
-                if not isinstance(link_result, LinkAccountsOkResult):
-                    raise email_ownership_conflict()
-            metadata_user_id = primary_user_id
+            link_result = await accountlinking_asyncio.link_accounts(
+                passwordless_user.recipe_user_id, primary_user_id, user_context
+            )
+            if not isinstance(link_result, LinkAccountsOkResult):
+                raise email_ownership_conflict()
             canonical_email_recipe_user_id = passwordless_user.recipe_user_id.get_as_string()
-            verified_recipe_user_id = initiating_recipe_user_id
 
         await session_asyncio.revoke_all_sessions_for_user(
-            metadata_user_id, True, None, user_context
+            user_id, True, None, user_context
         )
-        target_metadata = await get_user_metadata(metadata_user_id, user_context)
+        target_metadata = await get_user_metadata(user_id, user_context)
         updated_metadata = build_verified_email_metadata(
             target_metadata,
-            metadata_user_id,
+            user_id,
             normalized_email,
             canonical_email_recipe_user_id,
             as_json_dict(metadata.get("original_rownd_user")),
         )
         await usermetadata_asyncio.update_user_metadata(
-            metadata_user_id, updated_metadata, user_context
+            user_id, updated_metadata, user_context
         )
         completion_phase = "COMPLETED"
+
+        async def rollback_on_session_replacement_failure() -> None:
+            rollback_errors: List[Exception] = []
+            operations: List[Callable[[], Awaitable[object]]] = []
+            if rollback_credential_change:
+                operations.append(rollback_credential_change)
+
+            async def unverify() -> None:
+                await emailverification_asyncio.unverify_email(
+                    recipe_user_id, normalized_email, user_context
+                )
+
+            async def restore_metadata() -> None:
+                await usermetadata_asyncio.update_user_metadata(
+                    user_id,
+                    {
+                        **target_metadata,
+                        "rownd_pending_verification": [
+                            item
+                            for item in get_pending_verifications(target_metadata)
+                            if item.get("id") != pending_verification.get("id")
+                        ],
+                    },
+                    user_context,
+                )
+
+            async def revoke_sessions() -> None:
+                await session_asyncio.revoke_all_sessions_for_user(
+                    user_id, True, None, user_context
+                )
+
+            operations.extend([unverify, restore_metadata, revoke_sessions])
+            for operation in operations:
+                try:
+                    await operation()
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+            if rollback_errors:
+                log_debug(
+                    get_active_rownd_config(),
+                    "Email change replacement-session rollback failed for user %s; "
+                    "reconciliation required. Errors: %s"
+                    % (user_id, "; ".join(str(error) for error in rollback_errors)),
+                )
+                raise RowndEmailChangeError(
+                    "CONFLICT",
+                    409,
+                    "email change rollback failed; account reconciliation is required",
+                )
+
         return {
-            "user_id": metadata_user_id,
-            "recipe_user_id": verified_recipe_user_id,
+            "user_id": user_id,
+            "recipe_user_id": initiating_recipe_user_id,
             "initiating_session_handle": initiating_session_handle,
             "replace_session": True,
+            "rollback_on_session_replacement_failure": (
+                rollback_on_session_replacement_failure
+            ),
         }
-    except Exception:
+    except Exception as error:
         if completion_phase != "COMPLETED":
+            rollback_error: Optional[Exception] = None
             if rollback_credential_change:
-                with suppress(Exception):
+                try:
                     await rollback_credential_change()
+                except Exception as caught_rollback_error:
+                    rollback_error = caught_rollback_error
             if completion_phase == "COMMITTING":
                 await asyncio.gather(
-                    *(
-                        session_asyncio.revoke_all_sessions_for_user(
-                            session_user_id, True, None, user_context
-                        )
-                        for session_user_id in {user_id, metadata_user_id}
+                    session_asyncio.revoke_all_sessions_for_user(
+                        user_id, True, None, user_context
                     ),
                     return_exceptions=True,
                 )
-            with suppress(Exception):
+            if rollback_error is not None:
+                log_debug(
+                    get_active_rownd_config(),
+                    "Email change rollback failed for user %s; reconciliation required. Error: %s"
+                    % (user_id, rollback_error),
+                )
+                raise RowndEmailChangeError(
+                    "CONFLICT",
+                    409,
+                    "email change rollback failed; account reconciliation is required",
+                ) from rollback_error
+            cleanup_failed = False
+            try:
                 await cleanup_pending_email_verification(
                     user_id,
                     pending_verification,
@@ -2513,7 +2690,17 @@ async def complete_pending_email_verification(
                     normalized_email,
                     user_context,
                 )
-        raise
+            except Exception:
+                cleanup_failed = True
+            if completion_phase == "COMMITTING" and cleanup_failed:
+                with suppress(Exception):
+                    await mark_pending_email_verification_status(
+                        user_id,
+                        cast(str, pending_verification["id"]),
+                        "PENDING",
+                        user_context,
+                    )
+        raise error
 
 
 def get_pending_verifications(metadata: JsonDict) -> List[JsonDict]:
@@ -2629,8 +2816,11 @@ async def revoke_pending_email_verification_tokens(
 
 
 async def assert_email_available_for_user(
-    email: str, user_id: str, user_context: UserContext
+    email: str, allowed_user_ids: Union[str, List[str]], user_context: UserContext
 ) -> None:
+    allowed_ids = (
+        {allowed_user_ids} if isinstance(allowed_user_ids, str) else set(allowed_user_ids)
+    )
     tenants = await multitenancy_asyncio.list_all_tenants(user_context)
     tenant_ids = list(
         dict.fromkeys([PUBLIC_TENANT_ID] + [tenant.tenant_id for tenant in tenants.tenants])
@@ -2643,7 +2833,7 @@ async def assert_email_available_for_user(
             for tenant_id in tenant_ids
         )
     )
-    if any(owner.id != user_id for owners in owners_by_tenant for owner in owners):
+    if any(owner.id not in allowed_ids for owners in owners_by_tenant for owner in owners):
         raise email_ownership_conflict()
 
 
@@ -2652,22 +2842,26 @@ def email_ownership_conflict() -> RowndEmailChangeError:
 
 
 def find_pending_passwordless_method(
-    user: Optional[User], pending_verification: JsonDict
+    user: Optional[User], pending_verification: JsonDict, tenant_id: str
 ) -> Optional[LoginMethod]:
     if user is None:
         return None
-    methods = get_passwordless_email_login_methods(user.login_methods)
+    if (
+        pending_verification.get("purpose") != "UPDATE_PASSWORDLESS"
+        or not pending_verification.get("verificationRecipeUserId")
+    ):
+        return None
+    methods = [method for method in user.login_methods if method.recipe_id == "passwordless"]
+    if len(methods) != 1:
+        return None
+    method = methods[0]
     pending_recipe_user_id = pending_verification.get("verificationRecipeUserId")
-    if pending_verification.get("purpose") == "UPDATE_PASSWORDLESS" and pending_recipe_user_id:
-        return next(
-            (
-                method
-                for method in methods
-                if method.recipe_user_id.get_as_string() == pending_recipe_user_id
-            ),
-            None,
-        )
-    return methods[0] if len(methods) == 1 else None
+    return (
+        method
+        if tenant_id in method.tenant_ids
+        and method.recipe_user_id.get_as_string() == pending_recipe_user_id
+        else None
+    )
 
 
 async def ensure_stable_primary_user(
@@ -2723,12 +2917,10 @@ async def cleanup_pending_email_verification(
     email: str,
     user_context: UserContext,
 ) -> None:
-    try:
-        await emailverification_asyncio.unverify_email(recipe_user_id, email, user_context)
-    finally:
-        await remove_pending_email_verification(
-            user_id, cast(str, pending_verification["id"]), user_context
-        )
+    await emailverification_asyncio.unverify_email(recipe_user_id, email, user_context)
+    await remove_pending_email_verification(
+        user_id, cast(str, pending_verification["id"]), user_context
+    )
 
 
 async def reject_inactive_pending_email_verification(

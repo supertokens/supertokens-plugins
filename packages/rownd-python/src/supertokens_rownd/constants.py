@@ -31,3 +31,7 @@ INTERNAL_METADATA_FIELDS = {
 BUILTIN_SIGN_IN_METHOD_KEYS = {"email", "phone", "google", "apple", "anonymous"}
 PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM = "bypassDeviceConfirmation"
 ROWND_OAUTH_LOGIN_CHALLENGE_PARAM = "rownd_oauth_login_challenge"
+PENDING_EMAIL_VERIFICATION_QUERY_PARAM = "rowndPendingVerificationId"
+NATIVE_EMAIL_VERIFICATION_UPGRADE_REQUIRED_MESSAGE = (
+    "native email verification requires a Rownd SDK upgrade"
+)

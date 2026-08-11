@@ -62,9 +62,16 @@ from supertokens_python.types.base import AccountInfoInput, UserContext
 from supertokens_python.types.recipe import BaseAPIInterface, BaseRecipeInterface
 from supertokens_python.types.response import GeneralErrorResponse
 
-from .constants import HANDLE_BASE_PATH, PLUGIN_ID, PLUGIN_SDK_VERSION, PLUGIN_VERSION
+from .constants import (
+    HANDLE_BASE_PATH,
+    PENDING_EMAIL_VERIFICATION_QUERY_PARAM,
+    PLUGIN_ID,
+    PLUGIN_SDK_VERSION,
+    PLUGIN_VERSION,
+)
 from .plugin_implementation import (
     add_hub_bootstrap_params,
+    add_pending_email_verification_marker,
     apply_rownd_oauth_resource_params,
     assert_app_variant_is_configured,
     build_rownd_oauth_payload,
@@ -77,6 +84,7 @@ from .plugin_implementation import (
     get_requested_display_context_from_request,
     get_requested_oauth_login_challenge_from_request,
     get_requested_redirect_to_path_from_request,
+    get_pending_email_verification_id_from_user_context,
     handle_app_config,
     handle_delete_user,
     handle_get_user,
@@ -94,6 +102,7 @@ from .plugin_implementation import (
     is_guest_account_info,
     normalize_rownd_oauth_scopes,
     record_rownd_app_variant_for_user,
+    resolve_pending_email_verification_token,
     set_active_rownd_config,
 )
 from .rownd_client import RowndClient
@@ -118,15 +127,24 @@ class RowndEmailDeliveryOverride(Generic[TemplateVarsT], EmailDeliveryInterface[
         self.target_path = target_path
 
     async def send_email(self, template_vars: TemplateVarsT, user_context: UserContext) -> None:
+        pending_verification_id = get_pending_email_verification_id_from_user_context(user_context)
+        link = getattr(template_vars, self.link_attr, None)
+        if pending_verification_id and self.link_attr == "email_verify_link":
+            link = add_pending_email_verification_marker(link, pending_verification_id)
         setattr(
             template_vars,
             self.link_attr,
             add_hub_bootstrap_params(
-                getattr(template_vars, self.link_attr, None),
+                link,
                 self.target_path,
                 self.config,
                 user_context,
                 getattr(template_vars, "user_input_code", None),
+                (
+                    {PENDING_EMAIL_VERIFICATION_QUERY_PARAM: pending_verification_id}
+                    if pending_verification_id
+                    else None
+                ),
             ),
         )
         await self.original.send_email(template_vars, user_context)
@@ -849,10 +867,25 @@ def _emailverification_api_override():
             api_options: EmailVerificationAPIOptions,
             user_context: UserContext,
         ):
-            result = await original_email_verify_post(
-                token, session, tenant_id, api_options, user_context
+            pending_token = await resolve_pending_email_verification_token(
+                token,
+                api_options.request.get_query_param(PENDING_EMAIL_VERIFICATION_QUERY_PARAM),
+                tenant_id,
+                session,
+                user_context,
             )
-            if getattr(result, "status", None) == "OK":
+            if pending_token["status"] == "INVALID_PENDING":
+                return GeneralErrorResponse(
+                    "email change verification requires the initiating session"
+                )
+            result = await original_email_verify_post(
+                cast(str, pending_token.get("core_token", token)),
+                session,
+                tenant_id,
+                api_options,
+                user_context,
+            )
+            if getattr(result, "status", None) == "OK" and pending_token["status"] == "OK":
                 user = getattr(result, "user", None)
                 recipe_user_id = getattr(user, "recipe_user_id", None)
                 email = getattr(user, "email", None)
@@ -864,6 +897,8 @@ def _emailverification_api_override():
                             user_context,
                             tenant_id,
                             session.get_handle() if session is not None else None,
+                            cast(str, pending_token["pending_verification_id"]),
+                            cast(str, pending_token["user_id"]),
                         )
                     except RowndEmailChangeError as error:
                         return GeneralErrorResponse(str(error))
@@ -877,16 +912,24 @@ def _emailverification_api_override():
                             verified_recipe_user_id = cast(
                                 RecipeUserId, verification_result["recipe_user_id"]
                             )
-                            cast(
-                                Any, result
-                            ).new_session = await session_asyncio.create_new_session(
-                                api_options.request,
-                                tenant_id,
-                                verified_recipe_user_id,
-                                {},
-                                {},
-                                user_context,
-                            )
+                            try:
+                                cast(
+                                    Any, result
+                                ).new_session = await session_asyncio.create_new_session(
+                                    api_options.request,
+                                    tenant_id,
+                                    verified_recipe_user_id,
+                                    {},
+                                    {},
+                                    user_context,
+                                )
+                            except Exception:
+                                rollback = cast(
+                                    Callable[[], Any],
+                                    verification_result["rollback_on_session_replacement_failure"],
+                                )
+                                await rollback()
+                                raise
             return result
 
         original.email_verify_post = email_verify_post

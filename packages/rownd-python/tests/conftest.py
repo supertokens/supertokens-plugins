@@ -22,6 +22,10 @@ from supertokens_python import (
     init as supertokens_init,
 )
 from supertokens_python.framework.fastapi import get_middleware
+from supertokens_python.ingredients.emaildelivery.types import (
+    EmailDeliveryConfig,
+    EmailDeliveryInterface,
+)
 from supertokens_python.process_state import ProcessState
 from supertokens_python.recipe import accountlinking, emailverification, passwordless, session, thirdparty, usermetadata
 from supertokens_python.recipe.accountlinking.recipe import AccountLinkingRecipe
@@ -78,6 +82,16 @@ class MockRowndClient:
         if self.fetch_error is not None:
             raise self.fetch_error
         return self.user_info
+
+
+class CapturingEmailDelivery(EmailDeliveryInterface[Any]):
+    def __init__(self, links: list[str]) -> None:
+        self.links = links
+
+    async def send_email(self, template_vars: Any, user_context: Dict[str, Any]) -> None:
+        link = getattr(template_vars, "email_verify_link", None)
+        if isinstance(link, str):
+            self.links.append(link)
 
 
 class TestClientWithNoCookieJar(TestClient):
@@ -193,6 +207,8 @@ def make_client(
     plugin_config: Optional[Dict[str, Any]] = None,
     enable_email_verification: bool = False,
     email_verification_mode: Literal["OPTIONAL", "REQUIRED"] = "OPTIONAL",
+    email_verification_links: Optional[list[str]] = None,
+    enable_email_password: bool = False,
 ) -> TestClientWithNoCookieJar:
     app = FastAPI()
     app.add_middleware(get_middleware())
@@ -239,7 +255,21 @@ def make_client(
         ),
     ]
     if enable_email_verification:
-        recipes.insert(4, emailverification.init(mode=email_verification_mode))
+        recipes.insert(
+            4,
+            emailverification.init(
+                mode=email_verification_mode,
+                email_delivery=(
+                    EmailDeliveryConfig(service=CapturingEmailDelivery(email_verification_links))
+                    if email_verification_links is not None
+                    else None
+                ),
+            ),
+        )
+    if enable_email_password:
+        from supertokens_python.recipe import emailpassword
+
+        recipes.append(emailpassword.init())
 
     supertokens_init(
         app_info=InputAppInfo(

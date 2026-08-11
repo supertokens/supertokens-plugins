@@ -768,7 +768,9 @@ async def test_thirdparty_sign_in_rejects_unknown_app_variant():
         )
 
 
-async def test_emailverification_verify_completes_pending_email(monkeypatch: pytest.MonkeyPatch):
+async def test_emailverification_unmarked_verify_does_not_complete_pending_email(
+    monkeypatch: pytest.MonkeyPatch,
+):
     completed: list[tuple[str, str, Dict[str, Any], str]] = []
 
     async def complete_pending_email_verification(
@@ -802,9 +804,206 @@ async def test_emailverification_verify_completes_pending_email(monkeypatch: pyt
     original = SimpleNamespace(email_verify_post=email_verify_post)
     overridden = plugin._emailverification_api_override()(cast(Any, original))
 
-    await overridden.email_verify_post("token", None, "public", cast(Any, None), {"source": "test"})
+    await overridden.email_verify_post(
+        "token",
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {"source": "test"},
+    )
 
-    assert completed == [("recipe-user", "verified@example.com", {"source": "test"}, "public")]
+    assert completed == []
+
+
+async def test_emailverification_pending_marker_requires_session():
+    called = False
+
+    async def email_verify_post(*_args: Any, **_kwargs: Any):
+        nonlocal called
+        called = True
+        return SimpleNamespace(status="OK")
+
+    original = SimpleNamespace(email_verify_post=email_verify_post)
+    overridden = plugin._emailverification_api_override()(cast(Any, original))
+
+    result = await overridden.email_verify_post(
+        "raw-token",
+        None,
+        "public",
+        cast(
+            Any,
+            SimpleNamespace(
+                request=FakeRequest({"rowndPendingVerificationId": "pending-id"})
+            ),
+        ),
+        {},
+    )
+
+    assert cast(Any, result).status == "GENERAL_ERROR"
+    assert cast(Any, result).message == (
+        "email change verification requires the initiating session"
+    )
+    assert called is False
+
+
+async def test_emailverification_delivery_adds_pending_marker():
+    original = CapturingDelivery()
+    override = plugin.RowndEmailDeliveryOverride(
+        cast(Any, original), make_config(), "email_verify_link", "account/verify-email"
+    )
+    template_vars = SimpleNamespace(email_verify_link="/auth/verify?token=raw-token")
+
+    await override.send_email(
+        template_vars,
+        {
+            "_rowndPendingEmailVerificationId": "pending-id",
+            "rowndDisplayContext": "mobile_app",
+        },
+    )
+
+    assert "token=raw-token" in original.template_vars.email_verify_link
+    assert "rowndPendingVerificationId=pending-id" in original.template_vars.email_verify_link
+    assert "displayContext=mobile_app" in original.template_vars.email_verify_link
+
+
+async def test_email_change_context_is_sanitized():
+    context = impl.build_email_change_user_context(
+        {"trusted": "value"},
+        {
+            "rowndDisplayContext": "mobile_app",
+            "rowndClientDomain": "mobile",
+            "rowndNativeEmailVerification": True,
+            "rowndRedirectToPath": "/untrusted",
+            "trusted": "overwritten",
+        },
+    )
+
+    assert context == {
+        "trusted": "value",
+        "rowndDisplayContext": "mobile_app",
+        "rowndClientDomain": "mobile",
+        "rowndNativeEmailVerification": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "invalid_binding",
+    ["session_user", "session_tenant", "pending_session", "purpose", "status"],
+)
+async def test_pending_verification_binding_is_checked_before_token_use(
+    monkeypatch: pytest.MonkeyPatch, invalid_binding: str
+):
+    session = SimpleNamespace(
+        get_handle=lambda: "session-handle",
+        get_user_id=lambda _context: "user-id",
+        get_tenant_id=lambda _context: "public",
+    )
+    session_information = SimpleNamespace(
+        session_handle="session-handle",
+        user_id="user-id",
+        tenant_id="public",
+    )
+    pending = {
+        "id": "pending-id",
+        "field": "email",
+        "value": "target@example.com",
+        "created_at": "2026-08-11T00:00:00Z",
+        "tenantId": "public",
+        "purpose": "UPDATE_PASSWORDLESS",
+        "initiatingSessionHandle": "session-handle",
+        "status": "PENDING",
+    }
+    if invalid_binding == "session_user":
+        session_information.user_id = "other-user"
+    elif invalid_binding == "session_tenant":
+        session_information.tenant_id = "other-tenant"
+    elif invalid_binding == "pending_session":
+        pending["initiatingSessionHandle"] = "other-session"
+    elif invalid_binding == "purpose":
+        pending["purpose"] = "UNSAFE"
+    else:
+        pending["status"] = "COMMITTING"
+
+    async def get_session_information(*_args: Any, **_kwargs: Any):
+        return session_information
+
+    async def get_user_metadata(*_args: Any, **_kwargs: Any):
+        return {"rownd_pending_verification": [pending]}
+
+    monkeypatch.setattr(
+        impl.session_asyncio, "get_session_information", get_session_information
+    )
+    monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)
+
+    result = await impl.resolve_pending_email_verification_token(
+        "raw-token", "pending-id", "public", cast(Any, session), {}
+    )
+
+    assert result == {"status": "INVALID_PENDING"}
+
+
+async def test_replacement_session_failure_runs_email_change_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    rolled_back = False
+
+    async def resolve_pending(*_args: Any, **_kwargs: Any):
+        return {
+            "status": "OK",
+            "core_token": "raw-token",
+            "pending_verification_id": "pending-id",
+            "user_id": "user-id",
+        }
+
+    async def complete_pending(*_args: Any, **_kwargs: Any):
+        async def rollback() -> None:
+            nonlocal rolled_back
+            rolled_back = True
+
+        return {
+            "recipe_user_id": SimpleNamespace(get_as_string=lambda: "recipe-user"),
+            "initiating_session_handle": "session-handle",
+            "rollback_on_session_replacement_failure": rollback,
+        }
+
+    async def email_verify_post(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(
+            status="OK",
+            user=SimpleNamespace(
+                recipe_user_id=SimpleNamespace(get_as_string=lambda: "recipe-user"),
+                email="target@example.com",
+            ),
+        )
+
+    async def create_new_session(*_args: Any, **_kwargs: Any):
+        raise RuntimeError("replacement session failed")
+
+    session = SimpleNamespace(
+        get_handle=lambda: "session-handle",
+        get_tenant_id=lambda _context: "public",
+    )
+    monkeypatch.setattr(plugin, "resolve_pending_email_verification_token", resolve_pending)
+    monkeypatch.setattr(plugin, "complete_pending_email_verification", complete_pending)
+    monkeypatch.setattr(plugin.session_asyncio, "create_new_session", create_new_session)
+    overridden = plugin._emailverification_api_override()(
+        cast(Any, SimpleNamespace(email_verify_post=email_verify_post))
+    )
+
+    with pytest.raises(RuntimeError, match="replacement session failed"):
+        await overridden.email_verify_post(
+            "raw-token",
+            cast(Any, session),
+            "public",
+            cast(
+                Any,
+                SimpleNamespace(
+                    request=FakeRequest({"rowndPendingVerificationId": "pending-id"})
+                ),
+            ),
+            {},
+        )
+
+    assert rolled_back is True
 
 
 async def test_accountlinking_links_guest_session_without_verification(

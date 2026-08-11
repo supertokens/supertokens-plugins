@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Literal, Optional, Protocol, Union
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from .constants import DEFAULT_ROWND_SCHEMA
 
@@ -60,6 +60,12 @@ class RowndCrossDeviceConfirmationBypassConfig(TypedDict):
 
 class RowndEmailChangeConfig(TypedDict, total=False):
     max_session_age_seconds: float
+
+
+class RowndEmailChangeRequestContext(TypedDict):
+    rowndDisplayContext: NotRequired[Literal["browser", "mobile_app", "customer_web_view"]]
+    rowndClientDomain: NotRequired[str]
+    rowndNativeEmailVerification: NotRequired[bool]
 
 
 class RowndPendingVerification(TypedDict, total=False):
