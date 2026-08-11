@@ -414,6 +414,34 @@ async def test_plugin_routes_use_explicit_api_base_path():
     assert "/api/auth/plugin/migrate-session" in paths
 
 
+async def test_account_management_routes_check_session_database():
+    rownd_plugin = plugin.init(make_config())
+    route_handlers = cast(Any, rownd_plugin.route_handlers)
+    result = route_handlers(cast(Any, None), [], "0.31.3")
+    account_routes = [
+        handler
+        for handler in result.route_handlers
+        if handler.path.startswith("/auth/plugin/rownd/user")
+        or handler.path == "/auth/plugin/rownd/signout"
+    ]
+
+    assert account_routes
+    assert all(handler.verify_session_options.check_database for handler in account_routes)
+
+
+async def test_init_rejects_non_positive_email_change_session_age():
+    with pytest.raises(
+        ValueError, match="email_change.max_session_age_seconds must be a positive number"
+    ):
+        plugin.init(
+            RowndPluginConfig(
+                rownd_app_key="app-key",
+                rownd_app_secret="secret",
+                email_change={"max_session_age_seconds": 0},
+            )
+        )
+
+
 async def test_disabled_migration_omits_migration_routes():
     with pytest.warns(UserWarning, match="migration is disabled"):
         rownd_plugin = plugin.init(
@@ -748,7 +776,9 @@ async def test_emailverification_verify_completes_pending_email(monkeypatch: pyt
         email: str,
         user_context: Dict[str, Any],
         tenant_id: str,
+        session_handle: Optional[str],
     ):
+        assert session_handle is None
         completed.append((recipe_user_id.get_as_string(), email, user_context, tenant_id))
 
     async def email_verify_post(
@@ -821,6 +851,21 @@ async def test_accountlinking_does_not_link_without_session(monkeypatch: pytest.
         None,
         "public",
         {},
+    )
+
+    assert isinstance(result, ShouldNotAutomaticallyLink)
+
+
+async def test_accountlinking_reconciliation_context_disables_linking():
+    original_config = SimpleNamespace(should_do_automatic_account_linking=None)
+    overridden = cast(Any, plugin._accountlinking_config_override()(cast(Any, original_config)))
+
+    result = await overridden.should_do_automatic_account_linking(
+        AccountInfoWithRecipeId(recipe_id="passwordless", email="user@example.com"),
+        SimpleNamespace(login_methods=[]),
+        None,
+        "public",
+        {"rowndDisableAutomaticAccountLinking": True},
     )
 
     assert isinstance(result, ShouldNotAutomaticallyLink)

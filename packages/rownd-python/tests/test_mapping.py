@@ -135,14 +135,21 @@ def test_maps_multiple_rownd_login_methods():
             "recipeId": "thirdparty",
             "thirdPartyId": "google",
             "thirdPartyUserId": "google-existing-plus-phone",
-            "email": "existing-google-plus-phone@example.com",
-            "isVerified": True,
+            "email": impl.build_supertokens_fake_email(
+                "google-existing-plus-phone", "google"
+            ),
+            "isVerified": False,
             "isPrimary": True,
         },
         {
             "recipeId": "passwordless",
             "phoneNumber": "+15555550123",
             "isVerified": True,
+        },
+        {
+            "recipeId": "passwordless",
+            "email": "existing-google-plus-phone@example.com",
+            "isVerified": False,
         },
     ]
 
@@ -198,6 +205,7 @@ def test_maps_missing_verified_data_as_unverified_email_user():
             {"recipeId": "passwordless", "email": "missing@example.com", "isVerified": False}
         ],
         "userMetadata": {
+            "rownd_migration_complete": True,
             "original_rownd_user": {
                 "data": {"user_id": "rownd-missing-verified-data", "email": "missing@example.com"}
             }
@@ -710,3 +718,58 @@ async def test_rownd_compat_user_includes_provider_id_for_imported_linked_user(
     assert data[field] == "%s-linked-id" % provider_id
     assert verified_data["email"] == "linked@example.com"
     assert verified_data[field] == "%s-linked-id" % provider_id
+
+
+@pytest.mark.asyncio
+async def test_rownd_compat_user_prefers_canonical_email_method(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    canonical_id = SimpleNamespace(get_as_string=lambda: "canonical-email-method")
+    older_id = SimpleNamespace(get_as_string=lambda: "older-email-method")
+
+    async def get_user_metadata(user_id: str):
+        return {
+            "original_rownd_user": {
+                "data": {"user_id": user_id, "email": "stale@example.com"},
+                "verified_data": {"email": "stale@example.com"},
+            },
+            "rownd_email_recipe_user_id": "canonical-email-method",
+        }
+
+    async def get_user(user_id: str, user_context=None):
+        return SimpleNamespace(
+            id=user_id,
+            time_joined=1000,
+            login_methods=[
+                SimpleNamespace(
+                    recipe_id="passwordless",
+                    email="older@example.com",
+                    phone_number=None,
+                    recipe_user_id=older_id,
+                    verified=True,
+                    tenant_ids=["public"],
+                    time_joined=1000,
+                ),
+                SimpleNamespace(
+                    recipe_id="passwordless",
+                    email="canonical@example.com",
+                    phone_number=None,
+                    recipe_user_id=canonical_id,
+                    verified=True,
+                    tenant_ids=["public"],
+                    time_joined=2000,
+                ),
+            ],
+        )
+
+    async def get_latest_session_info(user_id: str, tenant_id: str):
+        return None
+
+    monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)
+    monkeypatch.setattr(impl, "get_user", get_user)
+    monkeypatch.setattr(impl, "get_latest_session_info", get_latest_session_info)
+
+    user = await get_rownd_compat_user("st-user")
+
+    assert as_json_dict(user["data"])["email"] == "canonical@example.com"
+    assert as_json_dict(user["verified_data"])["email"] == "canonical@example.com"

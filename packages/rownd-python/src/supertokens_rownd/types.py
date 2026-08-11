@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Protocol, Union
+from typing import Callable, Dict, List, Literal, Optional, Protocol, Union
 from typing_extensions import TypedDict
 
 from .constants import DEFAULT_ROWND_SCHEMA
@@ -51,10 +51,33 @@ class RowndPluginKwargs(TypedDict, total=False):
     sub_brands: Dict[str, JsonDict]
     cross_device_confirmation_bypass: "RowndCrossDeviceConfirmationBypassConfig"
     rownd_client: Optional[RowndClientProtocol]
+    email_change: "RowndEmailChangeConfig"
 
 
 class RowndCrossDeviceConfirmationBypassConfig(TypedDict):
     allowed_redirect_paths: List[str]
+
+
+class RowndEmailChangeConfig(TypedDict, total=False):
+    max_session_age_seconds: float
+
+
+class RowndPendingVerification(TypedDict, total=False):
+    id: str
+    field: str
+    value: str
+    created_at: str
+    tenantId: str
+    normalizedValue: str
+    purpose: Literal["UPDATE_PASSWORDLESS", "ADD_PASSWORDLESS", "UPGRADE_GUEST"]
+    primaryUserId: str
+    initiatingRecipeUserId: str
+    initiatingSessionHandle: str
+    verificationRecipeUserId: str
+    passwordlessRecipeUserId: str
+    tenantIds: List[str]
+    expires_at: str
+    status: Literal["PENDING", "VERIFIED", "COMMITTING", "CONFLICT"]
 
 
 @dataclass
@@ -78,7 +101,22 @@ class RowndPluginConfig:
     sub_brands: Dict[str, JsonDict] = field(default_factory=dict)
     cross_device_confirmation_bypass: Optional[RowndCrossDeviceConfirmationBypassConfig] = None
     rownd_client: Optional[RowndClientProtocol] = None
+    email_change: RowndEmailChangeConfig = field(
+        default_factory=lambda: {"max_session_age_seconds": 600}
+    )
 
 
 class RowndPluginError(Exception):
     pass
+
+
+class RowndEmailChangeError(Exception):
+    def __init__(
+        self,
+        code: Literal["CONFLICT", "AMBIGUOUS", "INVALID_EMAIL"],
+        http_status: int,
+        message: str,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.http_status = http_status

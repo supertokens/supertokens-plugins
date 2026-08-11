@@ -3,6 +3,7 @@ PLUGIN_VERSION = "0.1.2"
 PLUGIN_SDK_VERSION = ">=0.31.3"
 HANDLE_BASE_PATH = "/plugin/rownd"
 PUBLIC_TENANT_ID = "public"
+MIGRATION_ORIGIN_SESSION_DATA_KEY = "supertokens-plugin-rownd:migration-originated"
 
 GUEST_AUTH_METHOD_ID = "guest"
 INSTANT_AUTH_METHOD_ID = "instant"
@@ -22,7 +23,12 @@ DEFAULT_ROWND_SCHEMA = {
 }
 
 IDENTITY_USER_DATA_FIELDS = {"user_id", "email", "phone_number", "google_id", "apple_id"}
-INTERNAL_METADATA_FIELDS = {"original_rownd_user", "rownd_pending_verification"}
+INTERNAL_METADATA_FIELDS = {
+    "original_rownd_user",
+    "rownd_email_recipe_user_id",
+    "rownd_migration_complete",
+    "rownd_pending_verification",
+}
 BUILTIN_SIGN_IN_METHOD_KEYS = {"email", "phone", "google", "apple", "anonymous"}
 PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM = "bypassDeviceConfirmation"
 ROWND_OAUTH_LOGIN_CHALLENGE_PARAM = "rownd_oauth_login_challenge"

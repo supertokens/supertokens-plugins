@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import math
 import warnings
 from collections.abc import Callable
 from typing import Any, Generic, Optional, TypeVar, cast
@@ -59,6 +60,7 @@ from supertokens_python.recipe.thirdparty.provider import Provider, RedirectUriI
 from supertokens_python.types import RecipeUserId, User
 from supertokens_python.types.base import AccountInfoInput, UserContext
 from supertokens_python.types.recipe import BaseAPIInterface, BaseRecipeInterface
+from supertokens_python.types.response import GeneralErrorResponse
 
 from .constants import HANDLE_BASE_PATH, PLUGIN_ID, PLUGIN_SDK_VERSION, PLUGIN_VERSION
 from .plugin_implementation import (
@@ -96,7 +98,7 @@ from .plugin_implementation import (
 )
 from .rownd_client import RowndClient
 from .telemetry import create_telemetry_client
-from .types import RowndClientProtocol, RowndPluginConfig, RowndPluginKwargs
+from .types import RowndClientProtocol, RowndEmailChangeError, RowndPluginConfig, RowndPluginKwargs
 
 
 TemplateVarsT = TypeVar("TemplateVarsT")
@@ -290,7 +292,7 @@ def init(
 
     rownd_user_session_required = VerifySessionOptions(
         session_required=True,
-        check_database=False,
+        check_database=True,
         override_global_claim_validators=_without_email_verification_claim_validator,
     )
     checked_session_required = VerifySessionOptions(session_required=True, check_database=True)
@@ -855,28 +857,26 @@ def _emailverification_api_override():
                 recipe_user_id = getattr(user, "recipe_user_id", None)
                 email = getattr(user, "email", None)
                 if recipe_user_id is not None and isinstance(email, str):
-                    verification_result = await complete_pending_email_verification(
-                        recipe_user_id,
-                        email,
-                        user_context,
-                        tenant_id,
-                    )
-                    if session is not None and verification_result is not None:
-                        current_user_id = session.get_user_id(user_context)
-                        current_recipe_user_id = session.get_recipe_user_id(
-                            user_context
-                        ).get_as_string()
-                        verified_user_id = cast(str, verification_result["user_id"])
-                        verified_recipe_user_id = cast(
-                            RecipeUserId, verification_result["recipe_user_id"]
+                    try:
+                        verification_result = await complete_pending_email_verification(
+                            recipe_user_id,
+                            email,
+                            user_context,
+                            tenant_id,
+                            session.get_handle() if session is not None else None,
                         )
+                    except RowndEmailChangeError as error:
+                        return GeneralErrorResponse(str(error))
+                    if session is not None and verification_result is not None:
                         should_replace_session = (
-                            current_user_id != verified_user_id
-                            or current_recipe_user_id != verified_recipe_user_id.get_as_string()
+                            session.get_handle()
+                            == verification_result["initiating_session_handle"]
                         )
                         if should_replace_session:
                             tenant_id = session.get_tenant_id(user_context)
-                            await session.revoke_session(user_context)
+                            verified_recipe_user_id = cast(
+                                RecipeUserId, verification_result["recipe_user_id"]
+                            )
                             cast(
                                 Any, result
                             ).new_session = await session_asyncio.create_new_session(
@@ -910,6 +910,8 @@ def _accountlinking_config_override():
         ):
             from supertokens_python.asyncio import get_user, list_users_by_account_info
 
+            if user_context.get("rowndDisableAutomaticAccountLinking") is True:
+                return ShouldNotAutomaticallyLink()
             if session_:
                 current_user = await get_user(session_.get_user_id(), user_context)
                 if has_only_guest_login_methods(current_user):
@@ -969,6 +971,16 @@ def _validate_config(config: RowndPluginConfig) -> None:
             raise ValueError("Missing telemetry axiom token or dataset in plugin config")
         if telemetry.provider == "custom" and telemetry.factory is None:
             raise ValueError("Missing telemetry custom factory function in plugin config")
+
+    max_session_age = config.email_change.get("max_session_age_seconds", 600)
+    if (
+        not isinstance(max_session_age, (int, float))
+        or isinstance(max_session_age, bool)
+        or not math.isfinite(max_session_age)
+        or max_session_age <= 0
+    ):
+        raise ValueError("email_change.max_session_age_seconds must be a positive number")
+    config.email_change["max_session_age_seconds"] = max_session_age
 
     for key, value in config.client_domains.items():
         parsed = urlparse(value) if isinstance(value, str) else None

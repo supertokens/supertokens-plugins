@@ -198,6 +198,9 @@ def make_client(
     app.add_middleware(get_middleware())
 
     api_domain = "http://testserver"
+    effective_plugin_config = dict(plugin_config or {})
+    if enable_email_verification and "app_config" not in effective_plugin_config:
+        effective_plugin_config["app_config"] = {"signInMethods": [{"method": "email"}]}
     rownd_config = RowndPluginConfig(
         rownd_app_key="test-key",
         rownd_app_secret="test-secret",
@@ -205,7 +208,7 @@ def make_client(
         api_domain=api_domain,
         app_name="Test App",
         rownd_client=rownd_client,
-        **(plugin_config or {}),
+        **effective_plugin_config,
     )
 
     recipes = [

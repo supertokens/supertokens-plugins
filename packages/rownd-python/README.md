@@ -129,7 +129,27 @@ The plugin exposes Rownd-compatible user/session behavior for migrated and new S
 - Google and Apple third-party login methods are exposed as `google_id` and `apple_id` in Rownd-compatible user payloads.
 - OAuth2 Provider tokens and userinfo responses include Rownd claims plus standard `email`, `phone`, and `profile` claims when those scopes are requested.
 - OAuth2 `resource=app:*` requests are translated to SuperTokens `audience=app:*` for Rownd-compatible OAuth clients.
-- Rownd compatibility user routes ignore the global email verification claim validator so instant users can update email fields even when email verification is required.
+- Rownd compatibility user routes ignore the global email verification claim validator for profile access; secure email changes apply their own checks.
+
+### Email Changes
+
+When email sign-in is configured, changing the profile email starts a verified,
+account-wide passwordless email change. Configure the maximum native-session age:
+
+```python
+RowndMigrationPlugin(
+    rownd_app_key="rownd_app_key",
+    rownd_app_secret="rownd_app_secret",
+    app_config={"signInMethods": [{"method": "email"}]},
+    email_change={"max_session_age_seconds": 600},
+)
+```
+
+The flow requires Passwordless, EmailVerification, and AccountLinking. It rejects
+migration-originated, stale, guest, and instant sessions, checks target ownership
+across all tenants, and binds the 15-minute pending verification to the initiating
+session. Completion revokes all account sessions and returns a replacement session.
+The old email remains active until verification succeeds.
 
 ### Passwordless Confirmation Bypass
 
