@@ -146,10 +146,10 @@ RowndMigrationPlugin(
 ```
 
 The flow requires Passwordless, EmailVerification, and AccountLinking. It rejects
-migration-originated, stale, guest, and instant sessions, checks target ownership
-across all tenants, and binds the 15-minute pending verification to the initiating
-session. Completion revokes all account sessions and returns a replacement session.
-The old email remains active until verification succeeds.
+stale, guest, and instant sessions, checks target ownership across all tenants, and
+binds the 15-minute pending verification to the initiating session. Completion
+revokes all account sessions and returns a replacement session. The old email remains
+active until verification succeeds.
 
 ### Passwordless Confirmation Bypass
 

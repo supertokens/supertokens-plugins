@@ -51,7 +51,6 @@ from .constants import (
     IDENTITY_USER_DATA_FIELDS,
     INSTANT_AUTH_METHOD_ID,
     INTERNAL_METADATA_FIELDS,
-    MIGRATION_ORIGIN_SESSION_DATA_KEY,
     PUBLIC_TENANT_ID,
     PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM,
     ROWND_OAUTH_LOGIN_CHALLENGE_PARAM,
@@ -674,7 +673,7 @@ async def handle_migrate(
                 {},
                 app_variant_id,
             ),
-            {MIGRATION_ORIGIN_SESSION_DATA_KEY: True},
+            {},
             {**user_context, **({"rowndAppVariantId": app_variant_id} if app_variant_id else {})},
         )
         await record_success(
@@ -969,9 +968,6 @@ async def validate_email_change_session(
             "code": 403,
             "message": "guest accounts cannot change sign-in email",
         }
-    session_data = await session.get_session_data_from_database(user_context)
-    if session_data.get(MIGRATION_ORIGIN_SESSION_DATA_KEY) is True:
-        return recent_authentication_required_response()
     session_age_ms = time.time() * 1000 - await session.get_time_created(user_context)
     max_session_age = config.email_change.get("max_session_age_seconds", 600)
     if session_age_ms > cast(float, max_session_age) * 1000:
@@ -1536,8 +1532,6 @@ def build_configured_session_claims(config: RowndPluginConfig, metadata: JsonDic
         if field_config.get("include_in_session_claims") is not True:
             continue
         claim_name = field_config.get("session_claim_name") or key
-        if claim_name == MIGRATION_ORIGIN_SESSION_DATA_KEY:
-            continue
         value = original_data.get(key, metadata.get(key))
         if value is not None:
             claims[claim_name] = value

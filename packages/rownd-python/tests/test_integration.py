@@ -25,7 +25,7 @@ from supertokens_python.recipe.usermetadata import asyncio as usermetadata_async
 from supertokens_python.types.base import AccountInfoInput
 
 import supertokens_rownd.plugin_implementation as impl
-from supertokens_rownd.constants import MIGRATION_ORIGIN_SESSION_DATA_KEY, ROWND_JWT_CLAIMS
+from supertokens_rownd.constants import ROWND_JWT_CLAIMS
 from supertokens_rownd.plugin_implementation import build_rownd_session_claims, complete_pending_email_verification
 from supertokens_rownd import create_magic_link_with_confirmation_bypass
 from supertokens_rownd.types import RowndEmailChangeError, RowndPluginConfig, RowndPluginError
@@ -108,7 +108,6 @@ async def test_migrate_user_successfully(core_url: str, rownd_client: MockRowndC
         cast(str, res.headers.get("st-access-token"))
     )
     assert session is not None
-    assert (await session.get_session_data_from_database())[MIGRATION_ORIGIN_SESSION_DATA_KEY] is True
 
 
 async def test_migrate_missing_auth_header_returns_error(core_url: str, rownd_client: MockRowndClient):
@@ -1766,7 +1765,7 @@ async def test_user_email_update_stores_pending_verification(
     assert pending[0]["expires_at"]
 
 
-async def test_migrated_session_cannot_start_email_change(
+async def test_fresh_migrated_session_can_start_email_change(
     core_url: str, rownd_client: MockRowndClient
 ):
     client = make_client(core_url, rownd_client, enable_email_verification=True)
@@ -1792,15 +1791,17 @@ async def test_migrated_session_cannot_start_email_change(
         json={"data": {"email": "migration-target@example.com"}},
     )
 
-    assert res.status_code == 403
-    assert res.json() == {
-        "status": "ERROR",
-        "code": 403,
-        "message": "recent authentication is required to change email",
-    }
+    assert res.status_code == 200
+    assert res.json()["status"] == "OK"
+    user = await get_user("migration-email-change-user")
+    assert user is not None
+    metadata = await usermetadata_asyncio.get_user_metadata(user.id)
+    assert metadata.metadata["rownd_pending_verification"][0]["value"] == (
+        "migration-target@example.com"
+    )
 
 
-async def test_repeated_migrated_sessions_remain_ineligible_for_email_change(
+async def test_repeated_fresh_migrated_sessions_can_start_email_change(
     core_url: str, rownd_client: MockRowndClient
 ):
     client = make_client(core_url, rownd_client, enable_email_verification=True)
@@ -1818,20 +1819,7 @@ async def test_repeated_migrated_sessions_remain_ineligible_for_email_change(
         client, rownd_client, "repeated-migration-email-user", user_info
     )
     access_tokens = [first.headers["st-access-token"], second.headers["st-access-token"]]
-    sessions = [
-        await session_asyncio.get_session_without_request_response(access_token)
-        for access_token in access_tokens
-    ]
-    assert all(session is not None for session in sessions)
-    first_session = cast(Any, sessions[0])
-    second_session = cast(Any, sessions[1])
-    assert first_session.get_handle() != second_session.get_handle()
-
-    for index, (access_token, session) in enumerate(zip(access_tokens, sessions)):
-        assert session is not None
-        assert (await session.get_session_data_from_database())[
-            MIGRATION_ORIGIN_SESSION_DATA_KEY
-        ] is True
+    for index, access_token in enumerate(access_tokens):
         res = client.put(
             "/auth/plugin/rownd/user",
             headers={
@@ -1840,8 +1828,8 @@ async def test_repeated_migrated_sessions_remain_ineligible_for_email_change(
             },
             json={"data": {"email": f"repeated-migration-target-{index}@example.com"}},
         )
-        assert res.status_code == 403
-        assert res.json()["message"] == "recent authentication is required to change email"
+        assert res.status_code == 200
+        assert res.json()["status"] == "OK"
 
 
 async def test_stale_native_session_cannot_start_email_change(

@@ -3,7 +3,6 @@ PLUGIN_VERSION = "0.1.2"
 PLUGIN_SDK_VERSION = ">=0.31.3"
 HANDLE_BASE_PATH = "/plugin/rownd"
 PUBLIC_TENANT_ID = "public"
-MIGRATION_ORIGIN_SESSION_DATA_KEY = "supertokens-plugin-rownd:migration-originated"
 
 GUEST_AUTH_METHOD_ID = "guest"
 INSTANT_AUTH_METHOD_ID = "instant"
