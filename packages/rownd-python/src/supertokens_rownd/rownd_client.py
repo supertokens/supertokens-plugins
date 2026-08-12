@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+import jwt
 from typing import Optional
 
 from .types import JsonDict, RowndPluginConfig, RowndPluginError
@@ -11,8 +12,48 @@ class RowndClient:
         self.config = config
 
     async def validate_token(self, token: str) -> str:
-        data = await self._request("POST", "/hub/auth/token/validate", {"token": token})
-        user_id = data.get("user_id") or data.get("userId")
+        oauth_config = await self._request_public(
+            "/hub/auth/.well-known/oauth-authorization-server"
+        )
+        jwks_uri = oauth_config.get("jwks_uri")
+        if not isinstance(jwks_uri, str) or not jwks_uri:
+            raise RowndPluginError("Invalid token")
+
+        try:
+            jwks = await self._request_public_url(jwks_uri)
+            header = jwt.get_unverified_header(token)
+            key_id = header.get("kid")
+            keys = jwks.get("keys")
+            if not isinstance(key_id, str) or not isinstance(keys, list):
+                raise RowndPluginError("Invalid token")
+
+            key = next(
+                (
+                    candidate
+                    for candidate in keys
+                    if isinstance(candidate, dict) and candidate.get("kid") == key_id
+                ),
+                None,
+            )
+            if key is None:
+                raise RowndPluginError("Invalid token")
+
+            app_config = await self._request("GET", "/hub/app-config")
+            app = app_config.get("app")
+            app_id = app.get("id") if isinstance(app, dict) else None
+            if not isinstance(app_id, str) or not app_id:
+                raise RowndPluginError("Invalid token")
+
+            data = jwt.decode(
+                token,
+                jwt.PyJWK.from_dict(key).key,
+                algorithms=["EdDSA"],
+                audience="app:%s" % app_id,
+            )
+        except jwt.PyJWTError as err:
+            raise RowndPluginError("Invalid token") from err
+
+        user_id = data.get("https://auth.rownd.io/app_user_id")
         if not isinstance(user_id, str) or not user_id:
             raise RowndPluginError("Invalid token")
         return user_id
@@ -53,6 +94,18 @@ class RowndClient:
                 headers=headers,
                 json=json,
             )
+            res.raise_for_status()
+            data = res.json()
+            if not isinstance(data, dict):
+                raise RowndPluginError("Invalid Rownd response")
+            return data
+
+    async def _request_public(self, path: str) -> JsonDict:
+        return await self._request_public_url(self.config.rownd_api_base_url.rstrip("/") + path)
+
+    async def _request_public_url(self, url: str) -> JsonDict:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.get(url)
             res.raise_for_status()
             data = res.json()
             if not isinstance(data, dict):
