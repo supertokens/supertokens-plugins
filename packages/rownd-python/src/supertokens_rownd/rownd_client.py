@@ -65,10 +65,16 @@ class RowndClient:
         return data
 
     async def fetch_optional_user_info(self, user_id: str) -> Optional[JsonDict]:
+        app_config = await self._request("GET", "/hub/app-config")
+        app = app_config.get("app")
+        app_id = app.get("id") if isinstance(app, dict) else None
+        if not isinstance(app_id, str) or not app_id:
+            raise RowndPluginError("Invalid Rownd app config")
+
         try:
             data = await self._request(
                 "GET",
-                "/me/applications/%s/users/%s" % (self.config.rownd_app_key, user_id),
+                "/applications/%s/users/%s/data" % (app_id, user_id),
             )
         except httpx.HTTPStatusError as err:
             if err.response.status_code == 404:
