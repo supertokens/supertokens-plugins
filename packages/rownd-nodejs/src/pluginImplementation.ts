@@ -556,6 +556,7 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
         return {
           status: "OK" as const,
           ...updateResult,
+          email_verification_pending: changesEmail,
         };
       } catch (error) {
         if (error instanceof RowndEmailChangeError) {
@@ -745,6 +746,7 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
         return {
           status: "OK" as const,
           ...pendingVerificationResult,
+          email_verification_pending: changesEmail,
         };
       } catch (error) {
         if (error instanceof RowndEmailChangeError) {

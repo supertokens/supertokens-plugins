@@ -67,13 +67,15 @@ Without `disableRowndUserMigration: true`, both `rowndAppKey` and
 ### Email Changes
 
 When email sign-in is configured, changing the Rownd profile email starts a
-verified, account-wide passwordless email change. The plugin updates the
-account's existing passwordless email method. For an account containing only
-real third-party methods, it creates and links a new passwordless method after
-verification. Third-party and email-password login identifiers are not modified.
-For additions, the initiating third-party recipe user acts as the
-EmailVerification subject because the Passwordless recipe user does not exist
-until proof succeeds.
+verified passwordless email change for the initiating tenant. After
+verification, the plugin creates a new passwordless method or reuses one already
+linked to the same primary user in that tenant, then makes it the canonical
+Rownd profile email. Existing passwordless, third-party, and email-password
+login identifiers are not modified. For
+updates, the canonical Passwordless method acts as the EmailVerification
+subject. For third-party-only accounts, the initiating third-party method acts
+as the subject because the new Passwordless recipe user does not exist until
+proof succeeds.
 
 Email changes for established accounts require a database-checked native
 SuperTokens session created within the last ten minutes by default. Normal
@@ -103,18 +105,24 @@ email updates are rejected rather than creating a hidden authentication method.
 when email changes are enabled, and Passwordless must use `EMAIL` or
 `EMAIL_OR_PHONE` as its contact method.
 
-The old email remains active until verification succeeds. A pending change
-remains usable only while its underlying SuperTokens verification token,
-pending metadata, and initiating session remain valid. Starting another change
-revokes the previous pending token. Email ownership is checked across every
-SuperTokens tenant both when the change starts and when verification completes.
-A conflicting owner or an account with multiple Passwordless login methods must
-be repaired before the change can proceed. Accounts with only real third-party
-methods can add a Passwordless method; guest and instant methods cannot.
-Phone-only Passwordless methods are supported, and adding an email preserves the
-phone number. Verification must use the same active session that started the
-change. Completion revokes every account
-session and returns a replacement for that initiating session.
+Previous Passwordless emails remain active login aliases after verification and
+resolve to the same primary user. A pending change remains usable only while its underlying
+SuperTokens verification token, pending metadata, and initiating session remain
+valid. Starting another change revokes the previous pending token. Email
+ownership is checked across every SuperTokens tenant both when the change starts
+and when verification completes. Accounts with multiple Passwordless methods
+must have a valid tenant-scoped `rownd_email_recipe_user_ids` canonical marker.
+The legacy `rownd_email_recipe_user_id` marker remains available for metadata
+compatibility. Accounts with
+only real third-party methods can add a Passwordless method; guest and instant
+methods cannot. Phone-only Passwordless methods are supported, and adding an
+email preserves the phone method. Verification must use the same active session
+that started the change. Completion revokes every account session and returns a
+replacement for that initiating session.
+
+Successful update responses that start verification include
+`email_verification_pending: true`. The returned profile continues to contain
+the current canonical email until verification completes.
 
 Native clients using `rowndDisplayContext: "mobile_app"` must also send
 `rowndNativeEmailVerification: true` in the validated `context` object for

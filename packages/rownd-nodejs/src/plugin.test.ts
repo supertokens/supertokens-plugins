@@ -5146,6 +5146,7 @@ describe("rownd-nodejs plugin", () => {
         expect(res.status).toBe(200);
         const body = await res.json();
         expect(body.status).toBe("OK");
+        expect(body.email_verification_pending).toBe(true);
         expect(body.data.email).toBe("email-update-user@example.com");
         expect(body.data.first_name).toBe("Grace");
         expect(body.verified_data.email).toBe("email-update-user@example.com");
@@ -5212,12 +5213,105 @@ describe("rownd-nodejs plugin", () => {
         const passwordlessMethods = updatedUser?.loginMethods.filter(
           (method) => method.recipeId === "passwordless" && method.email,
         );
-        expect(passwordlessMethods).toHaveLength(1);
-        const passwordlessMethod = passwordlessMethods?.[0];
-        expect(passwordlessMethod?.email).toBe("new-email-update@example.com");
-        expect(passwordlessMethod?.recipeUserId.getAsString()).toBe(
+        expect(passwordlessMethods).toHaveLength(2);
+        expect(passwordlessMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ email: "email-update-user@example.com" }),
+            expect.objectContaining({ email: "new-email-update@example.com" }),
+          ]),
+        );
+        const originalMethod = passwordlessMethods?.find(
+          (method) => method.recipeUserId.getAsString() === recipeUserId.getAsString(),
+        );
+        const canonicalMethod = passwordlessMethods?.find(
+          (method) => method.email === "new-email-update@example.com",
+        );
+        expect(originalMethod?.email).toBe("email-update-user@example.com");
+        expect(canonicalMethod?.recipeUserId.getAsString()).not.toBe(
           recipeUserId.getAsString(),
         );
+        expect((metadata.metadata as any).rownd_email_recipe_user_id).toBe(
+          canonicalMethod?.recipeUserId.getAsString(),
+        );
+        expect((metadata.metadata as any).rownd_email_recipe_user_ids).toEqual({
+          public: canonicalMethod?.recipeUserId.getAsString(),
+        });
+
+        const oldEmailSignIn = await Passwordless.signInUp({
+          email: "email-update-user@example.com",
+          tenantId: "public",
+        });
+        const newEmailSignIn = await Passwordless.signInUp({
+          email: "new-email-update@example.com",
+          tenantId: "public",
+        });
+        expect(oldEmailSignIn.createdNewRecipeUser).toBe(false);
+        expect(newEmailSignIn.createdNewRecipeUser).toBe(false);
+        expect(oldEmailSignIn.user.id).toBe(userId);
+        expect(newEmailSignIn.user.id).toBe(userId);
+
+        const secondTargetEmail = "second-email-update@example.com";
+        const secondUpdateRes = await requestEmailChange(
+          replacementAccessToken!,
+          secondTargetEmail,
+        );
+        expect(secondUpdateRes.status).toBe(200);
+        expect(emailVerificationLinks).toHaveLength(2);
+        const secondVerificationUrl = new URL(emailVerificationLinks[1]);
+        const secondVerifyRes = await verifyEmailToken(
+          secondVerificationUrl.searchParams.get("token") || "unused",
+          replacementAccessToken!,
+          secondVerificationUrl.searchParams.get(
+            "rowndPendingVerificationId",
+          ) || "unused",
+        );
+        await expect(secondVerifyRes.json()).resolves.toEqual({ status: "OK" });
+        const secondReplacementAccessToken =
+          secondVerifyRes.headers.get("st-access-token");
+        expect(secondReplacementAccessToken).toBeTruthy();
+
+        const twiceUpdatedUser = await SuperTokens.getUser(userId);
+        expect(
+          twiceUpdatedUser?.loginMethods.filter(
+            (method) => method.recipeId === "passwordless" && method.email,
+          ),
+        ).toHaveLength(3);
+        const twiceUpdatedMetadata = await UserMetadata.getUserMetadata(userId);
+        expect(
+          (twiceUpdatedMetadata.metadata as any).rownd_email_recipe_user_id,
+        ).toBe(
+          twiceUpdatedUser?.loginMethods.find(
+            (method) => method.email === secondTargetEmail,
+          )?.recipeUserId.getAsString(),
+        );
+
+        const restoreAliasRes = await requestEmailChange(
+          secondReplacementAccessToken!,
+          "email-update-user@example.com",
+        );
+        expect(restoreAliasRes.status).toBe(200);
+        expect(emailVerificationLinks).toHaveLength(3);
+        const restoreAliasUrl = new URL(emailVerificationLinks[2]);
+        const restoreAliasVerifyRes = await verifyEmailToken(
+          restoreAliasUrl.searchParams.get("token") || "unused",
+          secondReplacementAccessToken!,
+          restoreAliasUrl.searchParams.get("rowndPendingVerificationId") ||
+            "unused",
+        );
+        await expect(restoreAliasVerifyRes.json()).resolves.toEqual({
+          status: "OK",
+        });
+
+        const restoredAliasUser = await SuperTokens.getUser(userId);
+        expect(
+          restoredAliasUser?.loginMethods.filter(
+            (method) => method.recipeId === "passwordless" && method.email,
+          ),
+        ).toHaveLength(3);
+        const restoredAliasMetadata = await UserMetadata.getUserMetadata(userId);
+        expect(
+          (restoredAliasMetadata.metadata as any).rownd_email_recipe_user_ids,
+        ).toEqual({ public: recipeUserId.getAsString() });
       });
 
       it("rejects unsupported pending email-change purposes", async () => {
@@ -5312,7 +5406,7 @@ describe("rownd-nodejs plugin", () => {
         expect(user?.loginMethods[0]?.email).toBe(currentEmail);
       });
 
-      it("rejects completion if more than one Passwordless method exists after reloading the user", async () => {
+      it("uses the recorded method if more than one Passwordless method exists after reloading the user", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
         });
@@ -5348,34 +5442,29 @@ describe("rownd-nodejs plugin", () => {
               }
               : user;
           });
-        const updateUser = vi.spyOn(Passwordless, "updateUser");
-
         await expect(
           completePendingEmailVerification({
             recipeUserId: initiatingUser.recipeUserId,
             email: targetEmail,
             sessionHandle: initiatingUser.sessionHandle,
           }),
-        ).rejects.toThrow(
-          "email change session is no longer active; start the email change again",
-        );
+        ).resolves.toMatchObject({ replaceSession: true });
         getUser.mockRestore();
 
-        expect(updateUser).not.toHaveBeenCalled();
         const user = await SuperTokens.getUser(initiatingUser.userId);
-        expect(user?.loginMethods[0]?.email).toBe(currentEmail);
+        expect(user?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ email: currentEmail }),
+            expect.objectContaining({ email: targetEmail }),
+          ]),
+        );
         const metadata = await UserMetadata.getUserMetadata(
           initiatingUser.userId,
         );
-        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
-          [],
+        expect((metadata.metadata as any).rownd_email_recipe_user_id).toBe(
+          user?.loginMethods.find((method) => method.email === targetEmail)
+            ?.recipeUserId.getAsString(),
         );
-        await expect(
-          EmailVerification.isEmailVerified(
-            initiatingUser.recipeUserId,
-            targetEmail,
-          ),
-        ).resolves.toBe(false);
       });
 
       it("restores PENDING when completion cleanup fails so a new change can supersede it", async () => {
@@ -5741,7 +5830,7 @@ describe("rownd-nodejs plugin", () => {
           }),
         ).rejects.toThrow("second account revocation failed");
         expect(accountRevocationCount).toBe(3);
-        expect(emailAtSecondRevocation).toBe(targetEmail);
+        expect(emailAtSecondRevocation).toBe(currentEmail);
 
         const user = await SuperTokens.getUser(initiatingUser.userId);
         expect(
@@ -5772,7 +5861,7 @@ describe("rownd-nodejs plugin", () => {
         ).resolves.toEqual([]);
       });
 
-      it("preserves reconciliation state when credential rollback returns a failure status", async () => {
+      it("preserves reconciliation state when linked method rollback fails", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
         });
@@ -5818,17 +5907,9 @@ describe("rownd-nodejs plugin", () => {
             return originalRevokeAllSessionsForUser(...input);
           },
         );
-        const originalUpdateUser = Passwordless.updateUser;
-        let updateUserCallCount = 0;
-        vi.spyOn(Passwordless, "updateUser").mockImplementation(
-          async (input) => {
-            updateUserCallCount += 1;
-            if (updateUserCallCount === 2) {
-              return { status: "UNKNOWN_USER_ID_ERROR" };
-            }
-            return originalUpdateUser(input);
-          },
-        );
+        const deleteUser = vi
+          .spyOn(SuperTokens, "deleteUser")
+          .mockRejectedValue(new Error("linked method deletion failed"));
         const unverifyEmail = vi.spyOn(EmailVerification, "unverifyEmail");
 
         await expect(
@@ -5840,18 +5921,17 @@ describe("rownd-nodejs plugin", () => {
         ).rejects.toThrow(
           "email change rollback failed; account reconciliation is required",
         );
-        expect(updateUserCallCount).toBe(2);
+        expect(deleteUser).toHaveBeenCalledTimes(1);
         expect(accountRevocationCount).toBe(3);
         expect(unverifyEmail).not.toHaveBeenCalled();
 
         const user = await SuperTokens.getUser(initiatingUser.userId);
-        expect(
-          user?.loginMethods.find(
-            (method) =>
-              method.recipeUserId.getAsString() ===
-              initiatingUser.recipeUserId.getAsString(),
-          )?.email,
-        ).toBe(targetEmail);
+        expect(user?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ email: currentEmail }),
+            expect.objectContaining({ email: targetEmail }),
+          ]),
+        );
         const metadata = await UserMetadata.getUserMetadata(
           initiatingUser.userId,
         );
@@ -6207,10 +6287,21 @@ describe("rownd-nodejs plugin", () => {
         );
 
         const user = await SuperTokens.getUser(initiatingUser.userId);
+        const passwordlessMethods = user?.loginMethods.filter(
+          (method) => method.recipeId === "passwordless",
+        );
+        expect(passwordlessMethods).toHaveLength(2);
         expect(
-          user?.loginMethods.find((method) => method.recipeId === "passwordless")
-            ?.email,
-        ).toBe(targetEmail);
+          passwordlessMethods?.find(
+            (method) =>
+              method.recipeUserId.getAsString() ===
+              initiatingUser.recipeUserId.getAsString(),
+          )?.email,
+        ).toBe("concurrent-envelope-current@example.com");
+        expect(
+          passwordlessMethods?.find((method) => method.email === targetEmail)
+            ?.recipeUserId.getAsString(),
+        ).not.toBe(initiatingUser.recipeUserId.getAsString());
         const metadata = await UserMetadata.getUserMetadata(
           initiatingUser.userId,
         );
@@ -6855,7 +6946,7 @@ describe("rownd-nodejs plugin", () => {
         ).toEqual([]);
       });
 
-      it("adds email to a phone-only Passwordless method after proof and retains the phone", async () => {
+      it("links an email method to a phone-only Passwordless user and retains the phone method", async () => {
         const emailVerificationLinks: string[] = [];
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
@@ -6894,11 +6985,21 @@ describe("rownd-nodejs plugin", () => {
         await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
 
         const user = await SuperTokens.getUser(signInUpResponse.user.id);
-        const passwordlessMethod = user?.loginMethods.find(
+        const passwordlessMethods = user?.loginMethods.filter(
           (method) => method.recipeId === "passwordless",
         );
-        expect(passwordlessMethod?.email).toBe(targetEmail);
-        expect(passwordlessMethod?.phoneNumber).toBe(phoneNumber);
+        expect(passwordlessMethods).toHaveLength(2);
+        expect(
+          passwordlessMethods?.find(
+            (method) =>
+              method.recipeUserId.getAsString() ===
+              signInUpResponse.recipeUserId.getAsString(),
+          )?.phoneNumber,
+        ).toBe(phoneNumber);
+        expect(
+          passwordlessMethods?.find((method) => method.email === targetEmail)
+            ?.recipeUserId.getAsString(),
+        ).not.toBe(signInUpResponse.recipeUserId.getAsString());
       });
 
       it("removes duplicate matching pending email verifications on completion", async () => {
@@ -7043,6 +7144,7 @@ describe("rownd-nodejs plugin", () => {
         expect(verificationUrl.searchParams.has("redirectToPath")).toBe(false);
 
         const body = await res.json();
+        expect(body.email_verification_pending).toBe(true);
         expect(body.data.email).toBe("email-verified-current@example.com");
         expect(body.verified_data.email).toBe(
           "email-verified-current@example.com",

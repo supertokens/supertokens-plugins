@@ -803,6 +803,7 @@ export type RowndUser = JSONObject & {
 export type RowndUserMetadata = {
   original_rownd_user?: RowndUser;
   rownd_email_recipe_user_id?: string;
+  rownd_email_recipe_user_ids?: Record<string, string>;
   rownd_migration_complete?: boolean;
   rownd_pending_verification?: Array<{
     id: string;

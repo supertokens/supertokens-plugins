@@ -62,6 +62,7 @@ const IDENTITY_USER_DATA_FIELDS = new Set([
 const INTERNAL_METADATA_FIELDS = new Set([
   "original_rownd_user",
   "rownd_email_recipe_user_id",
+  "rownd_email_recipe_user_ids",
   "rownd_migration_complete",
   "rownd_pending_verification",
 ]);

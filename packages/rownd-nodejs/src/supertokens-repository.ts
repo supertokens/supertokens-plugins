@@ -805,9 +805,13 @@ export async function getUserById(
       a.timeJoined - b.timeJoined ||
       a.recipeUserId.getAsString().localeCompare(b.recipeUserId.getAsString()),
     );
+  const canonicalEmailRecipeUserId = getCanonicalEmailRecipeUserId(
+    metadata,
+    tenantId,
+  );
   const canonicalEmailMethod = tenantLoginMethods.find(
     (method) =>
-      method.recipeUserId.getAsString() === metadata.rownd_email_recipe_user_id &&
+      method.recipeUserId.getAsString() === canonicalEmailRecipeUserId &&
       method.email &&
       !isSuperTokensFakeEmail(method.email),
   );
@@ -1080,34 +1084,21 @@ export async function startPendingEmailVerification(input: {
     );
   }
 
-  const passwordlessMethods = user.loginMethods.filter(
+  const passwordlessMethod = findCanonicalPasswordlessMethod(
+    user,
+    metadata,
+    input.tenantId,
+  );
+  const hasPasswordlessMethod = user.loginMethods.some(
     (method) => method.recipeId === "passwordless",
   );
-  if (passwordlessMethods.length > 1) {
-    throw new RowndEmailChangeError(
-      "AMBIGUOUS",
-      409,
-      "the account has multiple email sign-in methods",
-    );
-  }
-  const passwordlessMethod = passwordlessMethods[0];
-  if (
-    passwordlessMethod &&
-    !passwordlessMethod.tenantIds.includes(input.tenantId)
-  ) {
-    throw new RowndEmailChangeError(
-      "CONFLICT",
-      409,
-      "the account passwordless sign-in method belongs to another tenant",
-    );
-  }
   const initiatingLoginMethod = user.loginMethods.find(
     (method) =>
       method.recipeUserId.getAsString() === input.recipeUserId.getAsString() &&
       method.tenantIds.includes(input.tenantId),
   );
   const canAddPasswordless =
-    passwordlessMethods.length === 0 &&
+    !hasPasswordlessMethod &&
     initiatingLoginMethod !== undefined &&
     isRealThirdPartyMethod(initiatingLoginMethod) &&
     user.loginMethods.every(isRealThirdPartyMethod);
@@ -1152,6 +1143,7 @@ export async function startPendingEmailVerification(input: {
     const currentPasswordlessMethod = user.loginMethods.find(
       (method) =>
         method.recipeId === "passwordless" &&
+        method.tenantIds.includes(input.tenantId) &&
         method.verified &&
         method.email &&
         normalizeEmail(method.email) === normalizedEmail,
@@ -1162,6 +1154,7 @@ export async function startPendingEmailVerification(input: {
         input.userId,
         normalizedEmail,
         currentPasswordlessMethod.recipeUserId.getAsString(),
+        input.tenantId,
       )
       : {
         ...metadata,
@@ -1473,50 +1466,30 @@ export async function completePendingEmailVerification(input: {
       );
     }
 
-    let canonicalEmailRecipeUserId: string;
-    if (pendingVerification.purpose === "UPDATE_PASSWORDLESS") {
-      if (!passwordlessMethod) {
-        throw new RowndPluginError("ROWND_USER_NOT_FOUND");
-      }
-      const previousEmail = passwordlessMethod.email ?? null;
-      const updateResult = await Passwordless.updateUser({
-        recipeUserId: passwordlessMethod.recipeUserId,
-        email: normalizedEmail,
-        userContext: input.userContext,
-      });
-
-      if (updateResult.status !== "OK") {
-        throw emailOwnershipConflict();
-      }
-      rollbackCredentialChange = async () => {
-        const rollbackResult = await Passwordless.updateUser({
-          recipeUserId: passwordlessMethod.recipeUserId,
-          email: previousEmail,
-          userContext: input.userContext,
-        });
-        if (rollbackResult.status !== "OK") {
-          throw new Error(
-            `Passwordless credential rollback failed with status ${rollbackResult.status}`,
-          );
-        }
-      };
-      canonicalEmailRecipeUserId =
-        passwordlessMethod.recipeUserId.getAsString();
-    } else {
-      const passwordlessUser = await Passwordless.signInUp({
-        email: normalizedEmail,
-        tenantId,
-        userContext: {
-          ...input.userContext,
-          rowndDisableAutomaticAccountLinking: true,
-        },
-      });
-      if (
-        passwordlessUser.status !== "OK" ||
-        !passwordlessUser.createdNewRecipeUser
-      ) {
-        throw emailOwnershipConflict();
-      }
+    const passwordlessUser = await Passwordless.signInUp({
+      email: normalizedEmail,
+      tenantId,
+      userContext: {
+        ...input.userContext,
+        rowndDisableAutomaticAccountLinking: true,
+      },
+    });
+    if (passwordlessUser.status !== "OK") {
+      throw emailOwnershipConflict();
+    }
+    const reusesLinkedMethod =
+      !passwordlessUser.createdNewRecipeUser &&
+      passwordlessUser.user.id === userId &&
+      passwordlessUser.user.loginMethods.some(
+        (method) =>
+          method.recipeUserId.getAsString() ===
+            passwordlessUser.recipeUserId.getAsString() &&
+          method.tenantIds.includes(tenantId),
+      );
+    if (!passwordlessUser.createdNewRecipeUser && !reusesLinkedMethod) {
+      throw emailOwnershipConflict();
+    }
+    if (passwordlessUser.createdNewRecipeUser) {
       rollbackCredentialChange = async () => {
         await SuperTokens.deleteUser(
           passwordlessUser.recipeUserId.getAsString(),
@@ -1549,9 +1522,9 @@ export async function completePendingEmailVerification(input: {
       if (linkResult.status !== "OK") {
         throw emailOwnershipConflict();
       }
-      canonicalEmailRecipeUserId =
-        passwordlessUser.recipeUserId.getAsString();
     }
+    const canonicalEmailRecipeUserId =
+      passwordlessUser.recipeUserId.getAsString();
 
     await Session.revokeAllSessionsForUser(
       userId,
@@ -1565,6 +1538,7 @@ export async function completePendingEmailVerification(input: {
       userId,
       normalizedEmail,
       canonicalEmailRecipeUserId,
+      tenantId,
       metadata.original_rownd_user,
     );
 
@@ -1810,17 +1784,65 @@ function findPendingPasswordlessMethod(
     pendingVerification.purpose !== "UPDATE_PASSWORDLESS" ||
     !pendingVerification.verificationRecipeUserId
   ) return undefined;
-  const passwordlessMethods = user.loginMethods.filter(
-    (method) => method.recipeId === "passwordless",
+  const passwordlessMethod = user.loginMethods.find(
+    (method) =>
+      method.recipeId === "passwordless" &&
+      method.recipeUserId.getAsString() ===
+        pendingVerification.verificationRecipeUserId,
   );
-  if (passwordlessMethods.length !== 1) return undefined;
-
-  const [passwordlessMethod] = passwordlessMethods;
   return passwordlessMethod?.tenantIds.includes(tenantId) &&
     passwordlessMethod.recipeUserId.getAsString() ===
       pendingVerification.verificationRecipeUserId
     ? passwordlessMethod
     : undefined;
+}
+
+function findCanonicalPasswordlessMethod(
+  user: SuperTokensUser,
+  metadata: RowndMetadata,
+  tenantId: string,
+) {
+  const passwordlessMethods = user.loginMethods.filter(
+    (method) =>
+      method.recipeId === "passwordless" && method.tenantIds.includes(tenantId),
+  );
+  const canonicalEmailRecipeUserId = getCanonicalEmailRecipeUserId(
+    metadata,
+    tenantId,
+  );
+  if (canonicalEmailRecipeUserId) {
+    const canonicalMethod = passwordlessMethods.find(
+      (method) =>
+        method.recipeUserId.getAsString() ===
+        canonicalEmailRecipeUserId,
+    );
+    if (!canonicalMethod) {
+      throw new RowndEmailChangeError(
+        "CONFLICT",
+        409,
+        "the canonical email sign-in method is invalid",
+      );
+    }
+    return canonicalMethod;
+  }
+  if (passwordlessMethods.length > 1) {
+    throw new RowndEmailChangeError(
+      "AMBIGUOUS",
+      409,
+      "the account has multiple email sign-in methods without a canonical method",
+    );
+  }
+  return passwordlessMethods[0];
+}
+
+function getCanonicalEmailRecipeUserId(
+  metadata: RowndMetadata,
+  tenantId: string,
+) {
+  return metadata.rownd_email_recipe_user_ids?.[tenantId] ??
+    (metadata.rownd_email_recipe_user_ids === undefined
+      ? metadata.rownd_email_recipe_user_id
+      : undefined);
 }
 
 async function removePendingEmailVerification(
@@ -1902,6 +1924,7 @@ function buildVerifiedEmailMetadata(
   userId: string,
   email: string,
   canonicalEmailRecipeUserId: string,
+  tenantId: string,
   fallbackOriginalRowndUser?: RowndMetadata["original_rownd_user"],
 ): RowndMetadata {
   const compatibilityUser = metadata.original_rownd_user ?? fallbackOriginalRowndUser ?? {
@@ -1928,6 +1951,10 @@ function buildVerifiedEmailMetadata(
       },
     },
     rownd_email_recipe_user_id: canonicalEmailRecipeUserId,
+    rownd_email_recipe_user_ids: {
+      ...metadata.rownd_email_recipe_user_ids,
+      [tenantId]: canonicalEmailRecipeUserId,
+    },
     rownd_pending_verification: getPendingVerifications(metadata).filter(
       (verification) => verification.field !== "email",
     ),

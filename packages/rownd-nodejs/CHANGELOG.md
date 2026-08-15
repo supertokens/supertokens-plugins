@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- Fix the email change flow
+- Preserve previous Passwordless emails as linked login methods and report pending email verification
 
 ## 0.6.5
 
