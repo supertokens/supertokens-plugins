@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/rownd-nodejs",
-  "version": "0.6.7",
+  "version": "0.6.8",
   "description": "Rownd User Migration Plugin for SuperTokens",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
