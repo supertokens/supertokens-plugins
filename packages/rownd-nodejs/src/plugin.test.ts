@@ -97,8 +97,9 @@ describe("rownd-nodejs plugin", () => {
   let importCoreConnectionURI: string;
 
   async function createLinkedGuestSession(
-    primaryRecipeUserId: Parameters<typeof AccountLinking.createPrimaryUser>[0],
-    primaryUserId: string,
+    authenticatedRecipeUserId: Parameters<
+      typeof AccountLinking.createPrimaryUser
+    >[0],
   ) {
     const guestResult = await ThirdParty.manuallyCreateOrUpdateUser(
       "public",
@@ -122,21 +123,22 @@ describe("rownd-nodejs plugin", () => {
       throw new Error("guest session has no anonymous_id");
     }
 
-    const primaryResult =
-      await AccountLinking.createPrimaryUser(primaryRecipeUserId);
+    const primaryResult = await AccountLinking.createPrimaryUser(
+      guestResult.recipeUserId,
+    );
     if (primaryResult.status !== "OK") {
       throw new Error("failed to create primary user");
     }
     const linkResult = await AccountLinking.linkAccounts(
-      guestResult.recipeUserId,
-      primaryUserId,
+      authenticatedRecipeUserId,
+      primaryResult.user.id,
       undefined,
     );
     if (linkResult.status !== "OK") {
       throw new Error("failed to link guest user");
     }
 
-    return { session, anonymousId };
+    return { session, anonymousId, linkedUser: linkResult.user };
   }
 
   beforeAll(async () => {
@@ -1369,12 +1371,8 @@ describe("rownd-nodejs plugin", () => {
         email: "passwordless-variant@example.com",
         tenantId: "public",
       });
-      const { session, anonymousId } = await createLinkedGuestSession(
-        signInUpResult.recipeUserId,
-        signInUpResult.user.id,
-      );
-      const linkedUser = await SuperTokens.getUser(signInUpResult.user.id);
-      expect(linkedUser).toBeDefined();
+      const { session, anonymousId, linkedUser } =
+        await createLinkedGuestSession(signInUpResult.recipeUserId);
       const mergeIntoAccessTokenPayload = vi.spyOn(
         session,
         "mergeIntoAccessTokenPayload",
@@ -1400,7 +1398,7 @@ describe("rownd-nodejs plugin", () => {
           userContext: { rowndAppVariantId: "variant_123" },
         }),
       );
-      const metadata = await getUserMetadata(signInUpResult.user.id);
+      const metadata = await getUserMetadata(linkedUser.id);
       expect(
         (metadata.metadata as any).original_rownd_user.attributes[
           "rownd:app_variants"
@@ -1689,12 +1687,8 @@ describe("rownd-nodejs plugin", () => {
       if (signInUpResult.status !== "OK") {
         throw new Error("failed to create thirdparty user");
       }
-      const { session, anonymousId } = await createLinkedGuestSession(
-        signInUpResult.recipeUserId,
-        signInUpResult.user.id,
-      );
-      const linkedUser = await SuperTokens.getUser(signInUpResult.user.id);
-      expect(linkedUser).toBeDefined();
+      const { session, anonymousId, linkedUser } =
+        await createLinkedGuestSession(signInUpResult.recipeUserId);
       const mergeIntoAccessTokenPayload = vi.spyOn(
         session,
         "mergeIntoAccessTokenPayload",
@@ -1721,7 +1715,7 @@ describe("rownd-nodejs plugin", () => {
           userContext: { rowndAppVariantId: "variant_123" },
         }),
       );
-      const metadata = await getUserMetadata(signInUpResult.user.id);
+      const metadata = await getUserMetadata(linkedUser.id);
       expect(
         (metadata.metadata as any).original_rownd_user.attributes[
           "rownd:app_variants"
