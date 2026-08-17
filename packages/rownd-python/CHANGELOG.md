@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 0.1.9
+
+### Patch Changes
+
+- Fix fetch rownd user
+
 ## 0.1.8
 
 ### Patch Changes
