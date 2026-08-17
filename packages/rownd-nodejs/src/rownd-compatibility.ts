@@ -297,9 +297,9 @@ export function buildRowndSessionClaimPayload(input: {
     currentPayload,
     input.metadata,
   );
-  const isAnonymous =
-    currentPayload.is_anonymous === true ||
-    [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(authLevel);
+  const isAnonymous = [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(
+    authLevel,
+  );
   const anonymousId = getAnonymousId(input.userId, input.user, input.metadata);
   const isVerifiedUser = authLevel !== "unverified";
   const audience = buildRowndAudience(currentPayload, input.appVariantId);

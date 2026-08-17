@@ -1325,9 +1325,20 @@ describe("rownd-nodejs plugin", () => {
         email: "passwordless-variant@example.com",
         tenantId: "public",
       });
+      const mergeIntoAccessTokenPayload = vi.fn();
       const originalConsumeCodePOST = vi.fn().mockResolvedValue({
         status: "OK",
         user: signInUpResult.user,
+        session: {
+          getAccessTokenPayload: () => ({
+            auth_level: "instant",
+            is_anonymous: true,
+            [ROWND_JWT_CLAIMS.IsAnonymous]: true,
+          }),
+          getRecipeUserId: () => signInUpResult.recipeUserId,
+          getTenantId: () => "public",
+          mergeIntoAccessTokenPayload,
+        },
       });
       const passwordlessApis = (
         init(pluginConfig) as any
@@ -1351,6 +1362,17 @@ describe("rownd-nodejs plugin", () => {
           "rownd:app_variants"
         ],
       ).toEqual(["variant_123"]);
+      expect(mergeIntoAccessTokenPayload).toHaveBeenCalledWith(
+        expect.objectContaining({
+          auth_level: "verified",
+          is_anonymous: expect.objectContaining({ v: false }),
+          is_verified_user: true,
+          [ROWND_JWT_CLAIMS.AuthLevel]: "verified",
+          [ROWND_JWT_CLAIMS.IsVerifiedUser]: true,
+          [ROWND_JWT_CLAIMS.IsAnonymous]: null,
+          anonymous_id: null,
+        }),
+      );
     });
 
     it("adds app variant context before passwordless email creation", async () => {
@@ -7084,6 +7106,11 @@ describe("rownd-nodejs plugin", () => {
 
         const claims = await buildRowndSessionClaims(
           passwordlessResult.user.id,
+          {
+            auth_level: "guest",
+            is_anonymous: true,
+            [ROWND_JWT_CLAIMS.IsAnonymous]: true,
+          },
         );
         expect(claims).toMatchObject({
           app_user_id: passwordlessResult.user.id,

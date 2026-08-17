@@ -22,6 +22,7 @@ import {
   PENDING_EMAIL_VERIFICATION_QUERY_PARAM,
   PLUGIN_ID,
   PLUGIN_SDK_VERSION,
+  ROWND_JWT_CLAIMS,
 } from "./constants";
 import { RowndPluginConfig, RowndPluginNormalisedConfig } from "./types";
 import { enableDebugLogs, logDebugMessage } from "./logger";
@@ -554,6 +555,31 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     response.user.id,
                     appVariantId,
                   );
+
+                  const currentPayload =
+                    response.session.getAccessTokenPayload();
+                  const [rowndSessionClaims, rowndIsAnonymousClaim] =
+                    await Promise.all([
+                      buildRowndSessionClaims(
+                        response.user.id,
+                        currentPayload,
+                        appVariantId,
+                      ),
+                      RowndIsAnonymousClaim.build(
+                        response.user.id,
+                        response.session.getRecipeUserId(),
+                        response.session.getTenantId(),
+                        currentPayload,
+                        input.userContext,
+                      ),
+                    ]);
+                  await response.session.mergeIntoAccessTokenPayload({
+                    ...rowndSessionClaims,
+                    ...rowndIsAnonymousClaim,
+                    [ROWND_JWT_CLAIMS.IsAnonymous]:
+                      rowndSessionClaims[ROWND_JWT_CLAIMS.IsAnonymous] ?? null,
+                    anonymous_id: rowndSessionClaims.anonymous_id ?? null,
+                  });
                 }
 
                 return response;
