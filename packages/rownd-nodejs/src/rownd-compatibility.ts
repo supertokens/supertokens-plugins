@@ -256,6 +256,7 @@ export function getAnonymousId(
   userId: string,
   user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
   metadata?: RowndMetadata,
+  currentPayload?: JsonRecord,
 ) {
   const originalAnonymousId = metadata?.original_rownd_user?.data?.anonymous_id;
   if (typeof originalAnonymousId === "string") {
@@ -269,7 +270,13 @@ export function getAnonymousId(
     );
   });
 
-  return guestMethod ? `anon_${user?.id || userId}` : undefined;
+  if (!guestMethod) {
+    return undefined;
+  }
+
+  return typeof currentPayload?.anonymous_id === "string"
+    ? currentPayload.anonymous_id
+    : `anon_${user?.id || userId}`;
 }
 
 export function buildRowndSessionClaimPayload(input: {
@@ -300,7 +307,12 @@ export function buildRowndSessionClaimPayload(input: {
   const isAnonymous = [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(
     authLevel,
   );
-  const anonymousId = getAnonymousId(input.userId, input.user, input.metadata);
+  const anonymousId = getAnonymousId(
+    input.userId,
+    input.user,
+    input.metadata,
+    currentPayload,
+  );
   const isVerifiedUser = authLevel !== "unverified";
   const audience = buildRowndAudience(currentPayload, input.appVariantId);
   const configuredClaims = buildConfiguredSessionClaims(input.metadata);

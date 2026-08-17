@@ -10,7 +10,10 @@ import type {
 import type { APIInterface as PasswordlessAPIInterface } from "supertokens-node/recipe/passwordless";
 import Session from "supertokens-node/recipe/session";
 import type { APIInterface as ThirdPartyAPIInterface } from "supertokens-node/recipe/thirdparty";
-import type { VerifySessionOptions } from "supertokens-node/recipe/session/types";
+import type {
+  SessionContainerInterface,
+  VerifySessionOptions,
+} from "supertokens-node/recipe/session/types";
 import { createPluginInitFunction } from "@shared/js";
 import { withRequestHandler } from "@shared/nodejs";
 import { createInstance } from "@rownd/node";
@@ -78,6 +81,36 @@ import {
 const DISABLED_MIGRATION_ROWND_APP_KEY = "migration-disabled";
 const PENDING_EMAIL_VERIFICATION_SESSION_ERROR =
   "email change verification requires the initiating session";
+
+async function refreshRowndSessionClaims(input: {
+  session: SessionContainerInterface;
+  userId: string;
+  appVariantId?: string;
+  userContext: UserContext;
+}) {
+  const currentPayload = input.session.getAccessTokenPayload();
+  const [rowndSessionClaims, rowndIsAnonymousClaim] = await Promise.all([
+    buildRowndSessionClaims(
+      input.userId,
+      currentPayload,
+      input.appVariantId,
+    ),
+    RowndIsAnonymousClaim.build(
+      input.userId,
+      input.session.getRecipeUserId(),
+      input.session.getTenantId(),
+      currentPayload,
+      input.userContext,
+    ),
+  ]);
+  await input.session.mergeIntoAccessTokenPayload({
+    ...rowndSessionClaims,
+    ...rowndIsAnonymousClaim,
+    [ROWND_JWT_CLAIMS.IsAnonymous]:
+      rowndSessionClaims[ROWND_JWT_CLAIMS.IsAnonymous] ?? null,
+    anonymous_id: rowndSessionClaims.anonymous_id ?? null,
+  });
+}
 
 function applyRowndPasswordlessRequestContext(
   req: Parameters<typeof getRequestedDisplayContextFromRequest>[0],
@@ -556,29 +589,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     appVariantId,
                   );
 
-                  const currentPayload =
-                    response.session.getAccessTokenPayload();
-                  const [rowndSessionClaims, rowndIsAnonymousClaim] =
-                    await Promise.all([
-                      buildRowndSessionClaims(
-                        response.user.id,
-                        currentPayload,
-                        appVariantId,
-                      ),
-                      RowndIsAnonymousClaim.build(
-                        response.user.id,
-                        response.session.getRecipeUserId(),
-                        response.session.getTenantId(),
-                        currentPayload,
-                        input.userContext,
-                      ),
-                    ]);
-                  await response.session.mergeIntoAccessTokenPayload({
-                    ...rowndSessionClaims,
-                    ...rowndIsAnonymousClaim,
-                    [ROWND_JWT_CLAIMS.IsAnonymous]:
-                      rowndSessionClaims[ROWND_JWT_CLAIMS.IsAnonymous] ?? null,
-                    anonymous_id: rowndSessionClaims.anonymous_id ?? null,
+                  await refreshRowndSessionClaims({
+                    session: response.session,
+                    userId: response.user.id,
+                    appVariantId,
+                    userContext: input.userContext,
                   });
                 }
 
@@ -613,6 +628,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     response.user.id,
                     appVariantId,
                   );
+                  await refreshRowndSessionClaims({
+                    session: response.session,
+                    userId: response.user.id,
+                    appVariantId,
+                    userContext: input.userContext,
+                  });
                 }
 
                 return response;

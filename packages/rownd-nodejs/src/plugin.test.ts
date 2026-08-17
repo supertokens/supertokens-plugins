@@ -96,6 +96,49 @@ describe("rownd-nodejs plugin", () => {
   let coreConnectionURI: string;
   let importCoreConnectionURI: string;
 
+  async function createLinkedGuestSession(
+    primaryRecipeUserId: Parameters<typeof AccountLinking.createPrimaryUser>[0],
+    primaryUserId: string,
+  ) {
+    const guestResult = await ThirdParty.manuallyCreateOrUpdateUser(
+      "public",
+      "guest",
+      `guest-${randomUUID()}`,
+      `guest-${randomUUID()}@anonymous.local`,
+      false,
+    );
+    if (guestResult.status !== "OK") {
+      throw new Error("failed to create guest user");
+    }
+    const session = await Session.createNewSessionWithoutRequestResponse(
+      "public",
+      guestResult.recipeUserId,
+      {},
+      {},
+      true,
+    );
+    const anonymousId = session.getAccessTokenPayload().anonymous_id;
+    if (typeof anonymousId !== "string") {
+      throw new Error("guest session has no anonymous_id");
+    }
+
+    const primaryResult =
+      await AccountLinking.createPrimaryUser(primaryRecipeUserId);
+    if (primaryResult.status !== "OK") {
+      throw new Error("failed to create primary user");
+    }
+    const linkResult = await AccountLinking.linkAccounts(
+      guestResult.recipeUserId,
+      primaryUserId,
+      undefined,
+    );
+    if (linkResult.status !== "OK") {
+      throw new Error("failed to link guest user");
+    }
+
+    return { session, anonymousId };
+  }
+
   beforeAll(async () => {
     network = await new Network().start();
     postgresContainer = await new GenericContainer("postgres:14")
@@ -1305,10 +1348,11 @@ describe("rownd-nodejs plugin", () => {
       expect(rewrittenUrl.searchParams.get("displayContext")).toBe("browser");
     });
 
-    it("records app variant membership after passwordless code consumption", async () => {
+    it("records app variant membership and refreshes a linked guest session after passwordless code consumption", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
+        appConfig: { id: "app_xyz" },
         subBrands: {
           variant_123: {
             id: "app_xyz",
@@ -1325,20 +1369,20 @@ describe("rownd-nodejs plugin", () => {
         email: "passwordless-variant@example.com",
         tenantId: "public",
       });
-      const mergeIntoAccessTokenPayload = vi.fn();
+      const { session, anonymousId } = await createLinkedGuestSession(
+        signInUpResult.recipeUserId,
+        signInUpResult.user.id,
+      );
+      const linkedUser = await SuperTokens.getUser(signInUpResult.user.id);
+      expect(linkedUser).toBeDefined();
+      const mergeIntoAccessTokenPayload = vi.spyOn(
+        session,
+        "mergeIntoAccessTokenPayload",
+      );
       const originalConsumeCodePOST = vi.fn().mockResolvedValue({
         status: "OK",
-        user: signInUpResult.user,
-        session: {
-          getAccessTokenPayload: () => ({
-            auth_level: "instant",
-            is_anonymous: true,
-            [ROWND_JWT_CLAIMS.IsAnonymous]: true,
-          }),
-          getRecipeUserId: () => signInUpResult.recipeUserId,
-          getTenantId: () => "public",
-          mergeIntoAccessTokenPayload,
-        },
+        user: linkedUser,
+        session,
       });
       const passwordlessApis = (
         init(pluginConfig) as any
@@ -1362,17 +1406,18 @@ describe("rownd-nodejs plugin", () => {
           "rownd:app_variants"
         ],
       ).toEqual(["variant_123"]);
-      expect(mergeIntoAccessTokenPayload).toHaveBeenCalledWith(
-        expect.objectContaining({
-          auth_level: "verified",
-          is_anonymous: expect.objectContaining({ v: false }),
-          is_verified_user: true,
-          [ROWND_JWT_CLAIMS.AuthLevel]: "verified",
-          [ROWND_JWT_CLAIMS.IsVerifiedUser]: true,
-          [ROWND_JWT_CLAIMS.IsAnonymous]: null,
-          anonymous_id: null,
-        }),
-      );
+      expect(mergeIntoAccessTokenPayload).toHaveBeenCalledTimes(1);
+      const refreshedPayload = session.getAccessTokenPayload();
+      expect(refreshedPayload).toMatchObject({
+        auth_level: "verified",
+        is_anonymous: expect.objectContaining({ v: false }),
+        is_verified_user: true,
+        [ROWND_JWT_CLAIMS.AuthLevel]: "verified",
+        [ROWND_JWT_CLAIMS.IsVerifiedUser]: true,
+        anonymous_id: anonymousId,
+        aud: ["app:app_xyz", "app_variant:variant_123"],
+      });
+      expect(refreshedPayload).not.toHaveProperty(ROWND_JWT_CLAIMS.IsAnonymous);
     });
 
     it("adds app variant context before passwordless email creation", async () => {
@@ -1616,10 +1661,11 @@ describe("rownd-nodejs plugin", () => {
       expect(originalConsumeCodePOST).not.toHaveBeenCalled();
     });
 
-    it("records app variant membership after third-party sign in", async () => {
+    it("records app variant membership and refreshes a linked guest session after third-party sign in", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
+        appConfig: { id: "app_xyz" },
         subBrands: {
           variant_123: {
             id: "app_xyz",
@@ -1643,9 +1689,20 @@ describe("rownd-nodejs plugin", () => {
       if (signInUpResult.status !== "OK") {
         throw new Error("failed to create thirdparty user");
       }
+      const { session, anonymousId } = await createLinkedGuestSession(
+        signInUpResult.recipeUserId,
+        signInUpResult.user.id,
+      );
+      const linkedUser = await SuperTokens.getUser(signInUpResult.user.id);
+      expect(linkedUser).toBeDefined();
+      const mergeIntoAccessTokenPayload = vi.spyOn(
+        session,
+        "mergeIntoAccessTokenPayload",
+      );
       const originalSignInUpPOST = vi.fn().mockResolvedValue({
         status: "OK",
-        user: signInUpResult.user,
+        user: linkedUser,
+        session,
       });
 
       const thirdPartyApis = (
@@ -1670,6 +1727,18 @@ describe("rownd-nodejs plugin", () => {
           "rownd:app_variants"
         ],
       ).toEqual(["variant_123"]);
+      expect(mergeIntoAccessTokenPayload).toHaveBeenCalledTimes(1);
+      const refreshedPayload = session.getAccessTokenPayload();
+      expect(refreshedPayload).toMatchObject({
+        auth_level: "verified",
+        is_anonymous: expect.objectContaining({ v: false }),
+        is_verified_user: true,
+        [ROWND_JWT_CLAIMS.AuthLevel]: "verified",
+        [ROWND_JWT_CLAIMS.IsVerifiedUser]: true,
+        anonymous_id: anonymousId,
+        aud: ["app:app_xyz", "app_variant:variant_123"],
+      });
+      expect(refreshedPayload).not.toHaveProperty(ROWND_JWT_CLAIMS.IsAnonymous);
     });
 
     it("adds the current app variant to new session claims", async () => {
