@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.6.9
+
+### Patch Changes
+
+- Use primary user id in metadata updates
+
 ## 0.6.8
 
 ### Patch Changes
