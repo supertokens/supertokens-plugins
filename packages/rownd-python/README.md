@@ -131,6 +131,8 @@ The plugin exposes Rownd-compatible user/session behavior for migrated and new S
 
 - Guest sessions use the `guest` third-party provider.
 - Instant sessions use the `instant` third-party provider and preserve `auth_level: "instant"`.
+- Passwordless and third-party sign-in refresh Rownd session claims after account linking while preserving the linked guest's `anonymous_id`.
+- Compatibility reads combine metadata from the primary and linked recipe users. Profile and metadata writes target the primary user without relocating linked Rownd metadata.
 - Google and Apple third-party login methods are exposed as `google_id` and `apple_id` in Rownd-compatible user payloads.
 - OAuth2 Provider tokens and userinfo responses include Rownd claims plus standard `email`, `phone`, and `profile` claims when those scopes are requested.
 - OAuth2 `resource=app:*` requests are translated to SuperTokens `audience=app:*` for Rownd-compatible OAuth clients.
@@ -138,13 +140,15 @@ The plugin exposes Rownd-compatible user/session behavior for migrated and new S
 
 ### Email Changes
 
-When email sign-in is configured, changing the profile email starts a verified,
-account-wide passwordless email change. The plugin updates an existing Passwordless
-method, including a phone-only method without removing its phone number. For accounts
-containing only real third-party methods, it creates and links a Passwordless method
-after verification. Guest/instant-only accounts, mixed accounts without an existing
-Passwordless method, and ambiguous Passwordless topologies are rejected. Configure
-the maximum age of the initiating SuperTokens session:
+When email sign-in is configured, changing the profile email starts a verified
+Passwordless email change for the initiating tenant. After verification, the plugin
+creates a Passwordless email method or reuses one already linked to the same primary
+user in that tenant. Existing Passwordless email and phone methods remain unchanged,
+so previous email addresses continue to work as login aliases. For accounts containing
+only real third-party methods, the plugin creates and links the first Passwordless
+method after verification. Guest/instant-only accounts and unsupported mixed-account
+topologies are rejected. Configure the maximum age of the initiating SuperTokens
+session:
 
 ```python
 RowndMigrationPlugin(
@@ -159,7 +163,14 @@ The flow requires Passwordless, EmailVerification, and AccountLinking. It reject
 stale sessions, checks target ownership across all tenants, and binds pending
 verification metadata to the initiating user, session, tenant, purpose, and status
 before consuming the Core token. Completion revokes all account sessions and returns
-a replacement session. The old email remains active until verification succeeds.
+a replacement session. The tenant's canonical email method is tracked separately from
+its login aliases. Existing metadata using `rownd_email_recipe_user_id` remains
+supported; new updates also maintain the tenant-scoped `rownd_email_recipe_user_ids`
+map.
+
+Successful profile or field updates that start verification return
+`email_verification_pending: true`. Until verification completes, the returned profile
+continues to expose the current canonical email.
 
 Native clients using `rowndDisplayContext: "mobile_app"` must send
 `rowndNativeEmailVerification: true` in the request `context`. Older clients receive

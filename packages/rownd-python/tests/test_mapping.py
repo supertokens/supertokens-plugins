@@ -10,6 +10,9 @@ from supertokens_rownd.plugin_implementation import (
     as_json_dict,
     build_app_config,
     clear_supertokens_core_call_cache,
+    combine_linked_metadata,
+    find_canonical_passwordless_method,
+    get_canonical_email_recipe_user_id,
     get_magic_link_bootstrap_params,
     get_rownd_compat_user,
     map_rownd_user_to_supertokens,
@@ -17,7 +20,228 @@ from supertokens_rownd.plugin_implementation import (
     resolve_allowed_client_domain,
     resolve_tenant_id,
 )
-from supertokens_rownd.types import RowndPluginConfig, RowndPluginError
+from supertokens_rownd.types import (
+    JsonDict,
+    JsonList,
+    RowndEmailChangeError,
+    RowndPluginConfig,
+    RowndPluginError,
+)
+
+
+def rownd_snapshot(user_id: str, **data: Any) -> JsonDict:
+    return {
+        "state": "enabled",
+        "auth_level": "verified",
+        "data": {"user_id": user_id, **data},
+        "verified_data": {},
+    }
+
+
+def test_combines_linked_metadata_recursively_with_primary_values_winning():
+    result = combine_linked_metadata(
+        "primary",
+        {"shared": "primary", "nested": {"primary": True}},
+        [
+            (
+                "secondary",
+                {
+                    "shared": "secondary",
+                    "nested": {"primary": False, "secondary": True},
+                    "original_rownd_user": rownd_snapshot("rownd-user", first_name="Jane"),
+                },
+            )
+        ],
+    )
+
+    assert result["combined_metadata"] == {
+        "shared": "primary",
+        "nested": {"primary": True, "secondary": True},
+        "original_rownd_user": rownd_snapshot("rownd-user", first_name="Jane"),
+    }
+
+
+def test_combined_metadata_preserves_defined_empty_values():
+    primary = {"none": None, "false": False, "empty": "", "list": [], "zero": 0}
+    secondary = {"none": 1, "false": True, "empty": "x", "list": [1], "zero": 1}
+
+    result = combine_linked_metadata("primary", primary, [("secondary", secondary)])
+
+    assert result["combined_metadata"] == primary
+
+
+def test_combined_metadata_replaces_malformed_primary_rownd_snapshot():
+    snapshot = rownd_snapshot("rownd-user")
+
+    result = combine_linked_metadata(
+        "primary",
+        {"original_rownd_user": {}},
+        [("secondary", {"original_rownd_user": snapshot})],
+    )
+    combined_metadata = cast(JsonDict, result["combined_metadata"])
+
+    assert combined_metadata["original_rownd_user"] == snapshot
+    assert result["rownd_metadata_source_user_id"] == "secondary"
+
+
+def test_combined_metadata_order_is_deterministic_and_prefers_mapped_identity():
+    linked: list[tuple[str, JsonDict]] = [
+        ("a-stale", {"original_rownd_user": rownd_snapshot("stale", first_name="Stale")}),
+        (
+            "z-canonical",
+            {"original_rownd_user": rownd_snapshot("canonical", first_name="Canonical")},
+        ),
+    ]
+
+    forward = combine_linked_metadata("primary", {}, linked, "canonical")
+    reversed_result = combine_linked_metadata("primary", {}, list(reversed(linked)), "canonical")
+    combined_metadata = cast(JsonDict, forward["combined_metadata"])
+
+    assert forward == reversed_result
+    assert combined_metadata["original_rownd_user"] == rownd_snapshot(
+        "canonical", first_name="Canonical"
+    )
+    assert forward["rownd_metadata_source_user_id"] == "z-canonical"
+
+
+def test_combined_metadata_without_mapping_uses_user_id_ordering():
+    result = combine_linked_metadata(
+        "primary",
+        {},
+        [
+            ("a-rownd", {"shared": "rownd", "original_rownd_user": rownd_snapshot("rownd")}),
+            ("z-generic", {"shared": "generic"}),
+        ],
+    )
+
+    assert cast(JsonDict, result["combined_metadata"])["shared"] == "rownd"
+
+
+def test_combined_metadata_excludes_linked_pending_verification():
+    result = combine_linked_metadata(
+        "primary",
+        {},
+        [
+            (
+                "secondary",
+                {
+                    "original_rownd_user": rownd_snapshot("rownd-user"),
+                    "rownd_pending_verification": [{"id": "stale"}],
+                },
+            )
+        ],
+    )
+    combined_metadata = cast(JsonDict, result["combined_metadata"])
+
+    assert "rownd_pending_verification" not in combined_metadata
+
+
+def test_combined_metadata_excludes_linked_operational_metadata():
+    pending: JsonList = [{"id": "primary-pending"}]
+    result = combine_linked_metadata(
+        "primary",
+        {
+            "rownd_email_recipe_user_ids": {"public": "primary-email-user"},
+            "rownd_pending_verification": pending,
+        },
+        [
+            (
+                "secondary",
+                {
+                    "linked_profile": True,
+                    "rownd_email_recipe_user_id": "stale-email-user",
+                    "rownd_email_recipe_user_ids": {"tenant": "stale-email-user"},
+                    "rownd_migration_complete": True,
+                    "rownd_pending_verification": [],
+                },
+            )
+        ],
+    )
+
+    assert result["combined_metadata"] == {
+        "linked_profile": True,
+        "rownd_email_recipe_user_ids": {"public": "primary-email-user"},
+        "rownd_pending_verification": pending,
+    }
+    assert result["metadata_update"] == {"linked_profile": True}
+
+
+def test_combined_metadata_replaces_stale_primary_snapshot_with_mapped_identity():
+    canonical = rownd_snapshot("canonical", first_name="Canonical")
+    result = combine_linked_metadata(
+        "primary",
+        {
+            "primary_only": True,
+            "original_rownd_user": rownd_snapshot("stale", first_name="Stale"),
+        },
+        [("canonical-recipe-user", {"original_rownd_user": canonical})],
+        "canonical",
+    )
+
+    assert result["combined_metadata"] == {
+        "primary_only": True,
+        "original_rownd_user": canonical,
+    }
+    assert result["metadata_update"] == {"original_rownd_user": canonical}
+    assert result["rownd_metadata_source_user_id"] == "canonical-recipe-user"
+
+
+def test_combined_metadata_keeps_stale_primary_when_mapped_metadata_is_missing():
+    stale_primary = rownd_snapshot("primary-stale")
+    result = combine_linked_metadata(
+        "primary",
+        {"original_rownd_user": stale_primary},
+        [("secondary", {"original_rownd_user": rownd_snapshot("secondary-stale")})],
+        "canonical",
+    )
+
+    assert cast(JsonDict, result["combined_metadata"])["original_rownd_user"] == stale_primary
+    assert result["rownd_metadata_source_user_id"] == "primary"
+
+
+def test_tenant_canonical_id_only_uses_legacy_scalar_when_map_is_absent():
+    assert get_canonical_email_recipe_user_id(
+        {"rownd_email_recipe_user_id": "legacy"}, "tenant-a"
+    ) == "legacy"
+    assert get_canonical_email_recipe_user_id(
+        {
+            "rownd_email_recipe_user_id": "legacy",
+            "rownd_email_recipe_user_ids": {"tenant-b": "tenant-b-method"},
+        },
+        "tenant-a",
+    ) is None
+    assert get_canonical_email_recipe_user_id(
+        {"rownd_email_recipe_user_ids": {"tenant-a": "tenant-a-method"}}, "tenant-a"
+    ) == "tenant-a-method"
+
+
+def test_canonical_passwordless_method_is_tenant_local_and_requires_marker_for_multiple():
+    methods = [
+        SimpleNamespace(
+            recipe_id="passwordless",
+            recipe_user_id=SimpleNamespace(get_as_string=lambda value=value: value),
+            tenant_ids=[tenant_id],
+        )
+        for value, tenant_id in (
+            ("tenant-a-first", "tenant-a"),
+            ("tenant-a-second", "tenant-a"),
+            ("tenant-b-method", "tenant-b"),
+        )
+    ]
+    user = cast(Any, SimpleNamespace(login_methods=methods))
+
+    with pytest.raises(RowndEmailChangeError) as error:
+        find_canonical_passwordless_method(user, {}, "tenant-a")
+    assert error.value.code == "AMBIGUOUS"
+    assert (
+        find_canonical_passwordless_method(
+            user,
+            {"rownd_email_recipe_user_ids": {"tenant-a": "tenant-a-second"}},
+            "tenant-a",
+        )
+        is methods[1]
+    )
+    assert find_canonical_passwordless_method(user, {}, "tenant-b") is methods[2]
 
 
 def test_throws_when_payload_has_no_data_object():
@@ -733,7 +957,8 @@ async def test_rownd_compat_user_prefers_canonical_email_method(
                 "data": {"user_id": user_id, "email": "stale@example.com"},
                 "verified_data": {"email": "stale@example.com"},
             },
-            "rownd_email_recipe_user_id": "canonical-email-method",
+            "rownd_email_recipe_user_id": "older-email-method",
+            "rownd_email_recipe_user_ids": {"public": "canonical-email-method"},
         }
 
     async def get_user(user_id: str, user_context=None):

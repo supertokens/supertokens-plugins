@@ -36,6 +36,26 @@ class FakeSession:
         return self.user_id
 
 
+class RefreshSession:
+    def __init__(self, payload: Dict[str, Any]):
+        self.payload = payload
+        self.merged: Optional[Dict[str, Any]] = None
+
+    def get_access_token_payload(self, user_context: Dict[str, Any]) -> Dict[str, Any]:
+        return self.payload
+
+    def get_recipe_user_id(self, user_context: Dict[str, Any]) -> Any:
+        return SimpleNamespace(get_as_string=lambda: "recipe-user")
+
+    def get_tenant_id(self, user_context: Dict[str, Any]) -> str:
+        return "public"
+
+    async def merge_into_access_token_payload(
+        self, claims: Dict[str, Any], user_context: Dict[str, Any]
+    ) -> None:
+        self.merged = claims
+
+
 def make_config() -> RowndPluginConfig:
     return RowndPluginConfig(rownd_app_key="app-key", rownd_app_secret="secret")
 
@@ -624,13 +644,26 @@ async def test_rownd_oauth_user_info_picks_rownd_claims(monkeypatch: pytest.Monk
     }
 
 
-async def test_passwordless_consume_records_app_variant(monkeypatch: pytest.MonkeyPatch):
-    recorded: list[tuple[str, Optional[str]]] = []
+async def test_passwordless_consume_records_app_variant_before_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[tuple[str, str, Optional[str]]] = []
+    returned_session = SimpleNamespace()
 
     async def record_variant(
         config: RowndPluginConfig, user_id: str, app_variant_id: Optional[str]
     ):
-        recorded.append((user_id, app_variant_id))
+        events.append(("record", user_id, app_variant_id))
+
+    async def refresh_claims(
+        config: RowndPluginConfig,
+        session: Any,
+        user_id: str,
+        app_variant_id: Optional[str],
+        user_context: Dict[str, Any],
+    ):
+        assert session is returned_session
+        events.append(("refresh", user_id, app_variant_id))
 
     async def consume_code_post(
         pre_auth_session_id: str,
@@ -644,9 +677,12 @@ async def test_passwordless_consume_records_app_variant(monkeypatch: pytest.Monk
         user_context: Dict[str, Any],
     ):
         assert user_context["rowndAppVariantId"] == "variant_123"
-        return SimpleNamespace(status="OK", user=SimpleNamespace(id="passwordless-user"))
+        return SimpleNamespace(
+            status="OK", user=SimpleNamespace(id="passwordless-user"), session=returned_session
+        )
 
     monkeypatch.setattr(plugin, "record_rownd_app_variant_for_user", record_variant)
+    monkeypatch.setattr(plugin, "refresh_rownd_session_claims", refresh_claims)
     original = SimpleNamespace(create_code_post=None, consume_code_post=consume_code_post)
     overridden = plugin._passwordless_api_override(make_config())(cast(Any, original))
 
@@ -662,7 +698,10 @@ async def test_passwordless_consume_records_app_variant(monkeypatch: pytest.Monk
         {},
     )
 
-    assert recorded == [("passwordless-user", "variant_123")]
+    assert events == [
+        ("record", "passwordless-user", "variant_123"),
+        ("refresh", "passwordless-user", "variant_123"),
+    ]
 
 
 async def test_passwordless_consume_rejects_unknown_app_variant():
@@ -698,13 +737,26 @@ async def test_passwordless_consume_rejects_unknown_app_variant():
         )
 
 
-async def test_thirdparty_sign_in_records_app_variant(monkeypatch: pytest.MonkeyPatch):
-    recorded: list[tuple[str, Optional[str]]] = []
+async def test_thirdparty_sign_in_records_app_variant_before_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[tuple[str, str, Optional[str]]] = []
+    returned_session = SimpleNamespace()
 
     async def record_variant(
         config: RowndPluginConfig, user_id: str, app_variant_id: Optional[str]
     ):
-        recorded.append((user_id, app_variant_id))
+        events.append(("record", user_id, app_variant_id))
+
+    async def refresh_claims(
+        config: RowndPluginConfig,
+        session: Any,
+        user_id: str,
+        app_variant_id: Optional[str],
+        user_context: Dict[str, Any],
+    ):
+        assert session is returned_session
+        events.append(("refresh", user_id, app_variant_id))
 
     async def sign_in_up_post(
         provider: Any,
@@ -717,9 +769,12 @@ async def test_thirdparty_sign_in_records_app_variant(monkeypatch: pytest.Monkey
         user_context: Dict[str, Any],
     ):
         assert user_context["rowndAppVariantId"] == "variant_123"
-        return SimpleNamespace(status="OK", user=SimpleNamespace(id="thirdparty-user"))
+        return SimpleNamespace(
+            status="OK", user=SimpleNamespace(id="thirdparty-user"), session=returned_session
+        )
 
     monkeypatch.setattr(plugin, "record_rownd_app_variant_for_user", record_variant)
+    monkeypatch.setattr(plugin, "refresh_rownd_session_claims", refresh_claims)
     original = SimpleNamespace(sign_in_up_post=sign_in_up_post)
     overridden = plugin._thirdparty_api_override(make_config())(cast(Any, original))
 
@@ -734,7 +789,179 @@ async def test_thirdparty_sign_in_records_app_variant(monkeypatch: pytest.Monkey
         {},
     )
 
-    assert recorded == [("thirdparty-user", "variant_123")]
+    assert events == [
+        ("record", "thirdparty-user", "variant_123"),
+        ("refresh", "thirdparty-user", "variant_123"),
+    ]
+
+
+@pytest.mark.parametrize("preserve_anonymous_id", [False, True])
+async def test_refresh_rownd_session_claims_merges_and_clears_stale_claims(
+    monkeypatch: pytest.MonkeyPatch, preserve_anonymous_id: bool
+):
+    payload = {
+        "is_anonymous": True,
+        ROWND_JWT_CLAIMS["is_anonymous"]: True,
+        "anonymous_id": "anon-before-link",
+    }
+    session = RefreshSession(payload)
+
+    async def build_claims(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
+        return {
+            "auth_level": "verified",
+            **({"anonymous_id": "anon-before-link"} if preserve_anonymous_id else {}),
+        }
+
+    async def build_is_anonymous(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
+        return {"is_anonymous": {"v": False, "t": 1}}
+
+    monkeypatch.setattr(plugin, "build_rownd_session_claims", build_claims)
+    monkeypatch.setattr(plugin._rownd_is_anonymous_claim, "build", build_is_anonymous)
+
+    await plugin.refresh_rownd_session_claims(
+        make_config(), cast(Any, session), "linked-user", None, {}
+    )
+
+    assert session.merged is not None
+    assert session.merged["is_anonymous"] == {"v": False, "t": 1}
+    assert session.merged[ROWND_JWT_CLAIMS["is_anonymous"]] is None
+    assert session.merged["anonymous_id"] == (
+        "anon-before-link" if preserve_anonymous_id else None
+    )
+    assert "aud" not in session.merged
+
+
+async def test_refresh_rownd_session_claims_clears_stale_configured_claim(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        schema={
+            "role": {
+                "include_in_session_claims": True,
+                "session_claim_name": "authorization_role",
+            },
+            "nickname": {"include_in_session_claims": False},
+        },
+    )
+    session = RefreshSession(
+        {"authorization_role": "admin", "nickname": "still-present"}
+    )
+
+    async def build_claims(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
+        return {"auth_level": "verified"}
+
+    async def build_is_anonymous(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
+        return {"is_anonymous": {"v": False, "t": 1}}
+
+    monkeypatch.setattr(plugin, "build_rownd_session_claims", build_claims)
+    monkeypatch.setattr(plugin._rownd_is_anonymous_claim, "build", build_is_anonymous)
+
+    await plugin.refresh_rownd_session_claims(
+        config, cast(Any, session), "user", None, {}
+    )
+
+    assert session.merged is not None
+    assert session.merged["authorization_role"] is None
+    assert "nickname" not in session.merged
+
+
+@pytest.mark.parametrize("revoke_outcome", ["success", "false", "exception"])
+async def test_post_auth_refresh_revokes_session_without_masking_original_error(
+    monkeypatch: pytest.MonkeyPatch, revoke_outcome: str
+):
+    refresh_error = RuntimeError("refresh failed")
+    revoked: list[tuple[str, Dict[str, Any]]] = []
+    revoked_for_user: list[tuple[str, bool, Optional[str], Dict[str, Any]]] = []
+    session = SimpleNamespace(get_handle=lambda: "returned-session-handle")
+
+    async def refresh(*_args: Any, **_kwargs: Any) -> None:
+        raise refresh_error
+
+    async def revoke(handle: str, user_context: Dict[str, Any]) -> bool:
+        revoked.append((handle, user_context))
+        if revoke_outcome == "exception":
+            raise RuntimeError("revoke failed")
+        return revoke_outcome == "success"
+
+    async def revoke_all(
+        user_id: str,
+        revoke_sessions_for_linked_accounts: bool,
+        tenant_id: Optional[str],
+        user_context: Dict[str, Any],
+    ) -> None:
+        revoked_for_user.append(
+            (user_id, revoke_sessions_for_linked_accounts, tenant_id, user_context)
+        )
+        raise RuntimeError("fallback revoke failed")
+
+    monkeypatch.setattr(plugin, "refresh_rownd_session_claims", refresh)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_session", revoke)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+    context = {"rowndAppVariantId": "variant_123"}
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await plugin._refresh_rownd_session_claims_or_revoke(
+            make_config(), cast(Any, session), "user", "variant_123", context
+        )
+
+    assert exc_info.value is refresh_error
+    assert revoked == [("returned-session-handle", context)]
+    assert revoked_for_user == (
+        [] if revoke_outcome == "success" else [("user", True, None, context)]
+    )
+
+
+async def test_create_new_session_builds_rownd_and_boolean_claims_in_initial_payload(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    recipe_user_id = SimpleNamespace(get_as_string=lambda: "recipe-user")
+    captured_payload: Optional[Dict[str, Any]] = None
+
+    async def build_claims(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
+        return {"auth_level": "instant", ROWND_JWT_CLAIMS["is_anonymous"]: True}
+
+    async def build_is_anonymous(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
+        return {"is_anonymous": {"v": True, "t": 1}}
+
+    async def create_new_session(
+        user_id: str,
+        passed_recipe_user_id: Any,
+        access_token_payload: Dict[str, Any],
+        session_data_in_database: Any,
+        disable_anti_csrf: Any,
+        tenant_id: str,
+        user_context: Dict[str, Any],
+    ) -> str:
+        nonlocal captured_payload
+        assert user_id == "user"
+        assert passed_recipe_user_id is recipe_user_id
+        captured_payload = access_token_payload
+        return "session"
+
+    monkeypatch.setattr(plugin, "build_rownd_session_claims", build_claims)
+    monkeypatch.setattr(plugin._rownd_is_anonymous_claim, "build", build_is_anonymous)
+    original = SimpleNamespace(create_new_session=create_new_session)
+    overridden = plugin._session_function_override(make_config())(cast(Any, original))
+
+    result = await overridden.create_new_session(
+        "user",
+        cast(Any, recipe_user_id),
+        {"existing": "claim"},
+        {},
+        None,
+        "public",
+        {"rowndAppVariantId": "variant_123"},
+    )
+
+    assert result == "session"
+    assert captured_payload == {
+        "existing": "claim",
+        "auth_level": "instant",
+        ROWND_JWT_CLAIMS["is_anonymous"]: True,
+        "is_anonymous": {"v": True, "t": 1},
+    }
 
 
 async def test_thirdparty_sign_in_rejects_unknown_app_variant():
@@ -933,7 +1160,7 @@ async def test_pending_verification_binding_is_checked_before_token_use(
     monkeypatch.setattr(
         impl.session_asyncio, "get_session_information", get_session_information
     )
-    monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)
+    monkeypatch.setattr(impl, "get_raw_user_metadata", get_user_metadata)
 
     result = await impl.resolve_pending_email_verification_token(
         "raw-token", "pending-id", "public", cast(Any, session), {}

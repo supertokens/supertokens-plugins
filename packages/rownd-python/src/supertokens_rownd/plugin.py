@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import re
+import asyncio
 import math
+import re
 import warnings
 from collections.abc import Callable
 from typing import Any, Generic, Optional, TypeVar, cast
@@ -51,6 +52,7 @@ from supertokens_python.recipe.passwordless.types import (
 from supertokens_python.recipe.passwordless.utils import PasswordlessOverrideableConfig
 from supertokens_python.recipe.session import SessionContainer
 from supertokens_python.recipe.session import asyncio as session_asyncio
+from supertokens_python.recipe.session.claims import BooleanClaim
 from supertokens_python.recipe.session.interfaces import RecipeInterface as SessionRecipeInterface
 from supertokens_python.recipe.thirdparty.interfaces import (
     APIInterface as ThirdPartyAPIInterface,
@@ -63,11 +65,14 @@ from supertokens_python.types.recipe import BaseAPIInterface, BaseRecipeInterfac
 from supertokens_python.types.response import GeneralErrorResponse
 
 from .constants import (
+    GUEST_AUTH_METHOD_ID,
     HANDLE_BASE_PATH,
+    INSTANT_AUTH_METHOD_ID,
     PENDING_EMAIL_VERIFICATION_QUERY_PARAM,
     PLUGIN_ID,
     PLUGIN_SDK_VERSION,
     PLUGIN_VERSION,
+    ROWND_JWT_CLAIMS,
 )
 from .plugin_implementation import (
     add_hub_bootstrap_params,
@@ -79,6 +84,7 @@ from .plugin_implementation import (
     build_rownd_session_claims,
     complete_pending_email_verification,
     does_account_info_match_auth_method,
+    get_effective_auth_level,
     get_requested_app_variant_id_from_request,
     get_requested_client_domain_from_request,
     get_requested_display_context_from_request,
@@ -111,6 +117,93 @@ from .types import RowndClientProtocol, RowndEmailChangeError, RowndPluginConfig
 
 
 TemplateVarsT = TypeVar("TemplateVarsT")
+
+
+async def _fetch_is_anonymous_claim(
+    user_id: str,
+    recipe_user_id: RecipeUserId,
+    tenant_id: str,
+    current_payload: dict[str, Any],
+    user_context: UserContext,
+) -> bool:
+    from supertokens_python.asyncio import get_user
+
+    _ = recipe_user_id, tenant_id, current_payload
+    return get_effective_auth_level(await get_user(user_id, user_context)) in {
+        GUEST_AUTH_METHOD_ID,
+        INSTANT_AUTH_METHOD_ID,
+    }
+
+
+_rownd_is_anonymous_claim = BooleanClaim(
+    key="is_anonymous", fetch_value=_fetch_is_anonymous_claim
+)
+
+
+async def refresh_rownd_session_claims(
+    config: RowndPluginConfig,
+    session: SessionContainer,
+    user_id: str,
+    app_variant_id: Optional[str],
+    user_context: UserContext,
+) -> None:
+    current_payload = session.get_access_token_payload(user_context)
+    rownd_claims, is_anonymous_claim = await asyncio.gather(
+        build_rownd_session_claims(config, user_id, current_payload, app_variant_id),
+        _rownd_is_anonymous_claim.build(
+            user_id,
+            session.get_recipe_user_id(user_context),
+            session.get_tenant_id(user_context),
+            current_payload,
+            user_context,
+        ),
+    )
+    refreshed_claims = {**rownd_claims, **is_anonymous_claim}
+    managed_claim_names = {
+        "is_anonymous",
+        ROWND_JWT_CLAIMS["is_anonymous"],
+        "anonymous_id",
+    }
+    for field_name, field_config in config.schema.items():
+        if field_config.get("include_in_session_claims") is True:
+            configured_name = field_config.get("session_claim_name")
+            managed_claim_names.add(
+                configured_name
+                if isinstance(configured_name, str) and configured_name
+                else field_name
+            )
+    for key in managed_claim_names:
+        if key in current_payload and key not in refreshed_claims:
+            refreshed_claims[key] = None
+    await session.merge_into_access_token_payload(refreshed_claims, user_context)
+
+
+async def _refresh_rownd_session_claims_or_revoke(
+    config: RowndPluginConfig,
+    session: SessionContainer,
+    user_id: str,
+    app_variant_id: Optional[str],
+    user_context: UserContext,
+) -> None:
+    try:
+        await refresh_rownd_session_claims(
+            config, session, user_id, app_variant_id, user_context
+        )
+    except Exception:
+        try:
+            session_revoked = await session_asyncio.revoke_session(
+                session.get_handle(), user_context
+            )
+        except Exception:
+            session_revoked = False
+        if session_revoked is False:
+            try:
+                await session_asyncio.revoke_all_sessions_for_user(
+                    user_id, True, None, user_context
+                )
+            except Exception:
+                pass
+        raise
 
 
 class RowndEmailDeliveryOverride(Generic[TemplateVarsT], EmailDeliveryInterface[TemplateVarsT]):
@@ -738,6 +831,11 @@ def _passwordless_api_override(config: RowndPluginConfig):
                 user_id = getattr(getattr(result, "user", None), "id", None)
                 if isinstance(user_id, str):
                     await record_rownd_app_variant_for_user(config, user_id, app_variant_id)
+                    returned_session = getattr(result, "session", None)
+                    if returned_session is not None:
+                        await _refresh_rownd_session_claims_or_revoke(
+                            config, returned_session, user_id, app_variant_id, context
+                        )
             return result
 
         original.create_code_post = create_code_post
@@ -782,6 +880,11 @@ def _thirdparty_api_override(config: RowndPluginConfig):
                 user_id = getattr(getattr(result, "user", None), "id", None)
                 if isinstance(user_id, str):
                     await record_rownd_app_variant_for_user(config, user_id, app_variant_id)
+                    returned_session = getattr(result, "session", None)
+                    if returned_session is not None:
+                        await _refresh_rownd_session_claims_or_revoke(
+                            config, returned_session, user_id, app_variant_id, context
+                        )
             return result
 
         original.sign_in_up_post = sign_in_up_post
@@ -809,10 +912,17 @@ def _session_function_override(config: RowndPluginConfig):
                 if isinstance(user_context.get("rowndAppVariantId"), str)
                 else None
             )
-            payload = {
-                **payload,
-                **(await build_rownd_session_claims(config, user_id, payload, app_variant_id)),
-            }
+            rownd_claims, is_anonymous_claim = await asyncio.gather(
+                build_rownd_session_claims(config, user_id, payload, app_variant_id),
+                _rownd_is_anonymous_claim.build(
+                    user_id,
+                    recipe_user_id,
+                    tenant_id,
+                    payload,
+                    user_context,
+                ),
+            )
+            payload = {**payload, **rownd_claims, **is_anonymous_claim}
             return await original_create_new_session(
                 user_id,
                 recipe_user_id,

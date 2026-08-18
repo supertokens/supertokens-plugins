@@ -5,6 +5,9 @@
 ### Patch Changes
 
 - Fix fetch rownd user
+- Preserve previous Passwordless emails as tenant-scoped login aliases and report pending email verification
+- Refresh Rownd session claims after automatic linking during Passwordless and third-party sign-in
+- Resolve compatibility metadata across linked identities and apply profile writes to the primary user
 
 ## 0.1.8
 

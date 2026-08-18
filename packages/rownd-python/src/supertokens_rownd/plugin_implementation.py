@@ -73,6 +73,12 @@ from .types import (
 _active_config: Optional[RowndPluginConfig] = None
 SUPERTOKENS_FAKE_EMAIL_DOMAIN = "stfakeemail.supertokens.com"
 _PENDING_EMAIL_VERIFICATION_USER_CONTEXT_KEY = "_rowndPendingEmailVerificationId"
+_LINKED_OPERATIONAL_METADATA_FIELDS = {
+    "rownd_email_recipe_user_id",
+    "rownd_email_recipe_user_ids",
+    "rownd_migration_complete",
+    "rownd_pending_verification",
+}
 
 
 def set_active_rownd_config(config: RowndPluginConfig) -> None:
@@ -853,7 +859,14 @@ async def handle_update_user(
                 if data_without_email
                 else pending_result
             )
-            return json_response(response, {"status": "OK", **update_result})
+            return json_response(
+                response,
+                {
+                    "status": "OK",
+                    **update_result,
+                    "email_verification_pending": changes_email,
+                },
+            )
         except RowndEmailChangeError as error:
             return json_response(
                 response,
@@ -955,14 +968,15 @@ async def handle_update_user_field(
                 session.get_user_id(), config, session.get_tenant_id()
             )).get("data")
         ).get("email")
+        changes_email = not isinstance(current_email, str) or normalize_email(
+            current_email
+        ) != normalize_email(value)
         context = build_email_change_user_context(
             user_context, as_json_dict(body.get("context"))
         )
         if app_variant_id:
             context["rowndAppVariantId"] = app_variant_id
-        if not isinstance(current_email, str) or normalize_email(
-            current_email
-        ) != normalize_email(value):
+        if changes_email:
             if native_email_verification_upgrade_required(context):
                 upgrade = native_email_verification_upgrade_required_response()
                 return json_response(response, upgrade, 426)
@@ -977,6 +991,7 @@ async def handle_update_user_field(
                 {
                     "status": "OK",
                     **(await start_pending_email_verification(config, session, value, context)),
+                    "email_verification_pending": changes_email,
                 },
             )
         except RowndEmailChangeError as error:
@@ -1054,18 +1069,204 @@ def as_json_list(value: object) -> List[JsonDict]:
     )
 
 
-async def get_user_metadata(
+async def get_raw_user_metadata(
     user_id: str, user_context: Optional[UserContext] = None
 ) -> JsonDict:
     result = await usermetadata_asyncio.get_user_metadata(user_id, user_context)
     return result.metadata or {}
 
 
-async def update_user_metadata(user_id: str, input_meta: JsonDict) -> JsonDict:
-    metadata = await get_user_metadata(user_id)
-    updated = {**metadata, **input_meta}
-    await usermetadata_asyncio.update_user_metadata(user_id, updated)
-    return {"id": user_id, "meta": public_metadata(updated)}
+def get_original_rownd_user_id(metadata: JsonDict) -> Optional[str]:
+    user_id = as_json_dict(as_json_dict(metadata.get("original_rownd_user")).get("data")).get(
+        "user_id"
+    )
+    return user_id if isinstance(user_id, str) else None
+
+
+def merge_missing_values(primary: JsonDict, secondary: JsonDict) -> JsonDict:
+    merged = {**primary}
+    for key, secondary_value in secondary.items():
+        if key not in merged:
+            merged[key] = secondary_value
+        elif isinstance(merged[key], dict) and isinstance(secondary_value, dict):
+            merged[key] = merge_missing_values(
+                cast(JsonDict, merged[key]), cast(JsonDict, secondary_value)
+            )
+    return merged
+
+
+def combine_linked_metadata(
+    primary_user_id: str,
+    primary_metadata: JsonDict,
+    linked_metadata: List[Tuple[str, JsonDict]],
+    mapped_rownd_user_id: Optional[str] = None,
+) -> JsonDict:
+    ordered = sorted(
+        linked_metadata,
+        key=lambda item: (
+            not (
+                mapped_rownd_user_id is not None
+                and get_original_rownd_user_id(item[1]) == mapped_rownd_user_id
+            ),
+            item[0],
+        ),
+    )
+    primary_rownd_user_id = get_original_rownd_user_id(primary_metadata)
+    canonical_linked_metadata = (
+        next(
+            (
+                item
+                for item in ordered
+                if get_original_rownd_user_id(item[1]) == mapped_rownd_user_id
+            ),
+            None,
+        )
+        if mapped_rownd_user_id is not None
+        else None
+    )
+    canonical_replaces_primary = (
+        canonical_linked_metadata is not None
+        and primary_rownd_user_id != mapped_rownd_user_id
+    )
+    metadata_update: JsonDict = (
+        {"original_rownd_user": canonical_linked_metadata[1]["original_rownd_user"]}
+        if canonical_replaces_primary and canonical_linked_metadata is not None
+        else {}
+    )
+    for _, metadata in ordered:
+        for key, value in metadata.items():
+            if key in _LINKED_OPERATIONAL_METADATA_FIELDS:
+                continue
+            if (
+                key == "original_rownd_user"
+                and mapped_rownd_user_id is not None
+                and (
+                    primary_rownd_user_id == mapped_rownd_user_id
+                    or canonical_linked_metadata is not None
+                )
+                and get_original_rownd_user_id(metadata) != mapped_rownd_user_id
+            ):
+                continue
+            current = metadata_update[key] if key in metadata_update else primary_metadata.get(key)
+            if key not in metadata_update and key not in primary_metadata:
+                metadata_update[key] = value
+            elif isinstance(current, dict) and isinstance(value, dict):
+                merged = merge_missing_values(cast(JsonDict, current), cast(JsonDict, value))
+                if merged != current:
+                    metadata_update[key] = merged
+
+    primary_is_source = primary_rownd_user_id is not None and (
+        mapped_rownd_user_id is None
+        or primary_rownd_user_id == mapped_rownd_user_id
+        or canonical_linked_metadata is None
+    )
+    source_user_id = primary_user_id if primary_is_source else (
+        canonical_linked_metadata[0]
+        if canonical_linked_metadata is not None
+        else next(
+            (
+                linked_user_id
+                for linked_user_id, metadata in ordered
+                if get_original_rownd_user_id(metadata) is not None
+            ),
+            None,
+        )
+    )
+    return {
+        "primary_user_id": primary_user_id,
+        "linked_user_ids": [linked_user_id for linked_user_id, _ in ordered],
+        "primary_metadata": primary_metadata,
+        "combined_metadata": {**primary_metadata, **metadata_update},
+        "metadata_update": metadata_update,
+        "rownd_metadata_source_user_id": source_user_id,
+    }
+
+
+async def get_primary_user_mapping(
+    user_id: str, user_context: Optional[UserContext] = None
+) -> Optional[GetUserIdMappingOkResult]:
+    context = user_context if user_context is not None else {}
+    internal = await get_user_id_mapping(user_id, "SUPERTOKENS", context)
+    if isinstance(internal, GetUserIdMappingOkResult):
+        return internal
+    external = await get_user_id_mapping(user_id, "EXTERNAL", context)
+    return external if isinstance(external, GetUserIdMappingOkResult) else None
+
+
+async def inspect_linked_user_metadata(
+    user_id: str, user_context: Optional[UserContext] = None
+) -> JsonDict:
+    user = await get_user(user_id, user_context)
+    if user is None:
+        metadata = await get_raw_user_metadata(user_id, user_context)
+        return combine_linked_metadata(user_id, metadata, [])
+
+    mapping = await get_primary_user_mapping(user.id, user_context)
+    primary_user_id = mapping.supertokens_user_id if mapping else user.id
+    linked_user_ids = sorted(
+        {
+            method.recipe_user_id.get_as_string()
+            for method in user.login_methods
+            if method.recipe_user_id.get_as_string() != primary_user_id
+        }
+    )
+    metadata_results = await asyncio.gather(
+        get_raw_user_metadata(primary_user_id, user_context),
+        *(
+            get_raw_user_metadata(linked_user_id, user_context)
+            for linked_user_id in linked_user_ids
+        ),
+    )
+    return combine_linked_metadata(
+        primary_user_id,
+        metadata_results[0],
+        list(zip(linked_user_ids, metadata_results[1:])),
+        mapping.external_user_id if mapping else None,
+    )
+
+
+async def get_user_metadata(
+    user_id: str, user_context: Optional[UserContext] = None
+) -> JsonDict:
+    inspection = await inspect_linked_user_metadata(user_id, user_context)
+    return cast(JsonDict, inspection["combined_metadata"])
+
+
+async def update_primary_user_metadata(
+    user_id: str,
+    metadata_update: JsonDict,
+    user_context: Optional[UserContext] = None,
+) -> Tuple[str, JsonDict]:
+    user = await get_user(user_id, user_context)
+    mapping = await get_primary_user_mapping(user.id, user_context) if user else None
+    primary_user_id = mapping.supertokens_user_id if mapping else user.id if user else user_id
+    result = await usermetadata_asyncio.update_user_metadata(
+        primary_user_id, metadata_update, user_context
+    )
+    return primary_user_id, result.metadata or {}
+
+
+async def replace_primary_user_metadata(
+    user_id: str,
+    metadata: JsonDict,
+    user_context: Optional[UserContext] = None,
+) -> None:
+    mapping = await get_primary_user_mapping(user_id, user_context)
+    primary_user_id = mapping.supertokens_user_id if mapping else user_id
+    await usermetadata_asyncio.clear_user_metadata(primary_user_id, user_context)
+    if metadata:
+        await usermetadata_asyncio.update_user_metadata(
+            primary_user_id, metadata, user_context
+        )
+
+
+async def update_user_metadata(
+    user_id: str, input_meta: JsonDict, user_context: Optional[UserContext] = None
+) -> JsonDict:
+    primary_user_id, updated = await update_primary_user_metadata(
+        user_id, input_meta, user_context
+    )
+    return {"id": primary_user_id, "meta": public_metadata(updated)}
 
 
 async def update_user_data(
@@ -1074,9 +1275,8 @@ async def update_user_data(
     input_data: JsonDict,
     tenant_id: str = PUBLIC_TENANT_ID,
 ) -> JsonDict:
-    metadata = await get_user_metadata(user_id)
-    await usermetadata_asyncio.update_user_metadata(user_id, {**metadata, **input_data})
-    return await get_rownd_compat_user(user_id, config, tenant_id)
+    primary_user_id, _ = await update_primary_user_metadata(user_id, input_data)
+    return await get_rownd_compat_user(primary_user_id, config, tenant_id)
 
 
 def public_metadata(metadata: JsonDict) -> JsonDict:
@@ -1120,9 +1320,15 @@ async def get_rownd_compat_user(
     user_id: str,
     config: Optional[RowndPluginConfig] = None,
     tenant_id: str = PUBLIC_TENANT_ID,
+    metadata_override: Optional[JsonDict] = None,
+    user_override: Optional[User] = None,
 ) -> JsonDict:
-    metadata = await get_user_metadata(user_id)
-    st_user = await get_user(user_id)
+    metadata = (
+        metadata_override
+        if metadata_override is not None
+        else await get_user_metadata(user_id)
+    )
+    st_user = user_override if user_override is not None else await get_user(user_id)
     if st_user is None:
         raise RowndPluginError("User not found in Rownd")
 
@@ -1155,7 +1361,7 @@ async def get_rownd_compat_user(
         ],
         key=lambda method: (method.time_joined, method.recipe_user_id.get_as_string()),
     )
-    canonical_recipe_user_id = metadata.get("rownd_email_recipe_user_id")
+    canonical_recipe_user_id = get_canonical_email_recipe_user_id(metadata, tenant_id)
     canonical_email_method = next(
         (
             method
@@ -1365,17 +1571,26 @@ def get_effective_auth_level(
     )
 
 
-def get_anonymous_id(user_id: str, user: Optional[User], metadata: JsonDict) -> Optional[str]:
+def get_anonymous_id(
+    user_id: str,
+    user: Optional[User],
+    metadata: JsonDict,
+    current_payload: Optional[JsonDict] = None,
+) -> Optional[str]:
     original = as_json_dict(metadata.get("original_rownd_user"))
     original_data = as_json_dict(original.get("data"))
     if isinstance(original_data.get("anonymous_id"), str):
         return cast(str, original_data["anonymous_id"])
-    if user:
-        for method in user.login_methods:
-            third_party_id, _ = get_third_party_info(method)
-            if method.recipe_id == "thirdparty" and third_party_id == GUEST_AUTH_METHOD_ID:
-                return "anon_%s" % user_id
-    return None
+    guest_method = user and any(
+        method.recipe_id == "thirdparty"
+        and get_third_party_info(method)[0] == GUEST_AUTH_METHOD_ID
+        for method in user.login_methods
+    )
+    if not guest_method:
+        return None
+    if current_payload and isinstance(current_payload.get("anonymous_id"), str):
+        return cast(str, current_payload["anonymous_id"])
+    return "anon_%s" % (getattr(user, "id", None) or user_id)
 
 
 def map_login_method(method: Optional[LoginMethod]) -> str:
@@ -1409,11 +1624,11 @@ async def build_rownd_session_claims(
     app_user_id = (
         app_user_id or current_payload.get("app_user_id") or (user.id if user else user_id)
     )
-    is_anonymous = current_payload.get("is_anonymous") is True or auth_level in {
+    is_anonymous = auth_level in {
         GUEST_AUTH_METHOD_ID,
         INSTANT_AUTH_METHOD_ID,
     }
-    anonymous_id = get_anonymous_id(user_id, user, metadata) if user else None
+    anonymous_id = get_anonymous_id(user_id, user, metadata, current_payload) if user else None
     claims = {
         **build_rownd_audience(current_payload, config, app_variant_id),
         **build_configured_session_claims(config, metadata),
@@ -1617,7 +1832,12 @@ async def record_rownd_app_variant_for_user(
     if not app_variant_id:
         return
     assert_app_variant_is_configured(config, app_variant_id)
-    metadata = await get_user_metadata(user_id)
+    inspection = await inspect_linked_user_metadata(user_id)
+    metadata_user_id = cast(
+        str,
+        inspection.get("rownd_metadata_source_user_id") or inspection["primary_user_id"],
+    )
+    metadata = await get_raw_user_metadata(metadata_user_id)
     original = as_json_dict(metadata.get("original_rownd_user"))
     attributes = as_json_dict(original.get("attributes"))
     app_variants = attributes.get("rownd:app_variants") or []
@@ -1628,12 +1848,11 @@ async def record_rownd_app_variant_for_user(
     if app_variant_id in app_variants:
         return
     await usermetadata_asyncio.update_user_metadata(
-        user_id,
+        metadata_user_id,
         {
-            **metadata,
             "original_rownd_user": {
                 **original,
-                "data": as_json_dict(original.get("data")) or {"user_id": user_id},
+                "data": as_json_dict(original.get("data")) or {"user_id": metadata_user_id},
                 "verified_data": as_json_dict(original.get("verified_data")),
                 "attributes": {**attributes, "rownd:app_variants": [*app_variants, app_variant_id]},
             },
@@ -2138,26 +2357,25 @@ async def start_pending_email_verification(
     user_context: UserContext,
 ) -> JsonDict:
     user_id = session.get_user_id()
-    metadata = await get_user_metadata(user_id, user_context)
     tenant_id = session.get_tenant_id()
     user = await get_user(user_id, user_context)
     if user is None:
         raise RowndPluginError("User not found in Rownd")
+    metadata_inspection = await inspect_linked_user_metadata(user.id, user_context)
+    metadata = cast(JsonDict, metadata_inspection["primary_metadata"])
+    combined_metadata = cast(JsonDict, metadata_inspection["combined_metadata"])
     normalized_email = normalize_email(email)
     if not normalized_email:
         raise RowndEmailChangeError("INVALID_EMAIL", 400, "email must be a non-empty string")
-    passwordless_methods = [
-        method for method in user.login_methods if method.recipe_id == "passwordless"
+    passwordless_method = find_canonical_passwordless_method(
+        user, combined_metadata, tenant_id
+    )
+    tenant_login_methods = [
+        method for method in user.login_methods if tenant_id in method.tenant_ids
     ]
-    if len(passwordless_methods) > 1:
-        raise RowndEmailChangeError(
-            "AMBIGUOUS", 409, "the account has multiple email sign-in methods"
-        )
-    passwordless_method = passwordless_methods[0] if passwordless_methods else None
-    if passwordless_method and tenant_id not in passwordless_method.tenant_ids:
-        raise RowndEmailChangeError(
-            "CONFLICT", 409, "the account passwordless sign-in method belongs to another tenant"
-        )
+    has_passwordless_method = any(
+        method.recipe_id == "passwordless" for method in tenant_login_methods
+    )
     initiating_login_method = next(
         (
             method
@@ -2169,17 +2387,25 @@ async def start_pending_email_verification(
         None,
     )
     can_add_passwordless = (
-        passwordless_method is None
+        not has_passwordless_method
         and initiating_login_method is not None
         and is_real_third_party_method(initiating_login_method)
-        and all(is_real_third_party_method(method) for method in user.login_methods)
+        and all(is_real_third_party_method(method) for method in tenant_login_methods)
     )
     if passwordless_method is None and not can_add_passwordless:
         raise RowndEmailChangeError(
             "CONFLICT", 409, "the account has no passwordless sign-in method"
         )
     current_email = as_json_dict(
-        (await get_rownd_compat_user(user_id, config, tenant_id)).get("data")
+        (
+            await get_rownd_compat_user(
+                user_id,
+                config,
+                tenant_id,
+                metadata_override=combined_metadata,
+                user_override=user,
+            )
+        ).get("data")
     ).get("email")
     pending = get_pending_verifications(metadata)
     pending_email_verifications = [
@@ -2203,34 +2429,43 @@ async def start_pending_email_verification(
                 method
                 for method in user.login_methods
                 if method.recipe_id == "passwordless"
+                and tenant_id in method.tenant_ids
                 and method.verified
                 and method.email
                 and normalize_email(method.email) == normalized_email
             ),
             None,
         )
-        updated_metadata = (
-            build_verified_email_metadata(
-                metadata,
-                user_id,
-                normalized_email,
-                current_passwordless_method.recipe_user_id.get_as_string(),
-            )
-            if current_passwordless_method is not None
-            else {
-                **metadata,
-                "rownd_pending_verification": [
-                    item for item in pending if item.get("field") != "email"
-                ],
-            }
-        )
+        updated_metadata = {
+            **metadata,
+            **(
+                {
+                    "rownd_email_recipe_user_id": (
+                        current_passwordless_method.recipe_user_id.get_as_string()
+                    ),
+                    "rownd_email_recipe_user_ids": {
+                        **as_json_dict(
+                            combined_metadata.get("rownd_email_recipe_user_ids")
+                        ),
+                        tenant_id: current_passwordless_method.recipe_user_id.get_as_string(),
+                    },
+                }
+                if current_passwordless_method is not None
+                else {}
+            ),
+            "rownd_pending_verification": [
+                item for item in pending if item.get("field") != "email"
+            ],
+        }
         if pending_email_verifications or current_passwordless_method is not None:
-            await usermetadata_asyncio.update_user_metadata(
-                user_id,
-                updated_metadata,
-                user_context,
-            )
-        return await get_rownd_compat_user(user_id, config, tenant_id)
+            await update_primary_user_metadata(user_id, updated_metadata, user_context)
+        return await get_rownd_compat_user(
+            user_id,
+            config,
+            tenant_id,
+            metadata_override={**combined_metadata, **updated_metadata},
+            user_override=user,
+        )
 
     await assert_email_available_for_user(normalized_email, user.id, user_context)
     purpose = "UPDATE_PASSWORDLESS" if passwordless_method else "ADD_PASSWORDLESS"
@@ -2249,7 +2484,7 @@ async def start_pending_email_verification(
 
     now = datetime.now(timezone.utc)
     pending_verification_id = str(uuid.uuid4())
-    pending_verification = {
+    pending_verification: JsonDict = {
         "id": pending_verification_id,
         "field": "email",
         "value": email,
@@ -2260,7 +2495,7 @@ async def start_pending_email_verification(
         "verificationRecipeUserId": verification_recipe_user_id.get_as_string(),
         "status": "PENDING",
     }
-    await usermetadata_asyncio.update_user_metadata(
+    await update_primary_user_metadata(
         user_id,
         {
             **metadata,
@@ -2302,7 +2537,13 @@ async def start_pending_email_verification(
             user_id, pending_verification_id, user_context
         )
         raise
-    return await get_rownd_compat_user(user_id, config, tenant_id)
+    return await get_rownd_compat_user(
+        user_id,
+        config,
+        tenant_id,
+        metadata_override=combined_metadata,
+        user_override=user,
+    )
 
 
 async def resolve_pending_email_verification_token(
@@ -2333,7 +2574,7 @@ async def resolve_pending_email_verification_token(
     ):
         return {"status": "INVALID_PENDING"}
 
-    metadata = await get_user_metadata(session_user_id, user_context)
+    metadata = await get_raw_user_metadata(session_user_id, user_context)
     pending_verification = next(
         (
             verification
@@ -2379,7 +2620,11 @@ async def complete_pending_email_verification(
             409,
             "email change session is no longer active; start the email change again",
         )
-    metadata = await get_user_metadata(user_id, user_context)
+    primary_mapping = await get_primary_user_mapping(user_id, user_context)
+    primary_metadata_user_id = (
+        primary_mapping.supertokens_user_id if primary_mapping else user_id
+    )
+    metadata = await get_raw_user_metadata(primary_metadata_user_id, user_context)
     pending = get_pending_verifications(metadata)
     normalized_email = normalize_email(email)
     pending_verification = next(
@@ -2472,7 +2717,11 @@ async def complete_pending_email_verification(
         )
         can_add_passwordless = (
             purpose == "ADD_PASSWORDLESS"
-            and all(is_real_third_party_method(method) for method in current_user.login_methods)
+            and all(
+                is_real_third_party_method(method)
+                for method in current_user.login_methods
+                if tenant_id in method.tenant_ids
+            )
             and is_real_third_party_method(initiating_login_method)
             and pending_verification.get("verificationRecipeUserId")
             == initiating_login_method.recipe_user_id.get_as_string()
@@ -2498,7 +2747,7 @@ async def complete_pending_email_verification(
         await session_asyncio.revoke_all_sessions_for_user(
             user_id, True, None, user_context
         )
-        committing_metadata = await get_user_metadata(user_id, user_context)
+        committing_metadata = await get_raw_user_metadata(user_id, user_context)
         committing_verification = next(
             (
                 item
@@ -2516,44 +2765,26 @@ async def complete_pending_email_verification(
                 user_id, pending_verification, recipe_user_id, normalized_email, user_context
             )
 
-        if purpose == "UPDATE_PASSWORDLESS":
-            if passwordless_method is None:
-                raise RowndPluginError("User not found in Rownd")
-            previous_email = passwordless_method.email
-
-            async def rollback_update() -> None:
-                rollback_result = await passwordless_asyncio.update_user(
-                    passwordless_method.recipe_user_id,
-                    email=previous_email,
-                    user_context=user_context,
-                )
-                if rollback_result.__class__.__name__ != "UpdateUserOkResult":
-                    raise RuntimeError(
-                        "Passwordless credential rollback failed with status %s"
-                        % rollback_result.__class__.__name__
-                    )
-
-            update_result = await passwordless_asyncio.update_user(
-                passwordless_method.recipe_user_id,
-                email=normalized_email,
-                user_context=user_context,
+        passwordless_user = await passwordless_asyncio.signinup(
+            tenant_id,
+            normalized_email,
+            None,
+            None,
+            {**user_context, "rowndDisableAutomaticAccountLinking": True},
+        )
+        reuses_linked_method = (
+            not passwordless_user.created_new_recipe_user
+            and passwordless_user.user.id == user_id
+            and any(
+                method.recipe_user_id.get_as_string()
+                == passwordless_user.recipe_user_id.get_as_string()
+                and tenant_id in method.tenant_ids
+                for method in passwordless_user.user.login_methods
             )
-            if update_result.__class__.__name__ != "UpdateUserOkResult":
-                raise email_ownership_conflict()
-            rollback_credential_change = rollback_update
-            canonical_email_recipe_user_id = (
-                passwordless_method.recipe_user_id.get_as_string()
-            )
-        else:
-            passwordless_user = await passwordless_asyncio.signinup(
-                tenant_id,
-                normalized_email,
-                None,
-                None,
-                {**user_context, "rowndDisableAutomaticAccountLinking": True},
-            )
-            if not passwordless_user.created_new_recipe_user:
-                raise email_ownership_conflict()
+        )
+        if not passwordless_user.created_new_recipe_user and not reuses_linked_method:
+            raise email_ownership_conflict()
+        if passwordless_user.created_new_recipe_user:
 
             async def rollback_add() -> None:
                 await delete_user(
@@ -2580,22 +2811,27 @@ async def complete_pending_email_verification(
             )
             if not isinstance(link_result, LinkAccountsOkResult):
                 raise email_ownership_conflict()
-            canonical_email_recipe_user_id = passwordless_user.recipe_user_id.get_as_string()
+        canonical_email_recipe_user_id = passwordless_user.recipe_user_id.get_as_string()
 
         await session_asyncio.revoke_all_sessions_for_user(
             user_id, True, None, user_context
         )
-        target_metadata = await get_user_metadata(user_id, user_context)
+        final_metadata_inspection = await inspect_linked_user_metadata(user_id, user_context)
+        target_metadata = cast(
+            JsonDict, final_metadata_inspection["primary_metadata"]
+        )
+        combined_metadata = cast(
+            JsonDict, final_metadata_inspection["combined_metadata"]
+        )
         updated_metadata = build_verified_email_metadata(
             target_metadata,
             user_id,
             normalized_email,
             canonical_email_recipe_user_id,
-            as_json_dict(metadata.get("original_rownd_user")),
+            tenant_id,
+            combined_metadata,
         )
-        await usermetadata_asyncio.update_user_metadata(
-            user_id, updated_metadata, user_context
-        )
+        await update_primary_user_metadata(user_id, updated_metadata, user_context)
         completion_phase = "COMPLETED"
 
         async def rollback_on_session_replacement_failure() -> None:
@@ -2610,7 +2846,7 @@ async def complete_pending_email_verification(
                 )
 
             async def restore_metadata() -> None:
-                await usermetadata_asyncio.update_user_metadata(
+                await replace_primary_user_metadata(
                     user_id,
                     {
                         **target_metadata,
@@ -2852,17 +3088,66 @@ def find_pending_passwordless_method(
         or not pending_verification.get("verificationRecipeUserId")
     ):
         return None
-    methods = [method for method in user.login_methods if method.recipe_id == "passwordless"]
-    if len(methods) != 1:
-        return None
-    method = methods[0]
     pending_recipe_user_id = pending_verification.get("verificationRecipeUserId")
+    method = next(
+        (
+            method
+            for method in user.login_methods
+            if method.recipe_id == "passwordless"
+            and method.recipe_user_id.get_as_string() == pending_recipe_user_id
+        ),
+        None,
+    )
     return (
         method
-        if tenant_id in method.tenant_ids
+        if method is not None
+        and tenant_id in method.tenant_ids
         and method.recipe_user_id.get_as_string() == pending_recipe_user_id
         else None
     )
+
+
+def get_canonical_email_recipe_user_id(metadata: JsonDict, tenant_id: str) -> Optional[str]:
+    if "rownd_email_recipe_user_ids" in metadata:
+        canonical_by_tenant = metadata.get("rownd_email_recipe_user_ids")
+        if not isinstance(canonical_by_tenant, dict):
+            return None
+        canonical = canonical_by_tenant.get(tenant_id)
+        return canonical if isinstance(canonical, str) else None
+    canonical = metadata.get("rownd_email_recipe_user_id")
+    return canonical if isinstance(canonical, str) else None
+
+
+def find_canonical_passwordless_method(
+    user: User, metadata: JsonDict, tenant_id: str
+) -> Optional[LoginMethod]:
+    passwordless_methods = [
+        method
+        for method in user.login_methods
+        if method.recipe_id == "passwordless" and tenant_id in method.tenant_ids
+    ]
+    canonical_recipe_user_id = get_canonical_email_recipe_user_id(metadata, tenant_id)
+    if canonical_recipe_user_id:
+        canonical_method = next(
+            (
+                method
+                for method in passwordless_methods
+                if method.recipe_user_id.get_as_string() == canonical_recipe_user_id
+            ),
+            None,
+        )
+        if canonical_method is None:
+            raise RowndEmailChangeError(
+                "CONFLICT", 409, "the canonical email sign-in method is invalid"
+            )
+        return canonical_method
+    if len(passwordless_methods) > 1:
+        raise RowndEmailChangeError(
+            "AMBIGUOUS",
+            409,
+            "the account has multiple email sign-in methods without a canonical method",
+        )
+    return passwordless_methods[0] if passwordless_methods else None
 
 
 async def ensure_stable_primary_user(
@@ -2883,8 +3168,8 @@ async def ensure_stable_primary_user(
 async def remove_pending_email_verification(
     user_id: str, pending_id: str, user_context: UserContext
 ) -> None:
-    metadata = await get_user_metadata(user_id, user_context)
-    await usermetadata_asyncio.update_user_metadata(
+    metadata = await get_raw_user_metadata(user_id, user_context)
+    await update_primary_user_metadata(
         user_id,
         {
             "rownd_pending_verification": [
@@ -2898,8 +3183,8 @@ async def remove_pending_email_verification(
 async def mark_pending_email_verification_status(
     user_id: str, pending_id: str, status: str, user_context: UserContext
 ) -> None:
-    metadata = await get_user_metadata(user_id, user_context)
-    await usermetadata_asyncio.update_user_metadata(
+    metadata = await get_raw_user_metadata(user_id, user_context)
+    await update_primary_user_metadata(
         user_id,
         {
             "rownd_pending_verification": [
@@ -2946,11 +3231,13 @@ def build_verified_email_metadata(
     user_id: str,
     email: str,
     canonical_email_recipe_user_id: str,
-    fallback_original_rownd_user: Optional[JsonDict] = None,
+    tenant_id: str,
+    fallback_metadata: Optional[JsonDict] = None,
 ) -> JsonDict:
+    fallback_metadata = fallback_metadata or {}
     compatibility_user = (
         as_json_dict(metadata.get("original_rownd_user"))
-        or fallback_original_rownd_user
+        or as_json_dict(fallback_metadata.get("original_rownd_user"))
         or {
             "state": "enabled",
             "auth_level": "verified",
@@ -2976,6 +3263,11 @@ def build_verified_email_metadata(
             },
         },
         "rownd_email_recipe_user_id": canonical_email_recipe_user_id,
+        "rownd_email_recipe_user_ids": {
+            **as_json_dict(fallback_metadata.get("rownd_email_recipe_user_ids")),
+            **as_json_dict(metadata.get("rownd_email_recipe_user_ids")),
+            tenant_id: canonical_email_recipe_user_id,
+        },
         "rownd_pending_verification": [
             item for item in get_pending_verifications(metadata) if item.get("field") != "email"
         ],

@@ -1,5 +1,5 @@
 PLUGIN_ID = "supertokens-plugin-rownd"
-PLUGIN_VERSION = "0.1.7"
+PLUGIN_VERSION = "0.1.9"
 PLUGIN_SDK_VERSION = ">=0.31.3"
 HANDLE_BASE_PATH = "/plugin/rownd"
 PUBLIC_TENANT_ID = "public"
@@ -25,6 +25,7 @@ IDENTITY_USER_DATA_FIELDS = {"user_id", "email", "phone_number", "google_id", "a
 INTERNAL_METADATA_FIELDS = {
     "original_rownd_user",
     "rownd_email_recipe_user_id",
+    "rownd_email_recipe_user_ids",
     "rownd_migration_complete",
     "rownd_pending_verification",
 }
