@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.6.10
+
+### Patch Changes
+
+- Safely resolve linked user metadata
+
 ## 0.6.9
 
 ### Patch Changes
