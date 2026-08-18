@@ -1967,8 +1967,8 @@ export async function updateUserMetadata(
   userId: string,
   inputMeta: JsonRecord,
 ) {
-  const { primaryUserId, metadata: updatedMetadata } =
-    await updatePrimaryUserMetadata(userId, inputMeta);
+  const { primaryUserId } = await updatePrimaryUserMetadata(userId, inputMeta);
+  const updatedMetadata = await getCombinedUserMetadata(primaryUserId);
 
   return {
     id: primaryUserId,

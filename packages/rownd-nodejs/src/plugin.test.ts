@@ -7769,6 +7769,50 @@ describe("rownd-nodejs plugin", () => {
         });
       });
 
+      it("returns combined metadata after updating a linked account", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const passwordlessResult = await Passwordless.signInUp({
+          email: `linked-meta-update-${randomUUID()}@example.com`,
+          tenantId: "public",
+        });
+        const linkedRecipeUserId =
+          passwordlessResult.recipeUserId.getAsString();
+        const { session, linkedUser } = await createLinkedGuestSession(
+          passwordlessResult.recipeUserId,
+        );
+
+        await UserMetadata.updateUserMetadata(linkedUser.id, {
+          primary_only: "before",
+        });
+        await UserMetadata.updateUserMetadata(linkedRecipeUserId, {
+          linked_only: "linked",
+        });
+
+        const updateRes = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user/meta`,
+          {
+            method: "PUT",
+            headers: {
+              ...getAuthedHeaders(session.getAccessToken()),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ meta: { primary_only: "after" } }),
+          },
+        );
+
+        expect(updateRes.status).toBe(200);
+        await expect(updateRes.json()).resolves.toEqual({
+          status: "OK",
+          id: linkedUser.id,
+          meta: {
+            primary_only: "after",
+            linked_only: "linked",
+          },
+        });
+      });
+
       it("rejects updates to internal metadata fields", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
@@ -8660,6 +8704,43 @@ describe("linked user metadata", () => {
     });
   });
 
+  it("does not combine operational metadata from linked users", () => {
+    const pendingVerification = [
+      {
+        id: "primary-pending",
+        field: "email",
+        value: "pending@example.com",
+        created_at: "2026-01-01T00:00:00.000Z",
+      },
+    ];
+    const result = combineLinkedMetadata({
+      primaryUserId: "primary",
+      primaryMetadata: {
+        rownd_email_recipe_user_ids: { public: "primary-email-user" },
+        rownd_pending_verification: pendingVerification,
+      },
+      linkedMetadata: [
+        {
+          userId: "secondary",
+          metadata: {
+            linked_profile: true,
+            rownd_email_recipe_user_id: "stale-email-user",
+            rownd_email_recipe_user_ids: { tenant: "stale-email-user" },
+            rownd_migration_complete: true,
+            rownd_pending_verification: [],
+          },
+        },
+      ],
+    });
+
+    expect(result.combinedMetadata).toEqual({
+      linked_profile: true,
+      rownd_email_recipe_user_ids: { public: "primary-email-user" },
+      rownd_pending_verification: pendingVerification,
+    });
+    expect(result.metadataUpdate).toEqual({ linked_profile: true });
+  });
+
   it("selects secondary metadata deterministically by user ID", () => {
     const rowndUser = (firstName: string) => ({
       state: "enabled" as const,
@@ -8688,6 +8769,38 @@ describe("linked user metadata", () => {
     expect(forward.combinedMetadata.original_rownd_user).toEqual(
       rowndUser("A"),
     );
+  });
+
+  it("uses user ID ordering when there is no canonical Rownd ID", () => {
+    const rowndUser = {
+      state: "enabled" as const,
+      auth_level: "verified",
+      data: { user_id: "rownd-user" },
+      verified_data: {},
+    };
+    const linkedMetadata = [
+      { userId: "z-user", metadata: { shared: "z-user" } },
+      {
+        userId: "a-user",
+        metadata: { shared: "a-user", original_rownd_user: rowndUser },
+      },
+    ];
+
+    const forward = combineLinkedMetadata({
+      primaryUserId: "primary",
+      primaryMetadata: {},
+      linkedMetadata,
+    });
+    const reversed = combineLinkedMetadata({
+      primaryUserId: "primary",
+      primaryMetadata: {},
+      linkedMetadata: [...linkedMetadata].reverse(),
+    });
+
+    expect(forward).toEqual(reversed);
+    expect(forward.linkedUserIds).toEqual(["a-user", "z-user"]);
+    expect(forward.combinedMetadata.shared).toBe("a-user");
+    expect(forward.rowndMetadataSourceUserId).toBe("a-user");
   });
 
   it("merges metadata from different Rownd identities deterministically", () => {
@@ -8776,6 +8889,43 @@ describe("linked user metadata", () => {
     expect(result.rowndMetadataSourceUserId).toBe("canonical-recipe-user");
   });
 
+  it("replaces a stale primary Rownd snapshot with the mapped identity", () => {
+    const canonicalRowndUser = {
+      state: "enabled" as const,
+      auth_level: "verified",
+      data: { user_id: "rownd-canonical", first_name: "Canonical" },
+      verified_data: {},
+    };
+    const result = combineLinkedMetadata({
+      primaryUserId: "primary",
+      canonicalRowndUserId: "rownd-canonical",
+      primaryMetadata: {
+        primary_only: true,
+        original_rownd_user: {
+          state: "enabled",
+          auth_level: "verified",
+          data: { user_id: "rownd-stale", first_name: "Stale" },
+          verified_data: {},
+        },
+      },
+      linkedMetadata: [
+        {
+          userId: "canonical-recipe-user",
+          metadata: { original_rownd_user: canonicalRowndUser },
+        },
+      ],
+    });
+
+    expect(result.combinedMetadata).toEqual({
+      primary_only: true,
+      original_rownd_user: canonicalRowndUser,
+    });
+    expect(result.metadataUpdate).toEqual({
+      original_rownd_user: canonicalRowndUser,
+    });
+    expect(result.rowndMetadataSourceUserId).toBe("canonical-recipe-user");
+  });
+
   it("merges linked metadata when no metadata matches the mapped Rownd ID", () => {
     const result = combineLinkedMetadata({
       primaryUserId: "primary",
@@ -8799,5 +8949,38 @@ describe("linked user metadata", () => {
     expect(result.combinedMetadata.original_rownd_user?.data.user_id).toBe(
       "rownd-stale",
     );
+  });
+
+  it("keeps a stale primary as the source when canonical metadata is missing", () => {
+    const result = combineLinkedMetadata({
+      primaryUserId: "primary",
+      canonicalRowndUserId: "rownd-canonical",
+      primaryMetadata: {
+        original_rownd_user: {
+          state: "enabled",
+          auth_level: "verified",
+          data: { user_id: "rownd-primary" },
+          verified_data: {},
+        },
+      },
+      linkedMetadata: [
+        {
+          userId: "linked",
+          metadata: {
+            original_rownd_user: {
+              state: "enabled",
+              auth_level: "verified",
+              data: { user_id: "rownd-linked" },
+              verified_data: {},
+            },
+          },
+        },
+      ],
+    });
+
+    expect(result.combinedMetadata.original_rownd_user?.data.user_id).toBe(
+      "rownd-primary",
+    );
+    expect(result.rowndMetadataSourceUserId).toBe("primary");
   });
 });

@@ -76,6 +76,13 @@ const INTERNAL_METADATA_FIELDS = new Set([
   "rownd_pending_verification",
 ]);
 
+const LINKED_OPERATIONAL_METADATA_FIELDS = new Set([
+  "rownd_email_recipe_user_id",
+  "rownd_email_recipe_user_ids",
+  "rownd_migration_complete",
+  "rownd_pending_verification",
+]);
+
 const SUPERTOKENS_FAKE_EMAIL_DOMAIN = "stfakeemail.supertokens.com";
 
 export async function getRawUserMetadata(
@@ -121,8 +128,10 @@ export function combineLinkedMetadata(input: {
 }): LinkedUserMetadataInspection {
   const linkedMetadata = [...input.linkedMetadata].sort((a, b) => {
     const aMatchesCanonical =
+      input.canonicalRowndUserId !== undefined &&
       getOriginalRowndUserId(a.metadata) === input.canonicalRowndUserId;
     const bMatchesCanonical =
+      input.canonicalRowndUserId !== undefined &&
       getOriginalRowndUserId(b.metadata) === input.canonicalRowndUserId;
     if (aMatchesCanonical !== bMatchesCanonical) {
       return aMatchesCanonical ? -1 : 1;
@@ -130,11 +139,34 @@ export function combineLinkedMetadata(input: {
     return a.userId.localeCompare(b.userId);
   });
   const primaryRowndUserId = getOriginalRowndUserId(input.primaryMetadata);
+  const canonicalLinkedMetadata = input.canonicalRowndUserId === undefined
+    ? undefined
+    : linkedMetadata.find(
+      ({ metadata }) =>
+        getOriginalRowndUserId(metadata) === input.canonicalRowndUserId,
+    );
+  const canonicalMetadataReplacesPrimary =
+    canonicalLinkedMetadata !== undefined &&
+    primaryRowndUserId !== input.canonicalRowndUserId;
 
-  const metadataUpdate: JsonRecord = {};
+  const metadataUpdate: JsonRecord = canonicalMetadataReplacesPrimary
+    ? {
+      original_rownd_user:
+        canonicalLinkedMetadata.metadata.original_rownd_user!,
+    }
+    : {};
   for (const { metadata } of linkedMetadata) {
     for (const [key, value] of Object.entries(metadata)) {
-      if (key === "rownd_pending_verification") {
+      if (LINKED_OPERATIONAL_METADATA_FIELDS.has(key)) {
+        continue;
+      }
+      if (
+        key === "original_rownd_user" &&
+        input.canonicalRowndUserId !== undefined &&
+        (primaryRowndUserId === input.canonicalRowndUserId ||
+          canonicalLinkedMetadata !== undefined) &&
+        getOriginalRowndUserId(metadata) !== input.canonicalRowndUserId
+      ) {
         continue;
       }
 
@@ -165,9 +197,12 @@ export function combineLinkedMetadata(input: {
     } as RowndMetadata,
     metadataUpdate,
     rowndMetadataSourceUserId:
-      primaryRowndUserId !== undefined
+      primaryRowndUserId !== undefined &&
+      (input.canonicalRowndUserId === undefined ||
+        primaryRowndUserId === input.canonicalRowndUserId ||
+        canonicalLinkedMetadata === undefined)
         ? input.primaryUserId
-        : linkedMetadata.find(
+        : canonicalLinkedMetadata?.userId ?? linkedMetadata.find(
           ({ metadata }) =>
             getOriginalRowndUserId(metadata) !== undefined,
         )?.userId,
