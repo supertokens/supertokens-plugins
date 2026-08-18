@@ -22,6 +22,15 @@ import { getStringList, isJsonRecord } from "./utils";
 
 export type RowndMetadata = RowndUserMetadata & JsonRecord;
 
+export type LinkedUserMetadataInspection = {
+  primaryUserId: string;
+  linkedUserIds: string[];
+  primaryMetadata: RowndMetadata;
+  combinedMetadata: RowndMetadata;
+  metadataUpdate: JsonRecord;
+  rowndMetadataSourceUserId?: string;
+};
+
 export type RowndVerifiableField = string;
 
 export type RowndPendingVerification = {
@@ -68,6 +77,194 @@ const INTERNAL_METADATA_FIELDS = new Set([
 ]);
 
 const SUPERTOKENS_FAKE_EMAIL_DOMAIN = "stfakeemail.supertokens.com";
+
+export async function getRawUserMetadata(
+  userId: string,
+  userContext?: Record<string, any>,
+): Promise<RowndMetadata> {
+  const result = await UserMetadata.getUserMetadata(userId, userContext);
+  return (result.metadata || {}) as RowndMetadata;
+}
+
+function getOriginalRowndUserId(metadata: {
+  original_rownd_user?: JsonValue;
+}) {
+  const originalRowndUser = metadata.original_rownd_user;
+  const data = isJsonRecord(originalRowndUser)
+    ? originalRowndUser.data
+    : undefined;
+  return isJsonRecord(data) && typeof data.user_id === "string"
+    ? data.user_id
+    : undefined;
+}
+
+function mergeMissingValues(primary: JsonRecord, secondary: JsonRecord) {
+  const merged: JsonRecord = { ...primary };
+
+  for (const [key, secondaryValue] of Object.entries(secondary)) {
+    const primaryValue = merged[key];
+    if (primaryValue === undefined) {
+      merged[key] = secondaryValue;
+    } else if (isJsonRecord(primaryValue) && isJsonRecord(secondaryValue)) {
+      merged[key] = mergeMissingValues(primaryValue, secondaryValue);
+    }
+  }
+
+  return merged;
+}
+
+export function combineLinkedMetadata(input: {
+  primaryUserId: string;
+  primaryMetadata: RowndMetadata;
+  linkedMetadata: Array<{ userId: string; metadata: RowndMetadata }>;
+  canonicalRowndUserId?: string;
+}): LinkedUserMetadataInspection {
+  const linkedMetadata = [...input.linkedMetadata].sort((a, b) => {
+    const aMatchesCanonical =
+      getOriginalRowndUserId(a.metadata) === input.canonicalRowndUserId;
+    const bMatchesCanonical =
+      getOriginalRowndUserId(b.metadata) === input.canonicalRowndUserId;
+    if (aMatchesCanonical !== bMatchesCanonical) {
+      return aMatchesCanonical ? -1 : 1;
+    }
+    return a.userId.localeCompare(b.userId);
+  });
+  const primaryRowndUserId = getOriginalRowndUserId(input.primaryMetadata);
+
+  const metadataUpdate: JsonRecord = {};
+  for (const { metadata } of linkedMetadata) {
+    for (const [key, value] of Object.entries(metadata)) {
+      if (key === "rownd_pending_verification") {
+        continue;
+      }
+
+      const currentValue = Object.prototype.hasOwnProperty.call(
+        metadataUpdate,
+        key,
+      )
+        ? metadataUpdate[key]
+        : input.primaryMetadata[key];
+      if (currentValue === undefined) {
+        metadataUpdate[key] = value;
+      } else if (isJsonRecord(currentValue) && isJsonRecord(value)) {
+        const mergedValue = mergeMissingValues(currentValue, value);
+        if (JSON.stringify(mergedValue) !== JSON.stringify(currentValue)) {
+          metadataUpdate[key] = mergedValue;
+        }
+      }
+    }
+  }
+
+  return {
+    primaryUserId: input.primaryUserId,
+    linkedUserIds: linkedMetadata.map(({ userId }) => userId),
+    primaryMetadata: input.primaryMetadata,
+    combinedMetadata: {
+      ...input.primaryMetadata,
+      ...metadataUpdate,
+    } as RowndMetadata,
+    metadataUpdate,
+    rowndMetadataSourceUserId:
+      primaryRowndUserId !== undefined
+        ? input.primaryUserId
+        : linkedMetadata.find(
+          ({ metadata }) =>
+            getOriginalRowndUserId(metadata) !== undefined,
+        )?.userId,
+  };
+}
+
+async function getPrimaryUserMapping(
+  userId: string,
+  userContext?: Record<string, any>,
+) {
+  const internalMapping = await SuperTokens.getUserIdMapping({
+    userId,
+    userIdType: "SUPERTOKENS",
+    userContext,
+  });
+  if (internalMapping.status === "OK") {
+    return internalMapping;
+  }
+
+  const externalMapping = await SuperTokens.getUserIdMapping({
+    userId,
+    userIdType: "EXTERNAL",
+    userContext,
+  });
+  return externalMapping.status === "OK" ? externalMapping : undefined;
+}
+
+export async function inspectLinkedUserMetadata(
+  userId: string,
+  userContext?: Record<string, any>,
+): Promise<LinkedUserMetadataInspection> {
+  const user = await SuperTokens.getUser(userId, userContext);
+  if (!user) {
+    const metadata = await getRawUserMetadata(userId, userContext);
+    return {
+      primaryUserId: userId,
+      linkedUserIds: [],
+      primaryMetadata: metadata,
+      combinedMetadata: metadata,
+      metadataUpdate: {},
+      rowndMetadataSourceUserId:
+        getOriginalRowndUserId(metadata) === undefined ? undefined : userId,
+    };
+  }
+
+  const mapping = await getPrimaryUserMapping(user.id, userContext);
+  const primaryUserId = mapping?.superTokensUserId ?? user.id;
+  const linkedUserIds = [
+    ...new Set(
+      user.loginMethods
+        .map((method) => method.recipeUserId.getAsString())
+        .filter((recipeUserId) => recipeUserId !== primaryUserId),
+    ),
+  ];
+  const [primaryMetadata, linkedMetadata] = await Promise.all([
+    getRawUserMetadata(primaryUserId, userContext),
+    Promise.all(
+      linkedUserIds.map(async (linkedUserId) => ({
+        userId: linkedUserId,
+        metadata: await getRawUserMetadata(linkedUserId, userContext),
+      })),
+    ),
+  ]);
+
+  return combineLinkedMetadata({
+    primaryUserId,
+    primaryMetadata,
+    linkedMetadata,
+    canonicalRowndUserId: mapping?.externalUserId,
+  });
+}
+
+export async function getCombinedUserMetadata(
+  userId: string,
+  userContext?: Record<string, any>,
+) {
+  return (await inspectLinkedUserMetadata(userId, userContext)).combinedMetadata;
+}
+
+export async function updatePrimaryUserMetadata(
+  userId: string,
+  metadataUpdate: JsonRecord,
+  userContext?: Record<string, any>,
+) {
+  const user = await SuperTokens.getUser(userId, userContext);
+  const primaryUserId = user?.id ?? userId;
+  const result = await UserMetadata.updateUserMetadata(
+    primaryUserId,
+    metadataUpdate as JSONObject,
+    userContext,
+  );
+
+  return {
+    primaryUserId,
+    metadata: result.metadata as RowndMetadata,
+  };
+}
 
 export function isSuperTokensFakeEmail(email: unknown): email is string {
   return (
@@ -476,8 +673,7 @@ async function buildStandardOAuthClaims(user: SuperTokensUser, scopes: string[])
 }
 
 async function getRowndMetadata(userId: string): Promise<RowndMetadata> {
-  const metadata = await UserMetadata.getUserMetadata(userId);
-  return (metadata.metadata || {}) as RowndMetadata;
+  return getCombinedUserMetadata(userId);
 }
 
 function pickOAuthUserInfoRowndClaims(payload: JsonRecord) {

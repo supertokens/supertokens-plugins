@@ -48,6 +48,7 @@ import {
 } from "./constants";
 import {
   buildRowndOAuthPayload,
+  combineLinkedMetadata,
   mapRowndUserToSuperTokens,
   shouldLinkRowndAccounts,
 } from "./rownd-compatibility";
@@ -171,11 +172,14 @@ describe("rownd-nodejs plugin", () => {
 
     const importMappedPort = importContainer.getMappedPort(3567);
     importCoreConnectionURI = `http://${importContainer.getHost()}:${importMappedPort}`;
-    const licenseResponse = await fetch(`${importCoreConnectionURI}/ee/license`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ licenseKey: ACCOUNT_LINKING_TEST_LICENSE }),
-    });
+    const licenseResponse = await fetch(
+      `${importCoreConnectionURI}/ee/license`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ licenseKey: ACCOUNT_LINKING_TEST_LICENSE }),
+      },
+    );
     if (!licenseResponse.ok) {
       throw new Error(
         `Failed to enable account linking for import tests: ${licenseResponse.status} ${await licenseResponse.text()}`,
@@ -1371,6 +1375,16 @@ describe("rownd-nodejs plugin", () => {
         email: "passwordless-variant@example.com",
         tenantId: "public",
       });
+      const rowndMetadataUserId = signInUpResult.recipeUserId.getAsString();
+      await UserMetadata.updateUserMetadata(rowndMetadataUserId, {
+        original_rownd_user: {
+          state: "enabled",
+          auth_level: "verified",
+          data: { user_id: rowndMetadataUserId },
+          verified_data: {},
+          attributes: {},
+        },
+      });
       const { session, anonymousId, linkedUser } =
         await createLinkedGuestSession(signInUpResult.recipeUserId);
       const mergeIntoAccessTokenPayload = vi.spyOn(
@@ -1398,7 +1412,13 @@ describe("rownd-nodejs plugin", () => {
           userContext: { rowndAppVariantId: "variant_123" },
         }),
       );
-      const metadata = await getUserMetadata(linkedUser.id);
+      await expect(
+        UserMetadata.getUserMetadata(linkedUser.id),
+      ).resolves.toEqual({
+        status: "OK",
+        metadata: {},
+      });
+      const metadata = await UserMetadata.getUserMetadata(rowndMetadataUserId);
       expect(
         (metadata.metadata as any).original_rownd_user.attributes[
           "rownd:app_variants"
@@ -1755,7 +1775,9 @@ describe("rownd-nodejs plugin", () => {
         email: "session-variant@example.com",
         tenantId: "public",
       });
-      const sessionFunctions = (init(pluginConfig) as any).overrideMap.session.functions({
+      const sessionFunctions = (
+        init(pluginConfig) as any
+      ).overrideMap.session.functions({
         createNewSession: vi.fn().mockImplementation(async (input) => input),
       });
 
@@ -1904,6 +1926,9 @@ describe("rownd-nodejs plugin", () => {
             { recipeUserId: secondRecipeUserId, tenantIds: [] },
           ],
         } as any);
+        vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({
+          status: "UNKNOWN_MAPPING_ERROR",
+        });
         setRowndClient(mockRowndClient);
         mockRowndClient.validateToken.mockResolvedValue({
           user_id: rowndUserId,
@@ -2354,11 +2379,7 @@ describe("rownd-nodejs plugin", () => {
           }),
         ]);
         await expect(
-          SuperTokens.listUsersByAccountInfo(
-            "public",
-            { phoneNumber },
-            false,
-          ),
+          SuperTokens.listUsersByAccountInfo("public", { phoneNumber }, false),
         ).resolves.toHaveLength(0);
         expect(
           (await SuperTokens.getUser(emailOwner.user.id))?.loginMethods,
@@ -4287,6 +4308,186 @@ describe("rownd-nodejs plugin", () => {
         });
       });
 
+      it("preserves secondary Rownd metadata when the plugin automatically links accounts", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const email = `linked-metadata-${randomUUID()}@example.com`;
+        const providerUserId = `google-${randomUUID()}`;
+
+        const passwordlessResult = await Passwordless.signInUp({
+          email,
+          tenantId: "public",
+        });
+        const primaryResult = await AccountLinking.createPrimaryUser(
+          passwordlessResult.recipeUserId,
+        );
+        expect(primaryResult.status).toBe("OK");
+        if (primaryResult.status !== "OK") {
+          throw new Error("failed to create primary user");
+        }
+        const primaryUserId = primaryResult.user.id;
+        await UserMetadata.updateUserMetadata(primaryUserId, {
+          primary_metadata: "preserved",
+          shared_metadata: "primary",
+        });
+
+        const thirdPartyResult = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          providerUserId,
+          email,
+          true,
+          undefined,
+          { rowndDisableAutomaticAccountLinking: true },
+        );
+        expect(thirdPartyResult.status).toBe("OK");
+        if (thirdPartyResult.status !== "OK") {
+          throw new Error("failed to create third-party user");
+        }
+        const secondaryUserId = thirdPartyResult.user.id;
+        expect(secondaryUserId).not.toBe(primaryUserId);
+        await UserMetadata.updateUserMetadata(secondaryUserId, {
+          original_rownd_user: {
+            state: "enabled",
+            auth_level: "verified",
+            data: {
+              user_id: secondaryUserId,
+              email,
+              first_name: "jane",
+            },
+            verified_data: { email },
+            attributes: {
+              "stripe:customer_id": ["cus_linked_metadata"],
+            },
+            groups: [],
+            meta: {},
+          },
+          first_name: "jane",
+          shared_metadata: "secondary",
+          rownd_pending_verification: [
+            {
+              id: "stale-secondary-verification",
+              field: "email",
+              value: "stale@example.com",
+              created_at: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        });
+        const secondaryMetadataBeforeLogin =
+          await UserMetadata.getUserMetadata(secondaryUserId);
+
+        const pluginSignInResult = await signInUpWithTestProvider({
+          providerId: "google",
+          providerUserId,
+          email,
+        });
+        expect(pluginSignInResult.status).toBe("OK");
+        expect(pluginSignInResult.user.id).toBe(primaryUserId);
+        expect(pluginSignInResult.accessToken).toBeDefined();
+
+        const usersById = await Promise.all([
+          SuperTokens.getUser(primaryUserId),
+          SuperTokens.getUser(secondaryUserId),
+        ]);
+        expect(usersById.map((user) => user?.id)).toEqual([
+          primaryUserId,
+          primaryUserId,
+        ]);
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            headers: getAuthedHeaders(pluginSignInResult.accessToken!),
+          },
+        );
+
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body).toMatchObject({
+          status: "OK",
+          rownd_user: secondaryUserId,
+          data: {
+            first_name: "jane",
+          },
+          meta: {
+            primary_metadata: "preserved",
+            shared_metadata: "primary",
+          },
+          attributes: {
+            "stripe:customer_id": ["cus_linked_metadata"],
+          },
+        });
+
+        const primaryMetadataAfterLogin =
+          await UserMetadata.getUserMetadata(primaryUserId);
+        expect(primaryMetadataAfterLogin.metadata).toEqual({
+          primary_metadata: "preserved",
+          shared_metadata: "primary",
+        });
+        await expect(
+          UserMetadata.getUserMetadata(secondaryUserId),
+        ).resolves.toEqual(secondaryMetadataBeforeLogin);
+
+        await UserMetadata.updateUserMetadata(secondaryUserId, {
+          original_rownd_user: {
+            state: "enabled",
+            auth_level: "verified",
+            data: {
+              user_id: secondaryUserId,
+              email,
+              first_name: "jane",
+              last_name: "doe",
+            },
+            verified_data: { email },
+            attributes: {
+              "stripe:customer_id": ["cus_linked_metadata"],
+            },
+            groups: [],
+            meta: {},
+          },
+        });
+        const secondaryMetadataBeforeSubsequentLogin =
+          await UserMetadata.getUserMetadata(secondaryUserId);
+        const subsequentSignIn = await signInUpWithTestProvider({
+          providerId: "google",
+          providerUserId,
+          email,
+        });
+        expect(subsequentSignIn.status).toBe("OK");
+        expect(subsequentSignIn.accessToken).toBeDefined();
+
+        const subsequentResponse = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          {
+            headers: getAuthedHeaders(subsequentSignIn.accessToken!),
+          },
+        );
+        expect(subsequentResponse.status).toBe(200);
+        await expect(subsequentResponse.json()).resolves.toMatchObject({
+          data: {
+            first_name: "jane",
+            last_name: "doe",
+          },
+          attributes: {
+            "stripe:customer_id": ["cus_linked_metadata"],
+          },
+        });
+
+        await expect(
+          UserMetadata.getUserMetadata(primaryUserId),
+        ).resolves.toEqual({
+          status: "OK",
+          metadata: {
+            primary_metadata: "preserved",
+            shared_metadata: "primary",
+          },
+        });
+        await expect(
+          UserMetadata.getUserMetadata(secondaryUserId),
+        ).resolves.toEqual(secondaryMetadataBeforeSubsequentLogin);
+      });
+
       it.each([
         { providerId: "google", field: "google_id" },
         { providerId: "apple", field: "apple_id" },
@@ -4860,7 +5061,9 @@ describe("rownd-nodejs plugin", () => {
         expect(res.status).toBe(403);
         const metadata = await UserMetadata.getUserMetadata(userId);
         expect((metadata.metadata as any).first_name).toBeUndefined();
-        expect((metadata.metadata as any).rownd_pending_verification).toBeUndefined();
+        expect(
+          (metadata.metadata as any).rownd_pending_verification,
+        ).toBeUndefined();
       });
 
       it("updates other fields when a disabled email method is unchanged", async () => {
@@ -5010,7 +5213,9 @@ describe("rownd-nodejs plugin", () => {
           message: "recent authentication is required to change email",
         });
         const metadata = await UserMetadata.getUserMetadata(userId);
-        expect((metadata.metadata as any).rownd_pending_verification).toBeUndefined();
+        expect(
+          (metadata.metadata as any).rownd_pending_verification,
+        ).toBeUndefined();
       });
 
       it("allows a freshly migrated session to change email", async () => {
@@ -5047,14 +5252,16 @@ describe("rownd-nodejs plugin", () => {
           await createPasswordlessSessionForUser(
             "refreshed-stale-native-user@example.com",
           );
-        const originalSessionInfo = await Session.getSessionInformation(
-          sessionHandle,
-        );
+        const originalSessionInfo =
+          await Session.getSessionInformation(sessionHandle);
         expect(originalSessionInfo).toBeDefined();
         await new Promise((resolve) => setTimeout(resolve, 10));
 
         const refreshedSession =
-          await Session.refreshSessionWithoutRequestResponse(refreshToken, true);
+          await Session.refreshSessionWithoutRequestResponse(
+            refreshToken,
+            true,
+          );
         const refreshedSessionInfo = await Session.getSessionInformation(
           refreshedSession.getHandle(),
         );
@@ -5183,7 +5390,9 @@ describe("rownd-nodejs plugin", () => {
           initiatingUser.accessToken,
         );
         expect(ordinaryVerifyRes.status).toBe(200);
-        await expect(ordinaryVerifyRes.json()).resolves.toEqual({ status: "OK" });
+        await expect(ordinaryVerifyRes.json()).resolves.toEqual({
+          status: "OK",
+        });
         const unchangedUser = await SuperTokens.getUser(initiatingUser.userId);
         expect(
           unchangedUser?.loginMethods.find(
@@ -5306,7 +5515,8 @@ describe("rownd-nodejs plugin", () => {
           ]),
         );
         const originalMethod = passwordlessMethods?.find(
-          (method) => method.recipeUserId.getAsString() === recipeUserId.getAsString(),
+          (method) =>
+            method.recipeUserId.getAsString() === recipeUserId.getAsString(),
         );
         const canonicalMethod = passwordlessMethods?.find(
           (method) => method.email === "new-email-update@example.com",
@@ -5365,9 +5575,9 @@ describe("rownd-nodejs plugin", () => {
         expect(
           (twiceUpdatedMetadata.metadata as any).rownd_email_recipe_user_id,
         ).toBe(
-          twiceUpdatedUser?.loginMethods.find(
-            (method) => method.email === secondTargetEmail,
-          )?.recipeUserId.getAsString(),
+          twiceUpdatedUser?.loginMethods
+            .find((method) => method.email === secondTargetEmail)
+            ?.recipeUserId.getAsString(),
         );
 
         const restoreAliasRes = await requestEmailChange(
@@ -5393,7 +5603,8 @@ describe("rownd-nodejs plugin", () => {
             (method) => method.recipeId === "passwordless" && method.email,
           ),
         ).toHaveLength(3);
-        const restoredAliasMetadata = await UserMetadata.getUserMetadata(userId);
+        const restoredAliasMetadata =
+          await UserMetadata.getUserMetadata(userId);
         expect(
           (restoredAliasMetadata.metadata as any).rownd_email_recipe_user_ids,
         ).toEqual({ public: recipeUserId.getAsString() });
@@ -5522,9 +5733,9 @@ describe("rownd-nodejs plugin", () => {
             );
             return passwordlessMethod
               ? {
-                ...user,
-                loginMethods: [passwordlessMethod, passwordlessMethod],
-              }
+                  ...user,
+                  loginMethods: [passwordlessMethod, passwordlessMethod],
+                }
               : user;
           });
         await expect(
@@ -5547,7 +5758,8 @@ describe("rownd-nodejs plugin", () => {
           initiatingUser.userId,
         );
         expect((metadata.metadata as any).rownd_email_recipe_user_id).toBe(
-          user?.loginMethods.find((method) => method.email === targetEmail)
+          user?.loginMethods
+            .find((method) => method.email === targetEmail)
             ?.recipeUserId.getAsString(),
         );
       });
@@ -5574,9 +5786,8 @@ describe("rownd-nodejs plugin", () => {
         const verificationUrl = new URL(emailVerificationLinks[0]);
         const token = verificationUrl.searchParams.get("token") || "unused";
         const pendingVerificationId =
-          verificationUrl.searchParams.get(
-            "rowndPendingVerificationId",
-          ) || "unused";
+          verificationUrl.searchParams.get("rowndPendingVerificationId") ||
+          "unused";
 
         let statusAtFailure: string | undefined;
         const originalGetSessionInformation = Session.getSessionInformation;
@@ -6024,8 +6235,7 @@ describe("rownd-nodejs plugin", () => {
           expect.objectContaining({
             status: "COMMITTING",
             value: targetEmail,
-            verificationRecipeUserId:
-              initiatingUser.recipeUserId.getAsString(),
+            verificationRecipeUserId: initiatingUser.recipeUserId.getAsString(),
           }),
         ]);
         await expect(
@@ -6112,7 +6322,9 @@ describe("rownd-nodejs plugin", () => {
         expect(token).toBeTruthy();
         expect(pendingVerificationId).toBeTruthy();
 
-        const ordinaryVerificationRes = await verifyEmailToken(token || "unused");
+        const ordinaryVerificationRes = await verifyEmailToken(
+          token || "unused",
+        );
         expect(ordinaryVerificationRes.status).toBe(200);
         await expect(ordinaryVerificationRes.json()).resolves.toEqual({
           status: "OK",
@@ -6225,9 +6437,8 @@ describe("rownd-nodejs plugin", () => {
         const verificationUrl = new URL(emailVerificationLinks[0]);
         const token = verificationUrl.searchParams.get("token") || "unused";
         const pendingVerificationId =
-          verificationUrl.searchParams.get(
-            "rowndPendingVerificationId",
-          ) || "unused";
+          verificationUrl.searchParams.get("rowndPendingVerificationId") ||
+          "unused";
 
         const getUser = vi
           .spyOn(SuperTokens, "getUser")
@@ -6251,9 +6462,7 @@ describe("rownd-nodejs plugin", () => {
         );
         expect(
           (pendingMetadata.metadata as any).rownd_pending_verification,
-        ).toEqual([
-          expect.objectContaining({ id: pendingVerificationId }),
-        ]);
+        ).toEqual([expect.objectContaining({ id: pendingVerificationId })]);
 
         const retryRes = await verifyEmailToken(
           token,
@@ -6270,13 +6479,12 @@ describe("rownd-nodejs plugin", () => {
             targetEmail,
           ),
         ).resolves.toBe(true);
-        const metadataAfterRetry =
-          await UserMetadata.getUserMetadata(initiatingUser.userId);
+        const metadataAfterRetry = await UserMetadata.getUserMetadata(
+          initiatingUser.userId,
+        );
         expect(
           (metadataAfterRetry.metadata as any).rownd_pending_verification,
-        ).toEqual([
-          expect.objectContaining({ id: pendingVerificationId }),
-        ]);
+        ).toEqual([expect.objectContaining({ id: pendingVerificationId })]);
 
         const replacementRes = await requestEmailChange(
           initiatingUser.accessToken,
@@ -6325,9 +6533,8 @@ describe("rownd-nodejs plugin", () => {
         const verificationUrl = new URL(emailVerificationLinks[0]);
         const token = verificationUrl.searchParams.get("token") || "unused";
         const pendingVerificationId =
-          verificationUrl.searchParams.get(
-            "rowndPendingVerificationId",
-          ) || "unused";
+          verificationUrl.searchParams.get("rowndPendingVerificationId") ||
+          "unused";
 
         const originalGetSessionInformation = Session.getSessionInformation;
         let pendingResolutionCount = 0;
@@ -6384,7 +6591,8 @@ describe("rownd-nodejs plugin", () => {
           )?.email,
         ).toBe("concurrent-envelope-current@example.com");
         expect(
-          passwordlessMethods?.find((method) => method.email === targetEmail)
+          passwordlessMethods
+            ?.find((method) => method.email === targetEmail)
             ?.recipeUserId.getAsString(),
         ).not.toBe(initiatingUser.recipeUserId.getAsString());
         const metadata = await UserMetadata.getUserMetadata(
@@ -6535,9 +6743,7 @@ describe("rownd-nodejs plugin", () => {
         const staleVerificationUrl = new URL(emailVerificationLinks[0]);
         const staleToken = staleVerificationUrl.searchParams.get("token");
         const stalePendingVerificationId =
-          staleVerificationUrl.searchParams.get(
-            "rowndPendingVerificationId",
-          );
+          staleVerificationUrl.searchParams.get("rowndPendingVerificationId");
         expect(staleToken).toBeTruthy();
         expect(stalePendingVerificationId).toBeTruthy();
 
@@ -6583,9 +6789,13 @@ describe("rownd-nodejs plugin", () => {
       it.each(["guest", "instant"] as const)(
         "rejects profile email changes for %s accounts without a Passwordless method",
         async (authLevel) => {
-          const { server: s, port } = await setup(coreConnectionURI, undefined, {
-            enableEmailVerification: true,
-          });
+          const { server: s, port } = await setup(
+            coreConnectionURI,
+            undefined,
+            {
+              enableEmailVerification: true,
+            },
+          );
           server = s;
           testPORT = port;
           const guestSession = await createGuestSession(authLevel);
@@ -6742,10 +6952,14 @@ describe("rownd-nodejs plugin", () => {
         "adds a Passwordless email method for %s-only accounts",
         async (providerId) => {
           const emailVerificationLinks: string[] = [];
-          const { server: s, port } = await setup(coreConnectionURI, undefined, {
-            enableEmailVerification: true,
-            emailVerificationLinks,
-          });
+          const { server: s, port } = await setup(
+            coreConnectionURI,
+            undefined,
+            {
+              enableEmailVerification: true,
+              emailVerificationLinks,
+            },
+          );
           server = s;
           testPORT = port;
           const thirdPartyUser = await createThirdPartySessionForUser(
@@ -6794,30 +7008,34 @@ describe("rownd-nodejs plugin", () => {
           expect(updatedThirdPartyMethod?.recipeUserId.getAsString()).toBe(
             originalThirdPartyMethod?.recipeUserId.getAsString(),
           );
-          expect(updatedUser?.loginMethods).toEqual(expect.arrayContaining([
-            expect.objectContaining({
-              recipeId: "thirdparty",
-              email: `${providerId}-only-user@example.com`,
-              thirdParty: originalThirdPartyMethod?.thirdParty,
-            }),
-            expect.objectContaining({
-              recipeId: "passwordless",
-              email: targetEmail,
-              verified: true,
-              tenantIds: ["public"],
-            }),
-          ]));
+          expect(updatedUser?.loginMethods).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                recipeId: "thirdparty",
+                email: `${providerId}-only-user@example.com`,
+                thirdParty: originalThirdPartyMethod?.thirdParty,
+              }),
+              expect.objectContaining({
+                recipeId: "passwordless",
+                email: targetEmail,
+                verified: true,
+                tenantIds: ["public"],
+              }),
+            ]),
+          );
           const metadata = await UserMetadata.getUserMetadata(
             thirdPartyUser.userId,
           );
-          expect(metadata.metadata).toEqual(expect.objectContaining({
-            ...originalMetadata.metadata,
-            rownd_pending_verification: [],
-            original_rownd_user: expect.objectContaining({
-              data: expect.objectContaining({ email: targetEmail }),
-              verified_data: expect.objectContaining({ email: targetEmail }),
+          expect(metadata.metadata).toEqual(
+            expect.objectContaining({
+              ...originalMetadata.metadata,
+              rownd_pending_verification: [],
+              original_rownd_user: expect.objectContaining({
+                data: expect.objectContaining({ email: targetEmail }),
+                verified_data: expect.objectContaining({ email: targetEmail }),
+              }),
             }),
-          }));
+          );
         },
       );
 
@@ -6849,11 +7067,13 @@ describe("rownd-nodejs plugin", () => {
             return originalUpdateUserMetadata(userId, update, userContext);
           });
 
-        await expect(completePendingEmailVerification({
-          recipeUserId: thirdPartyUser.recipeUserId,
-          email: targetEmail,
-          sessionHandle: thirdPartyUser.sessionHandle,
-        })).rejects.toThrow("metadata finalization failed");
+        await expect(
+          completePendingEmailVerification({
+            recipeUserId: thirdPartyUser.recipeUserId,
+            email: targetEmail,
+            sessionHandle: thirdPartyUser.sessionHandle,
+          }),
+        ).rejects.toThrow("metadata finalization failed");
         metadataUpdate.mockRestore();
 
         const user = await SuperTokens.getUser(thirdPartyUser.userId);
@@ -6875,9 +7095,8 @@ describe("rownd-nodejs plugin", () => {
         testPORT = port;
         const providerEmail = "session-failure-provider@example.com";
         const targetEmail = "session-failure-target@example.com";
-        const thirdPartyUser = await createThirdPartySessionForUser(
-          providerEmail,
-        );
+        const thirdPartyUser =
+          await createThirdPartySessionForUser(providerEmail);
         const updateRes = await requestEmailChange(
           thirdPartyUser.accessToken,
           targetEmail,
@@ -6929,9 +7148,8 @@ describe("rownd-nodejs plugin", () => {
         testPORT = port;
         const providerEmail = "rollback-failure-provider@example.com";
         const targetEmail = "rollback-failure-target@example.com";
-        const thirdPartyUser = await createThirdPartySessionForUser(
-          providerEmail,
-        );
+        const thirdPartyUser =
+          await createThirdPartySessionForUser(providerEmail);
         const updateRes = await requestEmailChange(
           thirdPartyUser.accessToken,
           targetEmail,
@@ -6997,11 +7215,12 @@ describe("rownd-nodejs plugin", () => {
           victim.recipeUserId,
           "foreign-token-victim@example.com",
         );
-        const victimToken = await EmailVerification.createEmailVerificationToken(
-          "public",
-          victim.recipeUserId,
-          "foreign-token-victim@example.com",
-        );
+        const victimToken =
+          await EmailVerification.createEmailVerificationToken(
+            "public",
+            victim.recipeUserId,
+            "foreign-token-victim@example.com",
+          );
         expect(victimToken.status).toBe("OK");
 
         const verifyRes = await verifyEmailToken(
@@ -7082,7 +7301,8 @@ describe("rownd-nodejs plugin", () => {
           )?.phoneNumber,
         ).toBe(phoneNumber);
         expect(
-          passwordlessMethods?.find((method) => method.email === targetEmail)
+          passwordlessMethods
+            ?.find((method) => method.email === targetEmail)
             ?.recipeUserId.getAsString(),
         ).not.toBe(signInUpResponse.recipeUserId.getAsString());
       });
@@ -8276,3 +8496,308 @@ function overrideTestProviderUserInfo(originalImplementation: any) {
     }),
   };
 }
+
+describe("linked user metadata", () => {
+  it("combines linked metadata recursively while preserving primary values", () => {
+    const result = combineLinkedMetadata({
+      primaryUserId: "primary",
+      primaryMetadata: {
+        shared: "primary",
+      },
+      linkedMetadata: [
+        {
+          userId: "google",
+          metadata: {
+            shared: "secondary",
+            original_rownd_user: {
+              state: "enabled",
+              auth_level: "verified",
+              data: { user_id: "rownd-user", first_name: "jane" },
+              verified_data: {},
+            },
+            rownd_pending_verification: [
+              {
+                id: "stale",
+                field: "email",
+                value: "stale@example.com",
+                created_at: "2026-01-01T00:00:00.000Z",
+              },
+            ],
+          },
+        },
+        {
+          userId: "z-apple",
+          metadata: {
+            original_rownd_user: {
+              state: "enabled",
+              auth_level: "verified",
+              data: { user_id: "rownd-user", last_name: "doe" },
+              verified_data: {},
+              attributes: { customer: ["customer-id"] },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(result.combinedMetadata).toMatchObject({
+      shared: "primary",
+      original_rownd_user: {
+        data: {
+          user_id: "rownd-user",
+          first_name: "jane",
+          last_name: "doe",
+        },
+        attributes: { customer: ["customer-id"] },
+      },
+    });
+    expect(result.combinedMetadata).not.toHaveProperty(
+      "rownd_pending_verification",
+    );
+  });
+
+  it("combines missing Rownd user fields while keeping primary conflicts", () => {
+    const primaryRowndUser = {
+      state: "enabled",
+      auth_level: "unverified",
+      data: { user_id: "rownd-user" },
+      verified_data: {},
+    };
+    const result = combineLinkedMetadata({
+      primaryUserId: "primary",
+      primaryMetadata: { original_rownd_user: primaryRowndUser },
+      linkedMetadata: [
+        {
+          userId: "secondary",
+          metadata: {
+            original_rownd_user: {
+              state: "enabled",
+              auth_level: "verified",
+              data: { user_id: "rownd-user", role: "admin" },
+              verified_data: { email: "user@example.com" },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(result.combinedMetadata.original_rownd_user).toEqual({
+      ...primaryRowndUser,
+      data: { user_id: "rownd-user", role: "admin" },
+      verified_data: { email: "user@example.com" },
+    });
+    expect(result.metadataUpdate).toEqual({
+      original_rownd_user: {
+        ...primaryRowndUser,
+        data: { user_id: "rownd-user", role: "admin" },
+        verified_data: { email: "user@example.com" },
+      },
+    });
+  });
+
+  it("replaces a malformed primary Rownd snapshot with a valid secondary snapshot", () => {
+    const secondaryRowndUser = {
+      state: "enabled",
+      auth_level: "verified",
+      data: { user_id: "rownd-user" },
+      verified_data: {},
+    };
+    const result = combineLinkedMetadata({
+      primaryUserId: "primary",
+      primaryMetadata: { original_rownd_user: {} as any },
+      linkedMetadata: [
+        {
+          userId: "secondary",
+          metadata: { original_rownd_user: secondaryRowndUser },
+        },
+      ],
+    });
+
+    expect(result.combinedMetadata.original_rownd_user).toEqual(
+      secondaryRowndUser,
+    );
+    expect(result.metadataUpdate.original_rownd_user).toEqual(
+      secondaryRowndUser,
+    );
+  });
+
+  it("does not replace defined empty values", () => {
+    const result = combineLinkedMetadata({
+      primaryUserId: "primary",
+      primaryMetadata: {
+        nullable: null,
+        disabled: false,
+        emptyString: "",
+        emptyList: [],
+        zero: 0,
+      },
+      linkedMetadata: [
+        {
+          userId: "secondary",
+          metadata: {
+            original_rownd_user: {
+              state: "enabled",
+              auth_level: "verified",
+              data: { user_id: "rownd-user" },
+              verified_data: {},
+            },
+            nullable: "replacement",
+            disabled: true,
+            emptyString: "replacement",
+            emptyList: ["replacement"],
+            zero: 1,
+          },
+        },
+      ],
+    });
+
+    expect(result.combinedMetadata).toMatchObject({
+      nullable: null,
+      disabled: false,
+      emptyString: "",
+      emptyList: [],
+      zero: 0,
+    });
+  });
+
+  it("selects secondary metadata deterministically by user ID", () => {
+    const rowndUser = (firstName: string) => ({
+      state: "enabled" as const,
+      auth_level: "verified",
+      data: { user_id: "rownd-user", first_name: firstName },
+      verified_data: {},
+    });
+    const linkedMetadata = [
+      { userId: "z-user", metadata: { original_rownd_user: rowndUser("Z") } },
+      { userId: "a-user", metadata: { original_rownd_user: rowndUser("A") } },
+    ];
+
+    const forward = combineLinkedMetadata({
+      primaryUserId: "primary",
+      primaryMetadata: {},
+      linkedMetadata,
+    });
+    const reversed = combineLinkedMetadata({
+      primaryUserId: "primary",
+      primaryMetadata: {},
+      linkedMetadata: [...linkedMetadata].reverse(),
+    });
+
+    expect(forward).toEqual(reversed);
+    expect(forward.rowndMetadataSourceUserId).toBe("a-user");
+    expect(forward.combinedMetadata.original_rownd_user).toEqual(
+      rowndUser("A"),
+    );
+  });
+
+  it("merges metadata from different Rownd identities deterministically", () => {
+    const primaryMetadata = { shared: "primary" };
+    const result = combineLinkedMetadata({
+      primaryUserId: "primary",
+      primaryMetadata,
+      linkedMetadata: [
+        {
+          userId: "google",
+          metadata: {
+            original_rownd_user: {
+              state: "enabled",
+              auth_level: "verified",
+              data: { user_id: "rownd-a" },
+              verified_data: {},
+            },
+          },
+        },
+        {
+          userId: "apple",
+          metadata: {
+            original_rownd_user: {
+              state: "enabled",
+              auth_level: "verified",
+              data: { user_id: "rownd-b" },
+              verified_data: {},
+            },
+          },
+        },
+      ],
+    });
+
+    expect(result.combinedMetadata).toEqual({
+      ...primaryMetadata,
+      original_rownd_user: {
+        state: "enabled",
+        auth_level: "verified",
+        data: { user_id: "rownd-b" },
+        verified_data: {},
+      },
+    });
+  });
+
+  it("prioritizes mapped Rownd metadata before other linked metadata", () => {
+    const canonicalRowndUser = {
+      state: "enabled",
+      auth_level: "verified",
+      data: { user_id: "rownd-canonical", first_name: "Canonical" },
+      verified_data: {},
+    };
+    const result = combineLinkedMetadata({
+      primaryUserId: "primary",
+      canonicalRowndUserId: "rownd-canonical",
+      primaryMetadata: {},
+      linkedMetadata: [
+        {
+          userId: "stale-recipe-user",
+          metadata: {
+            stale_only: true,
+            original_rownd_user: {
+              state: "enabled",
+              auth_level: "verified",
+              data: { user_id: "rownd-stale" },
+              verified_data: {},
+            },
+          },
+        },
+        {
+          userId: "canonical-recipe-user",
+          metadata: {
+            canonical_only: true,
+            original_rownd_user: canonicalRowndUser,
+          },
+        },
+      ],
+    });
+
+    expect(result.combinedMetadata.original_rownd_user).toEqual(
+      canonicalRowndUser,
+    );
+    expect(result.combinedMetadata).toMatchObject({
+      canonical_only: true,
+      stale_only: true,
+    });
+    expect(result.rowndMetadataSourceUserId).toBe("canonical-recipe-user");
+  });
+
+  it("merges linked metadata when no metadata matches the mapped Rownd ID", () => {
+    const result = combineLinkedMetadata({
+      primaryUserId: "primary",
+      canonicalRowndUserId: "rownd-canonical",
+      primaryMetadata: {},
+      linkedMetadata: [
+        {
+          userId: "stale-recipe-user",
+          metadata: {
+            original_rownd_user: {
+              state: "enabled",
+              auth_level: "verified",
+              data: { user_id: "rownd-stale" },
+              verified_data: {},
+            },
+          },
+        },
+      ],
+    });
+
+    expect(result.combinedMetadata.original_rownd_user?.data.user_id).toBe(
+      "rownd-stale",
+    );
+  });
+});

@@ -35,6 +35,10 @@ import {
   type RowndCompatUserResponse,
   type RowndMetadata,
   type RowndPendingVerification,
+  getCombinedUserMetadata,
+  getRawUserMetadata,
+  inspectLinkedUserMetadata,
+  updatePrimaryUserMetadata,
 } from "./rownd-compatibility";
 import {
   assertAllowedBypassRedirectPath,
@@ -576,7 +580,10 @@ export async function recordRowndAppVariantForUser(
 
   assertRowndAppVariantIsConfigured(appVariantId);
 
-  const metadata = await getUserMetadata(userId);
+  const inspection = await inspectLinkedUserMetadata(userId);
+  const metadataUserId =
+    inspection.rowndMetadataSourceUserId ?? inspection.primaryUserId;
+  const metadata = await getRawUserMetadata(metadataUserId);
   const originalRowndUser: JsonRecord = isJsonRecord(metadata.original_rownd_user)
     ? metadata.original_rownd_user
     : {};
@@ -589,8 +596,7 @@ export async function recordRowndAppVariantForUser(
     return;
   }
 
-  await UserMetadata.updateUserMetadata(userId, {
-    ...metadata,
+  await UserMetadata.updateUserMetadata(metadataUserId, {
     original_rownd_user: {
       ...originalRowndUser,
       data: isJsonRecord(originalRowndUser.data)
@@ -727,8 +733,7 @@ export async function getUserMetadata(
   userId: string,
   userContext?: Record<string, any>,
 ): Promise<RowndMetadata> {
-  const metadata = await UserMetadata.getUserMetadata(userId, userContext);
-  return (metadata.metadata || {}) as RowndMetadata;
+  return getCombinedUserMetadata(userId, userContext);
 }
 
 function getPendingVerifications(
@@ -976,14 +981,8 @@ export async function updateUserData(
   inputData: JsonRecord,
   tenantId: string = PUBLIC_TENANT_ID,
 ) {
-  const metadata = await getUserMetadata(userId);
-  const updatedMetadata: JSONObject = {
-    ...metadata,
-    ...inputData,
-  };
-
-  await UserMetadata.updateUserMetadata(userId, updatedMetadata);
-  return getUserById(userId, tenantId);
+  const { primaryUserId } = await updatePrimaryUserMetadata(userId, inputData);
+  return getUserById(primaryUserId, tenantId);
 }
 
 export function addPendingEmailVerificationMarker(input: {
@@ -1035,7 +1034,7 @@ export async function resolvePendingEmailVerificationToken(input: {
     return { status: "INVALID_PENDING" } as const;
   }
 
-  const metadata = await getUserMetadata(sessionUserId, input.userContext);
+  const metadata = await getRawUserMetadata(sessionUserId, input.userContext);
   const pendingVerification = getPendingVerifications(metadata).find(
     (verification) =>
       verification.id === input.queryPendingVerificationId &&
@@ -1069,11 +1068,11 @@ export async function startPendingEmailVerification(input: {
   initiatingSessionHandle: string;
   userContext?: JsonRecord;
 }) {
-  const metadata = await getUserMetadata(input.userId);
   const user = await SuperTokens.getUser(input.userId, input.userContext);
   if (!user) {
     throw new RowndPluginError("ROWND_USER_NOT_FOUND");
   }
+  const metadata = await getRawUserMetadata(user.id, input.userContext);
 
   const normalizedEmail = normalizeEmail(input.email);
   if (!normalizedEmail) {
@@ -1163,7 +1162,7 @@ export async function startPendingEmailVerification(input: {
         ),
       };
     if (pendingEmailVerifications.length > 0 || currentPasswordlessMethod) {
-      await UserMetadata.updateUserMetadata(input.userId, updatedMetadata);
+      await updatePrimaryUserMetadata(input.userId, updatedMetadata);
     }
 
     return getUserById(input.userId, input.tenantId);
@@ -1197,7 +1196,7 @@ export async function startPendingEmailVerification(input: {
     status: "PENDING",
   };
 
-  await UserMetadata.updateUserMetadata(input.userId, {
+  await updatePrimaryUserMetadata(input.userId, {
     ...metadata,
     rownd_pending_verification: [
       ...pendingVerifications.filter(
@@ -1291,7 +1290,7 @@ export async function completePendingEmailVerification(input: {
       "email change session is no longer active; start the email change again",
     );
   }
-  const metadata = await getUserMetadata(userId);
+  const metadata = await getRawUserMetadata(userId, input.userContext);
   const pendingVerifications = getPendingVerifications(metadata);
   const normalizedEmail = normalizeEmail(input.email);
   const pendingVerification = pendingVerifications.find(
@@ -1449,7 +1448,10 @@ export async function completePendingEmailVerification(input: {
       undefined,
       input.userContext,
     );
-    const committingMetadata = await getUserMetadata(userId);
+    const committingMetadata = await getRawUserMetadata(
+      userId,
+      input.userContext,
+    );
     const committingVerification = getPendingVerifications(
       committingMetadata,
     ).find((verification) => verification.field === "email");
@@ -1542,7 +1544,7 @@ export async function completePendingEmailVerification(input: {
       metadata.original_rownd_user,
     );
 
-    await UserMetadata.updateUserMetadata(userId, updatedMetadata);
+    await updatePrimaryUserMetadata(userId, updatedMetadata, input.userContext);
     completionPhase = "COMPLETED";
 
     const rollbackOnSessionReplacementFailure = async () => {
@@ -1554,7 +1556,7 @@ export async function completePendingEmailVerification(input: {
           normalizedEmail,
           input.userContext,
         ),
-        () => UserMetadata.updateUserMetadata(userId, {
+        () => updatePrimaryUserMetadata(userId, {
           ...targetMetadata,
           rownd_pending_verification: getPendingVerifications(
             targetMetadata,
@@ -1850,8 +1852,8 @@ async function removePendingEmailVerification(
   pendingVerificationId: string,
   userContext?: Record<string, any>,
 ) {
-  const metadata = await getUserMetadata(userId, userContext);
-  await UserMetadata.updateUserMetadata(
+  const metadata = await getRawUserMetadata(userId, userContext);
+  await updatePrimaryUserMetadata(
     userId,
     {
       rownd_pending_verification: getPendingVerifications(metadata).filter(
@@ -1868,8 +1870,8 @@ async function markPendingEmailVerificationStatus(
   status: NonNullable<RowndPendingVerification["status"]>,
   userContext?: Record<string, any>,
 ) {
-  const metadata = await getUserMetadata(userId, userContext);
-  await UserMetadata.updateUserMetadata(
+  const metadata = await getRawUserMetadata(userId, userContext);
+  await updatePrimaryUserMetadata(
     userId,
     {
       rownd_pending_verification: getPendingVerifications(metadata).map(
@@ -1965,16 +1967,11 @@ export async function updateUserMetadata(
   userId: string,
   inputMeta: JsonRecord,
 ) {
-  const metadata = await getUserMetadata(userId);
-  const updatedMetadata: JSONObject = {
-    ...metadata,
-    ...inputMeta,
-  };
-
-  await UserMetadata.updateUserMetadata(userId, updatedMetadata);
+  const { primaryUserId, metadata: updatedMetadata } =
+    await updatePrimaryUserMetadata(userId, inputMeta);
 
   return {
-    id: userId,
+    id: primaryUserId,
     meta: Object.fromEntries(
       Object.entries(updatedMetadata).filter(
         ([key]) => !isInternalMetadataField(key),
