@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 0.1.12
+
+### Patch Changes
+
+- Handle concurrent Rownd migrations
+
 ## 0.1.11
 
 ### Patch Changes
