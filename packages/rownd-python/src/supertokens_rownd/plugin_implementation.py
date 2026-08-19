@@ -763,6 +763,7 @@ async def handle_migrate(
                 "status": "ERROR",
                 "message": str(err) if isinstance(err, RowndPluginError) else "Migration failed",
             },
+            400,
         )
 
 
@@ -2189,9 +2190,119 @@ async def create_rownd_user_id_mapping(
 
 
 async def run_compensations(compensations: List[Callable[[], Awaitable[None]]]) -> None:
+    errors: List[Exception] = []
     for compensate in reversed(compensations):
-        with suppress(Exception):
+        try:
             await compensate()
+        except Exception as error:
+            errors.append(error)
+    if errors:
+        raise RuntimeError("Migration rollback failed") from errors[0]
+
+
+async def link_verified_same_email_split_users(
+    inspections: List[
+        Tuple[JsonDict, List[Tuple[User, LoginMethod]], Optional[Tuple[User, LoginMethod]]]
+    ],
+    external_user_id: str,
+    tenant_id: str,
+    user_context: UserContext,
+) -> Callable[[], Awaitable[None]]:
+    if len(inspections) != 2:
+        raise RuntimeError("Migrated login methods belong to different SuperTokens users")
+
+    by_recipe = {
+        method.get("recipeId"): (method, owners, match) for method, owners, match in inspections
+    }
+    if set(by_recipe) != {"thirdparty", "passwordless"}:
+        raise RuntimeError("Migrated login methods belong to different SuperTokens users")
+
+    thirdparty_import, thirdparty_owners, thirdparty_match = by_recipe["thirdparty"]
+    passwordless_import, passwordless_owners, passwordless_match = by_recipe["passwordless"]
+    if (
+        len(thirdparty_owners) != 1
+        or len(passwordless_owners) != 1
+        or thirdparty_match is None
+        or passwordless_match is None
+    ):
+        raise RuntimeError("Migrated login methods belong to different SuperTokens users")
+
+    thirdparty_user, thirdparty_method = thirdparty_match
+    passwordless_user, passwordless_method = passwordless_match
+    imported_email = optional_string(passwordless_import.get("email"))
+    method_emails = [thirdparty_method.email, passwordless_method.email]
+    if (
+        not imported_email
+        or passwordless_import.get("isVerified") is not True
+        or not all(isinstance(email, str) and email for email in method_emails)
+        or not thirdparty_method.verified
+        or not passwordless_method.verified
+        or any(
+            cast(str, email).lower().endswith("@" + SUPERTOKENS_FAKE_EMAIL_DOMAIN)
+            for email in method_emails
+        )
+        or len({normalize_email(cast(str, email)) for email in [*method_emails, imported_email]})
+        != 1
+        or not thirdparty_user.is_primary_user
+        or passwordless_user.is_primary_user
+        or len(thirdparty_user.login_methods) != 1
+        or len(passwordless_user.login_methods) != 1
+        or set(thirdparty_method.tenant_ids) != {tenant_id}
+        or set(passwordless_method.tenant_ids) != {tenant_id}
+    ):
+        raise RuntimeError("Migrated login methods belong to different SuperTokens users")
+
+    thirdparty_user_id = await resolve_supertokens_user_id(thirdparty_user.id, user_context)
+    passwordless_user_id = await resolve_supertokens_user_id(passwordless_user.id, user_context)
+    if thirdparty_user_id == passwordless_user_id:
+        raise RuntimeError("Migrated login methods belong to different SuperTokens users")
+
+    external_mapping = await get_user_id_mapping(external_user_id, "EXTERNAL", user_context)
+    owner_ids = {thirdparty_user_id, passwordless_user_id}
+    if isinstance(external_mapping, GetUserIdMappingOkResult):
+        if external_mapping.supertokens_user_id != thirdparty_user_id:
+            raise RuntimeError("The Rownd user ID is already mapped to another SuperTokens user")
+
+    for owner_id in owner_ids:
+        owner_mapping = await get_user_id_mapping(owner_id, "SUPERTOKENS", user_context)
+        if (
+            isinstance(owner_mapping, GetUserIdMappingOkResult)
+            and owner_mapping.external_user_id != external_user_id
+        ):
+            raise RuntimeError("A migrated login method is mapped to another external user ID")
+
+    losing_recipe_user_id = passwordless_method.recipe_user_id
+
+    async def restore_split_user() -> None:
+        detached = await accountlinking_asyncio.unlink_account(losing_recipe_user_id, user_context)
+        if (
+            getattr(detached, "status", None) != "OK"
+            or not getattr(detached, "was_linked", False)
+            or getattr(detached, "was_recipe_user_deleted", True)
+        ):
+            raise RuntimeError("Failed to restore split migrated login method")
+        restored = await get_user(losing_recipe_user_id.get_as_string(), user_context)
+        if restored is None or restored.is_primary_user or restored.id == thirdparty_user_id:
+            raise RuntimeError("Restored migrated login method has an invalid owner")
+
+    try:
+        link_result = await accountlinking_asyncio.link_accounts(
+            losing_recipe_user_id, thirdparty_user_id, user_context
+        )
+    except Exception:
+        current = await get_user(losing_recipe_user_id.get_as_string(), user_context)
+        if current is not None and (
+            await resolve_supertokens_user_id(current.id, user_context)
+        ) == thirdparty_user_id:
+            await restore_split_user()
+        raise
+    if not isinstance(link_result, LinkAccountsOkResult):
+        raise RuntimeError(
+            "Failed to link split migrated login method: %s"
+            % getattr(link_result, "status", "ERROR")
+        )
+
+    return restore_split_user
 
 
 async def reconcile_rownd_user_with_existing_login_methods(
@@ -2211,37 +2322,101 @@ async def reconcile_rownd_user_with_existing_login_methods(
     matches = [match for _, _, match in inspections if match is not None]
     if not matches:
         return False
-
-    target_user, target_login_method = matches[0]
-    target_supertokens_user_id = await resolve_supertokens_user_id(
-        target_user.id,
-        user_context,
-    )
-    owner_ids = [
-        await resolve_supertokens_user_id(owner.id, user_context)
-        for _, owners, _ in inspections
-        for owner, _ in owners
-    ]
-    if any(owner_id != target_supertokens_user_id for owner_id in owner_ids):
-        raise RuntimeError("A migrated login method belongs to a different SuperTokens user")
-    unsupported = next(
-        (
-            method
-            for method, _, match in inspections
-            if match is None and method.get("recipeId") == "emailpassword"
-        ),
-        None,
-    )
-    if unsupported is not None:
-        raise RuntimeError("Cannot reconcile unsupported login method: emailpassword")
-
-    mapping_exists = target_supertokens_user_id == external_user_id or (
-        await assert_rownd_user_id_can_be_mapped(
-            target_supertokens_user_id, external_user_id, user_context
-        )
-    )
     compensations: List[Callable[[], Awaitable[None]]] = []
     try:
+        target_user, target_login_method = matches[0]
+        target_supertokens_user_id = await resolve_supertokens_user_id(
+            target_user.id,
+            user_context,
+        )
+        owner_ids = [
+            await resolve_supertokens_user_id(owner.id, user_context)
+            for _, owners, _ in inspections
+            for owner, _ in owners
+        ]
+        if any(owner_id != target_supertokens_user_id for owner_id in owner_ids):
+            compensations.append(
+                await link_verified_same_email_split_users(
+                    inspections, external_user_id, tenant_id, user_context
+                )
+            )
+            inspections = [
+                await inspect_import_method(method, tenant_id, user_context)
+                for method in method_imports
+            ]
+            matches = [match for _, _, match in inspections if match is not None]
+            if not matches:
+                raise RuntimeError("Merged migrated login methods could not be resolved")
+            target_user, target_login_method = matches[0]
+            target_supertokens_user_id = await resolve_supertokens_user_id(
+                target_user.id, user_context
+            )
+            owner_ids = [
+                await resolve_supertokens_user_id(owner.id, user_context)
+                for _, owners, _ in inspections
+                for owner, _ in owners
+            ]
+            if any(owner_id != target_supertokens_user_id for owner_id in owner_ids):
+                raise RuntimeError("Merged login methods still belong to different users")
+            linked_by_recipe = {
+                method.get("recipeId"): (method, owners, match)
+                for method, owners, match in inspections
+            }
+            linked_thirdparty = linked_by_recipe.get("thirdparty")
+            linked_passwordless = linked_by_recipe.get("passwordless")
+            if linked_thirdparty is None or linked_passwordless is None:
+                raise RuntimeError("Merged login methods changed during reconciliation")
+            _, thirdparty_owners, thirdparty_match = linked_thirdparty
+            passwordless_import, passwordless_owners, passwordless_match = linked_passwordless
+            if thirdparty_match is None or passwordless_match is None:
+                raise RuntimeError("Merged login methods changed during reconciliation")
+            linked_user, thirdparty_method = thirdparty_match
+            passwordless_user, passwordless_method = passwordless_match
+            linked_email = optional_string(passwordless_import.get("email"))
+            linked_emails = [thirdparty_method.email, passwordless_method.email]
+            if (
+                len(thirdparty_owners) != 1
+                or len(passwordless_owners) != 1
+                or linked_user.id != passwordless_user.id
+                or not linked_user.is_primary_user
+                or len(linked_user.login_methods) != 2
+                or not linked_email
+                or passwordless_import.get("isVerified") is not True
+                or not thirdparty_method.verified
+                or not passwordless_method.verified
+                or not all(isinstance(email, str) and email for email in linked_emails)
+                or any(
+                    cast(str, email).lower().endswith("@" + SUPERTOKENS_FAKE_EMAIL_DOMAIN)
+                    for email in linked_emails
+                )
+                or len(
+                    {
+                        normalize_email(cast(str, email))
+                        for email in [*linked_emails, linked_email]
+                    }
+                )
+                != 1
+                or set(thirdparty_method.tenant_ids) != {tenant_id}
+                or set(passwordless_method.tenant_ids) != {tenant_id}
+            ):
+                raise RuntimeError("Merged login methods changed during reconciliation")
+
+        unsupported = next(
+            (
+                method
+                for method, _, match in inspections
+                if match is None and method.get("recipeId") == "emailpassword"
+            ),
+            None,
+        )
+        if unsupported is not None:
+            raise RuntimeError("Cannot reconcile unsupported login method: emailpassword")
+
+        mapping_exists = target_supertokens_user_id == external_user_id or (
+            await assert_rownd_user_id_can_be_mapped(
+                target_supertokens_user_id, external_user_id, user_context
+            )
+        )
         primary_user_id = await ensure_primary_user(
             target_user,
             target_login_method,

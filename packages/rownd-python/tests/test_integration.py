@@ -60,6 +60,39 @@ def migrate_rownd_user(client, rownd_client: MockRowndClient, user_id: str, user
     )
 
 
+async def create_primary_thirdparty_and_standalone_passwordless(
+    email: str,
+    google_id: str,
+    thirdparty_email: Optional[str] = None,
+    thirdparty_verified: bool = True,
+):
+    reconciliation_context = {"rowndDisableAutomaticAccountLinking": True}
+    thirdparty = cast(
+        Any,
+        await thirdparty_asyncio.manually_create_or_update_user(
+            tenant_id="public",
+            third_party_id="google",
+            third_party_user_id=google_id,
+            email=thirdparty_email or email,
+            is_verified=thirdparty_verified,
+            user_context=reconciliation_context,
+        ),
+    )
+    thirdparty_primary = await accountlinking_asyncio.create_primary_user(
+        thirdparty.recipe_user_id, {}
+    )
+    passwordless = await passwordless_asyncio.signinup(
+        "public", email, None, None, reconciliation_context
+    )
+    assert getattr(thirdparty_primary, "status", None) == "OK"
+    thirdparty_user = await get_user(thirdparty.recipe_user_id.get_as_string())
+    passwordless_user = await get_user(passwordless.recipe_user_id.get_as_string())
+    assert thirdparty_user is not None and thirdparty_user.is_primary_user
+    assert passwordless_user is not None and not passwordless_user.is_primary_user
+    assert thirdparty_user.id != passwordless_user.id
+    return thirdparty, passwordless
+
+
 async def start_native_email_change(client, current_email: str, target_email: str):
     sign_in = await passwordless_asyncio.signinup(
         "public", current_email, None, None, {}
@@ -120,7 +153,7 @@ async def test_migrate_missing_auth_header_returns_error(core_url: str, rownd_cl
 
     res = client.post("/auth/plugin/rownd/migrate", headers=session_headers())
 
-    assert res.status_code == 200
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Missing authorization header"}
 
 
@@ -135,7 +168,7 @@ async def test_migrate_rownd_validation_error_returns_error(
         headers={"Authorization": "Bearer bad-token", **session_headers()},
     )
 
-    assert res.status_code == 200
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Invalid token"}
 
 
@@ -149,7 +182,7 @@ async def test_migrate_rownd_fetch_error_returns_error(core_url: str, rownd_clie
         headers={"Authorization": "Bearer rownd-token", **session_headers()},
     )
 
-    assert res.status_code == 200
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
 
 
@@ -193,7 +226,7 @@ async def test_migrate_bulk_import_500_returns_error(
         },
     )
 
-    assert res.status_code == 200
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
 
 
@@ -219,7 +252,7 @@ async def test_migrate_bulk_import_malformed_json_returns_error(
         },
     )
 
-    assert res.status_code == 200
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
 
 
@@ -245,7 +278,7 @@ async def test_migrate_bulk_import_missing_user_returns_error(
         },
     )
 
-    assert res.status_code == 200
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
 
 
@@ -386,6 +419,171 @@ async def test_migrate_reconciles_unverified_rownd_email_with_existing_passwordl
     assert len(google_owners) == 1
 
 
+async def test_migration_merges_verified_same_email_singleton_primaries(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "migration-split-primary"
+    google_id = "migration-split-primary-google"
+    email = "migration-split-primary@example.com"
+    thirdparty, passwordless = await create_primary_thirdparty_and_standalone_passwordless(
+        email, google_id
+    )
+    passwordless_id = passwordless.recipe_user_id.get_as_string()
+    mapping = await create_user_id_mapping(
+        thirdparty.user.id, rownd_user_id, force=False, user_context={}
+    )
+    assert mapping.__class__.__name__ == "CreateUserIdMappingOkResult"
+
+    res = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "data": {
+                "user_id": rownd_user_id,
+                "google_id": google_id,
+                "email": email,
+            },
+            "verified_data": {"google_id": True, "email": True},
+        },
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {"status": "OK"}
+    assert res.headers.get("st-access-token") is not None
+    merged = await get_user(rownd_user_id)
+    assert merged is not None
+    assert merged.id == rownd_user_id
+    assert merged.is_primary_user is True
+    assert {method.recipe_user_id.get_as_string() for method in merged.login_methods} == {
+        rownd_user_id,
+        passwordless_id,
+    }
+    assert all(method.verified for method in merged.login_methods)
+    assert (
+        len(
+            await supertokens_list_users_by_account_info(
+                "public",
+                AccountInfoInput(third_party=ThirdPartyInfo(google_id, "google")),
+                False,
+                {},
+            )
+        )
+        == 1
+    )
+    email_owners = await supertokens_list_users_by_account_info(
+        "public", AccountInfoInput(email=email), False, {}
+    )
+    assert {owner.id for owner in email_owners} == {rownd_user_id}
+    metadata = await usermetadata_asyncio.get_user_metadata(thirdparty.user.id)
+    assert metadata.metadata["rownd_migration_complete"] is True
+
+
+async def test_migration_restores_split_user_when_finalization_fails(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "migration-split-primary-rollback"
+    google_id = "migration-split-primary-rollback-google"
+    email = "migration-split-primary-rollback@example.com"
+    thirdparty, passwordless = await create_primary_thirdparty_and_standalone_passwordless(
+        email, google_id
+    )
+    thirdparty_id = thirdparty.recipe_user_id.get_as_string()
+    passwordless_id = passwordless.recipe_user_id.get_as_string()
+    mapping = await create_user_id_mapping(
+        thirdparty.user.id, rownd_user_id, force=False, user_context={}
+    )
+    assert mapping.__class__.__name__ == "CreateUserIdMappingOkResult"
+
+    async def fail_finalization(*_args: Any, **_kwargs: Any):
+        raise RuntimeError("metadata finalization failed")
+
+    monkeypatch.setattr(impl.usermetadata_asyncio, "update_user_metadata", fail_finalization)
+    res = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "data": {
+                "user_id": rownd_user_id,
+                "google_id": google_id,
+                "email": email,
+            },
+            "verified_data": {"google_id": True, "email": True},
+        },
+    )
+
+    assert res.status_code == 400
+    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert res.headers.get("st-access-token") is None
+    thirdparty_after = await get_user(thirdparty_id)
+    passwordless_after = await get_user(passwordless_id)
+    assert thirdparty_after is not None
+    assert passwordless_after is not None
+    assert thirdparty_after.id == rownd_user_id
+    assert passwordless_after.id == passwordless.user.id
+    assert thirdparty_after.id != passwordless_after.id
+    assert thirdparty_after.is_primary_user is True
+    assert passwordless_after.is_primary_user is False
+    assert len(thirdparty_after.login_methods) == 1
+    assert len(passwordless_after.login_methods) == 1
+
+
+@pytest.mark.parametrize(
+    ("thirdparty_email", "thirdparty_verified"),
+    [
+        ("migration-split-rejected-other@example.com", True),
+        (None, False),
+    ],
+    ids=["different-email", "unverified-thirdparty"],
+)
+async def test_migration_rejects_unsafe_split_user_linking(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    thirdparty_email: Optional[str],
+    thirdparty_verified: bool,
+):
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "migration-split-rejected-%s" % (
+        "email" if thirdparty_email else "verification"
+    )
+    google_id = rownd_user_id + "-google"
+    email = rownd_user_id + "@example.com"
+    thirdparty, passwordless = await create_primary_thirdparty_and_standalone_passwordless(
+        email, google_id, thirdparty_email, thirdparty_verified
+    )
+    mapping = await create_user_id_mapping(
+        thirdparty.user.id, rownd_user_id, force=False, user_context={}
+    )
+    assert mapping.__class__.__name__ == "CreateUserIdMappingOkResult"
+
+    res = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "data": {
+                "user_id": rownd_user_id,
+                "google_id": google_id,
+                "email": email,
+            },
+            "verified_data": {"google_id": True, "email": True},
+        },
+    )
+
+    assert res.status_code == 400
+    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    thirdparty_after = await get_user(thirdparty.recipe_user_id.get_as_string())
+    passwordless_after = await get_user(passwordless.recipe_user_id.get_as_string())
+    assert thirdparty_after is not None and thirdparty_after.is_primary_user
+    assert passwordless_after is not None and not passwordless_after.is_primary_user
+    assert thirdparty_after.id != passwordless_after.id
+
+
 async def test_migration_preflights_later_collision_before_creating_phone_method(
     core_url: str, rownd_client: MockRowndClient
 ):
@@ -420,6 +618,7 @@ async def test_migration_preflights_later_collision_before_creating_phone_method
         },
     )
 
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
     unchanged_provider = await get_user(provider.user.id)
     assert unchanged_provider is not None
@@ -474,6 +673,7 @@ async def test_migration_finalization_failure_removes_created_method_and_mapping
         },
     )
 
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
     compensated_provider = await get_user(provider.user.id)
     assert compensated_provider is not None
@@ -527,6 +727,7 @@ async def test_migrate_does_not_force_map_user_referenced_by_metadata(
         },
     )
 
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
     user = await get_user(existing.user.id)
     assert user is not None
@@ -578,6 +779,7 @@ async def test_migrate_does_not_modify_user_mapped_to_another_external_id(
         },
     )
 
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
     unchanged_user = await get_user(existing.user.id)
     assert unchanged_user is not None
@@ -670,6 +872,7 @@ async def test_migrate_records_error_telemetry(core_url: str, rownd_client: Mock
         headers={"Authorization": "Bearer rownd-token", **session_headers()},
     )
 
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
     assert telemetry.events
     assert telemetry.events[-1]["outcome"] == "error"
@@ -791,7 +994,7 @@ async def test_legacy_session_migration_missing_auth_header_returns_error(
 
     res = client.post("/auth/plugin/migrate-session", headers=session_headers())
 
-    assert res.status_code == 200
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Missing authorization header"}
 
 
@@ -806,7 +1009,7 @@ async def test_legacy_session_migration_validation_error_returns_error(
         headers={"Authorization": "Bearer bad-token", **session_headers()},
     )
 
-    assert res.status_code == 200
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Invalid token"}
 
 
@@ -822,7 +1025,7 @@ async def test_legacy_session_migration_fetch_error_returns_error(
         headers={"Authorization": "Bearer rownd-token", **session_headers()},
     )
 
-    assert res.status_code == 200
+    assert res.status_code == 400
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
 
 
