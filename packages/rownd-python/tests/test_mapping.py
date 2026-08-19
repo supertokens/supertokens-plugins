@@ -2,6 +2,12 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from supertokens_python.interfaces import GetUserIdMappingOkResult
+from supertokens_python.recipe.accountlinking.interfaces import (
+    CreatePrimaryUserRecipeUserIdAlreadyLinkedError,
+)
+from supertokens_python.recipe.thirdparty.interfaces import ManuallyCreateOrUpdateUserOkResult
+from supertokens_python.types import RecipeUserId
 
 import supertokens_rownd.plugin_implementation as impl
 from supertokens_rownd.plugin_implementation import (
@@ -648,6 +654,148 @@ def test_clear_supertokens_core_call_cache_handles_known_cache_keys():
         },
         "custom": "value",
     }
+
+
+async def test_existing_thirdparty_owner_is_compared_in_internal_id_space(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    recipe_user_id = RecipeUserId("thirdparty-recipe-user")
+    user_context = {"_default": {"coreCallCache": {"mapping": "UNKNOWN_MAPPING_ERROR"}}}
+
+    async def create_or_update(**_kwargs: Any):
+        return ManuallyCreateOrUpdateUserOkResult(
+            cast(Any, SimpleNamespace(id="rownd-external-id")), recipe_user_id, False
+        )
+
+    async def get_mapping(user_id: str, mapping_type: str, context: dict):
+        assert mapping_type == "EXTERNAL"
+        assert context["_default"]["coreCallCache"] == {}
+        if user_id == "rownd-external-id":
+            return GetUserIdMappingOkResult("internal-primary-id", user_id)
+        return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
+
+    monkeypatch.setattr(
+        impl.thirdparty_asyncio, "manually_create_or_update_user", create_or_update
+    )
+    monkeypatch.setattr(impl, "get_user_id_mapping", get_mapping)
+
+    result = await impl.create_missing_login_method(
+        {
+            "recipeId": "thirdparty",
+            "thirdPartyId": "google",
+            "thirdPartyUserId": "google-user-id",
+            "email": "google-user@example.com",
+        },
+        "public",
+        "internal-primary-id",
+        cast(Any, user_context),
+    )
+
+    assert result == (recipe_user_id, False)
+
+
+async def test_ensure_primary_user_rejects_concurrent_link_to_foreign_primary(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    recipe_user_id = RecipeUserId("target-recipe-user")
+    user_context = {"_default": {"coreCallCache": {"mapping": "stale"}}}
+
+    async def create_primary_user(_recipe_user_id: RecipeUserId, _context: dict):
+        return CreatePrimaryUserRecipeUserIdAlreadyLinkedError("foreign-external-id")
+
+    async def get_mapping(user_id: str, mapping_type: str, context: dict):
+        assert mapping_type == "EXTERNAL"
+        assert context["_default"]["coreCallCache"] == {}
+        assert user_id == "foreign-external-id"
+        return GetUserIdMappingOkResult("foreign-internal-id", user_id)
+
+    monkeypatch.setattr(impl.accountlinking_asyncio, "create_primary_user", create_primary_user)
+    monkeypatch.setattr(impl, "get_user_id_mapping", get_mapping)
+
+    with pytest.raises(RuntimeError, match="different primary user"):
+        await impl.ensure_primary_user(
+            cast(Any, SimpleNamespace(is_primary_user=False)),
+            cast(Any, SimpleNamespace(recipe_user_id=recipe_user_id)),
+            "expected-internal-id",
+            cast(Any, user_context),
+        )
+
+
+async def test_mapping_conflict_parser_error_requires_fresh_normalized_match(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    user_context = {"_default": {"coreCallCache": {"mapping": "stale"}}}
+    mapping_lookups: list[str] = []
+
+    async def create_mapping(*_args: Any, **_kwargs: Any):
+        raise KeyError("does_external_user_id_exist")
+
+    async def get_mapping(user_id: str, mapping_type: str, context: dict):
+        assert mapping_type == "EXTERNAL"
+        assert context["_default"]["coreCallCache"] == {}
+        mapping_lookups.append(user_id)
+        if user_id == "rownd-user-id":
+            return GetUserIdMappingOkResult("externalized-primary-id", user_id)
+        return GetUserIdMappingOkResult("expected-internal-id", user_id)
+
+    monkeypatch.setattr(impl, "create_user_id_mapping", create_mapping)
+    monkeypatch.setattr(impl, "get_user_id_mapping", get_mapping)
+
+    created = await impl.create_rownd_user_id_mapping(
+        "expected-internal-id", "rownd-user-id", cast(Any, user_context)
+    )
+
+    assert created is False
+    assert mapping_lookups == ["rownd-user-id", "externalized-primary-id"]
+
+
+async def test_mapping_creation_does_not_hide_unrelated_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def create_mapping(*_args: Any, **_kwargs: Any):
+        raise RuntimeError("network failed")
+
+    monkeypatch.setattr(impl, "create_user_id_mapping", create_mapping)
+
+    with pytest.raises(RuntimeError, match="network failed"):
+        await impl.create_rownd_user_id_mapping(
+            "expected-internal-id", "rownd-user-id", {}
+        )
+
+
+async def test_tenant_association_failure_does_not_disassociate_published_state(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    first_recipe_user_id = RecipeUserId("first-recipe-user")
+    second_recipe_user_id = RecipeUserId("second-recipe-user")
+    association_calls: list[str] = []
+    disassociation_calls: list[str] = []
+
+    async def associate(_tenant_id: str, recipe_user_id: RecipeUserId, _context: dict):
+        association_calls.append(recipe_user_id.get_as_string())
+        if recipe_user_id.get_as_string() == first_recipe_user_id.get_as_string():
+            return SimpleNamespace(status="OK", was_already_associated=False)
+        return SimpleNamespace(status="UNKNOWN_USER_ID_ERROR")
+
+    async def disassociate(_tenant_id: str, recipe_user_id: RecipeUserId, _context: dict):
+        disassociation_calls.append(recipe_user_id.get_as_string())
+
+    monkeypatch.setattr(impl.multitenancy_asyncio, "associate_user_to_tenant", associate)
+    monkeypatch.setattr(impl.multitenancy_asyncio, "disassociate_user_from_tenant", disassociate)
+    user = SimpleNamespace(
+        login_methods=[
+            SimpleNamespace(recipe_user_id=first_recipe_user_id, tenant_ids=["public"]),
+            SimpleNamespace(recipe_user_id=second_recipe_user_id, tenant_ids=["public"]),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="UNKNOWN_USER_ID_ERROR"):
+        await impl.associate_user_login_methods_to_tenant(
+            cast(Any, user), "tenant-a", {}
+        )
+
+    assert association_calls == ["first-recipe-user", "second-recipe-user"]
+    assert disassociation_calls == []
 
 
 @pytest.mark.parametrize(

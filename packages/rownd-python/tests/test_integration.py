@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -564,7 +565,7 @@ async def test_migrate_does_not_link_provider_to_mismatched_verified_email(
     )
 
 
-async def test_migration_finalization_failure_unlinks_existing_email_owner(
+async def test_migration_finalization_failure_keeps_linked_email_owner_and_mapping(
     core_url: str,
     rownd_client: MockRowndClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -582,7 +583,7 @@ async def test_migration_finalization_failure_unlinks_existing_email_owner(
         user_context={},
     )
     provider = cast(Any, provider)
-    passwordless = await passwordless_asyncio.signinup("public", email, None, None, {})
+    await passwordless_asyncio.signinup("public", email, None, None, {})
 
     async def fail_metadata_finalization(*_args: Any, **_kwargs: Any):
         raise RuntimeError("metadata finalization failed")
@@ -605,16 +606,16 @@ async def test_migration_finalization_failure_unlinks_existing_email_owner(
     )
 
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
-    compensated_provider = await get_user(provider.user.id)
-    compensated_passwordless = await get_user(passwordless.user.id)
-    assert compensated_provider is not None
-    assert compensated_passwordless is not None
-    assert len(compensated_provider.login_methods) == 1
-    assert len(compensated_passwordless.login_methods) == 1
-    assert compensated_passwordless.login_methods[0].email == email
-    assert (await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})).__class__.__name__ == (
-        "UnknownMappingError"
-    )
+    retained_user = await get_user(rownd_user_id)
+    assert retained_user is not None
+    assert len(retained_user.login_methods) == 2
+    assert {method.recipe_id for method in retained_user.login_methods} == {
+        "thirdparty",
+        "passwordless",
+    }
+    mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    assert mapping.supertokens_user_id == provider.user.id
 
 
 async def test_migration_preflights_later_collision_before_creating_phone_method(
@@ -666,7 +667,7 @@ async def test_migration_preflights_later_collision_before_creating_phone_method
     )
 
 
-async def test_migration_finalization_failure_removes_created_method_and_mapping(
+async def test_migration_finalization_failure_keeps_created_method_and_mapping(
     core_url: str,
     rownd_client: MockRowndClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -706,20 +707,16 @@ async def test_migration_finalization_failure_removes_created_method_and_mapping
     )
 
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
-    compensated_provider = await get_user(provider.user.id)
-    assert compensated_provider is not None
-    assert len(compensated_provider.login_methods) == 1
-    assert compensated_provider.login_methods[0].third_party is not None
-    assert compensated_provider.login_methods[0].third_party.user_id == google_id
-    assert await supertokens_list_users_by_account_info(
-        "public", AccountInfoInput(phone_number=phone_number), False, {}
-    ) == []
-    assert (await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})).__class__.__name__ == (
-        "UnknownMappingError"
-    )
+    retained_user = await get_user(rownd_user_id)
+    assert retained_user is not None
+    assert len(retained_user.login_methods) == 2
+    assert any(method.phone_number == phone_number for method in retained_user.login_methods)
+    mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    assert mapping.supertokens_user_id == provider.user.id
 
 
-async def test_migrate_does_not_force_map_user_referenced_by_metadata(
+async def test_failed_unverification_keeps_linked_methods_without_mapping(
     core_url: str, rownd_client: MockRowndClient
 ):
     client = make_client(core_url, rownd_client)
@@ -762,10 +759,16 @@ async def test_migrate_does_not_force_map_user_referenced_by_metadata(
     user = await get_user(existing.user.id)
     assert user is not None
     assert user.is_primary_user is True
-    assert len(user.login_methods) == 1
-    assert user.login_methods[0].third_party is not None
-    assert user.login_methods[0].third_party.user_id == google_id
-    assert all(method.phone_number != phone_number for method in user.login_methods)
+    assert len(user.login_methods) == 3
+    assert any(
+        method.third_party is not None and method.third_party.user_id == google_id
+        for method in user.login_methods
+    )
+    assert any(method.phone_number == phone_number for method in user.login_methods)
+    assert any(method.email == email and method.recipe_id == "passwordless" for method in user.login_methods)
+    assert (await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})).__class__.__name__ == (
+        "UnknownMappingError"
+    )
     metadata = await usermetadata_asyncio.get_user_metadata(existing.user.id)
     assert metadata.metadata == {"existing_metadata": "preserved"}
 
@@ -832,6 +835,182 @@ async def test_migrate_existing_user_does_not_duplicate(core_url: str, rownd_cli
     user = await get_user("py-duplicate-user")
     assert user is not None
     assert len(user.login_methods) == 1
+
+
+async def test_concurrent_reconciliation_normalizes_late_passwordless_owner(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "migration-concurrent-passwordless-owner"
+    google_id = "migration-concurrent-passwordless-owner-google"
+    email = "migration-concurrent-passwordless-owner@example.com"
+    user_info = {
+        "data": {
+            "user_id": rownd_user_id,
+            "google_id": google_id,
+            "email": email,
+        },
+        "verified_data": {"google_id": True, "email": True},
+    }
+    provider = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="google",
+        third_party_user_id=google_id,
+        email="concurrent-provider@example.com",
+        is_verified=True,
+        user_context={},
+    )
+    provider = cast(Any, provider)
+    parent_paused = threading.Event()
+    resume_parent = threading.Event()
+    invocation_lock = threading.Lock()
+    first_invocation = True
+    parent_signinup_result: list[Any] = []
+    original_signinup = impl.passwordless_asyncio.signinup
+
+    async def controlled_signinup(*args: Any, **kwargs: Any):
+        nonlocal first_invocation
+        with invocation_lock:
+            pause = first_invocation
+            first_invocation = False
+        if pause:
+            parent_paused.set()
+            await asyncio.to_thread(resume_parent.wait)
+        result = await original_signinup(*args, **kwargs)
+        if pause:
+            parent_signinup_result.append(result)
+        return result
+
+    monkeypatch.setattr(impl.passwordless_asyncio, "signinup", controlled_signinup)
+    parent_request = asyncio.create_task(
+        asyncio.to_thread(
+            migrate_rownd_user,
+            client,
+            rownd_client,
+            rownd_user_id,
+            user_info,
+        )
+    )
+    try:
+        assert await asyncio.to_thread(parent_paused.wait, 10)
+        reconciled = await impl.reconcile_rownd_user_with_existing_login_methods(
+            impl.map_rownd_user_to_supertokens(cast(Any, user_info)),
+            "public",
+            {},
+        )
+        assert reconciled is True
+    finally:
+        resume_parent.set()
+
+    response = await parent_request
+    assert response.status_code == 200
+    assert response.json() == {"status": "OK"}
+    assert len(parent_signinup_result) == 1
+    assert parent_signinup_result[0].created_new_recipe_user is False
+    assert parent_signinup_result[0].user.id == rownd_user_id
+
+    mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    assert mapping.supertokens_user_id == provider.user.id
+    user = await get_user(rownd_user_id)
+    assert user is not None
+    assert len(user.login_methods) == 2
+    assert {method.recipe_id for method in user.login_methods} == {"thirdparty", "passwordless"}
+    method_ids = sorted(method.recipe_user_id.get_as_string() for method in user.login_methods)
+    metadata = await usermetadata_asyncio.get_user_metadata(mapping.supertokens_user_id)
+    assert metadata.metadata["rownd_migration_complete"] is True
+    provider_owners = await supertokens_list_users_by_account_info(
+        "public", AccountInfoInput(third_party=ThirdPartyInfo(google_id, "google")), False, {}
+    )
+    passwordless_owners = await supertokens_list_users_by_account_info(
+        "public", AccountInfoInput(email=email), False, {}
+    )
+    assert len(provider_owners) == 1
+    assert len(passwordless_owners) == 1
+
+    repeated = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
+    assert repeated.json() == {"status": "OK"}
+    repeated_mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+    assert isinstance(repeated_mapping, GetUserIdMappingOkResult)
+    assert repeated_mapping.supertokens_user_id == mapping.supertokens_user_id
+    repeated_user = await get_user(rownd_user_id)
+    assert repeated_user is not None
+    assert sorted(
+        method.recipe_user_id.get_as_string() for method in repeated_user.login_methods
+    ) == method_ids
+
+
+async def test_failed_parent_does_not_rollback_state_finalized_by_sibling(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "migration-concurrent-finalization"
+    google_id = "migration-concurrent-finalization-google"
+    phone_number = "+15555550131"
+    user_info = {
+        "data": {
+            "user_id": rownd_user_id,
+            "google_id": google_id,
+            "phone_number": phone_number,
+        },
+        "verified_data": {"google_id": True, "phone_number": True},
+    }
+    await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="google",
+        third_party_user_id=google_id,
+        email="concurrent-finalization-provider@example.com",
+        is_verified=True,
+        user_context={},
+    )
+    parent_finalizing = threading.Event()
+    release_parent = threading.Event()
+    invocation_lock = threading.Lock()
+    first_invocation = True
+    original_update_metadata = impl.usermetadata_asyncio.update_user_metadata
+
+    async def controlled_update_metadata(*args: Any, **kwargs: Any):
+        nonlocal first_invocation
+        with invocation_lock:
+            fail = first_invocation
+            first_invocation = False
+        if fail:
+            parent_finalizing.set()
+            await asyncio.to_thread(release_parent.wait)
+            raise RuntimeError("parent metadata finalization failed")
+        return await original_update_metadata(*args, **kwargs)
+
+    monkeypatch.setattr(
+        impl.usermetadata_asyncio, "update_user_metadata", controlled_update_metadata
+    )
+    parent_request = asyncio.create_task(
+        asyncio.to_thread(
+            migrate_rownd_user, client, rownd_client, rownd_user_id, user_info
+        )
+    )
+    try:
+        assert await asyncio.to_thread(parent_finalizing.wait, 10)
+        sibling_response = await asyncio.to_thread(
+            migrate_rownd_user, client, rownd_client, rownd_user_id, user_info
+        )
+        assert sibling_response.json() == {"status": "OK"}
+    finally:
+        release_parent.set()
+
+    parent_response = await parent_request
+    assert parent_response.json() == {"status": "ERROR", "message": "Migration failed"}
+    mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    user = await get_user(rownd_user_id)
+    assert user is not None
+    assert len(user.login_methods) == 2
+    assert any(method.phone_number == phone_number for method in user.login_methods)
+    metadata = await usermetadata_asyncio.get_user_metadata(mapping.supertokens_user_id)
+    assert metadata.metadata["rownd_migration_complete"] is True
 
 
 async def test_migrate_with_emailverification_enabled_succeeds(

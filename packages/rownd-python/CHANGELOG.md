@@ -5,6 +5,7 @@
 ### Patch Changes
 
 - Match email verification check against the node plugin
+- Prevent concurrent migrations from misidentifying externalized user IDs or rolling back shared reconciliation state
 
 ## 0.1.10
 

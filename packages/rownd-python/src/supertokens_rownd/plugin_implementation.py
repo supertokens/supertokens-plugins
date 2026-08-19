@@ -15,7 +15,6 @@ import httpx
 from supertokens_python import SupertokensConfig, is_recipe_initialized
 from supertokens_python.asyncio import (
     create_user_id_mapping,
-    delete_user_id_mapping,
     delete_user,
     get_user,
     get_user_id_mapping,
@@ -688,34 +687,8 @@ async def handle_migrate(
         if recipe_user_id is None:
             raise RowndPluginError("User not found or has no login methods")
 
-        newly_associated_recipe_user_ids: List[RecipeUserId] = []
-        try:
-            for login_method in user.login_methods if user else []:
-                if tenant_id in login_method.tenant_ids:
-                    continue
-                association = await multitenancy_asyncio.associate_user_to_tenant(
-                    tenant_id,
-                    login_method.recipe_user_id,
-                    user_context,
-                )
-                if getattr(association, "status", None) != "OK":
-                    raise RuntimeError(
-                        "Failed to associate migrated user with tenant: %s"
-                        % getattr(association, "status", "ERROR")
-                    )
-                if not getattr(association, "was_already_associated", False):
-                    newly_associated_recipe_user_ids.append(login_method.recipe_user_id)
-        except Exception:
-            await asyncio.gather(
-                *(
-                    multitenancy_asyncio.disassociate_user_from_tenant(
-                        tenant_id, associated_recipe_user_id, user_context
-                    )
-                    for associated_recipe_user_id in newly_associated_recipe_user_ids
-                ),
-                return_exceptions=True,
-            )
-            raise
+        if user is not None:
+            await associate_user_login_methods_to_tenant(user, tenant_id, user_context)
 
         await sync_imported_email_verification_state(
             recipe_user_id,
@@ -774,6 +747,24 @@ def clear_supertokens_core_call_cache(user_context: UserContext) -> None:
         default_context["coreCallCache"] = {}
     if isinstance(default_context.get("core_call_cache"), dict):
         default_context["core_call_cache"] = {}
+
+
+async def associate_user_login_methods_to_tenant(
+    user: User, tenant_id: str, user_context: UserContext
+) -> None:
+    for login_method in user.login_methods:
+        if tenant_id in login_method.tenant_ids:
+            continue
+        association = await multitenancy_asyncio.associate_user_to_tenant(
+            tenant_id,
+            login_method.recipe_user_id,
+            user_context,
+        )
+        if getattr(association, "status", None) != "OK":
+            raise RuntimeError(
+                "Failed to associate migrated user with tenant: %s"
+                % getattr(association, "status", "ERROR")
+            )
 
 
 async def handle_signout(
@@ -2078,7 +2069,9 @@ async def create_missing_login_method(
                 "Failed to create migrated third-party login method: %s"
                 % getattr(result, "status", "ERROR")
             )
-        if not result.created_new_recipe_user and result.user.id != primary_user_id:
+        if not result.created_new_recipe_user and not await sdk_user_id_matches_internal_target(
+            result.user.id, primary_user_id, user_context
+        ):
             raise RuntimeError(
                 "Migrated third-party login method belongs to another SuperTokens user"
             )
@@ -2094,26 +2087,12 @@ async def create_missing_login_method(
             None,
             reconciliation_context,
         )
-        if not result.created_new_recipe_user and result.user.id != primary_user_id:
+        if not result.created_new_recipe_user and not await sdk_user_id_matches_internal_target(
+            result.user.id, primary_user_id, user_context
+        ):
             raise RuntimeError(
                 "Migrated passwordless login method belongs to another SuperTokens user"
             )
-        if email and not method_import.get("isVerified"):
-            try:
-                await emailverification_asyncio.unverify_email(
-                    result.recipe_user_id,
-                    email,
-                    user_context,
-                )
-            except Exception:
-                if result.created_new_recipe_user:
-                    with suppress(Exception):
-                        await delete_user(
-                            result.recipe_user_id.get_as_string(),
-                            remove_all_linked_accounts=False,
-                            user_context=user_context,
-                        )
-                raise
         return result.recipe_user_id, result.created_new_recipe_user
 
     raise RuntimeError(
@@ -2124,6 +2103,24 @@ async def create_missing_login_method(
 async def resolve_supertokens_user_id(user_id: str, user_context: UserContext) -> str:
     mapping = await get_user_id_mapping(user_id, "EXTERNAL", user_context)
     return mapping.supertokens_user_id if isinstance(mapping, GetUserIdMappingOkResult) else user_id
+
+
+async def freshly_resolve_sdk_user_id_to_internal(
+    sdk_user_id: str, user_context: UserContext
+) -> str:
+    clear_supertokens_core_call_cache(user_context)
+    return await resolve_supertokens_user_id(sdk_user_id, user_context)
+
+
+async def sdk_user_id_matches_internal_target(
+    sdk_user_id: str, expected_internal_user_id: str, user_context: UserContext
+) -> bool:
+    if sdk_user_id == expected_internal_user_id:
+        return True
+    resolved_sdk_user_id = await freshly_resolve_sdk_user_id_to_internal(
+        sdk_user_id, user_context
+    )
+    return resolved_sdk_user_id == expected_internal_user_id
 
 
 async def assert_user_is_not_mapped_to_another_rownd_user(
@@ -2146,7 +2143,9 @@ async def assert_rownd_user_id_can_be_mapped(
 ) -> bool:
     external_mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", user_context)
     if isinstance(external_mapping, GetUserIdMappingOkResult):
-        if external_mapping.supertokens_user_id != supertokens_user_id:
+        if not await sdk_user_id_matches_internal_target(
+            external_mapping.supertokens_user_id, supertokens_user_id, user_context
+        ):
             raise RuntimeError(
                 "The Rownd user ID is already mapped to another SuperTokens user"
             )
@@ -2175,9 +2174,13 @@ async def ensure_primary_user(
         user_context,
     )
     if isinstance(result, CreatePrimaryUserOkResult):
-        return login_method.recipe_user_id.get_as_string()
+        return supertokens_user_id
     if isinstance(result, CreatePrimaryUserRecipeUserIdAlreadyLinkedError):
-        return result.primary_user_id
+        if await sdk_user_id_matches_internal_target(
+            result.primary_user_id, supertokens_user_id, user_context
+        ):
+            return supertokens_user_id
+        raise RuntimeError("A migrated login method belongs to a different primary user")
     raise RuntimeError("A migrated login method belongs to a different primary user")
 
 
@@ -2186,30 +2189,41 @@ async def create_rownd_user_id_mapping(
     rownd_user_id: str,
     user_context: UserContext,
 ) -> bool:
-    mapping_result = await create_user_id_mapping(
-        supertokens_user_id,
-        rownd_user_id,
-        force=False,
-        user_context=user_context,
-    )
+    try:
+        mapping_result = await create_user_id_mapping(
+            supertokens_user_id,
+            rownd_user_id,
+            force=False,
+            user_context=user_context,
+        )
+    except KeyError as error:
+        if error.args != ("does_external_user_id_exist",):
+            raise
+        clear_supertokens_core_call_cache(user_context)
+        existing = await get_user_id_mapping(rownd_user_id, "EXTERNAL", user_context)
+        if (
+            isinstance(existing, GetUserIdMappingOkResult)
+            and await sdk_user_id_matches_internal_target(
+                existing.supertokens_user_id, supertokens_user_id, user_context
+            )
+        ):
+            return False
+        raise
     if isinstance(mapping_result, CreateUserIdMappingOkResult):
         return True
+    clear_supertokens_core_call_cache(user_context)
     existing = await get_user_id_mapping(rownd_user_id, "EXTERNAL", user_context)
     if (
         isinstance(existing, GetUserIdMappingOkResult)
-        and existing.supertokens_user_id == supertokens_user_id
+        and await sdk_user_id_matches_internal_target(
+            existing.supertokens_user_id, supertokens_user_id, user_context
+        )
     ):
         return False
     raise RuntimeError(
         "Failed to map migrated Rownd user ID: %s"
         % getattr(mapping_result, "status", "ERROR")
     )
-
-
-async def run_compensations(compensations: List[Callable[[], Awaitable[None]]]) -> None:
-    for compensate in reversed(compensations):
-        with suppress(Exception):
-            await compensate()
 
 
 async def reconcile_rownd_user_with_existing_login_methods(
@@ -2236,7 +2250,7 @@ async def reconcile_rownd_user_with_existing_login_methods(
         if method.get("recipeId") == "thirdparty" and match is not None
     ]
     target_user, target_login_method = third_party_matches[0] if third_party_matches else matches[0]
-    target_supertokens_user_id = await resolve_supertokens_user_id(
+    target_supertokens_user_id = await freshly_resolve_sdk_user_id_to_internal(
         target_user.id,
         user_context,
     )
@@ -2245,7 +2259,7 @@ async def reconcile_rownd_user_with_existing_login_methods(
             method,
             owner,
             login_method,
-            await resolve_supertokens_user_id(owner.id, user_context),
+            await freshly_resolve_sdk_user_id_to_internal(owner.id, user_context),
         )
         for method, owners, _match in inspections
         for owner, login_method in owners
@@ -2292,107 +2306,94 @@ async def reconcile_rownd_user_with_existing_login_methods(
             target_supertokens_user_id, external_user_id, user_context
         )
     )
-    compensations: List[Callable[[], Awaitable[None]]] = []
-    try:
-        primary_user_id = await ensure_primary_user(
-            target_user,
-            target_login_method,
-            target_supertokens_user_id,
+    primary_user_id = await ensure_primary_user(
+        target_user,
+        target_login_method,
+        target_supertokens_user_id,
+        user_context,
+    )
+    foreign_recipe_user_ids = {
+        login_method.recipe_user_id.get_as_string(): login_method.recipe_user_id
+        for _, _, login_method, _ in foreign_owners
+    }
+    for recipe_user_id in foreign_recipe_user_ids.values():
+        link_result = await accountlinking_asyncio.link_accounts(
+            recipe_user_id,
+            primary_user_id,
             user_context,
         )
-        foreign_recipe_user_ids = {
-            login_method.recipe_user_id.get_as_string(): login_method.recipe_user_id
-            for _, _, login_method, _ in foreign_owners
-        }
-        for recipe_user_id in foreign_recipe_user_ids.values():
-            link_result = await accountlinking_asyncio.link_accounts(
-                recipe_user_id,
-                primary_user_id,
-                user_context,
+        if not isinstance(link_result, LinkAccountsOkResult):
+            raise RuntimeError(
+                "Failed to link migrated login method: %s"
+                % getattr(link_result, "status", "ERROR")
             )
-            if not isinstance(link_result, LinkAccountsOkResult):
+    for method_import, _, match in inspections:
+        if match is not None:
+            continue
+        verified_matching_email = None
+        email = optional_string(method_import.get("email"))
+        if method_import.get("recipeId") == "passwordless" and email:
+            verified_matching_email = next(
+                (
+                    method
+                    for method in target_user.login_methods
+                    if tenant_id in method.tenant_ids
+                    and method.verified
+                    and method.has_same_email_as(email)
+                ),
+                None,
+            )
+        effective_import = (
+            {**method_import, "isVerified": True}
+            if verified_matching_email is not None
+            else method_import
+        )
+        recipe_user_id, _ = await create_missing_login_method(
+            effective_import, tenant_id, primary_user_id, user_context
+        )
+        created_user = await get_user(recipe_user_id.get_as_string(), user_context)
+        if created_user is None:
+            raise RuntimeError("Created migrated login method was not found")
+        if not await sdk_user_id_matches_internal_target(
+            created_user.id, primary_user_id, user_context
+        ):
+            link_result = await accountlinking_asyncio.link_accounts(
+                recipe_user_id, primary_user_id, user_context
+            )
+            already_linked = (
+                isinstance(link_result, LinkAccountsRecipeUserIdAlreadyLinkedError)
+                and await sdk_user_id_matches_internal_target(
+                    link_result.primary_user_id, primary_user_id, user_context
+                )
+            )
+            if not isinstance(link_result, LinkAccountsOkResult) and not already_linked:
                 raise RuntimeError(
                     "Failed to link migrated login method: %s"
                     % getattr(link_result, "status", "ERROR")
                 )
-            if not link_result.accounts_already_linked:
-                async def unlink_existing(recipe_id: RecipeUserId = recipe_user_id) -> None:
-                    await accountlinking_asyncio.unlink_account(recipe_id, user_context)
-
-                compensations.append(unlink_existing)
-        for method_import, _, match in inspections:
-            if match is not None:
-                continue
-            verified_matching_email = None
-            email = optional_string(method_import.get("email"))
-            if method_import.get("recipeId") == "passwordless" and email:
-                verified_matching_email = next(
-                    (
-                        method
-                        for method in target_user.login_methods
-                        if tenant_id in method.tenant_ids
-                        and method.verified
-                        and method.has_same_email_as(email)
-                    ),
-                    None,
-                )
-            effective_import = (
-                {**method_import, "isVerified": True}
-                if verified_matching_email is not None
-                else method_import
+        if (
+            effective_import.get("recipeId") == "passwordless"
+            and email
+            and not effective_import.get("isVerified")
+        ):
+            await emailverification_asyncio.unverify_email(
+                recipe_user_id,
+                email,
+                user_context,
             )
-            recipe_user_id, created_new = await create_missing_login_method(
-                effective_import, tenant_id, primary_user_id, user_context
-            )
-            if created_new:
-                async def delete_created(recipe_id: RecipeUserId = recipe_user_id) -> None:
-                    await delete_user(
-                        recipe_id.get_as_string(),
-                        remove_all_linked_accounts=False,
-                        user_context=user_context,
-                    )
 
-                compensations.append(delete_created)
-            created_user = await get_user(recipe_user_id.get_as_string(), user_context)
-            if created_user is None:
-                raise RuntimeError("Created migrated login method was not found")
-            if created_user.id != primary_user_id:
-                link_result = await accountlinking_asyncio.link_accounts(
-                    recipe_user_id, primary_user_id, user_context
-                )
-                already_linked = (
-                    isinstance(link_result, LinkAccountsRecipeUserIdAlreadyLinkedError)
-                    and link_result.primary_user_id == primary_user_id
-                )
-                if not isinstance(link_result, LinkAccountsOkResult) and not already_linked:
-                    raise RuntimeError(
-                        "Failed to link migrated login method: %s"
-                        % getattr(link_result, "status", "ERROR")
-                    )
-
-        if not mapping_exists:
-            mapping_created = await create_rownd_user_id_mapping(
-                primary_user_id, external_user_id, user_context
-            )
-            if mapping_created:
-                async def delete_mapping() -> None:
-                    await delete_user_id_mapping(
-                        external_user_id,
-                        "EXTERNAL",
-                        force=True,
-                        user_context=user_context,
-                    )
-
-                # Remove newly linked methods before deleting their user ID mapping.
-                compensations.insert(0, delete_mapping)
-        await usermetadata_asyncio.update_user_metadata(
-            primary_user_id,
-            as_json_dict(user_import.get("userMetadata")),
-            user_context,
+    if not mapping_exists:
+        clear_supertokens_core_call_cache(user_context)
+        mapping_exists = await assert_rownd_user_id_can_be_mapped(
+            primary_user_id, external_user_id, user_context
         )
-    except Exception:
-        await run_compensations(compensations)
-        raise
+        if not mapping_exists:
+            await create_rownd_user_id_mapping(primary_user_id, external_user_id, user_context)
+    await usermetadata_asyncio.update_user_metadata(
+        primary_user_id,
+        as_json_dict(user_import.get("userMetadata")),
+        user_context,
+    )
     return True
 
 
