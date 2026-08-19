@@ -1,5 +1,17 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.6.11
+
+### Patch Changes
+
+- Fix account linking during migration
+
+## Unreleased
+
+### Patch Changes
+
+- Link verified Rownd email methods to existing third-party users during migration
+
 ## 0.6.10
 
 ### Patch Changes
