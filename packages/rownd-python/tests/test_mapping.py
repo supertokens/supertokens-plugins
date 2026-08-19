@@ -23,6 +23,7 @@ from supertokens_rownd.plugin_implementation import (
 from supertokens_rownd.types import (
     JsonDict,
     JsonList,
+    JsonValue,
     RowndEmailChangeError,
     RowndPluginConfig,
     RowndPluginError,
@@ -310,6 +311,29 @@ def test_maps_email_passwordless_user():
     user_metadata = as_json_dict(mapped["userMetadata"])
     assert user_metadata["first_name"] == "Ada"
     assert user_metadata["source"] == "rownd"
+
+
+@pytest.mark.parametrize(
+    ("verified_email", "expected"),
+    [
+        (True, True),
+        ("VERIFIED@example.com", True),
+        ("another@example.com", False),
+        ("not-a-verification", False),
+    ],
+)
+def test_maps_matching_rownd_email_verification_value(
+    verified_email: JsonValue, expected: bool
+):
+    mapped = map_rownd_user_to_supertokens(
+        {
+            "data": {"user_id": "verified-email-value", "email": "verified@example.com"},
+            "verified_data": {"email": verified_email},
+        }
+    )
+
+    login_method = cast(dict, cast(list, mapped["loginMethods"])[0])
+    assert login_method["isVerified"] is expected
 
 
 def test_maps_login_methods_to_requested_tenant():

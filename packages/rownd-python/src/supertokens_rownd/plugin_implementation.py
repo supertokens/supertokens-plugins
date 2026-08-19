@@ -1802,6 +1802,10 @@ def is_oauth_claim_verified(value: object, expected_value: str, fallback: bool) 
     return value is True or value == expected_value or fallback
 
 
+def is_rownd_email_verified(value: object, email: str) -> bool:
+    return value is True or (isinstance(value, str) and value.casefold() == email.casefold())
+
+
 def build_configured_session_claims(config: RowndPluginConfig, metadata: JsonDict) -> JsonDict:
     original = as_json_dict(metadata.get("original_rownd_user"))
     original_data = as_json_dict(original.get("data"))
@@ -1903,11 +1907,12 @@ def map_rownd_user_to_supertokens(
             }
         )
     if data.get("email"):
+        email = cast(str, data["email"])
         login_methods.append(
             {
                 "recipeId": "passwordless",
-                "email": data["email"],
-                "isVerified": bool(verified_data.get("email")),
+                "email": email,
+                "isVerified": is_rownd_email_verified(verified_data.get("email"), email),
                 **({"tenantIds": [tenant_id]} if tenant_id else {}),
             }
         )
@@ -2121,6 +2126,19 @@ async def resolve_supertokens_user_id(user_id: str, user_context: UserContext) -
     return mapping.supertokens_user_id if isinstance(mapping, GetUserIdMappingOkResult) else user_id
 
 
+async def assert_user_is_not_mapped_to_another_rownd_user(
+    supertokens_user_id: str,
+    rownd_user_id: str,
+    user_context: UserContext,
+) -> None:
+    mapping = await get_user_id_mapping(supertokens_user_id, "SUPERTOKENS", user_context)
+    if (
+        isinstance(mapping, GetUserIdMappingOkResult)
+        and mapping.external_user_id != rownd_user_id
+    ):
+        raise RuntimeError("A migrated login method is already mapped to another Rownd user")
+
+
 async def assert_rownd_user_id_can_be_mapped(
     supertokens_user_id: str,
     rownd_user_id: str,
@@ -2212,18 +2230,52 @@ async def reconcile_rownd_user_with_existing_login_methods(
     if not matches:
         return False
 
-    target_user, target_login_method = matches[0]
+    third_party_matches = [
+        match
+        for method, _, match in inspections
+        if method.get("recipeId") == "thirdparty" and match is not None
+    ]
+    target_user, target_login_method = third_party_matches[0] if third_party_matches else matches[0]
     target_supertokens_user_id = await resolve_supertokens_user_id(
         target_user.id,
         user_context,
     )
-    owner_ids = [
-        await resolve_supertokens_user_id(owner.id, user_context)
-        for _, owners, _ in inspections
-        for owner, _ in owners
+    inspected_owners = [
+        (
+            method,
+            owner,
+            login_method,
+            await resolve_supertokens_user_id(owner.id, user_context),
+        )
+        for method, owners, _match in inspections
+        for owner, login_method in owners
     ]
-    if any(owner_id != target_supertokens_user_id for owner_id in owner_ids):
+    foreign_owners = [
+        owner_info
+        for owner_info in inspected_owners
+        if owner_info[3] != target_supertokens_user_id
+    ]
+    can_link_verified_email_owners = bool(third_party_matches) and all(
+        owner_id == target_supertokens_user_id
+        for method, _, _, owner_id in inspected_owners
+        if method.get("recipeId") == "thirdparty"
+    ) and all(
+        method.get("recipeId") == "passwordless"
+        and isinstance(method.get("email"), str)
+        and method.get("isVerified") is True
+        and login_method.recipe_id == "passwordless"
+        and login_method.has_same_email_as(cast(str, method["email"]))
+        and not owner.is_primary_user
+        for method, owner, login_method, _ in foreign_owners
+    )
+    if foreign_owners and not can_link_verified_email_owners:
         raise RuntimeError("A migrated login method belongs to a different SuperTokens user")
+    for _, _, _, owner_id in foreign_owners:
+        await assert_user_is_not_mapped_to_another_rownd_user(
+            owner_id,
+            external_user_id,
+            user_context,
+        )
     unsupported = next(
         (
             method
@@ -2248,6 +2300,26 @@ async def reconcile_rownd_user_with_existing_login_methods(
             target_supertokens_user_id,
             user_context,
         )
+        foreign_recipe_user_ids = {
+            login_method.recipe_user_id.get_as_string(): login_method.recipe_user_id
+            for _, _, login_method, _ in foreign_owners
+        }
+        for recipe_user_id in foreign_recipe_user_ids.values():
+            link_result = await accountlinking_asyncio.link_accounts(
+                recipe_user_id,
+                primary_user_id,
+                user_context,
+            )
+            if not isinstance(link_result, LinkAccountsOkResult):
+                raise RuntimeError(
+                    "Failed to link migrated login method: %s"
+                    % getattr(link_result, "status", "ERROR")
+                )
+            if not link_result.accounts_already_linked:
+                async def unlink_existing(recipe_id: RecipeUserId = recipe_user_id) -> None:
+                    await accountlinking_asyncio.unlink_account(recipe_id, user_context)
+
+                compensations.append(unlink_existing)
         for method_import, _, match in inspections:
             if match is not None:
                 continue
@@ -2335,7 +2407,9 @@ async def sync_imported_email_verification_state(
     data = as_json_dict(original.get("data"))
     verified_data = as_json_dict(original.get("verified_data"))
     email = data.get("email")
-    if not isinstance(email, str) or not verified_data.get("email"):
+    if not isinstance(email, str) or not is_rownd_email_verified(
+        verified_data.get("email"), email
+    ):
         return
     try:
         token_result = await emailverification_asyncio.create_email_verification_token(
