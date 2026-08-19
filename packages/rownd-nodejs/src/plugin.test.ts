@@ -475,6 +475,28 @@ describe("rownd-nodejs plugin", () => {
       ]);
     });
 
+    it.each([
+      { verifiedEmail: true, expected: true },
+      { verifiedEmail: "VERIFIED@example.com", expected: true },
+      { verifiedEmail: "another@example.com", expected: false },
+      { verifiedEmail: "not-a-verification", expected: false },
+    ])(
+      "maps Rownd email verification value $verifiedEmail as $expected",
+      ({ verifiedEmail, expected }) => {
+        const user = mapRowndUserToSuperTokens({
+          state: "enabled",
+          auth_level: "verified",
+          data: {
+            user_id: "verified-email-value",
+            email: "verified@example.com",
+          },
+          verified_data: { email: verifiedEmail },
+        });
+
+        expect(user.loginMethods[0]?.isVerified).toBe(expected);
+      },
+    );
+
     it("throws when the Rownd payload has no data object", () => {
       expect(() =>
         mapRowndUserToSuperTokens({ app_user_id: "rownd-no-data" } as any),
@@ -2464,6 +2486,209 @@ describe("rownd-nodejs plugin", () => {
           }),
         ]);
         expect(await SuperTokens.getUser(rowndUserId)).toBeUndefined();
+      });
+
+      it("links existing provider and passwordless users for a Rownd-verified email", async () => {
+        const { server: s, port } = await setup(
+          importCoreConnectionURI,
+          undefined,
+          { enableEmailVerification: true },
+        );
+        server = s;
+        testPORT = port;
+        const rowndUserId = "rownd-verified-email-owners";
+        const googleId = "google-verified-email-owners";
+        const email = "verified-email-owners@example.com";
+        const providerUser = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          googleId,
+          "provider-verified-email-owners@example.com",
+          true,
+        );
+        expect(providerUser.status).toBe("OK");
+        if (providerUser.status !== "OK") {
+          throw new Error("failed to create provider user");
+        }
+        const passwordlessUser = await Passwordless.signInUp({
+          tenantId: "public",
+          email,
+        });
+        expect(providerUser.user.id).not.toBe(passwordlessUser.user.id);
+
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: rowndUserId,
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: rowndUserId,
+          auth_level: "verified",
+          data: {
+            user_id: rowndUserId,
+            google_id: googleId,
+            email,
+          },
+          verified_data: {
+            google_id: true,
+            email: true,
+          },
+        });
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer some-token",
+              rid: "session",
+              "fdi-version": "1.18",
+              "st-auth-mode": "header",
+            },
+          },
+        );
+
+        expect(res.status).toBe(200);
+        await expect(res.json()).resolves.toEqual({ status: "OK" });
+        const accessToken = res.headers.get("st-access-token");
+        expect(accessToken).toBeTruthy();
+        const session = await Session.getSessionWithoutRequestResponse(
+          accessToken!,
+        );
+        expect(session.getUserId()).toBe(rowndUserId);
+        await expect(
+          SuperTokens.getUserIdMapping({
+            userId: rowndUserId,
+            userIdType: "EXTERNAL",
+          }),
+        ).resolves.toMatchObject({
+          status: "OK",
+          superTokensUserId: providerUser.user.id,
+        });
+
+        const migratedUser = await SuperTokens.getUser(rowndUserId);
+        expect(migratedUser?.isPrimaryUser).toBe(true);
+        expect(migratedUser?.loginMethods).toHaveLength(2);
+        expect(
+          migratedUser?.loginMethods
+            .find((method) => method.recipeId === "thirdparty")
+            ?.recipeUserId.getAsString(),
+        ).toBe(rowndUserId);
+        expect(
+          migratedUser?.loginMethods
+            .find((method) => method.recipeId === "passwordless")
+            ?.recipeUserId.getAsString(),
+        ).toBe(passwordlessUser.recipeUserId.getAsString());
+        expect(migratedUser?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: { id: "google", userId: googleId },
+            }),
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email,
+              verified: true,
+            }),
+          ]),
+        );
+        await expect(
+          SuperTokens.listUsersByAccountInfo(
+            "public",
+            { thirdParty: { id: "google", userId: googleId } },
+            false,
+          ),
+        ).resolves.toHaveLength(1);
+        await expect(
+          SuperTokens.listUsersByAccountInfo("public", { email }, false),
+        ).resolves.toHaveLength(1);
+      });
+
+      it("does not link a verified email owner mapped to another Rownd user", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const rowndUserId = "rownd-conflicting-email-owner";
+        const existingRowndUserId = "rownd-existing-email-owner";
+        const googleId = "google-conflicting-email-owner";
+        const email = "conflicting-email-owner@example.com";
+        const providerUser = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          googleId,
+          "provider-conflicting-email-owner@example.com",
+          true,
+        );
+        expect(providerUser.status).toBe("OK");
+        if (providerUser.status !== "OK") {
+          throw new Error("failed to create provider user");
+        }
+        const passwordlessUser = await Passwordless.signInUp({
+          tenantId: "public",
+          email,
+        });
+        await expect(
+          SuperTokens.createUserIdMapping({
+            superTokensUserId: passwordlessUser.user.id,
+            externalUserId: existingRowndUserId,
+          }),
+        ).resolves.toEqual({ status: "OK" });
+
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: rowndUserId,
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: rowndUserId,
+          auth_level: "verified",
+          data: {
+            user_id: rowndUserId,
+            google_id: googleId,
+            email,
+          },
+          verified_data: {
+            google_id: true,
+            email: true,
+          },
+        });
+
+        const res = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: "Bearer some-token",
+              rid: "session",
+              "fdi-version": "1.18",
+              "st-auth-mode": "header",
+            },
+          },
+        );
+
+        expect(res.status).toBe(400);
+        await expect(res.json()).resolves.toEqual({
+          status: "ERROR",
+          message: "Migration failed",
+        });
+        expect(res.headers.get("st-access-token")).toBeNull();
+        expect(
+          (await SuperTokens.getUser(providerUser.user.id))?.loginMethods,
+        ).toHaveLength(1);
+        expect(
+          (await SuperTokens.getUser(existingRowndUserId))?.loginMethods,
+        ).toHaveLength(1);
+        await expect(
+          SuperTokens.getUserIdMapping({
+            userId: rowndUserId,
+            userIdType: "EXTERNAL",
+          }),
+        ).resolves.toEqual({ status: "UNKNOWN_MAPPING_ERROR" });
+        await expect(
+          SuperTokens.getUserIdMapping({
+            userId: existingRowndUserId,
+            userIdType: "EXTERNAL",
+          }),
+        ).resolves.toMatchObject({
+          status: "OK",
+          superTokensUserId: passwordlessUser.user.id,
+        });
       });
 
       it("migrates and links a Rownd user when one of multiple login methods already exists", async () => {

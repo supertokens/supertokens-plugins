@@ -340,6 +340,26 @@ async function resolveSuperTokensUserId(
   return mapping.status === "OK" ? mapping.superTokensUserId : userId;
 }
 
+async function assertUserIsNotMappedToAnotherRowndUser(
+  superTokensUserId: string,
+  rowndUserId: string,
+  userContext: JsonRecord,
+) {
+  const mapping = await SuperTokens.getUserIdMapping({
+    userId: superTokensUserId,
+    userIdType: "SUPERTOKENS",
+    userContext,
+  });
+  if (
+    mapping.status === "OK" &&
+    mapping.externalUserId !== rowndUserId
+  ) {
+    throw new Error(
+      "A migrated login method is already mapped to another Rownd user",
+    );
+  }
+}
+
 async function assertRowndUserIdCanBeMapped(
   superTokensUserId: string,
   rowndUserId: string,
@@ -438,25 +458,58 @@ export async function reconcileRowndUserWithExistingLoginMethods(
     return false;
   }
 
-  const target = matches[0]!;
+  const thirdPartyMatches = matches.filter(
+    ({ loginMethod }) => loginMethod.recipeId === "thirdparty",
+  );
+  const target = thirdPartyMatches[0] ?? matches[0]!;
   const targetSuperTokensUserId = await resolveSuperTokensUserId(
     target.user.id,
     userContext,
   );
-  const ownerSuperTokensUserIds = await Promise.all(
-    inspections.flatMap(({ owners }) =>
-      owners.map(({ user }) =>
-        resolveSuperTokensUserId(user.id, userContext),
-      ),
+  const inspectedOwners = await Promise.all(
+    inspections.flatMap(({ importMethod, owners }) =>
+      owners.map(async ({ user, loginMethod }) => ({
+        importMethod,
+        user,
+        loginMethod,
+        superTokensUserId: await resolveSuperTokensUserId(
+          user.id,
+          userContext,
+        ),
+      })),
     ),
   );
-  if (
-    ownerSuperTokensUserIds.some(
-      (ownerId) => ownerId !== targetSuperTokensUserId,
-    )
-  ) {
+  const foreignOwners = inspectedOwners.filter(
+    ({ superTokensUserId }) =>
+      superTokensUserId !== targetSuperTokensUserId,
+  );
+  const canLinkVerifiedEmailOwners =
+    thirdPartyMatches.length > 0 &&
+    inspectedOwners
+      .filter(({ importMethod }) => importMethod.recipeId === "thirdparty")
+      .every(
+        ({ superTokensUserId }) =>
+          superTokensUserId === targetSuperTokensUserId,
+      ) &&
+    foreignOwners.every(
+      ({ importMethod, loginMethod, user }) =>
+        importMethod.recipeId === "passwordless" &&
+        importMethod.email !== undefined &&
+        importMethod.isVerified &&
+        loginMethod.recipeId === "passwordless" &&
+        loginMethod.hasSameEmailAs(importMethod.email) &&
+        !user.isPrimaryUser,
+    );
+  if (foreignOwners.length > 0 && !canLinkVerifiedEmailOwners) {
     throw new Error(
       "A migrated login method belongs to a different SuperTokens user",
+    );
+  }
+  for (const foreignOwner of foreignOwners) {
+    await assertUserIsNotMappedToAnotherRowndUser(
+      foreignOwner.superTokensUserId,
+      stUser.externalUserId,
+      userContext,
     );
   }
   const unsupportedMethod = inspections.find(
@@ -483,6 +536,29 @@ export async function reconcileRowndUserWithExistingLoginMethods(
       targetSuperTokensUserId,
       userContext,
     );
+    const foreignRecipeUserIds = new Map(
+      foreignOwners.map(({ loginMethod }) => [
+        loginMethod.recipeUserId.getAsString(),
+        loginMethod.recipeUserId,
+      ]),
+    );
+    for (const recipeUserId of foreignRecipeUserIds.values()) {
+      const linkResult = await AccountLinking.linkAccounts(
+        recipeUserId,
+        primaryUserId,
+        userContext,
+      );
+      if (linkResult.status !== "OK") {
+        throw new Error(
+          `Failed to link migrated login method: ${linkResult.status}`,
+        );
+      }
+      if (!linkResult.accountsAlreadyLinked) {
+        compensations.push(async () => {
+          await AccountLinking.unlinkAccount(recipeUserId, userContext);
+        });
+      }
+    }
     for (const { importMethod, match } of inspections) {
       if (match) {
         continue;

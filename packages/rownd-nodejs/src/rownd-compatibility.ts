@@ -374,7 +374,11 @@ export function mapRowndUserToSuperTokens(
     loginMethods.push({
       recipeId: "passwordless",
       email: rowndUserData.email,
-      isVerified: !!rowndUserVerifiedData.email,
+      isVerified:
+        rowndUserVerifiedData.email === true ||
+        (typeof rowndUserVerifiedData.email === "string" &&
+          rowndUserVerifiedData.email.toLowerCase() ===
+            rowndUserData.email.toLowerCase()),
       ...(tenantId ? { tenantIds: [tenantId] } : {}),
     });
   }
