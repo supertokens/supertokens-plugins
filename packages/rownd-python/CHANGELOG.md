@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 0.1.10
+
+### Patch Changes
+
+- Fix account linking during migrate
+
 ## Unreleased
 
 ### Patch Changes
