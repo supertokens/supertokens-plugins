@@ -1803,7 +1803,7 @@ def is_oauth_claim_verified(value: object, expected_value: str, fallback: bool) 
 
 
 def is_rownd_email_verified(value: object, email: str) -> bool:
-    return value is True or (isinstance(value, str) and value.casefold() == email.casefold())
+    return value is True or (isinstance(value, str) and value.lower() == email.lower())
 
 
 def build_configured_session_claims(config: RowndPluginConfig, metadata: JsonDict) -> JsonDict:
@@ -1906,8 +1906,8 @@ def map_rownd_user_to_supertokens(
                 **({"tenantIds": [tenant_id]} if tenant_id else {}),
             }
         )
-    if data.get("email"):
-        email = cast(str, data["email"])
+    email = data.get("email")
+    if isinstance(email, str) and email:
         login_methods.append(
             {
                 "recipeId": "passwordless",

@@ -6,12 +6,6 @@
 
 - Fix account linking during migrate
 
-## Unreleased
-
-### Patch Changes
-
-- Link verified Rownd email methods to existing third-party users during migration
-
 ## 0.1.9
 
 ### Patch Changes

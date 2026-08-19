@@ -517,6 +517,106 @@ async def test_migrate_does_not_link_verified_email_owner_mapped_to_another_rown
     assert getattr(existing_mapping, "supertokens_user_id", None) == passwordless.user.id
 
 
+async def test_migrate_does_not_link_provider_to_mismatched_verified_email(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "migration-mismatched-verified-email"
+    google_id = "migration-mismatched-verified-email-google"
+    email = "migration-mismatched-verified-email@example.com"
+    provider = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="google",
+        third_party_user_id=google_id,
+        email="provider-mismatched-verified-email@example.com",
+        is_verified=True,
+        user_context={},
+    )
+    provider = cast(Any, provider)
+    passwordless = await passwordless_asyncio.signinup("public", email, None, None, {})
+
+    res = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "data": {
+                "user_id": rownd_user_id,
+                "google_id": google_id,
+                "email": email,
+            },
+            "verified_data": {
+                "google_id": True,
+                "email": "another@example.com",
+            },
+        },
+    )
+
+    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    unchanged_provider = await get_user(provider.user.id)
+    unchanged_passwordless = await get_user(passwordless.user.id)
+    assert unchanged_provider is not None
+    assert unchanged_passwordless is not None
+    assert len(unchanged_provider.login_methods) == 1
+    assert len(unchanged_passwordless.login_methods) == 1
+    assert (await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})).__class__.__name__ == (
+        "UnknownMappingError"
+    )
+
+
+async def test_migration_finalization_failure_unlinks_existing_email_owner(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "migration-existing-link-compensation"
+    google_id = "migration-existing-link-compensation-google"
+    email = "migration-existing-link-compensation@example.com"
+    provider = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="google",
+        third_party_user_id=google_id,
+        email="provider-existing-link-compensation@example.com",
+        is_verified=True,
+        user_context={},
+    )
+    provider = cast(Any, provider)
+    passwordless = await passwordless_asyncio.signinup("public", email, None, None, {})
+
+    async def fail_metadata_finalization(*_args: Any, **_kwargs: Any):
+        raise RuntimeError("metadata finalization failed")
+
+    monkeypatch.setattr(
+        impl.usermetadata_asyncio, "update_user_metadata", fail_metadata_finalization
+    )
+    res = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "data": {
+                "user_id": rownd_user_id,
+                "google_id": google_id,
+                "email": email,
+            },
+            "verified_data": {"google_id": True, "email": True},
+        },
+    )
+
+    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    compensated_provider = await get_user(provider.user.id)
+    compensated_passwordless = await get_user(passwordless.user.id)
+    assert compensated_provider is not None
+    assert compensated_passwordless is not None
+    assert len(compensated_provider.login_methods) == 1
+    assert len(compensated_passwordless.login_methods) == 1
+    assert compensated_passwordless.login_methods[0].email == email
+    assert (await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})).__class__.__name__ == (
+        "UnknownMappingError"
+    )
+
+
 async def test_migration_preflights_later_collision_before_creating_phone_method(
     core_url: str, rownd_client: MockRowndClient
 ):
