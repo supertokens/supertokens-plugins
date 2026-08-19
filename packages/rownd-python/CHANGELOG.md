@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 0.1.11
+
+### Patch Changes
+
+- Match email verification check against the node plugin
+
 ## 0.1.10
 
 ### Patch Changes
