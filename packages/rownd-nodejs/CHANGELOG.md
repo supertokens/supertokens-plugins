@@ -5,12 +5,8 @@
 ### Patch Changes
 
 - Fix account linking during migration
-
-## Unreleased
-
-### Patch Changes
-
 - Link verified Rownd email methods to existing third-party users during migration
+- Prevent concurrent migrations from misidentifying externalized user IDs or rolling back shared reconciliation state
 
 ## 0.6.10
 

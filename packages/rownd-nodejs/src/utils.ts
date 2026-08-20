@@ -8,7 +8,27 @@ type SuperTokensRequest = Parameters<PluginRouteHandler["handler"]>[0];
 export type JsonRecord = JSONObject;
 export type JsonValue = JsonRecord[string];
 
+type SuperTokensUserContextWithCache = Record<string, unknown> & {
+  _default?: {
+    coreCallCache?: Record<string, unknown>;
+    core_call_cache?: Record<string, unknown>;
+  };
+};
+
 export const ROWND_OAUTH_LOGIN_CHALLENGE_PARAM = "rownd_oauth_login_challenge";
+
+export function clearSuperTokensCoreCallCache(
+  userContext: Record<string, unknown>,
+) {
+  const defaultContext = (userContext as SuperTokensUserContextWithCache)
+    ._default;
+  if (defaultContext?.coreCallCache) {
+    defaultContext.coreCallCache = {};
+  }
+  if (defaultContext?.core_call_cache) {
+    defaultContext.core_call_cache = {};
+  }
+}
 
 export function resolveTenantId(
   req: Pick<SuperTokensRequest, "getKeyValueFromQuery">,

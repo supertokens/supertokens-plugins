@@ -48,6 +48,7 @@ import {
 } from "./supertokens-repository";
 import {
   assertAllowedBypassRedirectPath,
+  clearSuperTokensCoreCallCache,
   getErrorMessage,
   getJsonBody,
   normalizeRedirectToPathForClientDomain,
@@ -69,12 +70,6 @@ type SuperTokensResponse = Parameters<PluginRouteHandler["handler"]>[1];
 type SuperTokensSession = Parameters<PluginRouteHandler["handler"]>[2];
 type SuperTokensUserContext = Parameters<PluginRouteHandler["handler"]>[3];
 type TelemetryClient = ReturnType<typeof createClient>;
-
-type SuperTokensUserContextWithCache = SuperTokensUserContext & {
-  _default?: {
-    coreCallCache?: Record<string, unknown>;
-  };
-};
 
 function isBodyString(body: unknown, key: string): body is Record<string, string> {
   return isRecord(body) && typeof body[key] === "string" && body[key].length > 0;
@@ -337,36 +332,8 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         throw new Error("User not found or has no login methods");
       }
 
-      const newlyAssociatedRecipeUserIds = [];
-      try {
-        for (const loginMethod of user?.loginMethods ?? []) {
-          if (loginMethod.tenantIds.includes(tenantId)) continue;
-
-          const associationResult = await MultiTenancy.associateUserToTenant(
-            tenantId,
-            loginMethod.recipeUserId,
-            userContext,
-          );
-          if (associationResult.status !== "OK") {
-            throw new Error(
-              `Failed to associate migrated user with tenant: ${associationResult.status}`,
-            );
-          }
-          if (!associationResult.wasAlreadyAssociated) {
-            newlyAssociatedRecipeUserIds.push(loginMethod.recipeUserId);
-          }
-        }
-      } catch (error) {
-        await Promise.all(
-          newlyAssociatedRecipeUserIds.map((associatedRecipeUserId) =>
-            MultiTenancy.disassociateUserFromTenant(
-              tenantId!,
-              associatedRecipeUserId,
-              userContext,
-            ),
-          ),
-        );
-        throw error;
+      if (user) {
+        await associateUserLoginMethodsToTenant(user, tenantId, userContext);
       }
 
       await Session.createNewSession(
@@ -414,10 +381,24 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
   };
 }
 
-function clearSuperTokensCoreCallCache(userContext: SuperTokensUserContext) {
-  const cacheContext = userContext as SuperTokensUserContextWithCache;
-  if (cacheContext._default?.coreCallCache) {
-    cacheContext._default.coreCallCache = {};
+export async function associateUserLoginMethodsToTenant(
+  user: NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>,
+  tenantId: string,
+  userContext: SuperTokensUserContext,
+) {
+  for (const loginMethod of user.loginMethods) {
+    if (loginMethod.tenantIds.includes(tenantId)) continue;
+
+    const associationResult = await MultiTenancy.associateUserToTenant(
+      tenantId,
+      loginMethod.recipeUserId,
+      userContext,
+    );
+    if (associationResult.status !== "OK") {
+      throw new Error(
+        `Failed to associate migrated user with tenant: ${associationResult.status}`,
+      );
+    }
   }
 }
 

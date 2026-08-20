@@ -42,6 +42,7 @@ import {
 } from "./rownd-compatibility";
 import {
   assertAllowedBypassRedirectPath,
+  clearSuperTokensCoreCallCache,
   getErrorMessage,
   getStringList,
   getAppInfoString,
@@ -212,7 +213,7 @@ async function inspectImportMethod(
   return { importMethod, owners, match };
 }
 
-async function createMissingLoginMethod(
+export async function createMissingLoginMethod(
   importMethod: ImportLoginMethod,
   tenantId: string,
   primaryUserId: string,
@@ -238,7 +239,14 @@ async function createMissingLoginMethod(
         `Failed to create migrated third-party login method: ${result.status}`,
       );
     }
-    if (!result.createdNewRecipeUser && result.user.id !== primaryUserId) {
+    if (
+      !result.createdNewRecipeUser &&
+      !await sdkUserIdMatchesInternalTarget(
+        result.user.id,
+        primaryUserId,
+        userContext,
+      )
+    ) {
       throw new Error(
         "Migrated third-party login method belongs to another SuperTokens user",
       );
@@ -262,32 +270,19 @@ async function createMissingLoginMethod(
         userContext: reconciliationUserContext,
       });
 
-    if (!result.createdNewRecipeUser && result.user.id !== primaryUserId) {
+    if (
+      !result.createdNewRecipeUser &&
+      !await sdkUserIdMatchesInternalTarget(
+        result.user.id,
+        primaryUserId,
+        userContext,
+      )
+    ) {
       throw new Error(
         "Migrated passwordless login method belongs to another SuperTokens user",
       );
     }
 
-    if (importMethod.email && !importMethod.isVerified) {
-      try {
-        await EmailVerification.unverifyEmail(
-          result.recipeUserId,
-          importMethod.email,
-          userContext,
-        );
-      } catch (error) {
-        if (result.createdNewRecipeUser) {
-          await Promise.allSettled([
-            SuperTokens.deleteUser(
-              result.recipeUserId.getAsString(),
-              false,
-              userContext,
-            ),
-          ]);
-        }
-        throw error;
-      }
-    }
     return {
       recipeUserId: result.recipeUserId,
       createdNewRecipeUser: result.createdNewRecipeUser,
@@ -299,7 +294,7 @@ async function createMissingLoginMethod(
   );
 }
 
-async function ensurePrimaryUser(
+export async function ensurePrimaryUser(
   user: SuperTokensUser,
   recipeUserId: SuperTokensLoginMethod["recipeUserId"],
   superTokensUserId: string,
@@ -314,13 +309,21 @@ async function ensurePrimaryUser(
     userContext,
   );
   if (result.status === "OK") {
-    return recipeUserId.getAsString();
+    return superTokensUserId;
   }
   if (
     result.status ===
     "RECIPE_USER_ID_ALREADY_LINKED_WITH_PRIMARY_USER_ID_ERROR"
   ) {
-    return result.primaryUserId;
+    if (
+      await sdkUserIdMatchesInternalTarget(
+        result.primaryUserId,
+        superTokensUserId,
+        userContext,
+      )
+    ) {
+      return superTokensUserId;
+    }
   }
 
   throw new Error(
@@ -338,6 +341,28 @@ async function resolveSuperTokensUserId(
     userContext,
   });
   return mapping.status === "OK" ? mapping.superTokensUserId : userId;
+}
+
+async function freshlyResolveSdkUserIdToInternal(
+  sdkUserId: string,
+  userContext: JsonRecord,
+) {
+  clearSuperTokensCoreCallCache(userContext);
+  return resolveSuperTokensUserId(sdkUserId, userContext);
+}
+
+async function sdkUserIdMatchesInternalTarget(
+  sdkUserId: string,
+  expectedInternalUserId: string,
+  userContext: JsonRecord,
+) {
+  if (sdkUserId === expectedInternalUserId) {
+    return true;
+  }
+
+  return (
+    await freshlyResolveSdkUserIdToInternal(sdkUserId, userContext)
+  ) === expectedInternalUserId;
 }
 
 async function assertUserIsNotMappedToAnotherRowndUser(
@@ -365,6 +390,7 @@ async function assertRowndUserIdCanBeMapped(
   rowndUserId: string,
   userContext: JsonRecord,
 ) {
+  clearSuperTokensCoreCallCache(userContext);
   const externalMapping = await SuperTokens.getUserIdMapping({
     userId: rowndUserId,
     userIdType: "EXTERNAL",
@@ -399,7 +425,7 @@ async function assertRowndUserIdCanBeMapped(
   return false;
 }
 
-async function createRowndUserIdMapping(
+export async function createRowndUserIdMapping(
   superTokensUserId: string,
   rowndUserId: string,
   userContext: JsonRecord,
@@ -411,6 +437,8 @@ async function createRowndUserIdMapping(
     userContext,
   });
   if (result.status === "USER_ID_MAPPING_ALREADY_EXISTS_ERROR") {
+    // A preflight UNKNOWN_MAPPING_ERROR may still be cached after a sibling creates the mapping.
+    clearSuperTokensCoreCallCache(userContext);
     const existingMapping = await SuperTokens.getUserIdMapping({
       userId: rowndUserId,
       userIdType: "EXTERNAL",
@@ -429,12 +457,6 @@ async function createRowndUserIdMapping(
     );
   }
   return true;
-}
-
-async function runCompensations(compensations: Array<() => Promise<void>>) {
-  for (const compensate of [...compensations].reverse()) {
-    await Promise.allSettled([compensate()]);
-  }
 }
 
 export async function reconcileRowndUserWithExistingLoginMethods(
@@ -462,7 +484,7 @@ export async function reconcileRowndUserWithExistingLoginMethods(
     ({ loginMethod }) => loginMethod.recipeId === "thirdparty",
   );
   const target = thirdPartyMatches[0] ?? matches[0]!;
-  const targetSuperTokensUserId = await resolveSuperTokensUserId(
+  const targetSuperTokensUserId = await freshlyResolveSdkUserIdToInternal(
     target.user.id,
     userContext,
   );
@@ -472,7 +494,7 @@ export async function reconcileRowndUserWithExistingLoginMethods(
         importMethod,
         user,
         loginMethod,
-        superTokensUserId: await resolveSuperTokensUserId(
+        superTokensUserId: await freshlyResolveSdkUserIdToInternal(
           user.id,
           userContext,
         ),
@@ -521,49 +543,60 @@ export async function reconcileRowndUserWithExistingLoginMethods(
       `Cannot reconcile unsupported login method: ${unsupportedMethod.importMethod.recipeId}`,
     );
   }
-  const mappingAlreadyExists =
+  let mappingAlreadyExists =
     targetSuperTokensUserId === stUser.externalUserId ||
     await assertRowndUserIdCanBeMapped(
       targetSuperTokensUserId,
       stUser.externalUserId,
       userContext,
     );
-  const compensations: Array<() => Promise<void>> = [];
-  try {
-    const primaryUserId = await ensurePrimaryUser(
-      target.user,
-      target.loginMethod.recipeUserId,
+  if (!mappingAlreadyExists) {
+    clearSuperTokensCoreCallCache(userContext);
+    mappingAlreadyExists = await assertRowndUserIdCanBeMapped(
       targetSuperTokensUserId,
+      stUser.externalUserId,
       userContext,
     );
-    const foreignRecipeUserIds = new Map(
-      foreignOwners.map(({ loginMethod }) => [
-        loginMethod.recipeUserId.getAsString(),
-        loginMethod.recipeUserId,
-      ]),
-    );
-    for (const recipeUserId of foreignRecipeUserIds.values()) {
-      const linkResult = await AccountLinking.linkAccounts(
-        recipeUserId,
-        primaryUserId,
+    if (!mappingAlreadyExists) {
+      await createRowndUserIdMapping(
+        targetSuperTokensUserId,
+        stUser.externalUserId,
         userContext,
       );
-      if (linkResult.status !== "OK") {
-        throw new Error(
-          `Failed to link migrated login method: ${linkResult.status}`,
-        );
-      }
-      if (!linkResult.accountsAlreadyLinked) {
-        compensations.push(async () => {
-          await AccountLinking.unlinkAccount(recipeUserId, userContext);
-        });
-      }
     }
-    for (const { importMethod, match } of inspections) {
-      if (match) {
-        continue;
-      }
-
+  }
+  const primaryUserId = await ensurePrimaryUser(
+    target.user,
+    target.loginMethod.recipeUserId,
+    targetSuperTokensUserId,
+    userContext,
+  );
+  const foreignRecipeUserIds = new Map(
+    foreignOwners.map(({ loginMethod }) => [
+      loginMethod.recipeUserId.getAsString(),
+      loginMethod.recipeUserId,
+    ]),
+  );
+  for (const recipeUserId of foreignRecipeUserIds.values()) {
+    const linkResult = await AccountLinking.linkAccounts(
+      recipeUserId,
+      primaryUserId,
+      userContext,
+    );
+    if (linkResult.status !== "OK") {
+      throw new Error(
+        `Failed to link migrated login method: ${linkResult.status}`,
+      );
+    }
+  }
+  for (const { importMethod, match } of inspections) {
+    let recipeUserId: SuperTokensLoginMethod["recipeUserId"];
+    let currentLoginMethod: SuperTokensLoginMethod;
+    let effectiveImportMethod: ImportLoginMethod = importMethod;
+    if (match) {
+      recipeUserId = match.loginMethod.recipeUserId;
+      currentLoginMethod = match.loginMethod;
+    } else {
       const verifiedMatchingEmailMethod =
         importMethod.recipeId === "passwordless" &&
         importMethod.email !== undefined &&
@@ -573,24 +606,15 @@ export async function reconcileRowndUserWithExistingLoginMethods(
             method.verified &&
             method.hasSameEmailAs(importMethod.email!),
         );
-      const createdMethod = await createMissingLoginMethod(
-        verifiedMatchingEmailMethod
-          ? { ...importMethod, isVerified: true }
-          : importMethod,
+      effectiveImportMethod = verifiedMatchingEmailMethod
+        ? { ...importMethod, isVerified: true }
+        : importMethod;
+      ({ recipeUserId } = await createMissingLoginMethod(
+        effectiveImportMethod,
         tenantId,
         primaryUserId,
         userContext,
-      );
-      const { recipeUserId } = createdMethod;
-      if (createdMethod.createdNewRecipeUser) {
-        compensations.push(async () => {
-          await SuperTokens.deleteUser(
-            recipeUserId.getAsString(),
-            false,
-            userContext,
-          );
-        });
-      }
+      ));
       const createdUser = await SuperTokens.getUser(
         recipeUserId.getAsString(),
         userContext,
@@ -598,7 +622,21 @@ export async function reconcileRowndUserWithExistingLoginMethods(
       if (!createdUser) {
         throw new Error("Created migrated login method was not found");
       }
-      if (createdUser.id !== primaryUserId) {
+      const createdLoginMethod = createdUser.loginMethods.find(
+        (method) =>
+          method.recipeUserId.getAsString() === recipeUserId.getAsString(),
+      );
+      if (!createdLoginMethod) {
+        throw new Error("Created migrated login method was not found");
+      }
+      currentLoginMethod = createdLoginMethod;
+      if (
+        !await sdkUserIdMatchesInternalTarget(
+          createdUser.id,
+          primaryUserId,
+          userContext,
+        )
+      ) {
         const linkResult = await AccountLinking.linkAccounts(
           recipeUserId,
           primaryUserId,
@@ -607,7 +645,11 @@ export async function reconcileRowndUserWithExistingLoginMethods(
         const alreadyLinkedToTarget =
           linkResult.status ===
             "RECIPE_USER_ID_ALREADY_LINKED_WITH_ANOTHER_PRIMARY_USER_ID_ERROR" &&
-          linkResult.primaryUserId === primaryUserId;
+          await sdkUserIdMatchesInternalTarget(
+            linkResult.primaryUserId,
+            primaryUserId,
+            userContext,
+          );
         if (linkResult.status !== "OK" && !alreadyLinkedToTarget) {
           throw new Error(
             `Failed to link migrated login method: ${linkResult.status}`,
@@ -616,32 +658,47 @@ export async function reconcileRowndUserWithExistingLoginMethods(
       }
     }
 
-    if (!mappingAlreadyExists) {
-      const mappingCreated = await createRowndUserIdMapping(
-        primaryUserId,
-        stUser.externalUserId,
+    if (
+      effectiveImportMethod.recipeId === "passwordless" &&
+      effectiveImportMethod.email &&
+      !effectiveImportMethod.isVerified &&
+      currentLoginMethod.verified
+    ) {
+      await EmailVerification.unverifyEmail(
+        recipeUserId,
+        effectiveImportMethod.email,
         userContext,
       );
-      if (mappingCreated) {
-        compensations.push(async () => {
-          await SuperTokens.deleteUserIdMapping({
-            userId: stUser.externalUserId!,
-            userIdType: "EXTERNAL",
-            force: false,
-            userContext,
-          });
-        });
+    } else if (
+      effectiveImportMethod.recipeId === "passwordless" &&
+      effectiveImportMethod.email &&
+      effectiveImportMethod.isVerified &&
+      !currentLoginMethod.verified
+    ) {
+      const tokenResult = await EmailVerification.createEmailVerificationToken(
+        tenantId,
+        recipeUserId,
+        effectiveImportMethod.email,
+        userContext,
+      );
+      if (tokenResult.status === "OK") {
+        const verificationResult = await EmailVerification.verifyEmailUsingToken(
+          tenantId,
+          tokenResult.token,
+          false,
+          userContext,
+        );
+        if (verificationResult.status !== "OK") {
+          throw new Error("Failed to verify migrated email method");
+        }
       }
     }
-    await UserMetadata.updateUserMetadata(
-      primaryUserId,
-      stUser.userMetadata,
-      userContext,
-    );
-  } catch (error) {
-    await runCompensations(compensations);
-    throw error;
   }
+  await UserMetadata.updateUserMetadata(
+    primaryUserId,
+    stUser.userMetadata,
+    userContext,
+  );
 
   return true;
 }
