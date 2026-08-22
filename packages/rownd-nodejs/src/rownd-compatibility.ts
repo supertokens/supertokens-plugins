@@ -23,12 +23,14 @@ import { getStringList, isJsonRecord } from "./utils";
 export type RowndMetadata = RowndUserMetadata & JsonRecord;
 
 export type LinkedUserMetadataInspection = {
+  user?: SuperTokensUser;
   primaryUserId: string;
   linkedUserIds: string[];
   primaryMetadata: RowndMetadata;
   combinedMetadata: RowndMetadata;
   metadataUpdate: JsonRecord;
   rowndMetadataSourceUserId?: string;
+  rowndMetadataSourceMetadata?: RowndMetadata;
 };
 
 export type RowndVerifiableField = string;
@@ -57,7 +59,9 @@ export type RowndCompatUserResponse = {
   attributes?: JsonRecord;
 };
 
-export type SuperTokensUser = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
+export type SuperTokensUser = NonNullable<
+  Awaited<ReturnType<typeof SuperTokens.getUser>>
+>;
 export type SuperTokensLoginMethod = SuperTokensUser["loginMethods"][number];
 
 const IDENTITY_USER_DATA_FIELDS = new Set([
@@ -93,9 +97,7 @@ export async function getRawUserMetadata(
   return (result.metadata || {}) as RowndMetadata;
 }
 
-function getOriginalRowndUserId(metadata: {
-  original_rownd_user?: JsonValue;
-}) {
+function getOriginalRowndUserId(metadata: { original_rownd_user?: JsonValue }) {
   const originalRowndUser = metadata.original_rownd_user;
   const data = isJsonRecord(originalRowndUser)
     ? originalRowndUser.data
@@ -139,12 +141,13 @@ export function combineLinkedMetadata(input: {
     return a.userId.localeCompare(b.userId);
   });
   const primaryRowndUserId = getOriginalRowndUserId(input.primaryMetadata);
-  const canonicalLinkedMetadata = input.canonicalRowndUserId === undefined
-    ? undefined
-    : linkedMetadata.find(
-      ({ metadata }) =>
-        getOriginalRowndUserId(metadata) === input.canonicalRowndUserId,
-    );
+  const canonicalLinkedMetadata =
+    input.canonicalRowndUserId === undefined
+      ? undefined
+      : linkedMetadata.find(
+        ({ metadata }) =>
+          getOriginalRowndUserId(metadata) === input.canonicalRowndUserId,
+      );
   const canonicalMetadataReplacesPrimary =
     canonicalLinkedMetadata !== undefined &&
     primaryRowndUserId !== input.canonicalRowndUserId;
@@ -152,7 +155,7 @@ export function combineLinkedMetadata(input: {
   const metadataUpdate: JsonRecord = canonicalMetadataReplacesPrimary
     ? {
       original_rownd_user:
-        canonicalLinkedMetadata.metadata.original_rownd_user!,
+          canonicalLinkedMetadata.metadata.original_rownd_user!,
     }
     : {};
   for (const { metadata } of linkedMetadata) {
@@ -202,10 +205,20 @@ export function combineLinkedMetadata(input: {
         primaryRowndUserId === input.canonicalRowndUserId ||
         canonicalLinkedMetadata === undefined)
         ? input.primaryUserId
-        : canonicalLinkedMetadata?.userId ?? linkedMetadata.find(
-          ({ metadata }) =>
-            getOriginalRowndUserId(metadata) !== undefined,
-        )?.userId,
+        : (canonicalLinkedMetadata?.userId ??
+          linkedMetadata.find(
+            ({ metadata }) => getOriginalRowndUserId(metadata) !== undefined,
+          )?.userId),
+    rowndMetadataSourceMetadata:
+      primaryRowndUserId !== undefined &&
+      (input.canonicalRowndUserId === undefined ||
+        primaryRowndUserId === input.canonicalRowndUserId ||
+        canonicalLinkedMetadata === undefined)
+        ? input.primaryMetadata
+        : (canonicalLinkedMetadata?.metadata ??
+          linkedMetadata.find(
+            ({ metadata }) => getOriginalRowndUserId(metadata) !== undefined,
+          )?.metadata),
   };
 }
 
@@ -233,11 +246,13 @@ async function getPrimaryUserMapping(
 export async function inspectLinkedUserMetadata(
   userId: string,
   userContext?: Record<string, any>,
+  userSnapshot?: SuperTokensUser,
 ): Promise<LinkedUserMetadataInspection> {
-  const user = await SuperTokens.getUser(userId, userContext);
+  const user = userSnapshot ?? (await SuperTokens.getUser(userId, userContext));
   if (!user) {
     const metadata = await getRawUserMetadata(userId, userContext);
     return {
+      user: undefined,
       primaryUserId: userId,
       linkedUserIds: [],
       primaryMetadata: metadata,
@@ -245,6 +260,8 @@ export async function inspectLinkedUserMetadata(
       metadataUpdate: {},
       rowndMetadataSourceUserId:
         getOriginalRowndUserId(metadata) === undefined ? undefined : userId,
+      rowndMetadataSourceMetadata:
+        getOriginalRowndUserId(metadata) === undefined ? undefined : metadata,
     };
   }
 
@@ -267,19 +284,23 @@ export async function inspectLinkedUserMetadata(
     ),
   ]);
 
-  return combineLinkedMetadata({
-    primaryUserId,
-    primaryMetadata,
-    linkedMetadata,
-    canonicalRowndUserId: mapping?.externalUserId,
-  });
+  return {
+    ...combineLinkedMetadata({
+      primaryUserId,
+      primaryMetadata,
+      linkedMetadata,
+      canonicalRowndUserId: mapping?.externalUserId,
+    }),
+    user,
+  };
 }
 
 export async function getCombinedUserMetadata(
   userId: string,
   userContext?: Record<string, any>,
 ) {
-  return (await inspectLinkedUserMetadata(userId, userContext)).combinedMetadata;
+  return (await inspectLinkedUserMetadata(userId, userContext))
+    .combinedMetadata;
 }
 
 export async function updatePrimaryUserMetadata(
@@ -447,7 +468,9 @@ export function buildRowndAudience(
   return audience.length > 0 ? { aud: [...new Set(audience)] } : {};
 }
 
-export function buildConfiguredSessionClaims(metadata?: RowndMetadata): JsonRecord {
+export function buildConfiguredSessionClaims(
+  metadata?: RowndMetadata,
+): JsonRecord {
   if (!metadata) {
     return {};
   }
@@ -525,8 +548,7 @@ export function buildRowndSessionClaimPayload(input: {
   const currentPayload = input.currentPayload ?? {};
   const originalRowndUser = input.metadata?.original_rownd_user;
   const verifiedData = originalRowndUser?.verified_data as
-    | JsonRecord
-    | undefined;
+    JsonRecord | undefined;
   const authLevel = getEffectiveAuthLevel(
     input.user,
     typeof currentPayload.auth_level === "string"
@@ -599,12 +621,12 @@ export function applyRowndOAuthResourceParams(input: {
   });
 
   if (!rowndAudience) {
-    return;
+    return undefined;
   }
 
-  input.userContext.rowndOAuthAudience = rowndAudience;
   input.params.audience = audience ?? rowndAudience;
   delete input.params.resource;
+  return rowndAudience;
 }
 
 export async function buildRowndOAuthPayload(input: {
@@ -615,11 +637,14 @@ export async function buildRowndOAuthPayload(input: {
   userContext?: Record<string, any>;
 }) {
   const currentPayload = input.currentPayload ?? {};
+  const metadata = input.user
+    ? await getRowndMetadata(input.user, input.userContext)
+    : undefined;
   const standardClaims = input.user
-    ? await buildStandardOAuthClaims(input.user, input.scopes)
+    ? buildStandardOAuthClaims(input.user, input.scopes, metadata!)
     : {};
   const rowndClaims = input.user
-    ? await buildRowndOAuthSessionClaims(input.user, currentPayload)
+    ? buildRowndOAuthSessionClaims(input.user, currentPayload, metadata!)
     : {};
   const audience = getRowndOAuthAudience({
     requestedAudience:
@@ -641,10 +666,12 @@ export async function buildRowndOAuthUserInfo(input: {
   accessTokenPayload: JsonRecord;
   scopes: string[];
   currentPayload?: JsonRecord;
+  userContext?: Record<string, any>;
 }) {
-  const standardClaims = await buildStandardOAuthClaims(
+  const standardClaims = buildStandardOAuthClaims(
     input.user,
     input.scopes,
+    await getRowndMetadata(input.user, input.userContext),
   );
   const rowndClaims = pickOAuthUserInfoRowndClaims(input.accessTokenPayload);
 
@@ -655,9 +682,12 @@ export async function buildRowndOAuthUserInfo(input: {
   };
 }
 
-async function buildStandardOAuthClaims(user: SuperTokensUser, scopes: string[]) {
+function buildStandardOAuthClaims(
+  user: SuperTokensUser,
+  scopes: string[],
+  metadata: RowndMetadata,
+) {
   const claims: JsonRecord = {};
-  const metadata = await getRowndMetadata(user.id);
   const rowndData = isJsonRecord(metadata.original_rownd_user?.data)
     ? metadata.original_rownd_user.data
     : ({} as JsonRecord);
@@ -711,8 +741,12 @@ async function buildStandardOAuthClaims(user: SuperTokensUser, scopes: string[])
   return claims;
 }
 
-async function getRowndMetadata(userId: string): Promise<RowndMetadata> {
-  return getCombinedUserMetadata(userId);
+async function getRowndMetadata(
+  user: SuperTokensUser,
+  userContext?: Record<string, any>,
+): Promise<RowndMetadata> {
+  return (await inspectLinkedUserMetadata(user.id, userContext, user))
+    .combinedMetadata;
 }
 
 function pickOAuthUserInfoRowndClaims(payload: JsonRecord) {
@@ -762,14 +796,15 @@ function isOAuthClaimVerified(
   return value === true || value === expectedValue || fallback;
 }
 
-async function buildRowndOAuthSessionClaims(
+function buildRowndOAuthSessionClaims(
   user: SuperTokensUser,
   currentPayload: JsonRecord,
+  metadata: RowndMetadata,
 ) {
   return buildRowndSessionClaimPayload({
     userId: user.id,
     user,
-    metadata: await getRowndMetadata(user.id),
+    metadata,
     currentPayload,
   });
 }
@@ -786,7 +821,10 @@ export async function shouldLinkRowndAccounts(
   const [newAccountInfo, existingUser, session, tenantId, userContext] = input;
 
   if (session) {
-    const currentUser = await SuperTokens.getUser(session.getUserId());
+    const currentUser = await SuperTokens.getUser(
+      session.getUserId(userContext),
+      userContext,
+    );
 
     if (hasOnlyGuestLoginMethods(currentUser)) {
       return {
@@ -970,17 +1008,15 @@ function hasVerifiedMatchingEmailLoginMethod(
   if (
     accountInfo.recipeId === "thirdparty" &&
     thirdParty &&
-    user.loginMethods.some(
-      (method) => {
-        const existingThirdParty = method.thirdParty;
-        return (
-          method.recipeId === "thirdparty" &&
-          method.tenantIds.includes(tenantId) &&
-          existingThirdParty?.id === thirdParty.id &&
-          existingThirdParty.userId !== thirdParty.userId
-        );
-      },
-    )
+    user.loginMethods.some((method) => {
+      const existingThirdParty = method.thirdParty;
+      return (
+        method.recipeId === "thirdparty" &&
+        method.tenantIds.includes(tenantId) &&
+        existingThirdParty?.id === thirdParty.id &&
+        existingThirdParty.userId !== thirdParty.userId
+      );
+    })
   ) {
     return false;
   }

@@ -55,6 +55,7 @@ import {
 import { DEFAULT_PRIMARY_COLOR } from "./config";
 import {
   RowndIsAnonymousClaim,
+  buildRowndSessionAndAnonymousClaims,
   buildRowndSessionClaims,
   completePendingEmailVerification,
   createMissingLoginMethod,
@@ -70,7 +71,7 @@ import {
   handleMigrate,
 } from "./pluginImplementation";
 import { setRowndClient } from "./rownd-repository";
-import { resolveTenantId } from "./utils";
+import { createDerivedUserContext, resolveTenantId } from "./utils";
 
 let testPORT = 30001;
 
@@ -252,6 +253,224 @@ describe("rownd-nodejs plugin", () => {
   });
 
   describe("concurrent migration ID normalization", () => {
+    it("isolates overlapping derived contexts and forwards cache replacement", async () => {
+      const userContext = {
+        requestId: "request-id",
+        _default: { coreCallCache: { initial: true } },
+      };
+      const first = createDerivedUserContext(userContext, {
+        rowndFlag: "first",
+      });
+      const second = createDerivedUserContext(userContext, {
+        rowndFlag: "second",
+      });
+
+      await Promise.all([
+        Promise.resolve().then(() => {
+          expect(first.rowndFlag).toBe("first");
+          expect(first.requestId).toBe("request-id");
+        }),
+        Promise.resolve().then(() => {
+          expect(second.rowndFlag).toBe("second");
+          expect(second.requestId).toBe("request-id");
+        }),
+      ]);
+
+      first._default = { coreCallCache: { first: true } };
+      expect(userContext._default).toBe(first._default);
+      second._default = { coreCallCache: { second: true } };
+      expect(userContext._default).toBe(second._default);
+      expect(first._default).toBe(second._default);
+      expect(userContext).not.toHaveProperty("rowndFlag");
+    });
+
+    it("adds own flags when the parent context is frozen", () => {
+      const userContext = Object.freeze({ requestId: "frozen" });
+      const derived = createDerivedUserContext(userContext, {
+        rowndDisableAutomaticAccountLinking: true,
+      });
+
+      expect(Object.isExtensible(derived)).toBe(true);
+      expect(derived).toHaveProperty(
+        "rowndDisableAutomaticAccountLinking",
+        true,
+      );
+      expect(derived.requestId).toBe("frozen");
+      expect(() => {
+        derived._default = { coreCallCache: {} };
+      }).toThrow("Unable to update parent userContext._default");
+    });
+
+    it("defines security flags without invoking inherited setters", () => {
+      const prototype = Object.create(null, {
+        rowndDisableAutomaticAccountLinking: {
+          configurable: true,
+          set: vi.fn(),
+        },
+      });
+      const userContext = Object.assign(Object.create(prototype), {
+        requestId: "request-id",
+      });
+
+      const derived = createDerivedUserContext(userContext, {
+        rowndDisableAutomaticAccountLinking: true,
+      });
+
+      expect(Object.prototype.hasOwnProperty.call(
+        derived,
+        "rowndDisableAutomaticAccountLinking",
+      )).toBe(true);
+      expect(derived.rowndDisableAutomaticAccountLinking).toBe(true);
+      expect(Object.getOwnPropertyDescriptor(
+        prototype,
+        "rowndDisableAutomaticAccountLinking",
+      )?.set).not.toHaveBeenCalled();
+    });
+
+    it("rejects deceptive parent cache assignment", () => {
+      const initialDefault = { coreCallCache: { initial: true } };
+      const userContext = new Proxy(
+        { _default: initialDefault },
+        {
+          set: (_target, key) => key === "_default",
+        },
+      );
+      const derived = createDerivedUserContext(userContext, {});
+
+      expect(() => {
+        derived._default = { coreCallCache: { replacement: true } };
+      }).toThrow("Unable to update parent userContext._default");
+      expect(userContext._default).toBe(initialDefault);
+    });
+
+    it("uses one user snapshot for session and anonymous claims", async () => {
+      const userContext = { requestId: "claims" } as any;
+      const getUser = vi.spyOn(SuperTokens, "getUser").mockResolvedValue({
+        id: "user-id",
+        loginMethods: [],
+      } as any);
+      vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({
+        status: "UNKNOWN_MAPPING_ERROR",
+      });
+      vi.spyOn(UserMetadata, "getUserMetadata").mockResolvedValue({
+        status: "OK",
+        metadata: {},
+      });
+
+      await buildRowndSessionAndAnonymousClaims(
+        "user-id",
+        {},
+        undefined,
+        userContext,
+      );
+
+      expect(getUser).toHaveBeenCalledTimes(1);
+      expect(getUser).toHaveBeenCalledWith("user-id", userContext);
+    });
+
+    it("uses one metadata inspection for standard and Rownd OAuth claims", async () => {
+      const userContext = { requestId: "oauth" };
+      const user = {
+        id: "oauth-user",
+        emails: ["oauth@example.com"],
+        phoneNumbers: [],
+        loginMethods: [],
+      } as any;
+      const getUser = vi.spyOn(SuperTokens, "getUser");
+      vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({
+        status: "UNKNOWN_MAPPING_ERROR",
+      });
+      const getMetadata = vi
+        .spyOn(UserMetadata, "getUserMetadata")
+        .mockImplementation(async (_userId, context) => {
+          expect(context).toBe(userContext);
+          return {
+            status: "OK",
+            metadata: {
+              original_rownd_user: {
+                data: { user_id: "rownd-oauth-user" },
+                verified_data: {},
+              },
+            },
+          } as any;
+        });
+
+      await buildRowndOAuthPayload({
+        user,
+        scopes: ["openid", "email"],
+        userContext,
+      });
+
+      expect(getUser).not.toHaveBeenCalled();
+      expect(getMetadata).toHaveBeenCalledTimes(1);
+    });
+
+    it("refreshes source metadata before recording an app variant", async () => {
+      init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        subBrands: {
+          variant_123: {
+            id: "app-id",
+            variant: { id: "variant_123" },
+          },
+        },
+      });
+      const userContext = {
+        _default: { coreCallCache: { metadata: "stale" } },
+      };
+      vi.spyOn(SuperTokens, "getUser").mockResolvedValue({
+        id: "user-id",
+        loginMethods: [],
+      } as any);
+      vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({
+        status: "UNKNOWN_MAPPING_ERROR",
+      });
+      const getMetadata = vi
+        .spyOn(UserMetadata, "getUserMetadata")
+        .mockResolvedValueOnce({
+          status: "OK",
+          metadata: {
+            original_rownd_user: {
+              data: { user_id: "user-id" },
+              attributes: {},
+            },
+          },
+        } as any)
+        .mockImplementationOnce(async (_userId, context) => {
+          expect(context).toBe(userContext);
+          expect((context as any)._default.coreCallCache).toEqual({});
+          return {
+            status: "OK",
+            metadata: {
+              original_rownd_user: {
+                data: { user_id: "user-id" },
+                attributes: { concurrent_update: "retained" },
+              },
+            },
+          } as any;
+        });
+      const updateMetadata = vi
+        .spyOn(UserMetadata, "updateUserMetadata")
+        .mockResolvedValue({ status: "OK", metadata: {} } as any);
+
+      await recordRowndAppVariantForUser(
+        "user-id",
+        "variant_123",
+        userContext as any,
+      );
+
+      expect(getMetadata).toHaveBeenCalledTimes(2);
+      expect(updateMetadata.mock.calls[0]?.[1]).toMatchObject({
+        original_rownd_user: {
+          attributes: {
+            concurrent_update: "retained",
+            "rownd:app_variants": ["variant_123"],
+          },
+        },
+      });
+    });
+
     it("compares an existing third-party owner in internal ID space", async () => {
       const recipeUserId = { getAsString: () => "thirdparty-recipe-user" };
       const userContext = {
@@ -263,6 +482,7 @@ describe("rownd-nodejs plugin", () => {
         recipeUserId,
         createdNewRecipeUser: false,
       } as any);
+      const create = vi.spyOn(ThirdParty, "manuallyCreateOrUpdateUser");
       vi.spyOn(SuperTokens, "getUserIdMapping").mockImplementation(
         async ({ userId, userIdType, userContext: context }) => {
           expect(userIdType).toBe("EXTERNAL");
@@ -291,6 +511,10 @@ describe("rownd-nodejs plugin", () => {
           userContext as any,
         ),
       ).resolves.toEqual({ recipeUserId, createdNewRecipeUser: false });
+      expect(create.mock.calls[0]?.[6]).not.toBe(userContext);
+      expect(userContext).not.toHaveProperty(
+        "rowndDisableAutomaticAccountLinking",
+      );
     });
 
     it("rejects a method concurrently linked to a foreign primary", async () => {
@@ -365,10 +589,7 @@ describe("rownd-nodejs plugin", () => {
         .spyOn(MultiTenancy, "associateUserToTenant")
         .mockResolvedValueOnce({ status: "OK", wasAlreadyAssociated: false })
         .mockResolvedValueOnce({ status: "UNKNOWN_USER_ID_ERROR" } as any);
-      const disassociate = vi.spyOn(
-        MultiTenancy,
-        "disassociateUserFromTenant",
-      );
+      const disassociate = vi.spyOn(MultiTenancy, "disassociateUserFromTenant");
 
       await expect(
         associateUserLoginMethodsToTenant(
@@ -1557,10 +1778,11 @@ describe("rownd-nodejs plugin", () => {
         session,
         "mergeIntoAccessTokenPayload",
       );
-      const originalConsumeCodePOST = vi.fn().mockResolvedValue({
-        status: "OK",
-        user: linkedUser,
-        session,
+      const userContext = {};
+      const originalConsumeCodePOST = vi.fn().mockImplementation((input) => {
+        expect(input.userContext).not.toBe(userContext);
+        expect(input.userContext.rowndAppVariantId).toBe("variant_123");
+        return { status: "OK", user: linkedUser, session };
       });
       const passwordlessApis = (
         init(pluginConfig) as any
@@ -1570,14 +1792,11 @@ describe("rownd-nodejs plugin", () => {
 
       await passwordlessApis.consumeCodePOST({
         options: { req: makeVariantRequest("variant_123") },
-        userContext: {},
+        userContext,
       });
 
-      expect(originalConsumeCodePOST).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userContext: { rowndAppVariantId: "variant_123" },
-        }),
-      );
+      expect(originalConsumeCodePOST).toHaveBeenCalledTimes(1);
+      expect(userContext).not.toHaveProperty("rowndAppVariantId");
       await expect(
         UserMetadata.getUserMetadata(linkedUser.id),
       ).resolves.toEqual({
@@ -1620,9 +1839,12 @@ describe("rownd-nodejs plugin", () => {
       server = s;
       testPORT = port;
 
-      const originalCreateCodePOST = vi
-        .fn()
-        .mockResolvedValue({ status: "OK" });
+      const userContext = {};
+      const originalCreateCodePOST = vi.fn().mockImplementation((input) => {
+        expect(input.userContext).not.toBe(userContext);
+        expect(input.userContext.rowndAppVariantId).toBe("variant_123");
+        return { status: "OK" };
+      });
       const passwordlessApis = (
         init(pluginConfig) as any
       ).overrideMap.passwordless.apis({
@@ -1631,14 +1853,44 @@ describe("rownd-nodejs plugin", () => {
 
       await passwordlessApis.createCodePOST({
         options: { req: makeVariantRequest("variant_123") },
-        userContext: {},
+        userContext,
       });
 
-      expect(originalCreateCodePOST).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userContext: { rowndAppVariantId: "variant_123" },
-        }),
-      );
+      expect(userContext).not.toHaveProperty("rowndAppVariantId");
+    });
+
+    it("shadows stale passwordless request flags when omitted", async () => {
+      const userContext = {
+        rowndAppVariantId: "stale-variant",
+        rowndOAuthLoginChallenge: "stale-challenge",
+      };
+      const originalCreateCodePOST = vi.fn().mockImplementation((input) => {
+        expect(input.userContext).not.toBe(userContext);
+        expect(input.userContext).toHaveProperty("rowndAppVariantId", undefined);
+        expect(input.userContext).toHaveProperty(
+          "rowndOAuthLoginChallenge",
+          undefined,
+        );
+        return { status: "OK" };
+      });
+      const passwordlessApis = (
+        init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+        }) as any
+      ).overrideMap.passwordless.apis({
+        createCodePOST: originalCreateCodePOST,
+      });
+
+      await passwordlessApis.createCodePOST({
+        options: { req: makeRequest({}) },
+        userContext,
+      });
+
+      expect(userContext).toMatchObject({
+        rowndAppVariantId: "stale-variant",
+        rowndOAuthLoginChallenge: "stale-challenge",
+      });
     });
 
     it("adds client domain context before passwordless code creation", async () => {
@@ -1646,9 +1898,15 @@ describe("rownd-nodejs plugin", () => {
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
       };
-      const originalCreateCodePOST = vi
-        .fn()
-        .mockResolvedValue({ status: "OK" });
+      const userContext = {};
+      const originalCreateCodePOST = vi.fn().mockImplementation((input) => {
+        expect(input.userContext).not.toBe(userContext);
+        expect(input.userContext).toMatchObject({
+          rowndDisplayContext: "browser",
+          rowndClientDomain: "browser_local",
+        });
+        return { status: "OK" };
+      });
       const passwordlessApis = (
         init(pluginConfig) as any
       ).overrideMap.passwordless.apis({
@@ -1662,17 +1920,10 @@ describe("rownd-nodejs plugin", () => {
             rownd_client_domain: "browser_local",
           }),
         },
-        userContext: {},
+        userContext,
       });
 
-      expect(originalCreateCodePOST).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userContext: {
-            rowndDisplayContext: "browser",
-            rowndClientDomain: "browser_local",
-          },
-        }),
-      );
+      expect(userContext).toEqual({});
     });
 
     it("adds OAuth login challenge context before passwordless code creation", async () => {
@@ -1680,9 +1931,14 @@ describe("rownd-nodejs plugin", () => {
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
       };
-      const originalCreateCodePOST = vi
-        .fn()
-        .mockResolvedValue({ status: "OK" });
+      const userContext = {};
+      const originalCreateCodePOST = vi.fn().mockImplementation((input) => {
+        expect(input.userContext).not.toBe(userContext);
+        expect(input.userContext.rowndOAuthLoginChallenge).toBe(
+          "login_challenge_123",
+        );
+        return { status: "OK" };
+      });
       const passwordlessApis = (
         init(pluginConfig) as any
       ).overrideMap.passwordless.apis({
@@ -1695,16 +1951,10 @@ describe("rownd-nodejs plugin", () => {
             rownd_oauth_login_challenge: "login_challenge_123",
           }),
         },
-        userContext: {},
+        userContext,
       });
 
-      expect(originalCreateCodePOST).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userContext: {
-            rowndOAuthLoginChallenge: "login_challenge_123",
-          },
-        }),
-      );
+      expect(userContext).toEqual({});
     });
 
     it("adds Rownd request context before resending a passwordless code", async () => {
@@ -1719,9 +1969,18 @@ describe("rownd-nodejs plugin", () => {
           },
         },
       };
-      const originalResendCodePOST = vi
-        .fn()
-        .mockResolvedValue({ status: "OK" });
+      const userContext = {};
+      const originalResendCodePOST = vi.fn().mockImplementation((input) => {
+        expect(input.userContext).not.toBe(userContext);
+        expect(input.userContext).toMatchObject({
+          rowndDisplayContext: "mobile_app",
+          rowndRedirectToPath: "/profile",
+          rowndClientDomain: "mobile",
+          rowndAppVariantId: "variant_123",
+          rowndOAuthLoginChallenge: "login_challenge_123",
+        });
+        return { status: "OK" };
+      });
       const passwordlessApis = (
         init(pluginConfig) as any
       ).overrideMap.passwordless.apis({
@@ -1738,20 +1997,10 @@ describe("rownd-nodejs plugin", () => {
             rownd_oauth_login_challenge: "login_challenge_123",
           }),
         },
-        userContext: {},
+        userContext,
       });
 
-      expect(originalResendCodePOST).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userContext: {
-            rowndDisplayContext: "mobile_app",
-            rowndRedirectToPath: "/profile",
-            rowndClientDomain: "mobile",
-            rowndAppVariantId: "variant_123",
-            rowndOAuthLoginChallenge: "login_challenge_123",
-          },
-        }),
-      );
+      expect(userContext).toEqual({});
     });
 
     it("rejects passwordless code resend for unknown app variants", async () => {
@@ -1879,10 +2128,11 @@ describe("rownd-nodejs plugin", () => {
         session,
         "mergeIntoAccessTokenPayload",
       );
-      const originalSignInUpPOST = vi.fn().mockResolvedValue({
-        status: "OK",
-        user: linkedUser,
-        session,
+      const userContext = {};
+      const originalSignInUpPOST = vi.fn().mockImplementation((input) => {
+        expect(input.userContext).not.toBe(userContext);
+        expect(input.userContext.rowndAppVariantId).toBe("variant_123");
+        return { status: "OK", user: linkedUser, session };
       });
 
       const thirdPartyApis = (
@@ -1893,14 +2143,11 @@ describe("rownd-nodejs plugin", () => {
 
       await thirdPartyApis.signInUpPOST({
         options: { req: makeVariantRequest("variant_123") },
-        userContext: {},
+        userContext,
       });
 
-      expect(originalSignInUpPOST).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userContext: { rowndAppVariantId: "variant_123" },
-        }),
-      );
+      expect(originalSignInUpPOST).toHaveBeenCalledTimes(1);
+      expect(userContext).not.toHaveProperty("rowndAppVariantId");
       const metadata = await getUserMetadata(linkedUser.id);
       expect(
         (metadata.metadata as any).original_rownd_user.attributes[
@@ -2011,7 +2258,12 @@ describe("rownd-nodejs plugin", () => {
     });
 
     it("translates Rownd OAuth resource params into audience params", async () => {
-      const originalAuthGET = vi.fn().mockResolvedValue({ redirectTo: "ok" });
+      const userContext = {};
+      const originalAuthGET = vi.fn().mockImplementation((input) => {
+        expect(input.userContext).not.toBe(userContext);
+        expect(input.userContext.rowndOAuthAudience).toBe("app:app_123");
+        return { redirectTo: "ok" };
+      });
       const oauthApis = (
         init({
           rowndAppKey: "test-key",
@@ -2022,7 +2274,7 @@ describe("rownd-nodejs plugin", () => {
       });
       const input = {
         params: { resource: "app:app_123", client_id: "client_123" },
-        userContext: {},
+        userContext,
       };
 
       await oauthApis.authGET(input);
@@ -2030,15 +2282,21 @@ describe("rownd-nodejs plugin", () => {
       expect(originalAuthGET).toHaveBeenCalledWith(
         expect.objectContaining({
           params: { client_id: "client_123", audience: "app:app_123" },
-          userContext: { rowndOAuthAudience: "app:app_123" },
+          userContext: expect.objectContaining({
+            rowndOAuthAudience: "app:app_123",
+          }),
         }),
       );
+      expect(userContext).toEqual({});
     });
 
     it("translates Rownd OAuth token resource params into audience params", async () => {
-      const originalTokenPOST = vi
-        .fn()
-        .mockResolvedValue({ access_token: "token" });
+      const userContext = {};
+      const originalTokenPOST = vi.fn().mockImplementation((input) => {
+        expect(input.userContext).not.toBe(userContext);
+        expect(input.userContext.rowndOAuthAudience).toBe("app:app_123");
+        return { access_token: "token" };
+      });
       const oauthApis = (
         init({
           rowndAppKey: "test-key",
@@ -2049,7 +2307,7 @@ describe("rownd-nodejs plugin", () => {
       });
       const input = {
         body: { resource: "app:app_123", grant_type: "client_credentials" },
-        userContext: {},
+        userContext,
       };
 
       await oauthApis.tokenPOST(input);
@@ -2057,9 +2315,37 @@ describe("rownd-nodejs plugin", () => {
       expect(originalTokenPOST).toHaveBeenCalledWith(
         expect.objectContaining({
           body: { grant_type: "client_credentials", audience: "app:app_123" },
-          userContext: { rowndOAuthAudience: "app:app_123" },
+          userContext: expect.objectContaining({
+            rowndOAuthAudience: "app:app_123",
+          }),
         }),
       );
+      expect(userContext).toEqual({});
+    });
+
+    it("shadows a stale OAuth audience when the request omits it", async () => {
+      const userContext = { rowndOAuthAudience: "app:stale" };
+      const originalAuthGET = vi.fn().mockImplementation((input) => {
+        expect(input.userContext).not.toBe(userContext);
+        expect(input.userContext).toHaveProperty(
+          "rowndOAuthAudience",
+          undefined,
+        );
+        return { redirectTo: "ok" };
+      });
+      const oauthApis = (
+        init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+        }) as any
+      ).overrideMap.oauth2provider.apis({ authGET: originalAuthGET });
+
+      await oauthApis.authGET({
+        params: { client_id: "client_123" },
+        userContext,
+      });
+
+      expect(userContext.rowndOAuthAudience).toBe("app:stale");
     });
   });
 
@@ -2983,8 +3269,7 @@ describe("rownd-nodejs plugin", () => {
         const originalSignInUp = Passwordless.signInUp;
         let invocationCount = 0;
         let parentSignInUpResult:
-          | Awaited<ReturnType<typeof Passwordless.signInUp>>
-          | undefined;
+          Awaited<ReturnType<typeof Passwordless.signInUp>> | undefined;
         vi.spyOn(Passwordless, "signInUp").mockImplementation(async (input) => {
           invocationCount += 1;
           const isParent = invocationCount === 1;
@@ -3065,7 +3350,9 @@ describe("rownd-nodejs plugin", () => {
             headers: { Authorization: "Bearer some-token" },
           },
         );
-        await expect(repeatedResponse.json()).resolves.toEqual({ status: "OK" });
+        await expect(repeatedResponse.json()).resolves.toEqual({
+          status: "OK",
+        });
         const repeatedUser = await SuperTokens.getUser(rowndUserId);
         expect(
           repeatedUser?.loginMethods
@@ -3173,7 +3460,9 @@ describe("rownd-nodejs plugin", () => {
         await expect(parentReconciliation).rejects.toThrow(
           "Failed to map migrated Rownd user ID",
         );
-        const losingProvider = await SuperTokens.getUser(parentProvider.user.id);
+        const losingProvider = await SuperTokens.getUser(
+          parentProvider.user.id,
+        );
         expect(losingProvider?.isPrimaryUser).toBe(false);
         expect(losingProvider?.loginMethods).toEqual([
           expect.objectContaining({
@@ -3182,11 +3471,7 @@ describe("rownd-nodejs plugin", () => {
           }),
         ]);
         await expect(
-          SuperTokens.listUsersByAccountInfo(
-            "public",
-            { phoneNumber },
-            false,
-          ),
+          SuperTokens.listUsersByAccountInfo("public", { phoneNumber }, false),
         ).resolves.toHaveLength(0);
         await expect(
           SuperTokens.getUserIdMapping({

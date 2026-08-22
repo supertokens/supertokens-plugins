@@ -1,4 +1,8 @@
-import type { JSONObject, PluginRouteHandler, SuperTokensPublicConfig } from "supertokens-node/types";
+import type {
+  JSONObject,
+  PluginRouteHandler,
+  SuperTokensPublicConfig,
+} from "supertokens-node/types";
 
 import { HUB_LOGIN_PAGE_PATH, PUBLIC_TENANT_ID } from "./constants";
 import { RowndPluginError } from "./errors";
@@ -16,6 +20,49 @@ type SuperTokensUserContextWithCache = Record<string, unknown> & {
 };
 
 export const ROWND_OAUTH_LOGIN_CHALLENGE_PARAM = "rownd_oauth_login_challenge";
+
+export function createDerivedUserContext<T extends Record<PropertyKey, any>>(
+  userContext: T,
+  values: Record<PropertyKey, unknown>,
+): T {
+  const derivedContext = Object.create(Object.getPrototypeOf(userContext));
+  for (const key of Reflect.ownKeys(userContext)) {
+    if (key === "_default") continue;
+    Object.defineProperty(derivedContext, key, {
+      configurable: true,
+      enumerable:
+        Object.getOwnPropertyDescriptor(userContext, key)?.enumerable ?? true,
+      value: Reflect.get(userContext, key),
+      writable: true,
+    });
+  }
+  for (const key of Reflect.ownKeys(values)) {
+    if (key === "_default") continue;
+    Object.defineProperty(derivedContext, key, {
+      configurable: true,
+      enumerable: true,
+      value: Reflect.get(values, key),
+      writable: true,
+    });
+  }
+  Object.defineProperty(derivedContext, "_default", {
+    configurable: true,
+    enumerable: Object.prototype.propertyIsEnumerable.call(
+      userContext,
+      "_default",
+    ),
+    get: () => Reflect.get(userContext, "_default"),
+    set: (value) => {
+      if (
+        !Reflect.set(userContext, "_default", value) ||
+        Reflect.get(userContext, "_default") !== value
+      ) {
+        throw new TypeError("Unable to update parent userContext._default");
+      }
+    },
+  });
+  return derivedContext;
+}
 
 export function clearSuperTokensCoreCallCache(
   userContext: Record<string, unknown>,
@@ -196,7 +243,9 @@ export function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
-export function getAppInfoString(value: { getAsStringDangerous: () => string }) {
+export function getAppInfoString(value: {
+  getAsStringDangerous: () => string;
+}) {
   return value.getAsStringDangerous();
 }
 
@@ -205,10 +254,12 @@ export function getWebsiteDomain(input: {
   request?: any;
   userContext?: Record<string, any>;
 }) {
-  return getAppInfoString(input.stConfig.appInfo.getOrigin({
-    request: input.request,
-    userContext: (input.userContext ?? {}) as any,
-  }));
+  return getAppInfoString(
+    input.stConfig.appInfo.getOrigin({
+      request: input.request,
+      userContext: (input.userContext ?? {}) as any,
+    }),
+  );
 }
 
 export function normalizeClientDomain(value: string) {
@@ -286,7 +337,9 @@ export function normalizeRedirectToPathForClientDomain(
   const normalizedClientDomain = normalizeClientDomain(clientDomain);
   const redirectUrl = new URL(
     redirectToPath,
-    normalizedClientDomain.endsWith("://") ? "http://localhost" : normalizedClientDomain,
+    normalizedClientDomain.endsWith("://")
+      ? "http://localhost"
+      : normalizedClientDomain,
   );
   const hasExplicitScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(redirectToPath);
 
@@ -308,16 +361,23 @@ export function assertAllowedBypassRedirectPath(
   redirectToPath: string | undefined,
 ) {
   if (!redirectToPath) {
-    throw new Error("redirectToPath is required for confirmation bypass magic links");
+    throw new Error(
+      "redirectToPath is required for confirmation bypass magic links",
+    );
   }
 
-  const allowedRedirectPaths = pluginConfig.crossDeviceConfirmationBypass?.allowedRedirectPaths ?? [];
+  const allowedRedirectPaths =
+    pluginConfig.crossDeviceConfirmationBypass?.allowedRedirectPaths ?? [];
   if (allowedRedirectPaths.length === 0) {
-    throw new Error("crossDeviceConfirmationBypass.allowedRedirectPaths must be configured");
+    throw new Error(
+      "crossDeviceConfirmationBypass.allowedRedirectPaths must be configured",
+    );
   }
 
   if (!allowedRedirectPaths.includes(redirectToPath)) {
-    throw new Error(`redirectToPath is not allowed for confirmation bypass: ${redirectToPath}`);
+    throw new Error(
+      `redirectToPath is not allowed for confirmation bypass: ${redirectToPath}`,
+    );
   }
 }
 
@@ -396,7 +456,9 @@ export function getRequestedRedirectToPathFromRequest(
 export function getRequestedOAuthLoginChallengeFromRequest(
   req: Pick<SuperTokensRequest, "getKeyValueFromQuery">,
 ) {
-  const loginChallenge = req.getKeyValueFromQuery(ROWND_OAUTH_LOGIN_CHALLENGE_PARAM);
+  const loginChallenge = req.getKeyValueFromQuery(
+    ROWND_OAUTH_LOGIN_CHALLENGE_PARAM,
+  );
   return typeof loginChallenge === "string" && loginChallenge.length > 0
     ? loginChallenge
     : undefined;

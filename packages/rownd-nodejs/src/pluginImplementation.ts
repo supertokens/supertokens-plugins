@@ -63,6 +63,7 @@ import {
   parseUpdateUserBody,
   resolveTenantId,
   resolveAllowedClientDomain,
+  createDerivedUserContext,
 } from "./utils";
 
 type SuperTokensRequest = Parameters<PluginRouteHandler["handler"]>[0];
@@ -71,8 +72,13 @@ type SuperTokensSession = Parameters<PluginRouteHandler["handler"]>[2];
 type SuperTokensUserContext = Parameters<PluginRouteHandler["handler"]>[3];
 type TelemetryClient = ReturnType<typeof createClient>;
 
-function isBodyString(body: unknown, key: string): body is Record<string, string> {
-  return isRecord(body) && typeof body[key] === "string" && body[key].length > 0;
+function isBodyString(
+  body: unknown,
+  key: string,
+): body is Record<string, string> {
+  return (
+    isRecord(body) && typeof body[key] === "string" && body[key].length > 0
+  );
 }
 
 export type RowndRouteHandlerDeps = {
@@ -198,7 +204,11 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
         );
       }
 
-      await recordRowndAppVariantForUser(response.user.id, appVariantId);
+      await recordRowndAppVariantForUser(
+        response.user.id,
+        appVariantId,
+        userContext,
+      );
 
       await Session.createNewSession(
         req,
@@ -208,7 +218,9 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
         {
           ...buildRowndAudience({}, appVariantId),
           auth_level: authLevel,
-          ...([GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(authLevel) ? { is_anonymous: true } : {}),
+          ...([GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(authLevel)
+            ? { is_anonymous: true }
+            : {}),
           app_user_id: response.user.id,
         },
         {},
@@ -255,8 +267,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
     let superTokensUserId: string | undefined;
     let user: Awaited<ReturnType<typeof SuperTokens.getUser>>;
     let recipeUserId:
-      | Parameters<typeof Session.createNewSession>[3]
-      | undefined;
+      Parameters<typeof Session.createNewSession>[3] | undefined;
 
     try {
       if (!deps.stConfig.supertokens) {
@@ -280,7 +291,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
 
       user = await SuperTokens.getUser(rowndUserId, userContext);
       const existingMetadata = user
-        ? await getUserMetadata(user.id)
+        ? await getUserMetadata(user.id, userContext)
         : undefined;
 
       if (!user || existingMetadata?.rownd_migration_complete !== true) {
@@ -320,7 +331,11 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       }
 
       if (superTokensUserId) {
-        await recordRowndAppVariantForUser(superTokensUserId, appVariantId);
+        await recordRowndAppVariantForUser(
+          superTokensUserId,
+          appVariantId,
+          userContext,
+        );
       }
 
       const tenantLoginMethod = user?.loginMethods.find((method) =>
@@ -402,37 +417,31 @@ export async function associateUserLoginMethodsToTenant(
   }
 }
 
-function buildEmailChangeUserContext(
-  userContext: SuperTokensUserContext,
+function getEmailChangeUserContextValues(
   payloadContext?: Record<string, unknown>,
-): SuperTokensUserContext & RowndEmailChangeRequestContext {
+): RowndEmailChangeRequestContext {
   const displayContext = payloadContext?.rowndDisplayContext;
   const emailChangeContext: RowndEmailChangeRequestContext = {
-    ...(displayContext === "browser" ||
-    displayContext === "mobile_app" ||
-    displayContext === "customer_web_view"
-      ? { rowndDisplayContext: displayContext }
-      : {}),
-    ...(typeof payloadContext?.rowndClientDomain === "string"
-      ? { rowndClientDomain: payloadContext.rowndClientDomain }
-      : {}),
-    ...(typeof payloadContext?.rowndNativeEmailVerification === "boolean"
-      ? {
-        rowndNativeEmailVerification:
-            payloadContext.rowndNativeEmailVerification,
-      }
-      : {}),
+    rowndDisplayContext:
+      displayContext === "browser" ||
+      displayContext === "mobile_app" ||
+      displayContext === "customer_web_view"
+        ? displayContext
+        : undefined,
+    rowndClientDomain:
+      typeof payloadContext?.rowndClientDomain === "string"
+        ? payloadContext.rowndClientDomain
+        : undefined,
+    rowndNativeEmailVerification:
+      typeof payloadContext?.rowndNativeEmailVerification === "boolean"
+        ? payloadContext.rowndNativeEmailVerification
+        : undefined,
   };
 
-  return {
-    ...userContext,
-    ...emailChangeContext,
-  };
+  return emailChangeContext;
 }
 
-function nativeEmailVerificationUpgradeRequired(
-  context: RowndEmailChangeRequestContext,
-) {
+function nativeEmailVerificationUpgradeRequired(context: Record<string, any>) {
   return (
     context.rowndDisplayContext === "mobile_app" &&
     context.rowndNativeEmailVerification !== true
@@ -452,8 +461,13 @@ export function handleGetUser() {
     _req: SuperTokensRequest,
     _res: SuperTokensResponse,
     session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
   ) => {
-    const user = await getUserById(session!.getUserId(), session!.getTenantId());
+    const user = await getUserById(
+      session!.getUserId(userContext),
+      session!.getTenantId(userContext),
+      userContext,
+    );
     return {
       status: "OK" as const,
       ...user,
@@ -472,98 +486,119 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
     assertRowndAppVariantIsConfigured(appVariantId);
     const payload = parseUpdateUserBody(await getJsonBody(req));
     const inputData = payload.data ?? {};
-    const requestUserContext = buildEmailChangeUserContext(
+    const operationContext = createDerivedUserContext(
       userContext,
-      payload.context,
+      {
+        ...getEmailChangeUserContextValues(payload.context),
+        rowndAppVariantId: appVariantId,
+      },
     );
-    const { email, ...dataWithoutEmail } = inputData;
-    const hasEmailField = hasOwn(inputData, "email");
-    if (hasEmailField && (typeof email !== "string" || email.trim().length === 0)) {
+    {
+      const { email, ...dataWithoutEmail } = inputData;
+      const hasEmailField = hasOwn(inputData, "email");
+      if (
+        hasEmailField &&
+          (typeof email !== "string" || email.trim().length === 0)
+      ) {
+        return {
+          status: "ERROR" as const,
+          code: 400,
+          message: "email must be a non-empty string",
+        };
+      }
+      const hasEmailUpdate = hasEmailField && typeof email === "string";
+      const permissionError = validateWritableFields(
+        Object.keys(dataWithoutEmail),
+      );
+
+      if (permissionError) {
+        return permissionError;
+      }
+
+      const currentEmail = hasEmailUpdate
+        ? (
+          await getUserById(
+                session!.getUserId(operationContext),
+                session!.getTenantId(operationContext),
+                operationContext,
+          )
+        ).data.email
+        : undefined;
+      const changesEmail =
+          hasEmailUpdate &&
+          (typeof currentEmail !== "string" ||
+            currentEmail.trim().toLowerCase() !== email.trim().toLowerCase());
+
+      if (changesEmail) {
+        if (nativeEmailVerificationUpgradeRequired(operationContext)) {
+          return nativeEmailVerificationUpgradeRequiredResponse();
+        }
+        const sessionError = await validateEmailChangeSession(
+          deps,
+            session!,
+            appVariantId,
+            operationContext,
+        );
+        if (sessionError) return sessionError;
+      }
+
+      if (hasEmailUpdate) {
+        try {
+          const pendingVerificationResult =
+              await startPendingEmailVerification({
+                userId: session!.getUserId(operationContext),
+                recipeUserId: session!.getRecipeUserId(operationContext),
+                initiatingSessionHandle: session!.getHandle(operationContext),
+                tenantId: session!.getTenantId(operationContext),
+                email,
+                pendingVerificationId: randomUUID(),
+                userContext: operationContext,
+              });
+          const updateResult =
+              Object.keys(dataWithoutEmail).length > 0
+                ? await updateUserData(
+                    session!.getUserId(operationContext),
+                    dataWithoutEmail,
+                    session!.getTenantId(operationContext),
+                    operationContext,
+                )
+                : pendingVerificationResult;
+          return {
+            status: "OK" as const,
+            ...updateResult,
+            email_verification_pending: changesEmail,
+          };
+        } catch (error) {
+          if (error instanceof RowndEmailChangeError) {
+            return {
+              status: "ERROR" as const,
+              code: error.httpStatus,
+              message: error.message,
+            };
+          }
+          throw error;
+        }
+      }
+
+      if (Object.keys(dataWithoutEmail).length > 0) {
+        await updateUserData(
+            session!.getUserId(operationContext),
+            dataWithoutEmail,
+            session!.getTenantId(operationContext),
+            operationContext,
+        );
+      }
+
+      const user = await getUserById(
+          session!.getUserId(operationContext),
+          session!.getTenantId(operationContext),
+          operationContext,
+      );
       return {
-        status: "ERROR" as const,
-        code: 400,
-        message: "email must be a non-empty string",
+        status: "OK" as const,
+        ...user,
       };
     }
-    const hasEmailUpdate = hasEmailField && typeof email === "string";
-    const permissionError = validateWritableFields(
-      Object.keys(dataWithoutEmail),
-    );
-
-    if (permissionError) {
-      return permissionError;
-    }
-
-    const currentEmail = hasEmailUpdate
-      ? (await getUserById(session!.getUserId(), session!.getTenantId())).data.email
-      : undefined;
-    const changesEmail = hasEmailUpdate &&
-      (typeof currentEmail !== "string" ||
-        currentEmail.trim().toLowerCase() !== email.trim().toLowerCase());
-
-    if (changesEmail) {
-      if (nativeEmailVerificationUpgradeRequired(requestUserContext)) {
-        return nativeEmailVerificationUpgradeRequiredResponse();
-      }
-      const sessionError = await validateEmailChangeSession(
-        deps,
-        session!,
-        appVariantId,
-        requestUserContext,
-      );
-      if (sessionError) return sessionError;
-    }
-
-    if (hasEmailUpdate) {
-      try {
-        const pendingVerificationResult = await startPendingEmailVerification({
-          userId: session!.getUserId(),
-          recipeUserId: session!.getRecipeUserId(),
-          initiatingSessionHandle: session!.getHandle(),
-          tenantId: session!.getTenantId(),
-          email,
-          pendingVerificationId: randomUUID(),
-          userContext: appVariantId
-            ? { ...requestUserContext, rowndAppVariantId: appVariantId }
-            : requestUserContext,
-        });
-        const updateResult = Object.keys(dataWithoutEmail).length > 0
-          ? await updateUserData(
-            session!.getUserId(),
-            dataWithoutEmail,
-            session!.getTenantId(),
-          )
-          : pendingVerificationResult;
-        return {
-          status: "OK" as const,
-          ...updateResult,
-          email_verification_pending: changesEmail,
-        };
-      } catch (error) {
-        if (error instanceof RowndEmailChangeError) {
-          return {
-            status: "ERROR" as const,
-            code: error.httpStatus,
-            message: error.message,
-          };
-        }
-        throw error;
-      }
-    }
-
-    if (Object.keys(dataWithoutEmail).length > 0) {
-      await updateUserData(
-        session!.getUserId(),
-        dataWithoutEmail,
-        session!.getTenantId(),
-      );
-    }
-
-    const user = await getUserById(session!.getUserId(), session!.getTenantId());
-    return {
-      status: "OK" as const,
-      ...user,
-    };
   };
 }
 
@@ -572,8 +607,13 @@ export function handleDeleteUser() {
     _req: SuperTokensRequest,
     _res: SuperTokensResponse,
     session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
   ) => {
-    await SuperTokens.deleteUser(session!.getUserId(), true);
+    await SuperTokens.deleteUser(
+      session!.getUserId(userContext),
+      true,
+      userContext,
+    );
     return { status: "OK" as const };
   };
 }
@@ -586,9 +626,9 @@ export function handleSignOut() {
     userContext: SuperTokensUserContext,
   ) => {
     await Session.revokeAllSessionsForUser(
-      session!.getUserId(),
+      session!.getUserId(userContext),
       true,
-      session!.getTenantId(),
+      session!.getTenantId(userContext),
       userContext,
     );
 
@@ -601,11 +641,15 @@ export function handleGetUserMeta() {
     _req: SuperTokensRequest,
     _res: SuperTokensResponse,
     session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
   ) => {
-    const metadata = await getUserMetadata(session!.getUserId());
+    const metadata = await getUserMetadata(
+      session!.getUserId(userContext),
+      userContext,
+    );
     return {
       status: "OK" as const,
-      id: session!.getUserId(),
+      id: session!.getUserId(userContext),
       meta: Object.fromEntries(
         Object.entries(metadata).filter(
           ([key]) => !isInternalMetadataField(key),
@@ -620,6 +664,7 @@ export function handleUpdateUserMeta() {
     req: SuperTokensRequest,
     _res: SuperTokensResponse,
     session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
   ) => {
     const payload = parseUpdateMetaBody(await getJsonBody(req));
     const internalField = Object.keys(payload.meta ?? {}).find(
@@ -635,8 +680,9 @@ export function handleUpdateUserMeta() {
     }
 
     const updateMetadataResult = await updateUserMetadata(
-      session!.getUserId(),
+      session!.getUserId(userContext),
       payload.meta ?? {},
+      userContext,
     );
     return {
       status: "OK" as const,
@@ -650,13 +696,18 @@ export function handleGetUserField() {
     req: SuperTokensRequest,
     _res: SuperTokensResponse,
     session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
   ) => {
     const field = req.getKeyValueFromQuery("field");
     if (!field) {
       return missingFieldResponse();
     }
 
-    const user = await getUserById(session!.getUserId(), session!.getTenantId());
+    const user = await getUserById(
+      session!.getUserId(userContext),
+      session!.getTenantId(userContext),
+      userContext,
+    );
     return {
       status: "OK" as const,
       value: user.data[field],
@@ -679,82 +730,94 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
     }
 
     const payload = parseUpdateFieldBody(await getJsonBody(req));
-    const requestUserContext = buildEmailChangeUserContext(
+    const operationContext = createDerivedUserContext(
       userContext,
-      payload.context,
+      {
+        ...getEmailChangeUserContextValues(payload.context),
+        rowndAppVariantId: appVariantId,
+      },
     );
-    if (field === "email") {
-      if (typeof payload.value !== "string" || payload.value.trim().length === 0) {
-        return {
-          status: "ERROR" as const,
-          code: 400,
-          message: "email must be a non-empty string",
-        };
-      }
-
-      const currentEmail = (
-        await getUserById(session!.getUserId(), session!.getTenantId())
-      ).data.email;
-      const changesEmail =
-        typeof currentEmail !== "string" ||
-        currentEmail.trim().toLowerCase() !==
-          payload.value.trim().toLowerCase();
-      if (changesEmail) {
-        if (nativeEmailVerificationUpgradeRequired(requestUserContext)) {
-          return nativeEmailVerificationUpgradeRequiredResponse();
-        }
-        const sessionError = await validateEmailChangeSession(
-          deps,
-          session!,
-          appVariantId,
-          requestUserContext,
-        );
-        if (sessionError) return sessionError;
-      }
-
-      try {
-        const pendingVerificationResult = await startPendingEmailVerification({
-          userId: session!.getUserId(),
-          recipeUserId: session!.getRecipeUserId(),
-          initiatingSessionHandle: session!.getHandle(),
-          tenantId: session!.getTenantId(),
-          email: payload.value,
-          pendingVerificationId: randomUUID(),
-          userContext: appVariantId
-            ? { ...requestUserContext, rowndAppVariantId: appVariantId }
-            : requestUserContext,
-        });
-        return {
-          status: "OK" as const,
-          ...pendingVerificationResult,
-          email_verification_pending: changesEmail,
-        };
-      } catch (error) {
-        if (error instanceof RowndEmailChangeError) {
+    {
+      if (field === "email") {
+        if (
+          typeof payload.value !== "string" ||
+            payload.value.trim().length === 0
+        ) {
           return {
             status: "ERROR" as const,
-            code: error.httpStatus,
-            message: error.message,
+            code: 400,
+            message: "email must be a non-empty string",
           };
         }
-        throw error;
+
+        const currentEmail = (
+          await getUserById(
+              session!.getUserId(operationContext),
+              session!.getTenantId(operationContext),
+              operationContext,
+          )
+        ).data.email;
+        const changesEmail =
+            typeof currentEmail !== "string" ||
+            currentEmail.trim().toLowerCase() !==
+              payload.value.trim().toLowerCase();
+        if (changesEmail) {
+          if (nativeEmailVerificationUpgradeRequired(operationContext)) {
+            return nativeEmailVerificationUpgradeRequiredResponse();
+          }
+          const sessionError = await validateEmailChangeSession(
+            deps,
+              session!,
+              appVariantId,
+              operationContext,
+          );
+          if (sessionError) return sessionError;
+        }
+
+        try {
+          const pendingVerificationResult =
+              await startPendingEmailVerification({
+                userId: session!.getUserId(operationContext),
+                recipeUserId: session!.getRecipeUserId(operationContext),
+                initiatingSessionHandle: session!.getHandle(operationContext),
+                tenantId: session!.getTenantId(operationContext),
+                email: payload.value,
+                pendingVerificationId: randomUUID(),
+                userContext: operationContext,
+              });
+          return {
+            status: "OK" as const,
+            ...pendingVerificationResult,
+            email_verification_pending: changesEmail,
+          };
+        } catch (error) {
+          if (error instanceof RowndEmailChangeError) {
+            return {
+              status: "ERROR" as const,
+              code: error.httpStatus,
+              message: error.message,
+            };
+          }
+          throw error;
+        }
       }
-    }
 
-    const permissionError = validateWritableFields([field]);
-    if (permissionError) {
-      return permissionError;
-    }
+      const permissionError = validateWritableFields([field]);
+      if (permissionError) {
+        return permissionError;
+      }
 
-    const updateUserDataResult = await updateUserData(
-      session!.getUserId(),
-      { [field]: payload.value },
-      session!.getTenantId(),
-    );
-    return {
-      status: "OK" as const,
-      ...updateUserDataResult,
-    };
+      const updateUserDataResult = await updateUserData(
+          session!.getUserId(operationContext),
+          { [field]: payload.value },
+          session!.getTenantId(operationContext),
+          operationContext,
+      );
+      return {
+        status: "OK" as const,
+        ...updateUserDataResult,
+      };
+    }
   };
 }
 
@@ -784,7 +847,10 @@ async function validateEmailChangeSession(
 
   const authenticationTime = await session.getTimeCreated(userContext);
   const sessionAgeMs = Date.now() - authenticationTime;
-  if (sessionAgeMs > deps.pluginConfig.emailChange.maxSessionAgeSeconds * 1000) {
+  if (
+    sessionAgeMs >
+    deps.pluginConfig.emailChange.maxSessionAgeSeconds * 1000
+  ) {
     return recentAuthenticationRequiredResponse();
   }
 

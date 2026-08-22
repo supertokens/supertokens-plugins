@@ -8,7 +8,11 @@ import ThirdParty from "supertokens-node/recipe/thirdparty";
 import { BooleanClaim } from "supertokens-node/recipe/session/claims";
 import type { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
-import type { JSONObject, SuperTokensPublicConfig } from "supertokens-node/types";
+import type {
+  JSONObject,
+  SuperTokensPublicConfig,
+  UserContext,
+} from "supertokens-node/types";
 
 import {
   DEFAULT_ROWND_SCHEMA,
@@ -20,7 +24,11 @@ import {
 } from "./constants";
 import { RowndEmailChangeError, RowndPluginError } from "./errors";
 import { logDebugMessage } from "./logger";
-import { assertRowndAppVariantIsConfigured, getPluginConfig, getSuperTokensConfig } from "./config";
+import {
+  assertRowndAppVariantIsConfigured,
+  getPluginConfig,
+  getSuperTokensConfig,
+} from "./config";
 import type { SuperTokensUserImport } from "./types";
 import {
   buildRowndSessionClaimPayload,
@@ -53,6 +61,7 @@ import {
   normalizeRedirectToPathForClientDomain,
   resolveAllowedClientDomain,
   rewriteMagicLink,
+  createDerivedUserContext,
   type JsonRecord,
 } from "./utils";
 
@@ -120,7 +129,9 @@ export async function importUser(
   return importResponse.user;
 }
 
-type SuperTokensUser = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
+type SuperTokensUser = NonNullable<
+  Awaited<ReturnType<typeof SuperTokens.getUser>>
+>;
 type SuperTokensLoginMethod = SuperTokensUser["loginMethods"][number];
 type ImportLoginMethod = SuperTokensUserImport["loginMethods"][number];
 const PENDING_EMAIL_VERIFICATION_USER_CONTEXT_KEY = Symbol(
@@ -219,11 +230,10 @@ export async function createMissingLoginMethod(
   primaryUserId: string,
   userContext: JsonRecord,
 ) {
-  const reconciliationUserContext = {
-    ...userContext,
-    rowndDisableAutomaticAccountLinking: true,
-  };
-
+  const operationContext = createDerivedUserContext(
+    userContext,
+    { rowndDisableAutomaticAccountLinking: true },
+  );
   if (importMethod.recipeId === "thirdparty") {
     const result = await ThirdParty.manuallyCreateOrUpdateUser(
       tenantId,
@@ -232,7 +242,7 @@ export async function createMissingLoginMethod(
       importMethod.email,
       importMethod.isVerified,
       undefined,
-      reconciliationUserContext,
+      operationContext,
     );
     if (result.status !== "OK") {
       throw new Error(
@@ -241,11 +251,11 @@ export async function createMissingLoginMethod(
     }
     if (
       !result.createdNewRecipeUser &&
-      !await sdkUserIdMatchesInternalTarget(
+      !(await sdkUserIdMatchesInternalTarget(
         result.user.id,
         primaryUserId,
-        userContext,
-      )
+        operationContext,
+      ))
     ) {
       throw new Error(
         "Migrated third-party login method belongs to another SuperTokens user",
@@ -262,21 +272,21 @@ export async function createMissingLoginMethod(
       ? await Passwordless.signInUp({
         tenantId,
         email: importMethod.email,
-        userContext: reconciliationUserContext,
+        userContext: operationContext,
       })
       : await Passwordless.signInUp({
         tenantId,
         phoneNumber: importMethod.phoneNumber!,
-        userContext: reconciliationUserContext,
+        userContext: operationContext,
       });
 
     if (
       !result.createdNewRecipeUser &&
-      !await sdkUserIdMatchesInternalTarget(
+      !(await sdkUserIdMatchesInternalTarget(
         result.user.id,
         primaryUserId,
-        userContext,
-      )
+        operationContext,
+      ))
     ) {
       throw new Error(
         "Migrated passwordless login method belongs to another SuperTokens user",
@@ -312,8 +322,7 @@ export async function ensurePrimaryUser(
     return superTokensUserId;
   }
   if (
-    result.status ===
-    "RECIPE_USER_ID_ALREADY_LINKED_WITH_PRIMARY_USER_ID_ERROR"
+    result.status === "RECIPE_USER_ID_ALREADY_LINKED_WITH_PRIMARY_USER_ID_ERROR"
   ) {
     if (
       await sdkUserIdMatchesInternalTarget(
@@ -361,8 +370,9 @@ async function sdkUserIdMatchesInternalTarget(
   }
 
   return (
-    await freshlyResolveSdkUserIdToInternal(sdkUserId, userContext)
-  ) === expectedInternalUserId;
+    (await freshlyResolveSdkUserIdToInternal(sdkUserId, userContext)) ===
+    expectedInternalUserId
+  );
 }
 
 async function assertUserIsNotMappedToAnotherRowndUser(
@@ -375,10 +385,7 @@ async function assertUserIsNotMappedToAnotherRowndUser(
     userIdType: "SUPERTOKENS",
     userContext,
   });
-  if (
-    mapping.status === "OK" &&
-    mapping.externalUserId !== rowndUserId
-  ) {
+  if (mapping.status === "OK" && mapping.externalUserId !== rowndUserId) {
     throw new Error(
       "A migrated login method is already mapped to another Rownd user",
     );
@@ -390,7 +397,6 @@ async function assertRowndUserIdCanBeMapped(
   rowndUserId: string,
   userContext: JsonRecord,
 ) {
-  clearSuperTokensCoreCallCache(userContext);
   const externalMapping = await SuperTokens.getUserIdMapping({
     userId: rowndUserId,
     userIdType: "EXTERNAL",
@@ -452,9 +458,7 @@ export async function createRowndUserIdMapping(
     }
   }
   if (result.status !== "OK") {
-    throw new Error(
-      `Failed to map migrated Rownd user ID: ${result.status}`,
-    );
+    throw new Error(`Failed to map migrated Rownd user ID: ${result.status}`);
   }
   return true;
 }
@@ -468,14 +472,23 @@ export async function reconcileRowndUserWithExistingLoginMethods(
     throw new Error("Migrated Rownd user has no external user ID");
   }
 
+  clearSuperTokensCoreCallCache(userContext);
+  const resolvedUserIds = new Map<string, Promise<string>>();
+  const resolveUserId = (userId: string) => {
+    let resolved = resolvedUserIds.get(userId);
+    if (!resolved) {
+      resolved = resolveSuperTokensUserId(userId, userContext);
+      resolvedUserIds.set(userId, resolved);
+    }
+    return resolved;
+  };
+
   const inspections = await Promise.all(
     stUser.loginMethods.map((method) =>
       inspectImportMethod(method, tenantId, userContext),
     ),
   );
-  const matches = inspections.flatMap(({ match }) =>
-    match ? [match] : [],
-  );
+  const matches = inspections.flatMap(({ match }) => (match ? [match] : []));
   if (matches.length === 0) {
     return false;
   }
@@ -484,26 +497,19 @@ export async function reconcileRowndUserWithExistingLoginMethods(
     ({ loginMethod }) => loginMethod.recipeId === "thirdparty",
   );
   const target = thirdPartyMatches[0] ?? matches[0]!;
-  const targetSuperTokensUserId = await freshlyResolveSdkUserIdToInternal(
-    target.user.id,
-    userContext,
-  );
+  const targetSuperTokensUserId = await resolveUserId(target.user.id);
   const inspectedOwners = await Promise.all(
     inspections.flatMap(({ importMethod, owners }) =>
       owners.map(async ({ user, loginMethod }) => ({
         importMethod,
         user,
         loginMethod,
-        superTokensUserId: await freshlyResolveSdkUserIdToInternal(
-          user.id,
-          userContext,
-        ),
+        superTokensUserId: await resolveUserId(user.id),
       })),
     ),
   );
   const foreignOwners = inspectedOwners.filter(
-    ({ superTokensUserId }) =>
-      superTokensUserId !== targetSuperTokensUserId,
+    ({ superTokensUserId }) => superTokensUserId !== targetSuperTokensUserId,
   );
   const canLinkVerifiedEmailOwners =
     thirdPartyMatches.length > 0 &&
@@ -543,13 +549,7 @@ export async function reconcileRowndUserWithExistingLoginMethods(
       `Cannot reconcile unsupported login method: ${unsupportedMethod.importMethod.recipeId}`,
     );
   }
-  let mappingAlreadyExists =
-    targetSuperTokensUserId === stUser.externalUserId ||
-    await assertRowndUserIdCanBeMapped(
-      targetSuperTokensUserId,
-      stUser.externalUserId,
-      userContext,
-    );
+  let mappingAlreadyExists = targetSuperTokensUserId === stUser.externalUserId;
   if (!mappingAlreadyExists) {
     clearSuperTokensCoreCallCache(userContext);
     mappingAlreadyExists = await assertRowndUserIdCanBeMapped(
@@ -631,11 +631,11 @@ export async function reconcileRowndUserWithExistingLoginMethods(
       }
       currentLoginMethod = createdLoginMethod;
       if (
-        !await sdkUserIdMatchesInternalTarget(
+        !(await sdkUserIdMatchesInternalTarget(
           createdUser.id,
           primaryUserId,
           userContext,
-        )
+        ))
       ) {
         const linkResult = await AccountLinking.linkAccounts(
           recipeUserId,
@@ -645,11 +645,11 @@ export async function reconcileRowndUserWithExistingLoginMethods(
         const alreadyLinkedToTarget =
           linkResult.status ===
             "RECIPE_USER_ID_ALREADY_LINKED_WITH_ANOTHER_PRIMARY_USER_ID_ERROR" &&
-          await sdkUserIdMatchesInternalTarget(
+          (await sdkUserIdMatchesInternalTarget(
             linkResult.primaryUserId,
             primaryUserId,
             userContext,
-          );
+          ));
         if (linkResult.status !== "OK" && !alreadyLinkedToTarget) {
           throw new Error(
             `Failed to link migrated login method: ${linkResult.status}`,
@@ -682,12 +682,13 @@ export async function reconcileRowndUserWithExistingLoginMethods(
         userContext,
       );
       if (tokenResult.status === "OK") {
-        const verificationResult = await EmailVerification.verifyEmailUsingToken(
-          tenantId,
-          tokenResult.token,
-          false,
-          userContext,
-        );
+        const verificationResult =
+          await EmailVerification.verifyEmailUsingToken(
+            tenantId,
+            tokenResult.token,
+            false,
+            userContext,
+          );
         if (verificationResult.status !== "OK") {
           throw new Error("Failed to verify migrated email method");
         }
@@ -706,6 +707,7 @@ export async function reconcileRowndUserWithExistingLoginMethods(
 export async function recordRowndAppVariantForUser(
   userId: string,
   appVariantId?: string,
+  userContext?: JsonRecord,
 ) {
   if (!appVariantId) {
     return;
@@ -713,11 +715,15 @@ export async function recordRowndAppVariantForUser(
 
   assertRowndAppVariantIsConfigured(appVariantId);
 
-  const inspection = await inspectLinkedUserMetadata(userId);
+  const operationContext = userContext ?? {};
+  const inspection = await inspectLinkedUserMetadata(userId, operationContext);
   const metadataUserId =
     inspection.rowndMetadataSourceUserId ?? inspection.primaryUserId;
-  const metadata = await getRawUserMetadata(metadataUserId);
-  const originalRowndUser: JsonRecord = isJsonRecord(metadata.original_rownd_user)
+  clearSuperTokensCoreCallCache(operationContext);
+  const metadata = await getRawUserMetadata(metadataUserId, operationContext);
+  const originalRowndUser: JsonRecord = isJsonRecord(
+    metadata.original_rownd_user,
+  )
     ? metadata.original_rownd_user
     : {};
   const attributes: JsonRecord = isJsonRecord(originalRowndUser.attributes)
@@ -729,29 +735,41 @@ export async function recordRowndAppVariantForUser(
     return;
   }
 
-  await UserMetadata.updateUserMetadata(metadataUserId, {
-    original_rownd_user: {
-      ...originalRowndUser,
-      data: isJsonRecord(originalRowndUser.data)
-        ? originalRowndUser.data
-        : { user_id: userId },
-      verified_data: isJsonRecord(originalRowndUser.verified_data)
-        ? originalRowndUser.verified_data
-        : {},
-      attributes: {
-        ...attributes,
-        "rownd:app_variants": [...appVariants, appVariantId],
+  await UserMetadata.updateUserMetadata(
+    metadataUserId,
+    {
+      original_rownd_user: {
+        ...originalRowndUser,
+        data: isJsonRecord(originalRowndUser.data)
+          ? originalRowndUser.data
+          : { user_id: userId },
+        verified_data: isJsonRecord(originalRowndUser.verified_data)
+          ? originalRowndUser.verified_data
+          : {},
+        attributes: {
+          ...attributes,
+          "rownd:app_variants": [...appVariants, appVariantId],
+        },
       },
     },
-  });
+    operationContext,
+  );
 }
 
 export const RowndIsAnonymousClaim = new BooleanClaim({
   key: "is_anonymous",
-  fetchValue: async (userId) => {
-    const user = await SuperTokens.getUser(userId);
+  fetchValue: async (
+    userId,
+    _recipeUserId,
+    _tenantId,
+    _payload,
+    userContext,
+  ) => {
+    const user = await SuperTokens.getUser(userId, userContext);
     const effectiveAuthLevel = getEffectiveAuthLevel(user);
-    return [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(effectiveAuthLevel);
+    return [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(
+      effectiveAuthLevel,
+    );
   },
 });
 
@@ -759,9 +777,11 @@ export async function buildRowndSessionClaims(
   userId: string,
   currentPayload: JsonRecord = {},
   appVariantId?: string,
+  userContext?: JsonRecord,
 ) {
-  const user = await SuperTokens.getUser(userId);
-  const metadata = user ? await getUserMetadata(user.id) : undefined;
+  const inspection = await inspectLinkedUserMetadata(userId, userContext);
+  const user = inspection.user;
+  const metadata = user ? inspection.combinedMetadata : undefined;
 
   return buildRowndSessionClaimPayload({
     userId,
@@ -772,11 +792,40 @@ export async function buildRowndSessionClaims(
   });
 }
 
+export async function buildRowndSessionAndAnonymousClaims(
+  userId: string,
+  currentPayload: JsonRecord,
+  appVariantId: string | undefined,
+  userContext: UserContext,
+) {
+  const inspection = await inspectLinkedUserMetadata(userId, userContext);
+  const user = inspection.user;
+  const rowndSessionClaims = buildRowndSessionClaimPayload({
+    userId,
+    user,
+    metadata: user ? inspection.combinedMetadata : undefined,
+    currentPayload,
+    appVariantId,
+  });
+  const isAnonymous = [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(
+    getEffectiveAuthLevel(user),
+  );
+  return {
+    rowndSessionClaims,
+    rowndIsAnonymousClaim: RowndIsAnonymousClaim.addToPayload_internal(
+      {},
+      isAnonymous,
+      userContext,
+    ),
+  };
+}
+
 export async function createMagicLinkWithConfirmationBypass(
   input: CreateMagicLinkWithConfirmationBypassInput,
 ) {
   const hasEmail = typeof input.email === "string" && input.email.length > 0;
-  const hasPhoneNumber = typeof input.phoneNumber === "string" && input.phoneNumber.length > 0;
+  const hasPhoneNumber =
+    typeof input.phoneNumber === "string" && input.phoneNumber.length > 0;
 
   if (hasEmail === hasPhoneNumber) {
     throw new Error("Exactly one of email or phoneNumber is required");
@@ -803,28 +852,31 @@ export async function createMagicLinkWithConfirmationBypass(
     request: input.request,
     userContext: input.userContext,
   });
-  const redirectToPath = normalizeRedirectToPathForClientDomain(input.redirectToPath, clientDomain);
+  const redirectToPath = normalizeRedirectToPathForClientDomain(
+    input.redirectToPath,
+    clientDomain,
+  );
   assertAllowedBypassRedirectPath(pluginConfig, redirectToPath);
 
-  const userContext = {
-    ...(input.userContext ?? {}),
-    ...(input.displayContext ? { rowndDisplayContext: input.displayContext } : {}),
+  const userContext = input.userContext ?? {};
+  const operationContext = createDerivedUserContext(userContext, {
+    rowndDisplayContext: input.displayContext,
     rowndRedirectToPath: redirectToPath,
-    ...(input.clientDomain ? { rowndClientDomain: input.clientDomain } : {}),
-    ...(appVariantId ? { rowndAppVariantId: appVariantId } : {}),
-  };
+    rowndClientDomain: input.clientDomain,
+    rowndAppVariantId: appVariantId,
+  });
   const codeInfo = hasEmail
     ? await Passwordless.createCode({
       email: input.email!,
       tenantId,
       session: input.session,
-      userContext,
+      userContext: operationContext,
     })
     : await Passwordless.createCode({
       phoneNumber: input.phoneNumber!,
       tenantId,
       session: input.session,
-      userContext,
+      userContext: operationContext,
     });
 
   if (codeInfo.status !== "OK") {
@@ -834,30 +886,36 @@ export async function createMagicLinkWithConfirmationBypass(
   const magicLink = `${getWebsiteDomain({
     stConfig,
     request: input.request,
-    userContext,
+    userContext: operationContext,
   })}${getAppInfoString(stConfig.appInfo.websiteBasePath)}/verify?preAuthSessionId=${encodeURIComponent(
     codeInfo.preAuthSessionId,
   )}&tenantId=${encodeURIComponent(tenantId)}#${encodeURIComponent(codeInfo.linkCode)}`;
-  const oauthLoginChallenge = (userContext as Record<string, unknown>)
+  const oauthLoginChallenge = (operationContext as Record<string, unknown>)
     .rowndOAuthLoginChallenge;
-  const rewrittenUrl = new URL(rewriteMagicLink({
-    magicLink,
-    clientDomain,
-    bootstrapParams: getMagicLinkBootstrapParams({
-      appKey: pluginConfig.rowndAppKey,
-      apiDomain: getAppInfoString(stConfig.appInfo.apiDomain),
-      apiBasePath: getAppInfoString(stConfig.appInfo.apiBasePath),
-      appVariantId,
-      displayContext: input.displayContext,
-      redirectToPath,
-      clientDomainKey: input.clientDomain,
-      oauthLoginChallenge: typeof oauthLoginChallenge === "string"
-        ? oauthLoginChallenge
-        : undefined,
+  const rewrittenUrl = new URL(
+    rewriteMagicLink({
+      magicLink,
+      clientDomain,
+      bootstrapParams: getMagicLinkBootstrapParams({
+        appKey: pluginConfig.rowndAppKey,
+        apiDomain: getAppInfoString(stConfig.appInfo.apiDomain),
+        apiBasePath: getAppInfoString(stConfig.appInfo.apiBasePath),
+        appVariantId,
+        displayContext: input.displayContext,
+        redirectToPath,
+        clientDomainKey: input.clientDomain,
+        oauthLoginChallenge:
+              typeof oauthLoginChallenge === "string"
+                ? oauthLoginChallenge
+                : undefined,
+      }),
     }),
-  }));
+  );
 
-  rewrittenUrl.searchParams.set(PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM, "true");
+  rewrittenUrl.searchParams.set(
+    PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM,
+    "true",
+  );
 
   return rewrittenUrl.toString();
 }
@@ -896,9 +954,11 @@ function isPendingVerification(
 export async function getUserById(
   userId: string,
   tenantId: string = PUBLIC_TENANT_ID,
+  userContext?: JsonRecord,
 ): Promise<RowndCompatUserResponse> {
-  const metadata = await getUserMetadata(userId);
-  const stUser = await SuperTokens.getUser(userId);
+  const inspection = await inspectLinkedUserMetadata(userId, userContext);
+  const metadata = inspection.combinedMetadata;
+  const stUser = inspection.user;
 
   if (!stUser) {
     throw new RowndPluginError("ROWND_USER_NOT_FOUND");
@@ -932,16 +992,20 @@ export async function getUserById(
     }
   }
 
-  const originalVerifiedData = (originalRowndUser?.verified_data || {}) as JsonRecord;
+  const originalVerifiedData = (originalRowndUser?.verified_data ||
+    {}) as JsonRecord;
   const verifiedData: JsonRecord = Object.fromEntries(
     Object.entries(originalVerifiedData).filter(([key]) => key !== "email"),
   );
 
   const tenantLoginMethods = stUser.loginMethods
     .filter((method) => method.tenantIds.includes(tenantId))
-    .sort((a, b) =>
-      a.timeJoined - b.timeJoined ||
-      a.recipeUserId.getAsString().localeCompare(b.recipeUserId.getAsString()),
+    .sort(
+      (a, b) =>
+        a.timeJoined - b.timeJoined ||
+        a.recipeUserId
+          .getAsString()
+          .localeCompare(b.recipeUserId.getAsString()),
     );
   const canonicalEmailRecipeUserId = getCanonicalEmailRecipeUserId(
     metadata,
@@ -1044,12 +1108,18 @@ export async function getUserById(
   const sortedByJoined = [...tenantLoginMethods].sort(
     (a, b) => a.timeJoined - b.timeJoined,
   );
-  const latestSessionInfo = await getLatestSessionInfo(stUser.id, tenantId);
+  const latestSessionInfo = await getLatestSessionInfo(
+    stUser.id,
+    tenantId,
+    userContext,
+  );
   const firstMethod = sortedByJoined[0];
-  const latestSessionRecipeUserId = latestSessionInfo?.recipeUserId.getAsString();
+  const latestSessionRecipeUserId =
+    latestSessionInfo?.recipeUserId.getAsString();
   const lastMethod = latestSessionRecipeUserId
     ? stUser.loginMethods.find(
-      (method) => method.recipeUserId.getAsString() === latestSessionRecipeUserId,
+      (method) =>
+        method.recipeUserId.getAsString() === latestSessionRecipeUserId,
     )
     : [...tenantLoginMethods].sort((a, b) => b.timeJoined - a.timeJoined)[0];
   const lastSignInAt = latestSessionInfo?.timeCreated ?? stUser.timeJoined;
@@ -1083,15 +1153,20 @@ export async function getUserById(
   };
 }
 
-async function getLatestSessionInfo(userId: string, tenantId: string) {
+async function getLatestSessionInfo(
+  userId: string,
+  tenantId: string,
+  userContext?: JsonRecord,
+) {
   const sessionHandles = await Session.getAllSessionHandlesForUser(
     userId,
     true,
     tenantId,
+    userContext,
   );
   const sessionInfos = await Promise.all(
     sessionHandles.map((sessionHandle) =>
-      Session.getSessionInformation(sessionHandle),
+      Session.getSessionInformation(sessionHandle, userContext),
     ),
   );
 
@@ -1113,9 +1188,14 @@ export async function updateUserData(
   userId: string,
   inputData: JsonRecord,
   tenantId: string = PUBLIC_TENANT_ID,
+  userContext?: JsonRecord,
 ) {
-  const { primaryUserId } = await updatePrimaryUserMetadata(userId, inputData);
-  return getUserById(primaryUserId, tenantId);
+  const { primaryUserId } = await updatePrimaryUserMetadata(
+    userId,
+    inputData,
+    userContext,
+  );
+  return getUserById(primaryUserId, tenantId, userContext);
 }
 
 export function addPendingEmailVerificationMarker(input: {
@@ -1201,6 +1281,7 @@ export async function startPendingEmailVerification(input: {
   initiatingSessionHandle: string;
   userContext?: JsonRecord;
 }) {
+  const userContext = input.userContext ?? {};
   const user = await SuperTokens.getUser(input.userId, input.userContext);
   if (!user) {
     throw new RowndPluginError("ROWND_USER_NOT_FOUND");
@@ -1242,7 +1323,9 @@ export async function startPendingEmailVerification(input: {
     );
   }
 
-  const currentEmail = (await getUserById(input.userId, input.tenantId)).data.email;
+  const currentEmail = (
+    await getUserById(input.userId, input.tenantId, input.userContext)
+  ).data.email;
   const pendingVerifications = getPendingVerifications(metadata);
   const pendingEmailVerifications = pendingVerifications.filter(
     (pendingVerification) => pendingVerification.field === "email",
@@ -1295,13 +1378,21 @@ export async function startPendingEmailVerification(input: {
         ),
       };
     if (pendingEmailVerifications.length > 0 || currentPasswordlessMethod) {
-      await updatePrimaryUserMetadata(input.userId, updatedMetadata);
+      await updatePrimaryUserMetadata(
+        input.userId,
+        updatedMetadata,
+        input.userContext,
+      );
     }
 
-    return getUserById(input.userId, input.tenantId);
+    return getUserById(input.userId, input.tenantId, input.userContext);
   }
 
-  await assertEmailAvailableForUser(normalizedEmail, user.id, input.userContext);
+  await assertEmailAvailableForUser(
+    normalizedEmail,
+    user.id,
+    input.userContext,
+  );
 
   const purpose = passwordlessMethod
     ? "UPDATE_PASSWORDLESS"
@@ -1329,16 +1420,19 @@ export async function startPendingEmailVerification(input: {
     status: "PENDING",
   };
 
-  await updatePrimaryUserMetadata(input.userId, {
-    ...metadata,
-    rownd_pending_verification: [
-      ...pendingVerifications.filter(
-        (pendingVerification) =>
-          pendingVerification.field !== "email",
-      ),
-      pendingVerification,
-    ],
-  });
+  await updatePrimaryUserMetadata(
+    input.userId,
+    {
+      ...metadata,
+      rownd_pending_verification: [
+        ...pendingVerifications.filter(
+          (pendingVerification) => pendingVerification.field !== "email",
+        ),
+        pendingVerification,
+      ],
+    },
+    input.userContext,
+  );
 
   try {
     await EmailVerification.revokeEmailVerificationTokens(
@@ -1352,16 +1446,16 @@ export async function startPendingEmailVerification(input: {
       normalizedEmail,
       input.userContext,
     );
+    const operationContext = createDerivedUserContext(userContext, {
+      [PENDING_EMAIL_VERIFICATION_USER_CONTEXT_KEY]:
+        input.pendingVerificationId,
+    });
     const response = await EmailVerification.sendEmailVerificationEmail(
       input.tenantId,
       input.userId,
       verificationRecipeUserId,
       normalizedEmail,
-      {
-        ...input.userContext,
-        [PENDING_EMAIL_VERIFICATION_USER_CONTEXT_KEY]:
-          input.pendingVerificationId,
-      },
+      operationContext,
     );
 
     if (response.status !== "OK") {
@@ -1382,7 +1476,7 @@ export async function startPendingEmailVerification(input: {
     throw error;
   }
 
-  return getUserById(input.userId, input.tenantId);
+  return getUserById(input.userId, input.tenantId, input.userContext);
 }
 
 export async function completePendingEmailVerification(input: {
@@ -1404,6 +1498,7 @@ export async function completePendingEmailVerification(input: {
   | undefined
 > {
   const tenantId = input.tenantId ?? PUBLIC_TENANT_ID;
+  const userContext = input.userContext ?? {};
   let user = await SuperTokens.getUser(
     input.recipeUserId.getAsString(),
     input.userContext,
@@ -1436,7 +1531,8 @@ export async function completePendingEmailVerification(input: {
         tenantId,
       ) &&
       (!pendingVerification.verificationRecipeUserId ||
-        pendingVerification.verificationRecipeUserId === input.recipeUserId.getAsString()),
+        pendingVerification.verificationRecipeUserId ===
+          input.recipeUserId.getAsString()),
   );
 
   if (!pendingVerification) {
@@ -1476,8 +1572,7 @@ export async function completePendingEmailVerification(input: {
     );
   }
 
-  const initiatingSessionHandle =
-    pendingVerification.initiatingSessionHandle;
+  const initiatingSessionHandle = pendingVerification.initiatingSessionHandle;
   if (
     (pendingVerification.status ?? "PENDING") !== "PENDING" ||
     !initiatingSessionHandle ||
@@ -1496,7 +1591,11 @@ export async function completePendingEmailVerification(input: {
   let completionPhase: CompletionPhase = "PENDING";
   let rollbackCredentialChange: (() => Promise<void>) | undefined;
   try {
-    await assertEmailAvailableForUser(normalizedEmail, userId, input.userContext);
+    await assertEmailAvailableForUser(
+      normalizedEmail,
+      userId,
+      input.userContext,
+    );
 
     const initiatingSession = await Session.getSessionInformation(
       initiatingSessionHandle,
@@ -1564,7 +1663,9 @@ export async function completePendingEmailVerification(input: {
       "COMMITTING",
       input.userContext,
     );
-    if (!(await Session.revokeSession(initiatingSessionHandle, input.userContext))) {
+    if (
+      !(await Session.revokeSession(initiatingSessionHandle, input.userContext))
+    ) {
       return rejectInactivePendingEmailVerification(
         userId,
         pendingVerification,
@@ -1590,7 +1691,7 @@ export async function completePendingEmailVerification(input: {
     ).find((verification) => verification.field === "email");
     if (
       committingVerification?.id !== pendingVerification.id ||
-    committingVerification.status !== "COMMITTING"
+      committingVerification.status !== "COMMITTING"
     ) {
       return rejectInactivePendingEmailVerification(
         userId,
@@ -1601,13 +1702,14 @@ export async function completePendingEmailVerification(input: {
       );
     }
 
+    const operationContext = createDerivedUserContext(
+      userContext,
+      { rowndDisableAutomaticAccountLinking: true },
+    );
     const passwordlessUser = await Passwordless.signInUp({
       email: normalizedEmail,
       tenantId,
-      userContext: {
-        ...input.userContext,
-        rowndDisableAutomaticAccountLinking: true,
-      },
+      userContext: operationContext,
     });
     if (passwordlessUser.status !== "OK") {
       throw emailOwnershipConflict();
@@ -1667,7 +1769,7 @@ export async function completePendingEmailVerification(input: {
       undefined,
       input.userContext,
     );
-    const targetMetadata = await getUserMetadata(userId);
+    const targetMetadata = await getUserMetadata(userId, input.userContext);
     const updatedMetadata = buildVerifiedEmailMetadata(
       targetMetadata,
       userId,
@@ -1684,25 +1786,32 @@ export async function completePendingEmailVerification(input: {
       const rollbackErrors: unknown[] = [];
       const rollbackOperations = [
         ...(rollbackCredentialChange ? [rollbackCredentialChange] : []),
-        () => EmailVerification.unverifyEmail(
-          input.recipeUserId,
-          normalizedEmail,
-          input.userContext,
-        ),
-        () => updatePrimaryUserMetadata(userId, {
-          ...targetMetadata,
-          rownd_pending_verification: getPendingVerifications(
-            targetMetadata,
-          ).filter(
-            (verification) => verification.id !== pendingVerification.id,
+        () =>
+          EmailVerification.unverifyEmail(
+            input.recipeUserId,
+            normalizedEmail,
+            input.userContext,
           ),
-        }),
-        () => Session.revokeAllSessionsForUser(
-          userId,
-          true,
-          undefined,
-          input.userContext,
-        ),
+        () =>
+          updatePrimaryUserMetadata(
+            userId,
+            {
+              ...targetMetadata,
+              rownd_pending_verification: getPendingVerifications(
+                targetMetadata,
+              ).filter(
+                (verification) => verification.id !== pendingVerification.id,
+              ),
+            },
+            input.userContext,
+          ),
+        () =>
+          Session.revokeAllSessionsForUser(
+            userId,
+            true,
+            undefined,
+            input.userContext,
+          ),
       ];
       for (const rollbackOperation of rollbackOperations) {
         try {
@@ -1792,9 +1901,11 @@ function isMatchingPendingEmailVerification(
   email: string,
   tenantId: string,
 ) {
-  return verification.field === "email" &&
+  return (
+    verification.field === "email" &&
     normalizeEmail(verification.value) === email &&
-    (verification.tenantId ?? PUBLIC_TENANT_ID) === tenantId;
+    (verification.tenantId ?? PUBLIC_TENANT_ID) === tenantId
+  );
 }
 
 function normalizeEmail(email: string) {
@@ -1802,9 +1913,11 @@ function normalizeEmail(email: string) {
 }
 
 function isRealThirdPartyMethod(method: SuperTokensLoginMethod) {
-  return method.recipeId === "thirdparty" &&
+  return (
+    method.recipeId === "thirdparty" &&
     method.thirdParty?.id !== GUEST_AUTH_METHOD_ID &&
-    method.thirdParty?.id !== INSTANT_AUTH_METHOD_ID;
+    method.thirdParty?.id !== INSTANT_AUTH_METHOD_ID
+  );
 }
 
 async function ensureStablePrimaryUser(
@@ -1839,17 +1952,20 @@ function getVerificationRecipeUserIds(
 ) {
   const exactRecipeUserId = user.loginMethods.find(
     (method) =>
-      method.recipeUserId.getAsString() === verification.verificationRecipeUserId,
+      method.recipeUserId.getAsString() ===
+      verification.verificationRecipeUserId,
   )?.recipeUserId;
   if (exactRecipeUserId) {
     return [exactRecipeUserId];
   }
 
-  return [...new Map(
-    [...user.loginMethods.map((method) => method.recipeUserId), fallback].map(
-      (recipeUserId) => [recipeUserId.getAsString(), recipeUserId],
-    ),
-  ).values()];
+  return [
+    ...new Map(
+      [...user.loginMethods.map((method) => method.recipeUserId), fallback].map(
+        (recipeUserId) => [recipeUserId.getAsString(), recipeUserId],
+      ),
+    ).values(),
+  ];
 }
 
 async function revokePendingEmailVerificationTokens(
@@ -1880,10 +1996,12 @@ async function assertEmailAvailableForUser(
     Array.isArray(allowedUserIds) ? allowedUserIds : [allowedUserIds],
   );
   const tenants = await MultiTenancy.listAllTenants(userContext);
-  const tenantIds = [...new Set([
-    PUBLIC_TENANT_ID,
-    ...tenants.tenants.map((tenant) => tenant.tenantId),
-  ])];
+  const tenantIds = [
+    ...new Set([
+      PUBLIC_TENANT_ID,
+      ...tenants.tenants.map((tenant) => tenant.tenantId),
+    ]),
+  ];
   const users = await Promise.all(
     tenantIds.map((tenantId) =>
       SuperTokens.listUsersByAccountInfo(
@@ -1918,7 +2036,8 @@ function findPendingPasswordlessMethod(
   if (
     pendingVerification.purpose !== "UPDATE_PASSWORDLESS" ||
     !pendingVerification.verificationRecipeUserId
-  ) return undefined;
+  )
+    return undefined;
   const passwordlessMethod = user.loginMethods.find(
     (method) =>
       method.recipeId === "passwordless" &&
@@ -1948,8 +2067,7 @@ function findCanonicalPasswordlessMethod(
   if (canonicalEmailRecipeUserId) {
     const canonicalMethod = passwordlessMethods.find(
       (method) =>
-        method.recipeUserId.getAsString() ===
-        canonicalEmailRecipeUserId,
+        method.recipeUserId.getAsString() === canonicalEmailRecipeUserId,
     );
     if (!canonicalMethod) {
       throw new RowndEmailChangeError(
@@ -1974,10 +2092,12 @@ function getCanonicalEmailRecipeUserId(
   metadata: RowndMetadata,
   tenantId: string,
 ) {
-  return metadata.rownd_email_recipe_user_ids?.[tenantId] ??
+  return (
+    metadata.rownd_email_recipe_user_ids?.[tenantId] ??
     (metadata.rownd_email_recipe_user_ids === undefined
       ? metadata.rownd_email_recipe_user_id
-      : undefined);
+      : undefined)
+  );
 }
 
 async function removePendingEmailVerification(
@@ -2062,7 +2182,8 @@ function buildVerifiedEmailMetadata(
   tenantId: string,
   fallbackOriginalRowndUser?: RowndMetadata["original_rownd_user"],
 ): RowndMetadata {
-  const compatibilityUser = metadata.original_rownd_user ?? fallbackOriginalRowndUser ?? {
+  const compatibilityUser = metadata.original_rownd_user ??
+    fallbackOriginalRowndUser ?? {
     state: "enabled",
     auth_level: "verified",
     data: { user_id: userId },
@@ -2099,9 +2220,17 @@ function buildVerifiedEmailMetadata(
 export async function updateUserMetadata(
   userId: string,
   inputMeta: JsonRecord,
+  userContext?: JsonRecord,
 ) {
-  const { primaryUserId } = await updatePrimaryUserMetadata(userId, inputMeta);
-  const updatedMetadata = await getCombinedUserMetadata(primaryUserId);
+  const { primaryUserId } = await updatePrimaryUserMetadata(
+    userId,
+    inputMeta,
+    userContext,
+  );
+  const updatedMetadata = await getCombinedUserMetadata(
+    primaryUserId,
+    userContext,
+  );
 
   return {
     id: primaryUserId,
