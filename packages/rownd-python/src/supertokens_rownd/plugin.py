@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import math
 import re
 import warnings
@@ -81,8 +80,9 @@ from .plugin_implementation import (
     assert_app_variant_is_configured,
     build_rownd_oauth_payload,
     build_rownd_oauth_user_info,
-    build_rownd_session_claims,
+    build_rownd_session_and_anonymous_claims,
     complete_pending_email_verification,
+    create_derived_user_context,
     does_account_info_match_auth_method,
     get_effective_auth_level,
     get_requested_app_variant_id_from_request,
@@ -135,9 +135,7 @@ async def _fetch_is_anonymous_claim(
     }
 
 
-_rownd_is_anonymous_claim = BooleanClaim(
-    key="is_anonymous", fetch_value=_fetch_is_anonymous_claim
-)
+_rownd_is_anonymous_claim = BooleanClaim(key="is_anonymous", fetch_value=_fetch_is_anonymous_claim)
 
 
 async def refresh_rownd_session_claims(
@@ -148,15 +146,8 @@ async def refresh_rownd_session_claims(
     user_context: UserContext,
 ) -> None:
     current_payload = session.get_access_token_payload(user_context)
-    rownd_claims, is_anonymous_claim = await asyncio.gather(
-        build_rownd_session_claims(config, user_id, current_payload, app_variant_id),
-        _rownd_is_anonymous_claim.build(
-            user_id,
-            session.get_recipe_user_id(user_context),
-            session.get_tenant_id(user_context),
-            current_payload,
-            user_context,
-        ),
+    rownd_claims, is_anonymous_claim = await build_rownd_session_and_anonymous_claims(
+        config, user_id, current_payload, app_variant_id, user_context
     )
     refreshed_claims = {**rownd_claims, **is_anonymous_claim}
     managed_claim_names = {
@@ -186,13 +177,11 @@ async def _refresh_rownd_session_claims_or_revoke(
     user_context: UserContext,
 ) -> None:
     try:
-        await refresh_rownd_session_claims(
-            config, session, user_id, app_variant_id, user_context
-        )
+        await refresh_rownd_session_claims(config, session, user_id, app_variant_id, user_context)
     except Exception:
         try:
             session_revoked = await session_asyncio.revoke_session(
-                session.get_handle(), user_context
+                session.get_handle(user_context), user_context
             )
         except Exception:
             session_revoked = False
@@ -343,7 +332,7 @@ def init(
         session: Optional[SessionContainer],
         user_context: UserContext,
     ) -> BaseResponse:
-        return await handle_signout(session, response)
+        return await handle_signout(session, response, user_context)
 
     async def get_user_handler(
         request: BaseRequest,
@@ -351,7 +340,7 @@ def init(
         session: Optional[SessionContainer],
         user_context: UserContext,
     ) -> BaseResponse:
-        return await handle_get_user(config, session, response)
+        return await handle_get_user(config, session, response, user_context)
 
     async def update_user_handler(
         request: BaseRequest,
@@ -367,7 +356,7 @@ def init(
         session: Optional[SessionContainer],
         user_context: UserContext,
     ) -> BaseResponse:
-        return await handle_delete_user(session, response)
+        return await handle_delete_user(session, response, user_context)
 
     async def get_user_meta_handler(
         request: BaseRequest,
@@ -375,7 +364,7 @@ def init(
         session: Optional[SessionContainer],
         user_context: UserContext,
     ) -> BaseResponse:
-        return await handle_get_user_meta(session, response)
+        return await handle_get_user_meta(session, response, user_context)
 
     async def update_user_meta_handler(
         request: BaseRequest,
@@ -383,7 +372,7 @@ def init(
         session: Optional[SessionContainer],
         user_context: UserContext,
     ) -> BaseResponse:
-        return await handle_update_user_meta(request, response, session)
+        return await handle_update_user_meta(request, response, session, user_context)
 
     async def get_user_field_handler(
         request: BaseRequest,
@@ -391,7 +380,7 @@ def init(
         session: Optional[SessionContainer],
         user_context: UserContext,
     ) -> BaseResponse:
-        return await handle_get_user_field(config, request, response, session)
+        return await handle_get_user_field(config, request, response, session, user_context)
 
     async def update_user_field_handler(
         request: BaseRequest,
@@ -638,7 +627,9 @@ def _oauth2provider_function_override(config: RowndPluginConfig):
                 tenant_id,
                 user_context,
             )
-            return await build_rownd_oauth_user_info(user, access_token_payload, scopes, payload)
+            return await build_rownd_oauth_user_info(
+                user, access_token_payload, scopes, payload, user_context
+            )
 
         original.get_requested_scopes = get_requested_scopes
         original.build_access_token_payload = build_access_token_payload
@@ -663,14 +654,19 @@ def _oauth2provider_api_override():
             user_context: UserContext,
         ):
             if isinstance(params, dict):
-                apply_rownd_oauth_resource_params(params, user_context)
+                audience = apply_rownd_oauth_resource_params(params)
+            else:
+                audience = None
+            operation_context = create_derived_user_context(
+                user_context, {"rowndOAuthAudience": audience}
+            )
             return await original_auth_get(
                 params,
                 cookie,
                 session,
                 should_try_refresh,
                 options,
-                user_context,
+                operation_context,
             )
 
         async def token_post(
@@ -680,8 +676,13 @@ def _oauth2provider_api_override():
             user_context: UserContext,
         ):
             if isinstance(body, dict):
-                apply_rownd_oauth_resource_params(body, user_context)
-            return await original_token_post(authorization_header, body, options, user_context)
+                audience = apply_rownd_oauth_resource_params(body)
+            else:
+                audience = None
+            operation_context = create_derived_user_context(
+                user_context, {"rowndOAuthAudience": audience}
+            )
+            return await original_token_post(authorization_header, body, options, operation_context)
 
         original.auth_get = auth_get
         original.token_post = token_post
@@ -742,7 +743,6 @@ def _passwordless_api_override(config: RowndPluginConfig):
         ) -> UserContext:
             app_variant_id = get_requested_app_variant_id_from_request(api_options.request)
             assert_app_variant_is_configured(config, app_variant_id)
-            context = dict(user_context)
             request_context = {
                 "rowndAppVariantId": app_variant_id,
                 "rowndDisplayContext": get_requested_display_context_from_request(
@@ -756,8 +756,7 @@ def _passwordless_api_override(config: RowndPluginConfig):
                     api_options.request
                 ),
             }
-            context.update({key: value for key, value in request_context.items() if value})
-            return context
+            return create_derived_user_context(user_context, request_context)
 
         async def create_code_post(
             email: Optional[str],
@@ -812,10 +811,9 @@ def _passwordless_api_override(config: RowndPluginConfig):
         ):
             app_variant_id = get_requested_app_variant_id_from_request(api_options.request)
             assert_app_variant_is_configured(config, app_variant_id)
-            context = {
-                **user_context,
-                **({"rowndAppVariantId": app_variant_id} if app_variant_id else {}),
-            }
+            context = create_derived_user_context(
+                user_context, {"rowndAppVariantId": app_variant_id}
+            )
             result = await original_consume_code_post(
                 pre_auth_session_id,
                 user_input_code,
@@ -830,7 +828,9 @@ def _passwordless_api_override(config: RowndPluginConfig):
             if getattr(result, "status", None) == "OK":
                 user_id = getattr(getattr(result, "user", None), "id", None)
                 if isinstance(user_id, str):
-                    await record_rownd_app_variant_for_user(config, user_id, app_variant_id)
+                    await record_rownd_app_variant_for_user(
+                        config, user_id, app_variant_id, context
+                    )
                     returned_session = getattr(result, "session", None)
                     if returned_session is not None:
                         await _refresh_rownd_session_claims_or_revoke(
@@ -862,10 +862,9 @@ def _thirdparty_api_override(config: RowndPluginConfig):
         ):
             app_variant_id = get_requested_app_variant_id_from_request(api_options.request)
             assert_app_variant_is_configured(config, app_variant_id)
-            context = {
-                **user_context,
-                **({"rowndAppVariantId": app_variant_id} if app_variant_id else {}),
-            }
+            context = create_derived_user_context(
+                user_context, {"rowndAppVariantId": app_variant_id}
+            )
             result = await original_sign_in_up_post(
                 provider,
                 redirect_uri_info,
@@ -879,7 +878,9 @@ def _thirdparty_api_override(config: RowndPluginConfig):
             if getattr(result, "status", None) == "OK":
                 user_id = getattr(getattr(result, "user", None), "id", None)
                 if isinstance(user_id, str):
-                    await record_rownd_app_variant_for_user(config, user_id, app_variant_id)
+                    await record_rownd_app_variant_for_user(
+                        config, user_id, app_variant_id, context
+                    )
                     returned_session = getattr(result, "session", None)
                     if returned_session is not None:
                         await _refresh_rownd_session_claims_or_revoke(
@@ -912,15 +913,8 @@ def _session_function_override(config: RowndPluginConfig):
                 if isinstance(user_context.get("rowndAppVariantId"), str)
                 else None
             )
-            rownd_claims, is_anonymous_claim = await asyncio.gather(
-                build_rownd_session_claims(config, user_id, payload, app_variant_id),
-                _rownd_is_anonymous_claim.build(
-                    user_id,
-                    recipe_user_id,
-                    tenant_id,
-                    payload,
-                    user_context,
-                ),
+            rownd_claims, is_anonymous_claim = await build_rownd_session_and_anonymous_claims(
+                config, user_id, payload, app_variant_id, user_context
             )
             payload = {**payload, **rownd_claims, **is_anonymous_claim}
             return await original_create_new_session(
@@ -1006,7 +1000,7 @@ def _emailverification_api_override():
                             email,
                             user_context,
                             tenant_id,
-                            session.get_handle() if session is not None else None,
+                            session.get_handle(user_context) if session is not None else None,
                             cast(str, pending_token["pending_verification_id"]),
                             cast(str, pending_token["user_id"]),
                         )
@@ -1014,7 +1008,7 @@ def _emailverification_api_override():
                         return GeneralErrorResponse(str(error))
                     if session is not None and verification_result is not None:
                         should_replace_session = (
-                            session.get_handle()
+                            session.get_handle(user_context)
                             == verification_result["initiating_session_handle"]
                         )
                         if should_replace_session:
@@ -1066,7 +1060,7 @@ def _accountlinking_config_override():
             if user_context.get("rowndDisableAutomaticAccountLinking") is True:
                 return ShouldNotAutomaticallyLink()
             if session_:
-                current_user = await get_user(session_.get_user_id(), user_context)
+                current_user = await get_user(session_.get_user_id(user_context), user_context)
                 if has_only_guest_login_methods(current_user):
                     return ShouldAutomaticallyLink(should_require_verification=False)
                 if current_user is not None and not is_guest_account_info(new_account_info):

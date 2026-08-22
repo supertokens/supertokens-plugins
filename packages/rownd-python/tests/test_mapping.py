@@ -207,19 +207,26 @@ def test_combined_metadata_keeps_stale_primary_when_mapped_metadata_is_missing()
 
 
 def test_tenant_canonical_id_only_uses_legacy_scalar_when_map_is_absent():
-    assert get_canonical_email_recipe_user_id(
-        {"rownd_email_recipe_user_id": "legacy"}, "tenant-a"
-    ) == "legacy"
-    assert get_canonical_email_recipe_user_id(
-        {
-            "rownd_email_recipe_user_id": "legacy",
-            "rownd_email_recipe_user_ids": {"tenant-b": "tenant-b-method"},
-        },
-        "tenant-a",
-    ) is None
-    assert get_canonical_email_recipe_user_id(
-        {"rownd_email_recipe_user_ids": {"tenant-a": "tenant-a-method"}}, "tenant-a"
-    ) == "tenant-a-method"
+    assert (
+        get_canonical_email_recipe_user_id({"rownd_email_recipe_user_id": "legacy"}, "tenant-a")
+        == "legacy"
+    )
+    assert (
+        get_canonical_email_recipe_user_id(
+            {
+                "rownd_email_recipe_user_id": "legacy",
+                "rownd_email_recipe_user_ids": {"tenant-b": "tenant-b-method"},
+            },
+            "tenant-a",
+        )
+        is None
+    )
+    assert (
+        get_canonical_email_recipe_user_id(
+            {"rownd_email_recipe_user_ids": {"tenant-a": "tenant-a-method"}}, "tenant-a"
+        )
+        == "tenant-a-method"
+    )
 
 
 def test_canonical_passwordless_method_is_tenant_local_and_requires_marker_for_multiple():
@@ -328,9 +335,7 @@ def test_maps_email_passwordless_user():
         ("not-a-verification", False),
     ],
 )
-def test_maps_matching_rownd_email_verification_value(
-    verified_email: JsonValue, expected: bool
-):
+def test_maps_matching_rownd_email_verification_value(verified_email: JsonValue, expected: bool):
     mapped = map_rownd_user_to_supertokens(
         {
             "data": {"user_id": "verified-email-value", "email": "verified@example.com"},
@@ -389,9 +394,7 @@ def test_maps_multiple_rownd_login_methods():
             "recipeId": "thirdparty",
             "thirdPartyId": "google",
             "thirdPartyUserId": "google-existing-plus-phone",
-            "email": impl.build_supertokens_fake_email(
-                "google-existing-plus-phone", "google"
-            ),
+            "email": impl.build_supertokens_fake_email("google-existing-plus-phone", "google"),
             "isVerified": False,
             "isPrimary": True,
         },
@@ -462,7 +465,7 @@ def test_maps_missing_verified_data_as_unverified_email_user():
             "rownd_migration_complete": True,
             "original_rownd_user": {
                 "data": {"user_id": "rownd-missing-verified-data", "email": "missing@example.com"}
-            }
+            },
         },
     }
 
@@ -674,9 +677,7 @@ async def test_existing_thirdparty_owner_is_compared_in_internal_id_space(
             return GetUserIdMappingOkResult("internal-primary-id", user_id)
         return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
 
-    monkeypatch.setattr(
-        impl.thirdparty_asyncio, "manually_create_or_update_user", create_or_update
-    )
+    monkeypatch.setattr(impl.thirdparty_asyncio, "manually_create_or_update_user", create_or_update)
     monkeypatch.setattr(impl, "get_user_id_mapping", get_mapping)
 
     result = await impl.create_missing_login_method(
@@ -758,9 +759,33 @@ async def test_mapping_creation_does_not_hide_unrelated_error(
     monkeypatch.setattr(impl, "create_user_id_mapping", create_mapping)
 
     with pytest.raises(RuntimeError, match="network failed"):
-        await impl.create_rownd_user_id_mapping(
-            "expected-internal-id", "rownd-user-id", {}
+        await impl.create_rownd_user_id_mapping("expected-internal-id", "rownd-user-id", {})
+
+
+async def test_raw_bulk_import_clears_active_context_on_unknown_write_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FailingClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args: Any):
+            return None
+
+        async def post(self, *args: Any, **kwargs: Any):
+            raise RuntimeError("connection lost")
+
+    monkeypatch.setattr(impl.httpx, "AsyncClient", lambda **kwargs: FailingClient())
+    context = {"_default": {"core_call_cache": {"user": "stale"}}}
+
+    with pytest.raises(RuntimeError, match="connection lost"):
+        await impl.import_user(
+            {},
+            cast(Any, SimpleNamespace(api_key=None, connection_uri="http://core")),
+            context,
         )
+
+    assert context["_default"]["core_call_cache"] == {}
 
 
 async def test_tenant_association_failure_does_not_disassociate_published_state(
@@ -790,9 +815,7 @@ async def test_tenant_association_failure_does_not_disassociate_published_state(
     )
 
     with pytest.raises(RuntimeError, match="UNKNOWN_USER_ID_ERROR"):
-        await impl.associate_user_login_methods_to_tenant(
-            cast(Any, user), "tenant-a", {}
-        )
+        await impl.associate_user_login_methods_to_tenant(cast(Any, user), "tenant-a", {})
 
     assert association_calls == ["first-recipe-user", "second-recipe-user"]
     assert disassociation_calls == []
@@ -1026,15 +1049,20 @@ async def test_rownd_compat_user_uses_latest_session_for_last_sign_in_method(
             ],
         )
 
-    async def get_latest_session_info(user_id: str, tenant_id: str):
+    async def get_latest_session_info(user_id: str, tenant_id: str, user_context=None):
         assert tenant_id == "public"
         return SimpleNamespace(
             recipe_user_id=SimpleNamespace(get_as_string=lambda: "passwordless-recipe-user"),
             time_created=6000,
         )
 
-    monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)
-    monkeypatch.setattr(impl, "get_user", get_user)
+    async def inspect(user_id: str, user_context=None, user_override=None):
+        return {
+            "user": user_override or await get_user(user_id, user_context),
+            "combined_metadata": await get_user_metadata(user_id),
+        }
+
+    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
     monkeypatch.setattr(impl, "get_latest_session_info", get_latest_session_info)
 
     user = await get_rownd_compat_user("st-user")
@@ -1097,12 +1125,17 @@ async def test_rownd_compat_user_includes_provider_id_for_imported_linked_user(
             ],
         )
 
-    async def get_latest_session_info(user_id: str, tenant_id: str):
+    async def get_latest_session_info(user_id: str, tenant_id: str, user_context=None):
         assert tenant_id == "public"
         return None
 
-    monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)
-    monkeypatch.setattr(impl, "get_user", get_user)
+    async def inspect(user_id: str, user_context=None, user_override=None):
+        return {
+            "user": user_override or await get_user(user_id, user_context),
+            "combined_metadata": await get_user_metadata(user_id),
+        }
+
+    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
     monkeypatch.setattr(impl, "get_latest_session_info", get_latest_session_info)
 
     user = await get_rownd_compat_user("st-user")
@@ -1159,11 +1192,16 @@ async def test_rownd_compat_user_prefers_canonical_email_method(
             ],
         )
 
-    async def get_latest_session_info(user_id: str, tenant_id: str):
+    async def get_latest_session_info(user_id: str, tenant_id: str, user_context=None):
         return None
 
-    monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)
-    monkeypatch.setattr(impl, "get_user", get_user)
+    async def inspect(user_id: str, user_context=None, user_override=None):
+        return {
+            "user": user_override or await get_user(user_id, user_context),
+            "combined_metadata": await get_user_metadata(user_id),
+        }
+
+    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
     monkeypatch.setattr(impl, "get_latest_session_info", get_latest_session_info)
 
     user = await get_rownd_compat_user("st-user")

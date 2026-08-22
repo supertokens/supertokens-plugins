@@ -820,6 +820,54 @@ async def test_migrate_does_not_modify_user_mapped_to_another_external_id(
     assert all(method.phone_number != phone_number for method in unchanged_user.login_methods)
 
 
+async def test_migrate_checks_external_mapping_before_mutating_target(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "py-external-preflight-conflict"
+    google_id = "py-external-preflight-google"
+    phone_number = "+15555550139"
+    mapping_owner = await passwordless_asyncio.signinup(
+        "public", "py-external-preflight-owner@example.com", None, None, {}
+    )
+    mapping_owner = cast(Any, mapping_owner)
+    target = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="google",
+        third_party_user_id=google_id,
+        email="py-external-preflight-target@example.com",
+        is_verified=True,
+        user_context={},
+    )
+    target = cast(Any, target)
+    mapping = await create_user_id_mapping(mapping_owner.user.id, rownd_user_id, user_context={})
+    assert getattr(mapping, "status", "OK") == "OK"
+
+    res = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "data": {
+                "user_id": rownd_user_id,
+                "google_id": google_id,
+                "phone_number": phone_number,
+            },
+            "verified_data": {"google_id": True, "phone_number": True},
+        },
+    )
+
+    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    unchanged_target = await get_user(target.user.id)
+    assert unchanged_target is not None
+    assert unchanged_target.is_primary_user is False
+    assert len(unchanged_target.login_methods) == 1
+    assert all(method.phone_number != phone_number for method in unchanged_target.login_methods)
+    existing_mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+    assert isinstance(existing_mapping, GetUserIdMappingOkResult)
+    assert existing_mapping.supertokens_user_id == mapping_owner.user.id
+
+
 async def test_migrate_existing_user_does_not_duplicate(core_url: str, rownd_client: MockRowndClient):
     client = make_client(core_url, rownd_client)
     user_info = {

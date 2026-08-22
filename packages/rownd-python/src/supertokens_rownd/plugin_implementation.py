@@ -62,7 +62,6 @@ from .types import (
     JsonDict,
     RowndClientProtocol,
     RowndEmailChangeError,
-    RowndEmailChangeRequestContext,
     RowndPluginConfig,
     RowndPluginError,
     RowndTelemetryClient,
@@ -78,6 +77,72 @@ _LINKED_OPERATIONAL_METADATA_FIELDS = {
     "rownd_migration_complete",
     "rownd_pending_verification",
 }
+
+
+class _DerivedUserContext(dict[str, Any]):
+    def __init__(self, parent: UserContext, values: Dict[str, Any]):
+        if not isinstance(parent, dict) or "_default" in values:
+            raise TypeError("Unable to safely derive SuperTokens user context")
+        default_context = parent.get("_default")
+        if default_context is None and "_default" not in parent:
+            default_context = {}
+            parent["_default"] = default_context
+        if not isinstance(default_context, dict):
+            raise TypeError("SuperTokens user context _default must be a dict")
+        self._default_context = default_context
+        super().__init__((key, value) for key, value in parent.items() if key != "_default")
+        super().update(values)
+        super().__setitem__("_default", default_context)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key == "_default":
+            if not isinstance(value, dict):
+                raise TypeError("SuperTokens user context _default replacement must be a dict")
+            if value is not self._default_context:
+                replacement = dict(value)
+                self._default_context.clear()
+                self._default_context.update(replacement)
+            return
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key: str) -> None:
+        if key == "_default":
+            raise TypeError("SuperTokens user context _default cannot be removed")
+        super().__delitem__(key)
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        if key == "_default":
+            return self._default_context
+        return super().setdefault(key, default)
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+    def pop(self, key: str, *default: Any) -> Any:
+        if len(default) > 1:
+            raise TypeError("pop expected at most 2 arguments")
+        if key == "_default":
+            raise TypeError("SuperTokens user context _default cannot be removed")
+        return super().pop(key, *default)
+
+    def popitem(self) -> Tuple[str, Any]:
+        for key in reversed(self):
+            if key != "_default":
+                return key, super().pop(key)
+        raise TypeError("SuperTokens user context _default cannot be removed")
+
+    def clear(self) -> None:
+        super().clear()
+        super().__setitem__("_default", self._default_context)
+
+    def __ior__(self, values: Any):
+        self.update(values)
+        return self
+
+
+def create_derived_user_context(user_context: UserContext, values: Dict[str, Any]) -> UserContext:
+    return _DerivedUserContext(user_context, values)
 
 
 def set_active_rownd_config(config: RowndPluginConfig) -> None:
@@ -363,13 +428,15 @@ async def create_magic_link_with_confirmation_bypass(
     )
     assert_allowed_bypass_redirect_path(config, normalized_redirect_to_path)
 
-    context = {
-        **(user_context or {}),
-        **({"rowndDisplayContext": display_context} if display_context else {}),
-        "rowndRedirectToPath": normalized_redirect_to_path,
-        **({"rowndClientDomain": client_domain} if client_domain else {}),
-        **({"rowndAppVariantId": app_variant_id} if app_variant_id else {}),
-    }
+    context = create_derived_user_context(
+        user_context if user_context is not None else {},
+        {
+            "rowndDisplayContext": display_context,
+            "rowndRedirectToPath": normalized_redirect_to_path,
+            "rowndClientDomain": client_domain,
+            "rowndAppVariantId": app_variant_id,
+        },
+    )
     code_info = await passwordless_asyncio.create_code(
         tenant_id,
         email=email if has_email else None,
@@ -454,24 +521,24 @@ def add_hub_bootstrap_params(
     if config.api_domain:
         params["apiDomain"] = config.api_domain
 
-    user_context = user_context or {}
-    if isinstance(user_context.get("rowndAppVariantId"), str):
-        params["appVariantId"] = user_context["rowndAppVariantId"]
-    if isinstance(user_context.get("rowndDisplayContext"), str):
-        params["displayContext"] = user_context["rowndDisplayContext"]
-    if isinstance(user_context.get("rowndRedirectToPath"), str):
-        params["redirectToPath"] = user_context["rowndRedirectToPath"]
-    if isinstance(user_context.get("rowndOAuthLoginChallenge"), str):
-        params["oauthLoginChallenge"] = user_context["rowndOAuthLoginChallenge"]
+    context = user_context if user_context is not None else {}
+    if isinstance(context.get("rowndAppVariantId"), str):
+        params["appVariantId"] = context["rowndAppVariantId"]
+    if isinstance(context.get("rowndDisplayContext"), str):
+        params["displayContext"] = context["rowndDisplayContext"]
+    if isinstance(context.get("rowndRedirectToPath"), str):
+        params["redirectToPath"] = context["rowndRedirectToPath"]
+    if isinstance(context.get("rowndOAuthLoginChallenge"), str):
+        params["oauthLoginChallenge"] = context["rowndOAuthLoginChallenge"]
     if user_input_code:
         params["passwordlessFlowType"] = "USER_INPUT_CODE_AND_MAGIC_LINK"
     params.update(additional_params or {})
-    client_domain = user_context.get("rowndClientDomain")
+    client_domain = context.get("rowndClientDomain")
     client_domain_key = (
         client_domain
         if isinstance(client_domain, str)
         else "mobile"
-        if user_context.get("rowndDisplayContext") == "mobile_app"
+        if context.get("rowndDisplayContext") == "mobile_app"
         else "browser"
     )
     client_base_url = config.client_domains.get(client_domain_key)
@@ -503,7 +570,11 @@ def add_pending_email_verification_marker(
 def build_email_change_user_context(
     user_context: UserContext, payload_context: JsonDict
 ) -> UserContext:
-    context: RowndEmailChangeRequestContext = {}
+    context: Dict[str, Any] = {
+        "rowndDisplayContext": None,
+        "rowndClientDomain": None,
+        "rowndNativeEmailVerification": None,
+    }
     display_context = payload_context.get("rowndDisplayContext")
     if display_context in {"browser", "mobile_app", "customer_web_view"}:
         context["rowndDisplayContext"] = cast(Any, display_context)
@@ -513,7 +584,7 @@ def build_email_change_user_context(
     native_verification = payload_context.get("rowndNativeEmailVerification")
     if isinstance(native_verification, bool):
         context["rowndNativeEmailVerification"] = native_verification
-    return {**user_context, **context}
+    return create_derived_user_context(user_context, context)
 
 
 def native_email_verification_upgrade_required(user_context: UserContext) -> bool:
@@ -590,14 +661,19 @@ async def handle_guest_login(
             "is_anonymous": True,
             "app_user_id": result.user.id,
         }
-        await record_rownd_app_variant_for_user(config, result.user.id, app_variant_id)
+        operation_context = create_derived_user_context(
+            user_context, {"rowndAppVariantId": app_variant_id}
+        )
+        await record_rownd_app_variant_for_user(
+            config, result.user.id, app_variant_id, operation_context
+        )
         await session_asyncio.create_new_session(
             request,
             tenant_id,
             result.recipe_user_id,
             payload,
             {},
-            {**user_context, **({"rowndAppVariantId": app_variant_id} if app_variant_id else {})},
+            operation_context,
         )
         await record_success(telemetry_client, started_at, tenant_id, None, result.user.id)
         return json_response(
@@ -638,7 +714,7 @@ async def handle_migrate(
             return json_response(response, {"status": "OK"})
 
         user = await get_user(rownd_user_id, user_context)
-        existing_metadata = await get_user_metadata(user.id) if user else None
+        existing_metadata = await get_user_metadata(user.id, user_context) if user else None
         recipe_user_id = None
 
         if user is None or (existing_metadata or {}).get("rownd_migration_complete") is not True:
@@ -654,11 +730,7 @@ async def handle_migrate(
             if not reconciled:
                 if user is not None:
                     raise RuntimeError("Incomplete migrated user could not be reconciled")
-                await import_user(
-                    user_import,
-                    supertokens_config,
-                )
-            clear_supertokens_core_call_cache(user_context)
+                await import_user(user_import, supertokens_config, user_context)
             user = await get_user(rownd_user_id, user_context)
             if user is None:
                 raise RowndPluginError("Imported user could not be resolved")
@@ -669,7 +741,9 @@ async def handle_migrate(
             recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else None
 
         if isinstance(supertokens_user_id, str):
-            await record_rownd_app_variant_for_user(config, supertokens_user_id, app_variant_id)
+            await record_rownd_app_variant_for_user(
+                config, supertokens_user_id, app_variant_id, user_context
+            )
         tenant_login_method = (
             next(
                 (
@@ -708,9 +782,10 @@ async def handle_migrate(
                 else recipe_user_id.get_as_string(),
                 {},
                 app_variant_id,
+                user_context,
             ),
             {},
-            {**user_context, **({"rowndAppVariantId": app_variant_id} if app_variant_id else {})},
+            create_derived_user_context(user_context, {"rowndAppVariantId": app_variant_id}),
         )
         await record_success(
             telemetry_client,
@@ -768,26 +843,37 @@ async def associate_user_login_methods_to_tenant(
 
 
 async def handle_signout(
-    session: Optional[SessionContainer], response: BaseResponse
+    session: Optional[SessionContainer], response: BaseResponse, user_context: UserContext
 ) -> BaseResponse:
     session = require_session(session)
     await session_asyncio.revoke_all_sessions_for_user(
-        session.get_user_id(),
+        session.get_user_id(user_context),
         revoke_sessions_for_linked_accounts=True,
-        tenant_id=session.get_tenant_id(),
+        tenant_id=session.get_tenant_id(user_context),
+        user_context=user_context,
     )
     return json_response(response, {"status": "OK"})
 
 
 async def handle_get_user(
-    config: RowndPluginConfig, session: Optional[SessionContainer], response: BaseResponse
+    config: RowndPluginConfig,
+    session: Optional[SessionContainer],
+    response: BaseResponse,
+    user_context: UserContext,
 ) -> BaseResponse:
     session = require_session(session)
     return json_response(
         response,
         {
             "status": "OK",
-            **(await get_rownd_compat_user(session.get_user_id(), config, session.get_tenant_id())),
+            **(
+                await get_rownd_compat_user(
+                    session.get_user_id(user_context),
+                    config,
+                    session.get_tenant_id(user_context),
+                    user_context=user_context,
+                )
+            ),
         },
     )
 
@@ -820,9 +906,14 @@ async def handle_update_user(
         return json_response(response, permission_error, code if isinstance(code, int) else 400)
     if isinstance(email, str):
         current_email = as_json_dict(
-            (await get_rownd_compat_user(
-                session.get_user_id(), config, session.get_tenant_id()
-            )).get("data")
+            (
+                await get_rownd_compat_user(
+                    session.get_user_id(user_context),
+                    config,
+                    session.get_tenant_id(user_context),
+                    user_context=user_context,
+                )
+            ).get("data")
         ).get("email")
         changes_email = not isinstance(current_email, str) or normalize_email(
             current_email
@@ -845,7 +936,11 @@ async def handle_update_user(
             )
             update_result = (
                 await update_user_data(
-                    config, session.get_user_id(), data_without_email, session.get_tenant_id()
+                    config,
+                    session.get_user_id(user_context),
+                    data_without_email,
+                    session.get_tenant_id(user_context),
+                    user_context,
                 )
                 if data_without_email
                 else pending_result
@@ -866,37 +961,56 @@ async def handle_update_user(
             )
     if data_without_email:
         await update_user_data(
-            config, session.get_user_id(), data_without_email, session.get_tenant_id()
+            config,
+            session.get_user_id(user_context),
+            data_without_email,
+            session.get_tenant_id(user_context),
+            user_context,
         )
     return json_response(
         response,
         {
             "status": "OK",
-            **(await get_rownd_compat_user(session.get_user_id(), config, session.get_tenant_id())),
+            **(
+                await get_rownd_compat_user(
+                    session.get_user_id(user_context),
+                    config,
+                    session.get_tenant_id(user_context),
+                    user_context=user_context,
+                )
+            ),
         },
     )
 
 
 async def handle_delete_user(
-    session: Optional[SessionContainer], response: BaseResponse
+    session: Optional[SessionContainer], response: BaseResponse, user_context: UserContext
 ) -> BaseResponse:
     session = require_session(session)
-    await delete_user(session.get_user_id(), remove_all_linked_accounts=True)
+    await delete_user(
+        session.get_user_id(user_context),
+        remove_all_linked_accounts=True,
+        user_context=user_context,
+    )
     return json_response(response, {"status": "OK"})
 
 
 async def handle_get_user_meta(
-    session: Optional[SessionContainer], response: BaseResponse
+    session: Optional[SessionContainer], response: BaseResponse, user_context: UserContext
 ) -> BaseResponse:
     session = require_session(session)
-    metadata = await get_user_metadata(session.get_user_id())
+    user_id = session.get_user_id(user_context)
+    metadata = await get_user_metadata(user_id, user_context)
     return json_response(
-        response, {"status": "OK", "id": session.get_user_id(), "meta": public_metadata(metadata)}
+        response, {"status": "OK", "id": user_id, "meta": public_metadata(metadata)}
     )
 
 
 async def handle_update_user_meta(
-    request: BaseRequest, response: BaseResponse, session: Optional[SessionContainer]
+    request: BaseRequest,
+    response: BaseResponse,
+    session: Optional[SessionContainer],
+    user_context: UserContext,
 ) -> BaseResponse:
     session = require_session(session)
     body = await _json_body(request)
@@ -912,7 +1026,7 @@ async def handle_update_user_meta(
             },
             403,
         )
-    updated = await update_user_metadata(session.get_user_id(), meta)
+    updated = await update_user_metadata(session.get_user_id(user_context), meta, user_context)
     return json_response(response, {"status": "OK", **updated})
 
 
@@ -921,12 +1035,18 @@ async def handle_get_user_field(
     request: BaseRequest,
     response: BaseResponse,
     session: Optional[SessionContainer],
+    user_context: UserContext,
 ) -> BaseResponse:
     session = require_session(session)
     field_name = request.get_query_param("field")
     if not field_name:
         return json_response(response, missing_field_response(), 400)
-    user = await get_rownd_compat_user(session.get_user_id(), config, session.get_tenant_id())
+    user = await get_rownd_compat_user(
+        session.get_user_id(user_context),
+        config,
+        session.get_tenant_id(user_context),
+        user_context=user_context,
+    )
     return json_response(
         response, {"status": "OK", "value": as_json_dict(user.get("data")).get(field_name)}
     )
@@ -955,16 +1075,19 @@ async def handle_update_user_field(
                 400,
             )
         current_email = as_json_dict(
-            (await get_rownd_compat_user(
-                session.get_user_id(), config, session.get_tenant_id()
-            )).get("data")
+            (
+                await get_rownd_compat_user(
+                    session.get_user_id(user_context),
+                    config,
+                    session.get_tenant_id(user_context),
+                    user_context=user_context,
+                )
+            ).get("data")
         ).get("email")
         changes_email = not isinstance(current_email, str) or normalize_email(
             current_email
         ) != normalize_email(value)
-        context = build_email_change_user_context(
-            user_context, as_json_dict(body.get("context"))
-        )
+        context = build_email_change_user_context(user_context, as_json_dict(body.get("context")))
         if app_variant_id:
             context["rowndAppVariantId"] = app_variant_id
         if changes_email:
@@ -1002,9 +1125,10 @@ async def handle_update_user_field(
             **(
                 await update_user_data(
                     config,
-                    session.get_user_id(),
+                    session.get_user_id(user_context),
                     {field_name: body.get("value")},
-                    session.get_tenant_id(),
+                    session.get_tenant_id(user_context),
+                    user_context,
                 )
             ),
         },
@@ -1025,9 +1149,7 @@ async def validate_email_change_session(
 ) -> Optional[JsonDict]:
     if not is_email_sign_in_enabled(config, app_variant_id):
         return {"status": "ERROR", "code": 403, "message": "email sign-in is not enabled"}
-    if not is_recipe_initialized("passwordless") or not is_recipe_initialized(
-        "emailverification"
-    ):
+    if not is_recipe_initialized("passwordless") or not is_recipe_initialized("emailverification"):
         return {"status": "ERROR", "code": 503, "message": "email sign-in is not available"}
     session_age_ms = time.time() * 1000 - await session.get_time_created(user_context)
     max_session_age = config.email_change.get("max_session_age_seconds", 600)
@@ -1116,8 +1238,7 @@ def combine_linked_metadata(
         else None
     )
     canonical_replaces_primary = (
-        canonical_linked_metadata is not None
-        and primary_rownd_user_id != mapped_rownd_user_id
+        canonical_linked_metadata is not None and primary_rownd_user_id != mapped_rownd_user_id
     )
     metadata_update: JsonDict = (
         {"original_rownd_user": canonical_linked_metadata[1]["original_rownd_user"]}
@@ -1151,16 +1272,20 @@ def combine_linked_metadata(
         or primary_rownd_user_id == mapped_rownd_user_id
         or canonical_linked_metadata is None
     )
-    source_user_id = primary_user_id if primary_is_source else (
-        canonical_linked_metadata[0]
-        if canonical_linked_metadata is not None
-        else next(
-            (
-                linked_user_id
-                for linked_user_id, metadata in ordered
-                if get_original_rownd_user_id(metadata) is not None
-            ),
-            None,
+    source_user_id = (
+        primary_user_id
+        if primary_is_source
+        else (
+            canonical_linked_metadata[0]
+            if canonical_linked_metadata is not None
+            else next(
+                (
+                    linked_user_id
+                    for linked_user_id, metadata in ordered
+                    if get_original_rownd_user_id(metadata) is not None
+                ),
+                None,
+            )
         )
     )
     return {
@@ -1185,12 +1310,14 @@ async def get_primary_user_mapping(
 
 
 async def inspect_linked_user_metadata(
-    user_id: str, user_context: Optional[UserContext] = None
-) -> JsonDict:
-    user = await get_user(user_id, user_context)
+    user_id: str,
+    user_context: Optional[UserContext] = None,
+    user_override: Optional[User] = None,
+) -> Dict[str, Any]:
+    user = user_override if user_override is not None else await get_user(user_id, user_context)
     if user is None:
         metadata = await get_raw_user_metadata(user_id, user_context)
-        return combine_linked_metadata(user_id, metadata, [])
+        return {**combine_linked_metadata(user_id, metadata, []), "user": None}
 
     mapping = await get_primary_user_mapping(user.id, user_context)
     primary_user_id = mapping.supertokens_user_id if mapping else user.id
@@ -1208,17 +1335,18 @@ async def inspect_linked_user_metadata(
             for linked_user_id in linked_user_ids
         ),
     )
-    return combine_linked_metadata(
-        primary_user_id,
-        metadata_results[0],
-        list(zip(linked_user_ids, metadata_results[1:])),
-        mapping.external_user_id if mapping else None,
-    )
+    return {
+        **combine_linked_metadata(
+            primary_user_id,
+            metadata_results[0],
+            list(zip(linked_user_ids, metadata_results[1:])),
+            mapping.external_user_id if mapping else None,
+        ),
+        "user": user,
+    }
 
 
-async def get_user_metadata(
-    user_id: str, user_context: Optional[UserContext] = None
-) -> JsonDict:
+async def get_user_metadata(user_id: str, user_context: Optional[UserContext] = None) -> JsonDict:
     inspection = await inspect_linked_user_metadata(user_id, user_context)
     return cast(JsonDict, inspection["combined_metadata"])
 
@@ -1246,17 +1374,13 @@ async def replace_primary_user_metadata(
     primary_user_id = mapping.supertokens_user_id if mapping else user_id
     await usermetadata_asyncio.clear_user_metadata(primary_user_id, user_context)
     if metadata:
-        await usermetadata_asyncio.update_user_metadata(
-            primary_user_id, metadata, user_context
-        )
+        await usermetadata_asyncio.update_user_metadata(primary_user_id, metadata, user_context)
 
 
 async def update_user_metadata(
     user_id: str, input_meta: JsonDict, user_context: Optional[UserContext] = None
 ) -> JsonDict:
-    primary_user_id, updated = await update_primary_user_metadata(
-        user_id, input_meta, user_context
-    )
+    primary_user_id, updated = await update_primary_user_metadata(user_id, input_meta, user_context)
     return {"id": primary_user_id, "meta": public_metadata(updated)}
 
 
@@ -1265,9 +1389,12 @@ async def update_user_data(
     user_id: str,
     input_data: JsonDict,
     tenant_id: str = PUBLIC_TENANT_ID,
+    user_context: Optional[UserContext] = None,
 ) -> JsonDict:
-    primary_user_id, _ = await update_primary_user_metadata(user_id, input_data)
-    return await get_rownd_compat_user(primary_user_id, config, tenant_id)
+    primary_user_id, _ = await update_primary_user_metadata(user_id, input_data, user_context)
+    return await get_rownd_compat_user(
+        primary_user_id, config, tenant_id, user_context=user_context
+    )
 
 
 def public_metadata(metadata: JsonDict) -> JsonDict:
@@ -1313,13 +1440,23 @@ async def get_rownd_compat_user(
     tenant_id: str = PUBLIC_TENANT_ID,
     metadata_override: Optional[JsonDict] = None,
     user_override: Optional[User] = None,
+    user_context: Optional[UserContext] = None,
 ) -> JsonDict:
+    inspection = (
+        None
+        if metadata_override is not None and user_override is not None
+        else await inspect_linked_user_metadata(user_id, user_context, user_override)
+    )
     metadata = (
         metadata_override
         if metadata_override is not None
-        else await get_user_metadata(user_id)
+        else cast(JsonDict, cast(JsonDict, inspection)["combined_metadata"])
     )
-    st_user = user_override if user_override is not None else await get_user(user_id)
+    st_user = (
+        user_override
+        if user_override is not None
+        else cast(Optional[User], cast(JsonDict, inspection)["user"])
+    )
     if st_user is None:
         raise RowndPluginError("User not found in Rownd")
 
@@ -1410,7 +1547,7 @@ async def get_rownd_compat_user(
 
     sorted_by_joined = sorted(tenant_login_methods, key=lambda method: method.time_joined)
     first_method = sorted_by_joined[0] if sorted_by_joined else None
-    latest_session_info = await get_latest_session_info(st_user.id, tenant_id)
+    latest_session_info = await get_latest_session_info(st_user.id, tenant_id, user_context)
     latest_recipe_user_id = None
     if latest_session_info is not None:
         recipe_user_id = getattr(latest_session_info, "recipe_user_id", None)
@@ -1471,18 +1608,23 @@ def iso_from_ms(value: int) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(value / 1000))
 
 
-async def get_latest_session_info(user_id: str, tenant_id: str = PUBLIC_TENANT_ID):
+async def get_latest_session_info(
+    user_id: str,
+    tenant_id: str = PUBLIC_TENANT_ID,
+    user_context: Optional[UserContext] = None,
+):
     try:
         handles = await session_asyncio.get_all_session_handles_for_user(
             user_id,
             fetch_sessions_for_linked_accounts=True,
             tenant_id=tenant_id,
+            user_context=user_context,
         )
     except Exception:
         return None
     latest = None
     for handle in handles:
-        session_info = await session_asyncio.get_session_information(handle)
+        session_info = await session_asyncio.get_session_information(handle, user_context)
         if session_info is not None and (
             latest is None or session_info.time_created > latest.time_created
         ):
@@ -1573,8 +1715,7 @@ def get_anonymous_id(
     if isinstance(original_data.get("anonymous_id"), str):
         return cast(str, original_data["anonymous_id"])
     guest_method = user and any(
-        method.recipe_id == "thirdparty"
-        and get_third_party_info(method)[0] == GUEST_AUTH_METHOD_ID
+        method.recipe_id == "thirdparty" and get_third_party_info(method)[0] == GUEST_AUTH_METHOD_ID
         for method in user.login_methods
     )
     if not guest_method:
@@ -1601,9 +1742,24 @@ async def build_rownd_session_claims(
     user_id: str,
     current_payload: JsonDict,
     app_variant_id: Optional[str],
+    user_context: Optional[UserContext] = None,
 ) -> JsonDict:
-    user = await get_user(user_id)
-    metadata = await get_user_metadata(user.id if user else user_id) if user else {}
+    inspection = await inspect_linked_user_metadata(user_id, user_context)
+    user = cast(Optional[User], inspection["user"])
+    metadata = cast(JsonDict, inspection["combined_metadata"]) if user else {}
+    return build_rownd_session_claim_payload(
+        config, user_id, user, metadata, current_payload, app_variant_id
+    )
+
+
+def build_rownd_session_claim_payload(
+    config: RowndPluginConfig,
+    user_id: str,
+    user: Optional[User],
+    metadata: JsonDict,
+    current_payload: JsonDict,
+    app_variant_id: Optional[str],
+) -> JsonDict:
     original = as_json_dict(metadata.get("original_rownd_user"))
     verified_data = as_json_dict(original.get("verified_data"))
     original_auth_level_value = original.get("auth_level")
@@ -1635,6 +1791,28 @@ async def build_rownd_session_claims(
     if anonymous_id:
         claims["anonymous_id"] = anonymous_id
     return claims
+
+
+async def build_rownd_session_and_anonymous_claims(
+    config: RowndPluginConfig,
+    user_id: str,
+    current_payload: JsonDict,
+    app_variant_id: Optional[str],
+    user_context: UserContext,
+) -> Tuple[JsonDict, JsonDict]:
+    inspection = await inspect_linked_user_metadata(user_id, user_context)
+    user = cast(Optional[User], inspection["user"])
+    metadata = cast(JsonDict, inspection["combined_metadata"]) if user else {}
+    rownd_claims = build_rownd_session_claim_payload(
+        config, user_id, user, metadata, current_payload, app_variant_id
+    )
+    is_anonymous = get_effective_auth_level(user) in {
+        GUEST_AUTH_METHOD_ID,
+        INSTANT_AUTH_METHOD_ID,
+    }
+    from supertokens_python.utils import get_timestamp_ms
+
+    return rownd_claims, {"is_anonymous": {"v": is_anonymous, "t": get_timestamp_ms()}}
 
 
 def normalize_rownd_oauth_scopes(scopes: List[str]) -> List[str]:
@@ -1679,16 +1857,16 @@ def get_rownd_oauth_audience(
     return requested if requested and requested.startswith("app:") else None
 
 
-def apply_rownd_oauth_resource_params(params: Dict[str, object], user_context: UserContext) -> None:
+def apply_rownd_oauth_resource_params(params: Dict[str, object]) -> Optional[str]:
     rownd_audience = get_rownd_oauth_audience(
         requested_audience=first_string(params.get("audience")),
         requested_resource=first_string(params.get("resource")),
     )
     if not rownd_audience:
-        return
-    user_context["rowndOAuthAudience"] = rownd_audience
+        return None
     params["audience"] = first_string(params.get("audience")) or rownd_audience
     params.pop("resource", None)
+    return rownd_audience
 
 
 async def build_rownd_oauth_payload(
@@ -1699,13 +1877,25 @@ async def build_rownd_oauth_payload(
     user_context: UserContext,
 ) -> JsonDict:
     payload = current_payload or {}
+    metadata = (
+        cast(
+            JsonDict,
+            (await inspect_linked_user_metadata(user.id, user_context, user))["combined_metadata"],
+        )
+        if user
+        else {}
+    )
     rownd_audience = get_rownd_oauth_audience(
         requested_audience=first_string(user_context.get("rowndOAuthAudience"))
     )
     return {
         **payload,
-        **(await build_standard_oauth_claims(user, scopes) if user else {}),
-        **(await build_rownd_session_claims(config, user.id, payload, None) if user else {}),
+        **(build_standard_oauth_claims(user, scopes, metadata) if user else {}),
+        **(
+            build_rownd_session_claim_payload(config, user.id, user, metadata, payload, None)
+            if user
+            else {}
+        ),
         **({"aud": rownd_audience} if rownd_audience else {}),
     }
 
@@ -1715,17 +1905,21 @@ async def build_rownd_oauth_user_info(
     access_token_payload: JsonDict,
     scopes: List[str],
     current_payload: Optional[JsonDict],
+    user_context: Optional[UserContext] = None,
 ) -> JsonDict:
+    metadata = cast(
+        JsonDict,
+        (await inspect_linked_user_metadata(user.id, user_context, user))["combined_metadata"],
+    )
     return {
         **(current_payload or {}),
-        **(await build_standard_oauth_claims(user, scopes)),
+        **build_standard_oauth_claims(user, scopes, metadata),
         **pick_oauth_user_info_rownd_claims(access_token_payload),
     }
 
 
-async def build_standard_oauth_claims(user: User, scopes: List[str]) -> JsonDict:
+def build_standard_oauth_claims(user: User, scopes: List[str], metadata: JsonDict) -> JsonDict:
     claims: JsonDict = {}
-    metadata = await get_user_metadata(user.id)
     original = as_json_dict(metadata.get("original_rownd_user"))
     rownd_data = as_json_dict(original.get("data"))
     verified_data = as_json_dict(original.get("verified_data"))
@@ -1822,17 +2016,22 @@ def build_rownd_audience(
 
 
 async def record_rownd_app_variant_for_user(
-    config: RowndPluginConfig, user_id: str, app_variant_id: Optional[str]
+    config: RowndPluginConfig,
+    user_id: str,
+    app_variant_id: Optional[str],
+    user_context: Optional[UserContext] = None,
 ) -> None:
     if not app_variant_id:
         return
     assert_app_variant_is_configured(config, app_variant_id)
-    inspection = await inspect_linked_user_metadata(user_id)
+    operation_context = user_context if user_context is not None else {}
+    inspection = await inspect_linked_user_metadata(user_id, operation_context)
     metadata_user_id = cast(
         str,
         inspection.get("rownd_metadata_source_user_id") or inspection["primary_user_id"],
     )
-    metadata = await get_raw_user_metadata(metadata_user_id)
+    clear_supertokens_core_call_cache(operation_context)
+    metadata = await get_raw_user_metadata(metadata_user_id, operation_context)
     original = as_json_dict(metadata.get("original_rownd_user"))
     attributes = as_json_dict(original.get("attributes"))
     app_variants = attributes.get("rownd:app_variants") or []
@@ -1852,6 +2051,7 @@ async def record_rownd_app_variant_for_user(
                 "attributes": {**attributes, "rownd:app_variants": [*app_variants, app_variant_id]},
             },
         },
+        operation_context,
     )
 
 
@@ -1944,16 +2144,23 @@ def build_rownd_user_metadata(rownd_user: JsonDict) -> JsonDict:
     return metadata
 
 
-async def import_user(user_import: JsonDict, supertokens_config: SupertokensConfig) -> JsonDict:
+async def import_user(
+    user_import: JsonDict,
+    supertokens_config: SupertokensConfig,
+    user_context: UserContext,
+) -> JsonDict:
     headers = {"Content-Type": "application/json"}
     if supertokens_config.api_key:
         headers["api-key"] = supertokens_config.api_key
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        res = await client.post(
-            supertokens_config.connection_uri.rstrip("/") + "/bulk-import/import",
-            headers=headers,
-            json=user_import,
-        )
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res = await client.post(
+                supertokens_config.connection_uri.rstrip("/") + "/bulk-import/import",
+                headers=headers,
+                json=user_import,
+            )
+    finally:
+        clear_supertokens_core_call_cache(user_context)
     if res.status_code < 200 or res.status_code >= 300:
         raise RuntimeError("Bulk import failed with status %s: %s" % (res.status_code, res.text))
     data = res.json()
@@ -2046,10 +2253,9 @@ async def create_missing_login_method(
     primary_user_id: str,
     user_context: UserContext,
 ) -> Tuple[RecipeUserId, bool]:
-    reconciliation_context = {
-        **user_context,
-        "rowndDisableAutomaticAccountLinking": True,
-    }
+    reconciliation_context = create_derived_user_context(
+        user_context, {"rowndDisableAutomaticAccountLinking": True}
+    )
     if method_import.get("recipeId") == "thirdparty":
         third_party_id = optional_string(method_import.get("thirdPartyId"))
         third_party_user_id = optional_string(method_import.get("thirdPartyUserId"))
@@ -2070,7 +2276,7 @@ async def create_missing_login_method(
                 % getattr(result, "status", "ERROR")
             )
         if not result.created_new_recipe_user and not await sdk_user_id_matches_internal_target(
-            result.user.id, primary_user_id, user_context
+            result.user.id, primary_user_id, reconciliation_context
         ):
             raise RuntimeError(
                 "Migrated third-party login method belongs to another SuperTokens user"
@@ -2088,7 +2294,7 @@ async def create_missing_login_method(
             reconciliation_context,
         )
         if not result.created_new_recipe_user and not await sdk_user_id_matches_internal_target(
-            result.user.id, primary_user_id, user_context
+            result.user.id, primary_user_id, reconciliation_context
         ):
             raise RuntimeError(
                 "Migrated passwordless login method belongs to another SuperTokens user"
@@ -2117,9 +2323,7 @@ async def sdk_user_id_matches_internal_target(
 ) -> bool:
     if sdk_user_id == expected_internal_user_id:
         return True
-    resolved_sdk_user_id = await freshly_resolve_sdk_user_id_to_internal(
-        sdk_user_id, user_context
-    )
+    resolved_sdk_user_id = await freshly_resolve_sdk_user_id_to_internal(sdk_user_id, user_context)
     return resolved_sdk_user_id == expected_internal_user_id
 
 
@@ -2129,10 +2333,7 @@ async def assert_user_is_not_mapped_to_another_rownd_user(
     user_context: UserContext,
 ) -> None:
     mapping = await get_user_id_mapping(supertokens_user_id, "SUPERTOKENS", user_context)
-    if (
-        isinstance(mapping, GetUserIdMappingOkResult)
-        and mapping.external_user_id != rownd_user_id
-    ):
+    if isinstance(mapping, GetUserIdMappingOkResult) and mapping.external_user_id != rownd_user_id:
         raise RuntimeError("A migrated login method is already mapped to another Rownd user")
 
 
@@ -2146,17 +2347,13 @@ async def assert_rownd_user_id_can_be_mapped(
         if not await sdk_user_id_matches_internal_target(
             external_mapping.supertokens_user_id, supertokens_user_id, user_context
         ):
-            raise RuntimeError(
-                "The Rownd user ID is already mapped to another SuperTokens user"
-            )
+            raise RuntimeError("The Rownd user ID is already mapped to another SuperTokens user")
         return True
 
     internal_mapping = await get_user_id_mapping(supertokens_user_id, "SUPERTOKENS", user_context)
     if isinstance(internal_mapping, GetUserIdMappingOkResult):
         if internal_mapping.external_user_id != rownd_user_id:
-            raise RuntimeError(
-                "The SuperTokens user is already mapped to another external user ID"
-            )
+            raise RuntimeError("The SuperTokens user is already mapped to another external user ID")
         return True
     return False
 
@@ -2201,11 +2398,10 @@ async def create_rownd_user_id_mapping(
             raise
         clear_supertokens_core_call_cache(user_context)
         existing = await get_user_id_mapping(rownd_user_id, "EXTERNAL", user_context)
-        if (
-            isinstance(existing, GetUserIdMappingOkResult)
-            and await sdk_user_id_matches_internal_target(
-                existing.supertokens_user_id, supertokens_user_id, user_context
-            )
+        if isinstance(
+            existing, GetUserIdMappingOkResult
+        ) and await sdk_user_id_matches_internal_target(
+            existing.supertokens_user_id, supertokens_user_id, user_context
         ):
             return False
         raise
@@ -2213,16 +2409,12 @@ async def create_rownd_user_id_mapping(
         return True
     clear_supertokens_core_call_cache(user_context)
     existing = await get_user_id_mapping(rownd_user_id, "EXTERNAL", user_context)
-    if (
-        isinstance(existing, GetUserIdMappingOkResult)
-        and await sdk_user_id_matches_internal_target(
-            existing.supertokens_user_id, supertokens_user_id, user_context
-        )
+    if isinstance(existing, GetUserIdMappingOkResult) and await sdk_user_id_matches_internal_target(
+        existing.supertokens_user_id, supertokens_user_id, user_context
     ):
         return False
     raise RuntimeError(
-        "Failed to map migrated Rownd user ID: %s"
-        % getattr(mapping_result, "status", "ERROR")
+        "Failed to map migrated Rownd user ID: %s" % getattr(mapping_result, "status", "ERROR")
     )
 
 
@@ -2235,11 +2427,11 @@ async def reconcile_rownd_user_with_existing_login_methods(
     if not isinstance(external_user_id, str):
         raise RuntimeError("Migrated Rownd user has no external user ID")
 
+    clear_supertokens_core_call_cache(user_context)
     method_imports = as_json_list(user_import.get("loginMethods"))
-    inspections = [
-        await inspect_import_method(method, tenant_id, user_context)
-        for method in method_imports
-    ]
+    inspections = await asyncio.gather(
+        *(inspect_import_method(method, tenant_id, user_context) for method in method_imports)
+    )
     matches = [match for _, _, match in inspections if match is not None]
     if not matches:
         return False
@@ -2250,37 +2442,44 @@ async def reconcile_rownd_user_with_existing_login_methods(
         if method.get("recipeId") == "thirdparty" and match is not None
     ]
     target_user, target_login_method = third_party_matches[0] if third_party_matches else matches[0]
-    target_supertokens_user_id = await freshly_resolve_sdk_user_id_to_internal(
-        target_user.id,
-        user_context,
-    )
-    inspected_owners = [
-        (
-            method,
-            owner,
-            login_method,
-            await freshly_resolve_sdk_user_id_to_internal(owner.id, user_context),
-        )
+    resolved_user_ids: Dict[str, "asyncio.Task[str]"] = {}
+
+    def resolve_user_id(user_id: str) -> "asyncio.Task[str]":
+        task = resolved_user_ids.get(user_id)
+        if task is None:
+            task = asyncio.create_task(resolve_supertokens_user_id(user_id, user_context))
+            resolved_user_ids[user_id] = task
+        return task
+
+    target_supertokens_user_id = await resolve_user_id(target_user.id)
+    owner_inputs = [
+        (method, owner, login_method)
         for method, owners, _match in inspections
         for owner, login_method in owners
     ]
-    foreign_owners = [
-        owner_info
-        for owner_info in inspected_owners
-        if owner_info[3] != target_supertokens_user_id
+    owner_ids = await asyncio.gather(*(resolve_user_id(owner.id) for _, owner, _ in owner_inputs))
+    inspected_owners = [
+        (*owner_input, owner_id) for owner_input, owner_id in zip(owner_inputs, owner_ids)
     ]
-    can_link_verified_email_owners = bool(third_party_matches) and all(
-        owner_id == target_supertokens_user_id
-        for method, _, _, owner_id in inspected_owners
-        if method.get("recipeId") == "thirdparty"
-    ) and all(
-        method.get("recipeId") == "passwordless"
-        and isinstance(method.get("email"), str)
-        and method.get("isVerified") is True
-        and login_method.recipe_id == "passwordless"
-        and login_method.has_same_email_as(cast(str, method["email"]))
-        and not owner.is_primary_user
-        for method, owner, login_method, _ in foreign_owners
+    foreign_owners = [
+        owner_info for owner_info in inspected_owners if owner_info[3] != target_supertokens_user_id
+    ]
+    can_link_verified_email_owners = (
+        bool(third_party_matches)
+        and all(
+            owner_id == target_supertokens_user_id
+            for method, _, _, owner_id in inspected_owners
+            if method.get("recipeId") == "thirdparty"
+        )
+        and all(
+            method.get("recipeId") == "passwordless"
+            and isinstance(method.get("email"), str)
+            and method.get("isVerified") is True
+            and login_method.recipe_id == "passwordless"
+            and login_method.has_same_email_as(cast(str, method["email"]))
+            and not owner.is_primary_user
+            for method, owner, login_method, _ in foreign_owners
+        )
     )
     if foreign_owners and not can_link_verified_email_owners:
         raise RuntimeError("A migrated login method belongs to a different SuperTokens user")
@@ -2301,11 +2500,11 @@ async def reconcile_rownd_user_with_existing_login_methods(
     if unsupported is not None:
         raise RuntimeError("Cannot reconcile unsupported login method: emailpassword")
 
-    mapping_exists = target_supertokens_user_id == external_user_id or (
-        await assert_rownd_user_id_can_be_mapped(
-            target_supertokens_user_id, external_user_id, user_context
-        )
+    clear_supertokens_core_call_cache(user_context)
+    existing_mapping_matches = await assert_rownd_user_id_can_be_mapped(
+        target_supertokens_user_id, external_user_id, user_context
     )
+    mapping_exists = target_supertokens_user_id == external_user_id or existing_mapping_matches
     primary_user_id = await ensure_primary_user(
         target_user,
         target_login_method,
@@ -2324,8 +2523,7 @@ async def reconcile_rownd_user_with_existing_login_methods(
         )
         if not isinstance(link_result, LinkAccountsOkResult):
             raise RuntimeError(
-                "Failed to link migrated login method: %s"
-                % getattr(link_result, "status", "ERROR")
+                "Failed to link migrated login method: %s" % getattr(link_result, "status", "ERROR")
             )
     for method_import, _, match in inspections:
         if match is not None:
@@ -2360,11 +2558,10 @@ async def reconcile_rownd_user_with_existing_login_methods(
             link_result = await accountlinking_asyncio.link_accounts(
                 recipe_user_id, primary_user_id, user_context
             )
-            already_linked = (
-                isinstance(link_result, LinkAccountsRecipeUserIdAlreadyLinkedError)
-                and await sdk_user_id_matches_internal_target(
-                    link_result.primary_user_id, primary_user_id, user_context
-                )
+            already_linked = isinstance(
+                link_result, LinkAccountsRecipeUserIdAlreadyLinkedError
+            ) and await sdk_user_id_matches_internal_target(
+                link_result.primary_user_id, primary_user_id, user_context
             )
             if not isinstance(link_result, LinkAccountsOkResult) and not already_linked:
                 raise RuntimeError(
@@ -2403,14 +2600,12 @@ async def sync_imported_email_verification_state(
     tenant_id: str,
     user_context: UserContext,
 ) -> None:
-    metadata = await get_user_metadata(user_id or recipe_user_id.get_as_string())
+    metadata = await get_user_metadata(user_id or recipe_user_id.get_as_string(), user_context)
     original = as_json_dict(metadata.get("original_rownd_user"))
     data = as_json_dict(original.get("data"))
     verified_data = as_json_dict(original.get("verified_data"))
     email = data.get("email")
-    if not isinstance(email, str) or not is_rownd_email_verified(
-        verified_data.get("email"), email
-    ):
+    if not isinstance(email, str) or not is_rownd_email_verified(verified_data.get("email"), email):
         return
     try:
         token_result = await emailverification_asyncio.create_email_verification_token(
@@ -2431,8 +2626,8 @@ async def start_pending_email_verification(
     email: str,
     user_context: UserContext,
 ) -> JsonDict:
-    user_id = session.get_user_id()
-    tenant_id = session.get_tenant_id()
+    user_id = session.get_user_id(user_context)
+    tenant_id = session.get_tenant_id(user_context)
     user = await get_user(user_id, user_context)
     if user is None:
         raise RowndPluginError("User not found in Rownd")
@@ -2442,9 +2637,7 @@ async def start_pending_email_verification(
     normalized_email = normalize_email(email)
     if not normalized_email:
         raise RowndEmailChangeError("INVALID_EMAIL", 400, "email must be a non-empty string")
-    passwordless_method = find_canonical_passwordless_method(
-        user, combined_metadata, tenant_id
-    )
+    passwordless_method = find_canonical_passwordless_method(user, combined_metadata, tenant_id)
     tenant_login_methods = [
         method for method in user.login_methods if tenant_id in method.tenant_ids
     ]
@@ -2456,7 +2649,7 @@ async def start_pending_email_verification(
             method
             for method in user.login_methods
             if method.recipe_user_id.get_as_string()
-            == session.get_recipe_user_id().get_as_string()
+            == session.get_recipe_user_id(user_context).get_as_string()
             and tenant_id in method.tenant_ids
         ),
         None,
@@ -2479,24 +2672,21 @@ async def start_pending_email_verification(
                 tenant_id,
                 metadata_override=combined_metadata,
                 user_override=user,
+                user_context=user_context,
             )
         ).get("data")
     ).get("email")
     pending = get_pending_verifications(metadata)
-    pending_email_verifications = [
-        item for item in pending if item.get("field") == "email"
-    ]
+    pending_email_verifications = [item for item in pending if item.get("field") == "email"]
     if any(item.get("status") == "COMMITTING" for item in pending_email_verifications):
-        raise RowndEmailChangeError(
-            "CONFLICT", 409, "an email change is already being committed"
-        )
+        raise RowndEmailChangeError("CONFLICT", 409, "an email change is already being committed")
 
     if isinstance(current_email, str) and normalize_email(current_email) == normalized_email:
         for verification in pending_email_verifications:
             await revoke_pending_email_verification_tokens(
                 user,
                 verification,
-                session.get_recipe_user_id(),
+                session.get_recipe_user_id(user_context),
                 user_context,
             )
         current_passwordless_method = next(
@@ -2519,9 +2709,7 @@ async def start_pending_email_verification(
                         current_passwordless_method.recipe_user_id.get_as_string()
                     ),
                     "rownd_email_recipe_user_ids": {
-                        **as_json_dict(
-                            combined_metadata.get("rownd_email_recipe_user_ids")
-                        ),
+                        **as_json_dict(combined_metadata.get("rownd_email_recipe_user_ids")),
                         tenant_id: current_passwordless_method.recipe_user_id.get_as_string(),
                     },
                 }
@@ -2540,6 +2728,7 @@ async def start_pending_email_verification(
             tenant_id,
             metadata_override={**combined_metadata, **updated_metadata},
             user_override=user,
+            user_context=user_context,
         )
 
     await assert_email_available_for_user(normalized_email, user.id, user_context)
@@ -2547,13 +2736,13 @@ async def start_pending_email_verification(
     verification_recipe_user_id = (
         passwordless_method.recipe_user_id
         if passwordless_method
-        else session.get_recipe_user_id()
+        else session.get_recipe_user_id(user_context)
     )
     for verification in pending_email_verifications:
         await revoke_pending_email_verification_tokens(
             user,
             verification,
-            session.get_recipe_user_id(),
+            session.get_recipe_user_id(user_context),
             user_context,
         )
 
@@ -2566,7 +2755,7 @@ async def start_pending_email_verification(
         "created_at": now.isoformat().replace("+00:00", "Z"),
         "tenantId": tenant_id,
         "purpose": purpose,
-        "initiatingSessionHandle": session.get_handle(),
+        "initiatingSessionHandle": session.get_handle(user_context),
         "verificationRecipeUserId": verification_recipe_user_id.get_as_string(),
         "status": "PENDING",
     }
@@ -2575,9 +2764,7 @@ async def start_pending_email_verification(
         {
             **metadata,
             "rownd_pending_verification": [
-                *[
-                    item for item in pending if item.get("field") != "email"
-                ],
+                *[item for item in pending if item.get("field") != "email"],
                 pending_verification,
             ],
         },
@@ -2596,10 +2783,10 @@ async def start_pending_email_verification(
             user_id,
             verification_recipe_user_id,
             normalized_email,
-            {
-                **user_context,
-                _PENDING_EMAIL_VERIFICATION_USER_CONTEXT_KEY: pending_verification_id,
-            },
+            create_derived_user_context(
+                user_context,
+                {_PENDING_EMAIL_VERIFICATION_USER_CONTEXT_KEY: pending_verification_id},
+            ),
         )
         if getattr(result, "status", None) != "OK":
             raise RuntimeError("A fresh email verification could not be created")
@@ -2608,9 +2795,7 @@ async def start_pending_email_verification(
             await emailverification_asyncio.revoke_email_verification_tokens(
                 tenant_id, verification_recipe_user_id, normalized_email, user_context
             )
-        await remove_pending_email_verification(
-            user_id, pending_verification_id, user_context
-        )
+        await remove_pending_email_verification(user_id, pending_verification_id, user_context)
         raise
     return await get_rownd_compat_user(
         user_id,
@@ -2618,6 +2803,7 @@ async def start_pending_email_verification(
         tenant_id,
         metadata_override=combined_metadata,
         user_override=user,
+        user_context=user_context,
     )
 
 
@@ -2633,7 +2819,7 @@ async def resolve_pending_email_verification_token(
     if session is None:
         return {"status": "INVALID_PENDING"}
 
-    session_handle = session.get_handle()
+    session_handle = session.get_handle(user_context)
     session_user_id = session.get_user_id(user_context)
     session_tenant_id = session.get_tenant_id(user_context)
     if session_tenant_id != tenant_id:
@@ -2659,8 +2845,7 @@ async def resolve_pending_email_verification_token(
             and verification.get("status") == "PENDING"
             and verification.get("initiatingSessionHandle") == session_handle
             and (verification.get("tenantId") or PUBLIC_TENANT_ID) == tenant_id
-            and verification.get("purpose")
-            in {"UPDATE_PASSWORDLESS", "ADD_PASSWORDLESS"}
+            and verification.get("purpose") in {"UPDATE_PASSWORDLESS", "ADD_PASSWORDLESS"}
         ),
         None,
     )
@@ -2696,9 +2881,7 @@ async def complete_pending_email_verification(
             "email change session is no longer active; start the email change again",
         )
     primary_mapping = await get_primary_user_mapping(user_id, user_context)
-    primary_metadata_user_id = (
-        primary_mapping.supertokens_user_id if primary_mapping else user_id
-    )
+    primary_metadata_user_id = primary_mapping.supertokens_user_id if primary_mapping else user_id
     metadata = await get_raw_user_metadata(primary_metadata_user_id, user_context)
     pending = get_pending_verifications(metadata)
     normalized_email = normalize_email(email)
@@ -2740,9 +2923,7 @@ async def complete_pending_email_verification(
             user_id, pending_verification, recipe_user_id, normalized_email, user_context
         )
 
-    initiating_session_handle = optional_string(
-        pending_verification.get("initiatingSessionHandle")
-    )
+    initiating_session_handle = optional_string(pending_verification.get("initiatingSessionHandle"))
     pending_status = pending_verification.get("status")
     if (
         (pending_status if pending_status is not None else "PENDING") != "PENDING"
@@ -2819,9 +3000,7 @@ async def complete_pending_email_verification(
                 user_id, pending_verification, recipe_user_id, normalized_email, user_context
             )
         initiating_recipe_user_id = initiating_login_method.recipe_user_id
-        await session_asyncio.revoke_all_sessions_for_user(
-            user_id, True, None, user_context
-        )
+        await session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context)
         committing_metadata = await get_raw_user_metadata(user_id, user_context)
         committing_verification = next(
             (
@@ -2845,7 +3024,9 @@ async def complete_pending_email_verification(
             normalized_email,
             None,
             None,
-            {**user_context, "rowndDisableAutomaticAccountLinking": True},
+            create_derived_user_context(
+                user_context, {"rowndDisableAutomaticAccountLinking": True}
+            ),
         )
         reuses_linked_method = (
             not passwordless_user.created_new_recipe_user
@@ -2888,16 +3069,10 @@ async def complete_pending_email_verification(
                 raise email_ownership_conflict()
         canonical_email_recipe_user_id = passwordless_user.recipe_user_id.get_as_string()
 
-        await session_asyncio.revoke_all_sessions_for_user(
-            user_id, True, None, user_context
-        )
+        await session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context)
         final_metadata_inspection = await inspect_linked_user_metadata(user_id, user_context)
-        target_metadata = cast(
-            JsonDict, final_metadata_inspection["primary_metadata"]
-        )
-        combined_metadata = cast(
-            JsonDict, final_metadata_inspection["combined_metadata"]
-        )
+        target_metadata = cast(JsonDict, final_metadata_inspection["primary_metadata"])
+        combined_metadata = cast(JsonDict, final_metadata_inspection["combined_metadata"])
         updated_metadata = build_verified_email_metadata(
             target_metadata,
             user_id,
@@ -2963,9 +3138,7 @@ async def complete_pending_email_verification(
             "recipe_user_id": initiating_recipe_user_id,
             "initiating_session_handle": initiating_session_handle,
             "replace_session": True,
-            "rollback_on_session_replacement_failure": (
-                rollback_on_session_replacement_failure
-            ),
+            "rollback_on_session_replacement_failure": (rollback_on_session_replacement_failure),
         }
     except Exception as error:
         if completion_phase != "COMPLETED":
@@ -2977,9 +3150,7 @@ async def complete_pending_email_verification(
                     rollback_error = caught_rollback_error
             if completion_phase == "COMMITTING":
                 await asyncio.gather(
-                    session_asyncio.revoke_all_sessions_for_user(
-                        user_id, True, None, user_context
-                    ),
+                    session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context),
                     return_exceptions=True,
                 )
             if rollback_error is not None:
@@ -3130,9 +3301,7 @@ async def revoke_pending_email_verification_tokens(
 async def assert_email_available_for_user(
     email: str, allowed_user_ids: Union[str, List[str]], user_context: UserContext
 ) -> None:
-    allowed_ids = (
-        {allowed_user_ids} if isinstance(allowed_user_ids, str) else set(allowed_user_ids)
-    )
+    allowed_ids = {allowed_user_ids} if isinstance(allowed_user_ids, str) else set(allowed_user_ids)
     tenants = await multitenancy_asyncio.list_all_tenants(user_context)
     tenant_ids = list(
         dict.fromkeys([PUBLIC_TENANT_ID] + [tenant.tenant_id for tenant in tenants.tenants])
@@ -3158,9 +3327,8 @@ def find_pending_passwordless_method(
 ) -> Optional[LoginMethod]:
     if user is None:
         return None
-    if (
-        pending_verification.get("purpose") != "UPDATE_PASSWORDLESS"
-        or not pending_verification.get("verificationRecipeUserId")
+    if pending_verification.get("purpose") != "UPDATE_PASSWORDLESS" or not pending_verification.get(
+        "verificationRecipeUserId"
     ):
         return None
     pending_recipe_user_id = pending_verification.get("verificationRecipeUserId")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any, Dict, Optional, cast
 
@@ -32,7 +33,7 @@ class FakeSession:
     def __init__(self, user_id: str = "session-user"):
         self.user_id = user_id
 
-    def get_user_id(self) -> str:
+    def get_user_id(self, user_context: Optional[Dict[str, Any]] = None) -> str:
         return self.user_id
 
 
@@ -286,6 +287,7 @@ async def test_passwordless_create_code_adds_rownd_context():
     )
 
     assert captured_context == {
+        "_default": {},
         "existing": "value",
         "rowndAppVariantId": "variant_123",
         "rowndDisplayContext": "mobile_app",
@@ -336,8 +338,12 @@ async def test_passwordless_resend_code_adds_rownd_context():
     )
 
     assert captured_context == {
+        "_default": {},
         "existing": "value",
         "rowndAppVariantId": "variant_123",
+        "rowndDisplayContext": None,
+        "rowndRedirectToPath": None,
+        "rowndClientDomain": None,
         "rowndOAuthLoginChallenge": "challenge_123",
     }
 
@@ -526,7 +532,11 @@ async def test_oauth_auth_get_translates_resource_to_audience():
     await overridden.auth_get(params, None, None, False, cast(Any, None), user_context)
 
     assert captured["params"] == {"client_id": "client_123", "audience": "app:app_123"}
-    assert captured["user_context"] == {"rowndOAuthAudience": "app:app_123"}
+    assert captured["user_context"] == {
+        "_default": {},
+        "rowndOAuthAudience": "app:app_123",
+    }
+    assert user_context == {"_default": {}}
 
 
 async def test_oauth_token_post_translates_resource_to_audience():
@@ -550,7 +560,11 @@ async def test_oauth_token_post_translates_resource_to_audience():
     await overridden.token_post(None, body, cast(Any, None), user_context)
 
     assert captured["body"] == {"grant_type": "client_credentials", "audience": "app:app_123"}
-    assert captured["user_context"] == {"rowndOAuthAudience": "app:app_123"}
+    assert captured["user_context"] == {
+        "_default": {},
+        "rowndOAuthAudience": "app:app_123",
+    }
+    assert user_context == {"_default": {}}
 
 
 async def test_rownd_oauth_payload_adds_standard_and_rownd_claims(monkeypatch: pytest.MonkeyPatch):
@@ -593,8 +607,13 @@ async def test_rownd_oauth_payload_adds_standard_and_rownd_claims(monkeypatch: p
             }
         }
 
-    monkeypatch.setattr(impl, "get_user", get_user)
-    monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)
+    async def inspect(user_id: str, user_context: Any = None, user_override: Any = None):
+        return {
+            "user": user_override or user,
+            "combined_metadata": await get_user_metadata(user_id),
+        }
+
+    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
 
     payload = await impl.build_rownd_oauth_payload(
         make_config(),
@@ -620,7 +639,10 @@ async def test_rownd_oauth_user_info_picks_rownd_claims(monkeypatch: pytest.Monk
     async def get_user_metadata(user_id: str):
         return {}
 
-    monkeypatch.setattr(impl, "get_user_metadata", get_user_metadata)
+    async def inspect(user_id: str, user_context: Any = None, user_override: Any = None):
+        return {"user": user_override or user, "combined_metadata": {}}
+
+    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
 
     user_info = await impl.build_rownd_oauth_user_info(
         user,
@@ -651,7 +673,10 @@ async def test_passwordless_consume_records_app_variant_before_refresh(
     returned_session = SimpleNamespace()
 
     async def record_variant(
-        config: RowndPluginConfig, user_id: str, app_variant_id: Optional[str]
+        config: RowndPluginConfig,
+        user_id: str,
+        app_variant_id: Optional[str],
+        user_context: Dict[str, Any],
     ):
         events.append(("record", user_id, app_variant_id))
 
@@ -744,7 +769,10 @@ async def test_thirdparty_sign_in_records_app_variant_before_refresh(
     returned_session = SimpleNamespace()
 
     async def record_variant(
-        config: RowndPluginConfig, user_id: str, app_variant_id: Optional[str]
+        config: RowndPluginConfig,
+        user_id: str,
+        app_variant_id: Optional[str],
+        user_context: Dict[str, Any],
     ):
         events.append(("record", user_id, app_variant_id))
 
@@ -806,17 +834,16 @@ async def test_refresh_rownd_session_claims_merges_and_clears_stale_claims(
     }
     session = RefreshSession(payload)
 
-    async def build_claims(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
-        return {
-            "auth_level": "verified",
-            **({"anonymous_id": "anon-before-link"} if preserve_anonymous_id else {}),
-        }
+    async def build_claims(*_args: Any, **_kwargs: Any):
+        return (
+            {
+                "auth_level": "verified",
+                **({"anonymous_id": "anon-before-link"} if preserve_anonymous_id else {}),
+            },
+            {"is_anonymous": {"v": False, "t": 1}},
+        )
 
-    async def build_is_anonymous(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
-        return {"is_anonymous": {"v": False, "t": 1}}
-
-    monkeypatch.setattr(plugin, "build_rownd_session_claims", build_claims)
-    monkeypatch.setattr(plugin._rownd_is_anonymous_claim, "build", build_is_anonymous)
+    monkeypatch.setattr(plugin, "build_rownd_session_and_anonymous_claims", build_claims)
 
     await plugin.refresh_rownd_session_claims(
         make_config(), cast(Any, session), "linked-user", None, {}
@@ -825,9 +852,7 @@ async def test_refresh_rownd_session_claims_merges_and_clears_stale_claims(
     assert session.merged is not None
     assert session.merged["is_anonymous"] == {"v": False, "t": 1}
     assert session.merged[ROWND_JWT_CLAIMS["is_anonymous"]] is None
-    assert session.merged["anonymous_id"] == (
-        "anon-before-link" if preserve_anonymous_id else None
-    )
+    assert session.merged["anonymous_id"] == ("anon-before-link" if preserve_anonymous_id else None)
     assert "aud" not in session.merged
 
 
@@ -845,22 +870,14 @@ async def test_refresh_rownd_session_claims_clears_stale_configured_claim(
             "nickname": {"include_in_session_claims": False},
         },
     )
-    session = RefreshSession(
-        {"authorization_role": "admin", "nickname": "still-present"}
-    )
+    session = RefreshSession({"authorization_role": "admin", "nickname": "still-present"})
 
-    async def build_claims(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
-        return {"auth_level": "verified"}
+    async def build_claims(*_args: Any, **_kwargs: Any):
+        return {"auth_level": "verified"}, {"is_anonymous": {"v": False, "t": 1}}
 
-    async def build_is_anonymous(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
-        return {"is_anonymous": {"v": False, "t": 1}}
+    monkeypatch.setattr(plugin, "build_rownd_session_and_anonymous_claims", build_claims)
 
-    monkeypatch.setattr(plugin, "build_rownd_session_claims", build_claims)
-    monkeypatch.setattr(plugin._rownd_is_anonymous_claim, "build", build_is_anonymous)
-
-    await plugin.refresh_rownd_session_claims(
-        config, cast(Any, session), "user", None, {}
-    )
+    await plugin.refresh_rownd_session_claims(config, cast(Any, session), "user", None, {})
 
     assert session.merged is not None
     assert session.merged["authorization_role"] is None
@@ -874,7 +891,13 @@ async def test_post_auth_refresh_revokes_session_without_masking_original_error(
     refresh_error = RuntimeError("refresh failed")
     revoked: list[tuple[str, Dict[str, Any]]] = []
     revoked_for_user: list[tuple[str, bool, Optional[str], Dict[str, Any]]] = []
-    session = SimpleNamespace(get_handle=lambda: "returned-session-handle")
+    context = {"rowndAppVariantId": "variant_123"}
+
+    def get_handle(user_context: Dict[str, Any]) -> str:
+        assert user_context is context
+        return "returned-session-handle"
+
+    session = SimpleNamespace(get_handle=get_handle)
 
     async def refresh(*_args: Any, **_kwargs: Any) -> None:
         raise refresh_error
@@ -899,8 +922,6 @@ async def test_post_auth_refresh_revokes_session_without_masking_original_error(
     monkeypatch.setattr(plugin, "refresh_rownd_session_claims", refresh)
     monkeypatch.setattr(plugin.session_asyncio, "revoke_session", revoke)
     monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
-    context = {"rowndAppVariantId": "variant_123"}
-
     with pytest.raises(RuntimeError) as exc_info:
         await plugin._refresh_rownd_session_claims_or_revoke(
             make_config(), cast(Any, session), "user", "variant_123", context
@@ -919,11 +940,11 @@ async def test_create_new_session_builds_rownd_and_boolean_claims_in_initial_pay
     recipe_user_id = SimpleNamespace(get_as_string=lambda: "recipe-user")
     captured_payload: Optional[Dict[str, Any]] = None
 
-    async def build_claims(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
-        return {"auth_level": "instant", ROWND_JWT_CLAIMS["is_anonymous"]: True}
-
-    async def build_is_anonymous(*_args: Any, **_kwargs: Any) -> Dict[str, Any]:
-        return {"is_anonymous": {"v": True, "t": 1}}
+    async def build_claims(*_args: Any, **_kwargs: Any):
+        return (
+            {"auth_level": "instant", ROWND_JWT_CLAIMS["is_anonymous"]: True},
+            {"is_anonymous": {"v": True, "t": 1}},
+        )
 
     async def create_new_session(
         user_id: str,
@@ -940,8 +961,7 @@ async def test_create_new_session_builds_rownd_and_boolean_claims_in_initial_pay
         captured_payload = access_token_payload
         return "session"
 
-    monkeypatch.setattr(plugin, "build_rownd_session_claims", build_claims)
-    monkeypatch.setattr(plugin._rownd_is_anonymous_claim, "build", build_is_anonymous)
+    monkeypatch.setattr(plugin, "build_rownd_session_and_anonymous_claims", build_claims)
     original = SimpleNamespace(create_new_session=create_new_session)
     overridden = plugin._session_function_override(make_config())(cast(Any, original))
 
@@ -1059,9 +1079,7 @@ async def test_emailverification_pending_marker_requires_session():
         "public",
         cast(
             Any,
-            SimpleNamespace(
-                request=FakeRequest({"rowndPendingVerificationId": "pending-id"})
-            ),
+            SimpleNamespace(request=FakeRequest({"rowndPendingVerificationId": "pending-id"})),
         ),
         {},
     )
@@ -1106,6 +1124,7 @@ async def test_email_change_context_is_sanitized():
     )
 
     assert context == {
+        "_default": {},
         "trusted": "value",
         "rowndDisplayContext": "mobile_app",
         "rowndClientDomain": "mobile",
@@ -1121,7 +1140,7 @@ async def test_pending_verification_binding_is_checked_before_token_use(
     monkeypatch: pytest.MonkeyPatch, invalid_binding: str
 ):
     session = SimpleNamespace(
-        get_handle=lambda: "session-handle",
+        get_handle=lambda _context: "session-handle",
         get_user_id=lambda _context: "user-id",
         get_tenant_id=lambda _context: "public",
     )
@@ -1157,9 +1176,7 @@ async def test_pending_verification_binding_is_checked_before_token_use(
     async def get_user_metadata(*_args: Any, **_kwargs: Any):
         return {"rownd_pending_verification": [pending]}
 
-    monkeypatch.setattr(
-        impl.session_asyncio, "get_session_information", get_session_information
-    )
+    monkeypatch.setattr(impl.session_asyncio, "get_session_information", get_session_information)
     monkeypatch.setattr(impl, "get_raw_user_metadata", get_user_metadata)
 
     result = await impl.resolve_pending_email_verification_token(
@@ -1206,7 +1223,7 @@ async def test_replacement_session_failure_runs_email_change_rollback(
         raise RuntimeError("replacement session failed")
 
     session = SimpleNamespace(
-        get_handle=lambda: "session-handle",
+        get_handle=lambda _context: "session-handle",
         get_tenant_id=lambda _context: "public",
     )
     monkeypatch.setattr(plugin, "resolve_pending_email_verification_token", resolve_pending)
@@ -1223,9 +1240,7 @@ async def test_replacement_session_failure_runs_email_change_rollback(
             "public",
             cast(
                 Any,
-                SimpleNamespace(
-                    request=FakeRequest({"rowndPendingVerificationId": "pending-id"})
-                ),
+                SimpleNamespace(request=FakeRequest({"rowndPendingVerificationId": "pending-id"})),
             ),
             {},
         )
@@ -1416,3 +1431,265 @@ async def test_accountlinking_links_matching_real_session_with_verification(
     )
 
     assert result.should_require_verification is True
+
+
+async def test_derived_context_forwards_default_replacements_to_parent():
+    original_default = {"core_call_cache": {"stale": True}}
+    parent = {"_default": original_default, "custom": "value"}
+    first = impl.create_derived_user_context(parent, {"temporary": "first"})
+    second = impl.create_derived_user_context(parent, {"temporary": "second"})
+
+    replacement = {"core_call_cache": {"fresh": True}}
+    first["_default"] = replacement
+
+    assert parent["_default"] is original_default
+    assert parent["_default"] == replacement
+    assert second.get("_default") is original_default
+    assert second["_default"] is original_default
+    assert "_default" in second
+    assert dict(first)["_default"] is original_default
+    assert dict(first.items())["_default"] is original_default
+    assert original_default in first.values()
+    assert first.copy()["_default"] is original_default
+
+    final = {"core_call_cache": {}}
+    second.update({"_default": final})
+    assert parent["_default"] is original_default
+    assert original_default == final
+
+    second |= {"_default": {"core_call_cache": {"updated": True}}, "added": True}
+    assert first["_default"] == {"core_call_cache": {"updated": True}}
+    assert second["added"] is True
+
+    empty_parent: Dict[str, Any] = {}
+    derived = impl.create_derived_user_context(empty_parent, {"temporary": True})
+    created = derived.setdefault("_default", {"ignored": True})
+    assert empty_parent["_default"] is created
+    assert created == {}
+    assert derived.setdefault("local", "value") == "value"
+    assert derived.pop("local") == "value"
+    with pytest.raises(TypeError, match="cannot be removed"):
+        derived.pop("_default")
+    with pytest.raises(TypeError, match="cannot be removed"):
+        del derived["_default"]
+    assert derived.popitem() == ("temporary", True)
+    with pytest.raises(TypeError, match="cannot be removed"):
+        derived.popitem()
+    derived.update({"temporary": True})
+    derived.clear()
+    assert dict(derived) == {"_default": created}
+
+    with pytest.raises(TypeError, match="replacement must be a dict"):
+        derived["_default"] = cast(Any, None)
+
+
+async def test_derived_context_reproduces_querier_default_replacement():
+    from supertokens_python.querier import Querier
+
+    parent: Dict[str, Any] = {"_default": {"keep_cache_alive": True}}
+    first = impl.create_derived_user_context(parent, {})
+    second = impl.create_derived_user_context(parent, {})
+    stable_default = parent["_default"]
+    querier = object.__new__(Querier)
+
+    querier.invalidate_core_call_cache(first)
+
+    assert parent["_default"] is stable_default
+    assert first["_default"] is stable_default
+    assert second["_default"] is stable_default
+    assert stable_default == {"keep_cache_alive": True, "core_call_cache": {}}
+    assert dict(first)["_default"] is stable_default
+
+
+async def test_passwordless_request_contexts_are_isolated_during_overlap():
+    entered = 0
+    both_entered = asyncio.Event()
+    captured: list[Dict[str, Any]] = []
+
+    async def create_code_post(*args: Any):
+        nonlocal entered
+        context = cast(Dict[str, Any], args[-1])
+        captured.append(context)
+        entered += 1
+        if entered == 2:
+            both_entered.set()
+        await both_entered.wait()
+        return SimpleNamespace(status="OK")
+
+    original = SimpleNamespace(create_code_post=create_code_post, consume_code_post=None)
+    overridden = plugin._passwordless_api_override(make_config())(cast(Any, original))
+    parent: Dict[str, Any] = {
+        "custom": "value",
+        "rowndDisplayContext": "stale",
+        "rowndClientDomain": "stale",
+    }
+
+    await asyncio.gather(
+        overridden.create_code_post(
+            "first@example.com",
+            None,
+            None,
+            None,
+            "public",
+            cast(
+                Any,
+                SimpleNamespace(
+                    request=FakeRequest(
+                        {
+                            "rownd_display_context": "mobile_app",
+                            "rownd_client_domain": "mobile",
+                        }
+                    )
+                ),
+            ),
+            parent,
+        ),
+        overridden.create_code_post(
+            "second@example.com",
+            None,
+            None,
+            None,
+            "public",
+            cast(Any, SimpleNamespace(request=FakeRequest())),
+            parent,
+        ),
+    )
+
+    assert captured[0] is not captured[1]
+    assert captured[0]["rowndDisplayContext"] == "mobile_app"
+    assert captured[0]["rowndClientDomain"] == "mobile"
+    assert captured[1]["rowndDisplayContext"] is None
+    assert captured[1]["rowndClientDomain"] is None
+    assert parent == {
+        "_default": {},
+        "custom": "value",
+        "rowndDisplayContext": "stale",
+        "rowndClientDomain": "stale",
+    }
+
+
+async def test_security_flag_is_operation_local_across_awaits():
+    parent: Dict[str, Any] = {"rowndDisableAutomaticAccountLinking": False}
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def operation():
+        context = impl.create_derived_user_context(
+            parent, {"rowndDisableAutomaticAccountLinking": True}
+        )
+        entered.set()
+        await release.wait()
+        return context["rowndDisableAutomaticAccountLinking"]
+
+    task = asyncio.create_task(operation())
+    await entered.wait()
+    assert parent["rowndDisableAutomaticAccountLinking"] is False
+    release.set()
+    assert await task is True
+
+
+async def test_normal_user_route_forwards_exact_context(monkeypatch: pytest.MonkeyPatch):
+    parent: Dict[str, Any] = {"custom": object()}
+
+    class ContextSession:
+        def get_user_id(self, user_context: Dict[str, Any]) -> str:
+            assert user_context is parent
+            return "user"
+
+        def get_tenant_id(self, user_context: Dict[str, Any]) -> str:
+            assert user_context is parent
+            return "public"
+
+    async def get_compat_user(*args: Any, **kwargs: Any):
+        assert kwargs["user_context"] is parent
+        return {"data": {}}
+
+    monkeypatch.setattr(impl, "get_rownd_compat_user", get_compat_user)
+    response = SimpleNamespace(
+        set_status_code=lambda _code: None, set_json_content=lambda _body: None
+    )
+
+    await impl.handle_get_user(
+        make_config(), cast(Any, ContextSession()), cast(Any, response), parent
+    )
+
+
+async def test_session_claims_share_one_inspection_snapshot(monkeypatch: pytest.MonkeyPatch):
+    context: Dict[str, Any] = {"custom": "value"}
+    calls = 0
+    user = SimpleNamespace(id="user", login_methods=[])
+
+    async def inspect(user_id: str, user_context: Any = None, user_override: Any = None):
+        nonlocal calls
+        calls += 1
+        assert user_context is context
+        return {"user": user, "combined_metadata": {}}
+
+    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
+
+    claims, anonymous = await impl.build_rownd_session_and_anonymous_claims(
+        make_config(), "user", {}, None, context
+    )
+
+    assert calls == 1
+    assert claims["app_user_id"] == "user"
+    assert cast(Dict[str, Any], anonymous["is_anonymous"])["v"] is False
+
+
+async def test_oauth_claims_share_one_metadata_inspection(monkeypatch: pytest.MonkeyPatch):
+    context: Dict[str, Any] = {"rowndOAuthAudience": "app:app_123"}
+    calls = 0
+    user = User("user", False, ["public"], ["user@example.com"], [], [], cast(Any, []), [], 1)
+
+    async def inspect(user_id: str, user_context: Any = None, user_override: Any = None):
+        nonlocal calls
+        calls += 1
+        assert user_context is context
+        assert user_override is user
+        return {"user": user, "combined_metadata": {}}
+
+    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
+
+    await impl.build_rownd_oauth_payload(make_config(), user, ["email"], {}, context)
+
+    assert calls == 1
+
+
+async def test_app_variant_uses_fresh_raw_metadata_before_write(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    context: Dict[str, Any] = {"_default": {"core_call_cache": {"metadata": "stale"}}}
+    fresh_original = {
+        "data": {"user_id": "rownd-user"},
+        "verified_data": {},
+        "attributes": {"preserved": True},
+    }
+    written: Dict[str, Any] = {}
+
+    async def inspect(*args: Any, **kwargs: Any):
+        return {
+            "primary_user_id": "primary",
+            "rownd_metadata_source_user_id": "source",
+        }
+
+    async def get_raw(user_id: str, user_context: Dict[str, Any]):
+        assert user_id == "source"
+        assert user_context is context
+        assert user_context["_default"]["core_call_cache"] == {}
+        return {"original_rownd_user": fresh_original}
+
+    async def update(user_id: str, metadata: Dict[str, Any], user_context: Dict[str, Any]):
+        written.update(metadata)
+        return SimpleNamespace(metadata=metadata)
+
+    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
+    monkeypatch.setattr(impl, "get_raw_user_metadata", get_raw)
+    monkeypatch.setattr(impl.usermetadata_asyncio, "update_user_metadata", update)
+
+    await impl.record_rownd_app_variant_for_user(make_config(), "user", "variant_123", context)
+
+    original = cast(Dict[str, Any], written["original_rownd_user"])
+    assert original["attributes"] == {
+        "preserved": True,
+        "rownd:app_variants": ["variant_123"],
+    }
