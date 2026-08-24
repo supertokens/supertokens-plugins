@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 0.1.13
+
+### Patch Changes
+
+- Pass context to prevent extra core calls
+
 ## 0.1.12
 
 ### Patch Changes

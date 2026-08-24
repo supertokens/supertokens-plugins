@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/rownd-python",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "private": true,
   "description": "Rownd migration plugin for SuperTokens Python",
   "scripts": {
