@@ -1,5 +1,17 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.6.13
+
+### Patch Changes
+
+- Pass context to prevent extra core requests
+
+## 0.6.12
+
+### Patch Changes
+
+- Handle concurrent Rownd migrations
+
 ## 0.6.11
 
 ### Patch Changes
