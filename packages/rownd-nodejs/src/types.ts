@@ -801,21 +801,40 @@ export type RowndUser = JSONObject & {
 };
 
 export type RowndUserMetadata = {
+  /** Preserves the Rownd profile shape used by compatibility endpoints and claims. */
   original_rownd_user?: RowndUser;
+  /** Legacy account-wide pointer to the canonical Passwordless email recipe user. */
   rownd_email_recipe_user_id?: string;
+  /** Selects the canonical Passwordless email recipe user independently for each tenant. */
   rownd_email_recipe_user_ids?: Record<string, string>;
+  /** Prevents a successfully imported Rownd user from being migrated again. */
   rownd_migration_complete?: boolean;
+  /** Tracks verified profile changes until they commit or are safely reconciled. */
   rownd_pending_verification?: Array<{
+    /** Correlates the pending operation with the verification link that completes it. */
     id: string;
+    /** Identifies the profile field being verified; currently only email is supported. */
     field: string;
+    /** Stores the proposed field value that must match the verified value. */
     value: string;
+    /** Records when the operation started for diagnostics and lifecycle checks. */
     created_at: string;
+    /** Scopes verification and credential changes to the initiating tenant. */
     tenantId?: string;
+    /** Distinguishes replacing an email method from adding the account's first one. */
     purpose?: "UPDATE_PASSWORDLESS" | "ADD_PASSWORDLESS";
+    /** Binds completion to the exact session that initiated the profile change. */
     initiatingSessionHandle?: string;
+    /** Identifies the existing recipe user used as the EmailVerification subject. */
     verificationRecipeUserId?: string;
+    /** Separates an awaiting-verification operation from durable credential cleanup. */
     status?: "PENDING" | "COMMITTING";
+    /** Identifies the verified Passwordless method that cleanup must make canonical. */
+    targetCanonicalRecipeUserId?: string;
+    /** Lists superseded Passwordless methods that durable cleanup must remove from the tenant. */
+    cleanupRecipeUserIds?: string[];
   }>;
+  /** Allows application metadata to coexist with the plugin's reserved Rownd fields. */
   [key: string]: unknown;
 };
 

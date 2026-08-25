@@ -70,8 +70,9 @@ When email sign-in is configured, changing the Rownd profile email starts a
 verified passwordless email change for the initiating tenant. After
 verification, the plugin creates a new passwordless method or reuses one already
 linked to the same primary user in that tenant, then makes it the canonical
-Rownd profile email. Existing passwordless, third-party, and email-password
-login identifiers are not modified. For
+Rownd profile email. It removes replaced Passwordless email methods from the
+initiating tenant. Methods also associated with another tenant remain available
+there. Phone, third-party, and email-password methods are not modified. For
 updates, the canonical Passwordless method acts as the EmailVerification
 subject. For third-party-only accounts, the initiating third-party method acts
 as the subject because the new Passwordless recipe user does not exist until
@@ -105,8 +106,9 @@ email updates are rejected rather than creating a hidden authentication method.
 when email changes are enabled, and Passwordless must use `EMAIL` or
 `EMAIL_OR_PHONE` as its contact method.
 
-Previous Passwordless emails remain active login aliases after verification and
-resolve to the same primary user. A pending change remains usable only while its underlying
+Previous Passwordless emails stop being login aliases in the initiating tenant
+after verification. The replacement session uses the surviving canonical
+Passwordless method. A pending change remains usable only while its underlying
 SuperTokens verification token, pending metadata, and initiating session remain
 valid. Starting another change revokes the previous pending token. Email
 ownership is checked across every SuperTokens tenant both when the change starts
@@ -119,6 +121,24 @@ methods cannot. Phone-only Passwordless methods are supported, and adding an
 email preserves the phone method. Verification must use the same active session
 that started the change. Completion revokes every account session and returns a
 replacement for that initiating session.
+
+Completion marks the pending operation `COMMITTING` before changing login
+methods. Once replaced-email cleanup starts, failures roll forward: the target
+method is retained, all sessions are revoked, and `COMMITTING` metadata remains
+with the target and cleanup recipe-user IDs required for reconciliation. A later
+authenticated profile-email update first retries that idempotent cleanup and
+canonical finalization. Already removed or disassociated methods are treated as
+complete. Invalid reconciliation state fails closed without deleting methods.
+Replacement-session failure does not restore removed login aliases.
+
+When `auth.useExplicitSignUpFlow` is enabled, Rownd Hub sends `intent` as
+`sign_in` or `sign_up` in Passwordless create-code requests. An explicit
+`sign_in` for an identifier with no tenant account returns
+`SIGN_IN_UP_NOT_ALLOWED` with reason `No existing account found`. `sign_up` and
+requests without an intent retain standard Passwordless behavior. Canonical
+email metadata is considered during account lookup and automatic linking, so a
+stale email retained by Apple or another provider cannot restore a replaced
+Passwordless email.
 
 Successful update responses that start verification include
 `email_verification_pending: true`. The returned profile continues to contain
@@ -149,7 +169,9 @@ updates are read/modify/write operations without compare-and-swap. Concurrent
 profile writes can still overwrite pending-operation metadata. A process crash
 between Core token consumption and terminal cleanup can leave stale pending
 metadata until it is repaired. Terminal operations attempt to remove their
-pending record; cleanup or rollback failures require reconciliation.
+pending record. Durable `COMMITTING` cleanup failures are retried by the next
+authenticated profile-email update; malformed state still requires operator
+reconciliation.
 
 ### Session Claim Fields
 

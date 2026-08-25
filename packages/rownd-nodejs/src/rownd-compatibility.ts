@@ -45,6 +45,8 @@ export type RowndPendingVerification = {
   initiatingSessionHandle?: string;
   verificationRecipeUserId?: string;
   status?: "PENDING" | "COMMITTING";
+  targetCanonicalRecipeUserId?: string;
+  cleanupRecipeUserIds?: string[];
 };
 
 export type RowndCompatUserResponse = {
@@ -862,17 +864,169 @@ export async function shouldLinkRowndAccounts(
       userContext,
     );
 
+  let verifiedMatches = matchingUsers.filter((user) =>
+    hasVerifiedMatchingEmailLoginMethod(user, accountInfo, tenantId),
+  );
+  let canonicalMatches = await Promise.all(
+    verifiedMatches.map((user) =>
+      hasCanonicalEmailForTenant(user, email, tenantId, userContext),
+    ),
+  );
   if (
-    matchingUsers.some((user) =>
-      hasVerifiedMatchingEmailLoginMethod(user, accountInfo, tenantId),
-    )
+    verifiedMatches.length > 0 &&
+    canonicalMatches.every((match) => match === undefined)
   ) {
+    const listedUsers = existingUser
+      ? await SuperTokens.listUsersByAccountInfo(
+        tenantId,
+        { email },
+        true,
+        userContext,
+      )
+      : matchingUsers;
+    verifiedMatches = listedUsers.filter((user) =>
+      user.loginMethods.some(
+        (method) =>
+          !isGuestLoginMethod(method) &&
+          method.tenantIds.includes(tenantId) &&
+          method.verified &&
+          method.email?.toLowerCase() === email.toLowerCase(),
+      ),
+    );
+    canonicalMatches = await Promise.all(
+      verifiedMatches.map((user) =>
+        hasCanonicalEmailForTenant(user, email, tenantId, userContext),
+      ),
+    );
+  }
+  const canonicalMatchCount = canonicalMatches.filter(
+    (match) => match === true,
+  ).length;
+  const hasCanonicalConflict = canonicalMatches.some(
+    (match) => match === false,
+  );
+  if (canonicalMatchCount === 1 && !hasCanonicalConflict) {
     return {
       shouldAutomaticallyLink: true,
       shouldRequireVerification: true,
     };
   }
 
+  if (canonicalMatchCount > 0 || hasCanonicalConflict) {
+    return {
+      shouldAutomaticallyLink: false,
+      shouldRequireVerification: false,
+    };
+  }
+
+  return undefined;
+}
+
+export async function doesRowndAccountInfoExist(input: {
+  tenantId: string;
+  email?: string;
+  phoneNumber?: string;
+  userContext?: Record<string, any>;
+}) {
+  const users = await SuperTokens.listUsersByAccountInfo(
+    input.tenantId,
+    input.email ? { email: input.email } : { phoneNumber: input.phoneNumber! },
+    true,
+    input.userContext,
+  );
+  if (!input.email) {
+    return users.length > 0;
+  }
+
+  const matches = await Promise.all(
+    users.map((user) =>
+      hasCanonicalEmailForTenant(
+        user,
+        input.email!,
+        input.tenantId,
+        input.userContext,
+      ),
+    ),
+  );
+  return matches.some(Boolean);
+}
+
+async function hasCanonicalEmailForTenant(
+  user: NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>,
+  email: string,
+  tenantId: string,
+  userContext?: Record<string, any>,
+) {
+  const metadata = (
+    await inspectLinkedUserMetadata(user.id, userContext, user)
+  ).combinedMetadata;
+  const scopedCanonicalRecipeUserId =
+    metadata.rownd_email_recipe_user_ids?.[tenantId];
+  const legacyCanonicalRecipeUserId =
+    metadata.rownd_email_recipe_user_ids === undefined
+      ? metadata.rownd_email_recipe_user_id
+      : undefined;
+  const canonicalRecipeUserId =
+    scopedCanonicalRecipeUserId ?? legacyCanonicalRecipeUserId;
+  if (canonicalRecipeUserId) {
+    const canonicalMethod = user.loginMethods.find(
+      (method) =>
+        method.recipeUserId.getAsString() === canonicalRecipeUserId &&
+        method.tenantIds.includes(tenantId),
+    );
+    if (canonicalMethod) {
+      return canonicalMethod.email?.toLowerCase() === email.toLowerCase();
+    }
+    if (scopedCanonicalRecipeUserId) {
+      return false;
+    }
+  }
+
+  const tenantEmailMethods = user.loginMethods.filter(
+    (method) =>
+      !isGuestLoginMethod(method) &&
+      method.tenantIds.includes(tenantId) &&
+      method.verified &&
+      method.email !== undefined,
+  );
+  const tenantEmails = new Set(
+    tenantEmailMethods.map((method) => method.email!.toLowerCase()),
+  );
+  const firstPartyEmails = new Set(
+    tenantEmailMethods
+      .filter(
+        (method) =>
+          method.recipeId === "passwordless" ||
+          method.recipeId === "emailpassword",
+      )
+      .map((method) => method.email!.toLowerCase()),
+  );
+  if (firstPartyEmails.size === 1) {
+    return firstPartyEmails.has(email.toLowerCase());
+  }
+
+  const originalEmail = metadata.original_rownd_user?.data?.email;
+  if (firstPartyEmails.size > 1) {
+    if (typeof originalEmail !== "string") {
+      return false;
+    }
+    const normalizedOriginalEmail = originalEmail.toLowerCase();
+    return (
+      firstPartyEmails.has(normalizedOriginalEmail) &&
+      normalizedOriginalEmail === email.toLowerCase()
+    );
+  }
+
+  if (typeof originalEmail === "string") {
+    const normalizedOriginalEmail = originalEmail.toLowerCase();
+    return (
+      tenantEmails.has(normalizedOriginalEmail) &&
+      normalizedOriginalEmail === email.toLowerCase()
+    );
+  }
+  if (tenantEmails.size > 0) {
+    return tenantEmails.size === 1 && tenantEmails.has(email.toLowerCase());
+  }
   return undefined;
 }
 

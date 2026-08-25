@@ -32,6 +32,7 @@ import { enableDebugLogs, logDebugMessage } from "./logger";
 import { createClient } from "./telemetry/createTelemetryClient";
 import {
   assertRowndAppVariantIsConfigured,
+  isExplicitSignUpFlowEnabled,
   isEmailSignInEnabled,
   setPluginConfig,
   setSuperTokensConfig,
@@ -42,6 +43,7 @@ import {
   buildRowndOAuthPayload,
   buildRowndOAuthUserInfo,
   normalizeRowndOAuthScopes,
+  doesRowndAccountInfoExist,
   shouldLinkRowndAccounts,
 } from "./rownd-compatibility";
 import { setRowndClient } from "./rownd-repository";
@@ -537,6 +539,45 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   throw new Error("Passwordless createCodePOST is unavailable");
                 }
 
+                const appVariantId = getRequestedAppVariantIdFromRequest(
+                  input.options.req,
+                );
+                assertRowndAppVariantIsConfigured(appVariantId);
+                const body = await input.options.req.getJSONBody();
+                const hasIntent =
+                  body !== null &&
+                  typeof body === "object" &&
+                  "intent" in body;
+                const intent = hasIntent
+                  ? (body as { intent?: unknown }).intent
+                  : undefined;
+                if (
+                  hasIntent &&
+                  intent !== "sign_in" &&
+                  intent !== "sign_up"
+                ) {
+                  return {
+                    status: "GENERAL_ERROR" as const,
+                    message: "intent must be sign_in or sign_up",
+                  };
+                }
+                if (
+                  intent === "sign_in" &&
+                  isExplicitSignUpFlowEnabled(pluginConfig, appVariantId) &&
+                  !(await doesRowndAccountInfoExist({
+                    tenantId: input.tenantId,
+                    ...("email" in input
+                      ? { email: input.email }
+                      : { phoneNumber: input.phoneNumber }),
+                    userContext: input.userContext,
+                  }))
+                ) {
+                  return {
+                    status: "SIGN_IN_UP_NOT_ALLOWED" as const,
+                    reason: "No existing account found",
+                  };
+                }
+
                 const operationContext = createDerivedUserContext(
                   input.userContext,
                   getRowndPasswordlessRequestContextValues(input.options.req),
@@ -845,7 +886,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                         input.userContext,
                       );
                     } catch (error) {
-                      await verificationResult.rollbackOnSessionReplacementFailure();
+                      await Session.revokeAllSessionsForUser(
+                        verificationResult.userId,
+                        true,
+                        undefined,
+                        input.userContext,
+                      );
                       throw error;
                     }
                   }

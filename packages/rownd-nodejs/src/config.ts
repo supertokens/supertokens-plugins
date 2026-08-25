@@ -49,6 +49,17 @@ export function isEmailSignInEnabled(
   return methods?.some((method) => method.method === "email") === true;
 }
 
+export function isExplicitSignUpFlowEnabled(
+  config: RowndPluginNormalisedConfig,
+  appVariantId?: string,
+) {
+  return (
+    (appVariantId
+      ? config.subBrands?.[appVariantId]?.auth?.useExplicitSignUpFlow
+      : undefined) ?? config.appConfig?.auth?.useExplicitSignUpFlow
+  ) === true;
+}
+
 const BUILTIN_SIGN_IN_METHOD_KEYS = [
   "email",
   "phone",

@@ -49,6 +49,7 @@ import {
 import {
   buildRowndOAuthPayload,
   combineLinkedMetadata,
+  doesRowndAccountInfoExist,
   mapRowndUserToSuperTokens,
   shouldLinkRowndAccounts,
 } from "./rownd-compatibility";
@@ -64,6 +65,7 @@ import {
   reconcileRowndUserWithExistingLoginMethods,
   createMagicLinkWithConfirmationBypass,
   recordRowndAppVariantForUser,
+  startPendingEmailVerification,
 } from "./supertokens-repository";
 import {
   associateUserLoginMethodsToTenant,
@@ -724,6 +726,225 @@ describe("rownd-nodejs plugin", () => {
           {},
         ] as any),
       ).resolves.toBeUndefined();
+    });
+
+    it("uses the Rownd profile email instead of a stale Apple email without a canonical marker", async () => {
+      const appleRecipeUserId = {
+        getAsString: () => "stale-apple-recipe-user",
+      };
+      const canonicalRecipeUserId = {
+        getAsString: () => "canonical-email-recipe-user",
+      };
+      const existingUser = {
+        id: "canonical-user",
+        loginMethods: [
+          {
+            recipeId: "thirdparty",
+            recipeUserId: appleRecipeUserId,
+            email: "doejohn@gmail.com",
+            verified: true,
+            tenantIds: ["public"],
+            thirdParty: { id: "apple", userId: "apple-user" },
+          },
+          {
+            recipeId: "passwordless",
+            recipeUserId: canonicalRecipeUserId,
+            email: "johndoe@email.com",
+            verified: true,
+            tenantIds: ["public"],
+          },
+        ],
+      } as any;
+      vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({
+        status: "UNKNOWN_MAPPING_ERROR",
+      });
+      vi.spyOn(UserMetadata, "getUserMetadata").mockImplementation(
+        async (userId) => ({
+          status: "OK",
+          metadata:
+            userId === "canonical-user"
+              ? {
+                  original_rownd_user: {
+                    data: {
+                      email: "johndoe@email.com",
+                    },
+                  },
+                }
+              : {},
+        }),
+      );
+      vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([
+        existingUser,
+      ]);
+
+      await expect(
+        doesRowndAccountInfoExist({
+          tenantId: "public",
+          email: "johndoe@email.com",
+          userContext: {},
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        doesRowndAccountInfoExist({
+          tenantId: "public",
+          email: "doejohn@gmail.com",
+          userContext: {},
+        }),
+      ).resolves.toBe(false);
+
+      await expect(
+        shouldLinkRowndAccounts([
+          {
+            recipeId: "thirdparty",
+            email: "johndoe@email.com",
+            thirdParty: { id: "google", userId: "google-user" },
+          },
+          existingUser,
+          undefined,
+          "public",
+          {},
+        ] as any),
+      ).resolves.toEqual({
+        shouldAutomaticallyLink: true,
+        shouldRequireVerification: true,
+      });
+
+      await expect(
+        shouldLinkRowndAccounts([
+          { recipeId: "passwordless", email: "doejohn@gmail.com" },
+          existingUser,
+          undefined,
+          "public",
+          {},
+        ] as any),
+      ).resolves.toEqual({
+        shouldAutomaticallyLink: false,
+        shouldRequireVerification: false,
+      });
+    });
+
+    it.each(["multiple", "mixed"] as const)(
+      "denies automatic linking for %s canonical candidates",
+      async (scenario) => {
+        const email = "ambiguous-canonical@example.com";
+        const recipeUserId = (id: string) => ({ getAsString: () => id });
+        const validUser = {
+          id: "valid-canonical-user",
+          loginMethods: [
+            {
+              recipeId: "passwordless",
+              recipeUserId: recipeUserId("valid-canonical-method"),
+              email,
+              verified: true,
+              tenantIds: ["public"],
+            },
+          ],
+        } as any;
+        const otherUser = {
+          id: "other-canonical-user",
+          loginMethods: [
+            {
+              recipeId: "passwordless",
+              recipeUserId: recipeUserId("other-matching-method"),
+              email,
+              verified: true,
+              tenantIds: ["public"],
+            },
+            ...(scenario === "mixed"
+              ? [
+                  {
+                    recipeId: "passwordless",
+                    recipeUserId: recipeUserId("other-canonical-method"),
+                    email: "other-canonical@example.com",
+                    verified: true,
+                    tenantIds: ["public"],
+                  },
+                ]
+              : []),
+          ],
+        } as any;
+        vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({
+          status: "UNKNOWN_MAPPING_ERROR",
+        });
+        vi.spyOn(UserMetadata, "getUserMetadata").mockImplementation(
+          async (userId) => ({
+            status: "OK",
+            metadata:
+              scenario === "mixed" && userId === otherUser.id
+                ? {
+                    rownd_email_recipe_user_ids: {
+                      public: "other-canonical-method",
+                    },
+                  }
+                : {},
+          }),
+        );
+        vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([
+          validUser,
+          otherUser,
+        ]);
+
+        await expect(
+          shouldLinkRowndAccounts([
+            {
+              recipeId: "thirdparty",
+              email,
+              thirdParty: { id: "google", userId: "ambiguous-google" },
+            },
+            undefined,
+            undefined,
+            "public",
+            {},
+          ] as any),
+        ).resolves.toEqual({
+          shouldAutomaticallyLink: false,
+          shouldRequireVerification: false,
+        });
+      },
+    );
+
+    it("ignores a legacy canonical marker that points only to another tenant", async () => {
+      const localRecipeUserId = { getAsString: () => "local-email-method" };
+      const otherRecipeUserId = { getAsString: () => "other-tenant-method" };
+      const user = {
+        id: "legacy-cross-tenant-user",
+        loginMethods: [
+          {
+            recipeId: "passwordless",
+            recipeUserId: localRecipeUserId,
+            email: "local@example.com",
+            verified: true,
+            tenantIds: ["tenant-a"],
+          },
+          {
+            recipeId: "passwordless",
+            recipeUserId: otherRecipeUserId,
+            email: "other@example.com",
+            verified: true,
+            tenantIds: ["tenant-b"],
+          },
+        ],
+      } as any;
+      vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({
+        status: "UNKNOWN_MAPPING_ERROR",
+      });
+      vi.spyOn(UserMetadata, "getUserMetadata").mockImplementation(
+        async (userId) => ({
+          status: "OK",
+          metadata:
+            userId === user.id
+              ? { rownd_email_recipe_user_id: otherRecipeUserId.getAsString() }
+              : {},
+        }),
+      );
+      vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([user]);
+
+      await expect(
+        doesRowndAccountInfoExist({
+          tenantId: "tenant-a",
+          email: "local@example.com",
+        }),
+      ).resolves.toBe(true);
     });
 
     it("links guest users without requiring verification", async () => {
@@ -1857,6 +2078,242 @@ describe("rownd-nodejs plugin", () => {
       });
 
       expect(userContext).not.toHaveProperty("rowndAppVariantId");
+    });
+
+    it("rejects unknown explicit sign-in before creating a passwordless code", async () => {
+      const pluginConfig: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        appConfig: { auth: { useExplicitSignUpFlow: true } },
+      };
+      const originalCreateCodePOST = vi.fn();
+      vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([]);
+      const passwordlessApis = (
+        init(pluginConfig) as any
+      ).overrideMap.passwordless.apis({
+        createCodePOST: originalCreateCodePOST,
+      });
+
+      await expect(
+        passwordlessApis.createCodePOST({
+          email: "missing@example.com",
+          tenantId: "tenant-a",
+          options: { req: makeRequest({}, { intent: "sign_in" }) },
+          userContext: {},
+        }),
+      ).resolves.toEqual({
+        status: "SIGN_IN_UP_NOT_ALLOWED",
+        reason: "No existing account found",
+      });
+      expect(SuperTokens.listUsersByAccountInfo).toHaveBeenCalledWith(
+        "tenant-a",
+        { email: "missing@example.com" },
+        true,
+        {},
+      );
+      expect(originalCreateCodePOST).not.toHaveBeenCalled();
+    });
+
+    it("delegates explicit sign-in for an existing email account", async () => {
+      const email = "existing@example.com";
+      const originalCreateCodePOST = vi
+        .fn()
+        .mockResolvedValue({ status: "OK" });
+      vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([
+        {
+          id: "existing-user",
+          loginMethods: [
+            {
+              recipeId: "passwordless",
+              recipeUserId: { getAsString: () => "existing-user" },
+              email,
+              verified: true,
+              tenantIds: ["public"],
+            },
+          ],
+        } as any,
+      ]);
+      vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({
+        status: "UNKNOWN_MAPPING_ERROR",
+      });
+      vi.spyOn(UserMetadata, "getUserMetadata").mockResolvedValue({
+        status: "OK",
+        metadata: {},
+      });
+      const passwordlessApis = (
+        init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+          appConfig: { auth: { useExplicitSignUpFlow: true } },
+        }) as any
+      ).overrideMap.passwordless.apis({
+        createCodePOST: originalCreateCodePOST,
+      });
+
+      await expect(
+        passwordlessApis.createCodePOST({
+          email,
+          tenantId: "public",
+          options: { req: makeRequest({}, { intent: "sign_in" }) },
+          userContext: {},
+        }),
+      ).resolves.toEqual({ status: "OK" });
+      expect(originalCreateCodePOST).toHaveBeenCalledOnce();
+      expect(originalCreateCodePOST).toHaveBeenCalledWith(
+        expect.objectContaining({ email, tenantId: "public" }),
+      );
+    });
+
+    it.each([undefined, "sign_up"])(
+      "delegates passwordless code creation for intent %s",
+      async (intent) => {
+        const pluginConfig: RowndPluginConfig = {
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+          appConfig: { auth: { useExplicitSignUpFlow: true } },
+        };
+        const originalCreateCodePOST = vi
+          .fn()
+          .mockResolvedValue({ status: "OK" });
+        const passwordlessApis = (
+          init(pluginConfig) as any
+        ).overrideMap.passwordless.apis({
+          createCodePOST: originalCreateCodePOST,
+        });
+
+        await expect(
+          passwordlessApis.createCodePOST({
+            email: "new@example.com",
+            tenantId: "public",
+            options: { req: makeRequest({}, intent ? { intent } : {}) },
+            userContext: {},
+          }),
+        ).resolves.toEqual({ status: "OK" });
+        expect(originalCreateCodePOST).toHaveBeenCalledWith(
+          expect.objectContaining({ email: "new@example.com" }),
+        );
+      },
+    );
+
+    it.each([null, "login", 1])(
+      "rejects invalid passwordless intent %s",
+      async (intent) => {
+        const originalCreateCodePOST = vi.fn();
+        const listUsers = vi.spyOn(SuperTokens, "listUsersByAccountInfo");
+        const passwordlessApis = (
+          init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret" }) as any
+        ).overrideMap.passwordless.apis({
+          createCodePOST: originalCreateCodePOST,
+        });
+
+        await expect(
+          passwordlessApis.createCodePOST({
+            email: "invalid-intent@example.com",
+            tenantId: "public",
+            options: { req: makeRequest({}, { intent }) },
+            userContext: {},
+          }),
+        ).resolves.toEqual({
+          status: "GENERAL_ERROR",
+          message: "intent must be sign_in or sign_up",
+        });
+        expect(originalCreateCodePOST).not.toHaveBeenCalled();
+        expect(listUsers).not.toHaveBeenCalled();
+      },
+    );
+
+    it("applies explicit sign-in policy to phone identifiers", async () => {
+      const originalCreateCodePOST = vi.fn();
+      vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([]);
+      const passwordlessApis = (
+        init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+          appConfig: { auth: { useExplicitSignUpFlow: true } },
+        }) as any
+      ).overrideMap.passwordless.apis({ createCodePOST: originalCreateCodePOST });
+
+      await expect(
+        passwordlessApis.createCodePOST({
+          phoneNumber: "+15555550123",
+          tenantId: "tenant-a",
+          options: { req: makeRequest({}, { intent: "sign_in" }) },
+          userContext: {},
+        }),
+      ).resolves.toEqual({
+        status: "SIGN_IN_UP_NOT_ALLOWED",
+        reason: "No existing account found",
+      });
+      expect(SuperTokens.listUsersByAccountInfo).toHaveBeenCalledWith(
+        "tenant-a",
+        { phoneNumber: "+15555550123" },
+        true,
+        {},
+      );
+    });
+
+    it("validates the app variant before explicit sign-in lookup", async () => {
+      const originalCreateCodePOST = vi.fn();
+      const listUsers = vi.spyOn(SuperTokens, "listUsersByAccountInfo");
+      const passwordlessApis = (
+        init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+          subBrands: {},
+        }) as any
+      ).overrideMap.passwordless.apis({ createCodePOST: originalCreateCodePOST });
+
+      await expect(
+        passwordlessApis.createCodePOST({
+          email: "variant@example.com",
+          tenantId: "public",
+          options: {
+            req: makeRequest(
+              { app_variant_id: "unknown-variant" },
+              { intent: "sign_in" },
+            ),
+          },
+          userContext: {},
+        }),
+      ).rejects.toThrow("Unknown Rownd app variant: unknown-variant");
+      expect(listUsers).not.toHaveBeenCalled();
+      expect(originalCreateCodePOST).not.toHaveBeenCalled();
+    });
+
+    it("uses the app variant explicit sign-in policy", async () => {
+      vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([]);
+      const passwordlessApis = (
+        init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+          appConfig: { auth: { useExplicitSignUpFlow: false } },
+          subBrands: {
+            "variant-123": {
+              id: "app-123",
+              name: "Variant",
+              variant: { id: "variant-123", name: "Variant" },
+              auth: { useExplicitSignUpFlow: true },
+            },
+          },
+        }) as any
+      ).overrideMap.passwordless.apis({ createCodePOST: vi.fn() });
+
+      await expect(
+        passwordlessApis.createCodePOST({
+          email: "variant@example.com",
+          tenantId: "public",
+          options: {
+            req: makeRequest(
+              { app_variant_id: "variant-123" },
+              { intent: "sign_in" },
+            ),
+          },
+          userContext: {},
+        }),
+      ).resolves.toEqual({
+        status: "SIGN_IN_UP_NOT_ALLOWED",
+        reason: "No existing account found",
+      });
     });
 
     it("shadows stale passwordless request flags when omitted", async () => {
@@ -6529,6 +6986,7 @@ describe("rownd-nodejs plugin", () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
           emailVerificationLinks,
+          passwordlessContactMethod: "EMAIL_OR_PHONE",
         });
         server = s;
         testPORT = port;
@@ -6712,13 +7170,9 @@ describe("rownd-nodejs plugin", () => {
         const passwordlessMethods = updatedUser?.loginMethods.filter(
           (method) => method.recipeId === "passwordless" && method.email,
         );
-        expect(passwordlessMethods).toHaveLength(2);
-        expect(passwordlessMethods).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({ email: "email-update-user@example.com" }),
-            expect.objectContaining({ email: "new-email-update@example.com" }),
-          ]),
-        );
+        expect(passwordlessMethods).toEqual([
+          expect.objectContaining({ email: "new-email-update@example.com" }),
+        ]);
         const originalMethod = passwordlessMethods?.find(
           (method) =>
             method.recipeUserId.getAsString() === recipeUserId.getAsString(),
@@ -6726,7 +7180,7 @@ describe("rownd-nodejs plugin", () => {
         const canonicalMethod = passwordlessMethods?.find(
           (method) => method.email === "new-email-update@example.com",
         );
-        expect(originalMethod?.email).toBe("email-update-user@example.com");
+        expect(originalMethod).toBeUndefined();
         expect(canonicalMethod?.recipeUserId.getAsString()).not.toBe(
           recipeUserId.getAsString(),
         );
@@ -6737,17 +7191,11 @@ describe("rownd-nodejs plugin", () => {
           public: canonicalMethod?.recipeUserId.getAsString(),
         });
 
-        const oldEmailSignIn = await Passwordless.signInUp({
-          email: "email-update-user@example.com",
-          tenantId: "public",
-        });
         const newEmailSignIn = await Passwordless.signInUp({
           email: "new-email-update@example.com",
           tenantId: "public",
         });
-        expect(oldEmailSignIn.createdNewRecipeUser).toBe(false);
         expect(newEmailSignIn.createdNewRecipeUser).toBe(false);
-        expect(oldEmailSignIn.user.id).toBe(userId);
         expect(newEmailSignIn.user.id).toBe(userId);
 
         const secondTargetEmail = "second-email-update@example.com";
@@ -6775,7 +7223,7 @@ describe("rownd-nodejs plugin", () => {
           twiceUpdatedUser?.loginMethods.filter(
             (method) => method.recipeId === "passwordless" && method.email,
           ),
-        ).toHaveLength(3);
+        ).toHaveLength(1);
         const twiceUpdatedMetadata = await UserMetadata.getUserMetadata(userId);
         expect(
           (twiceUpdatedMetadata.metadata as any).rownd_email_recipe_user_id,
@@ -6807,12 +7255,145 @@ describe("rownd-nodejs plugin", () => {
           restoredAliasUser?.loginMethods.filter(
             (method) => method.recipeId === "passwordless" && method.email,
           ),
-        ).toHaveLength(3);
+        ).toHaveLength(1);
         const restoredAliasMetadata =
           await UserMetadata.getUserMetadata(userId);
         expect(
           (restoredAliasMetadata.metadata as any).rownd_email_recipe_user_ids,
-        ).toEqual({ public: recipeUserId.getAsString() });
+        ).toEqual({
+          public: restoredAliasUser?.loginMethods
+            .find((method) => method.email === "email-update-user@example.com")
+            ?.recipeUserId.getAsString(),
+        });
+      });
+
+      it("replaces the confirmed email across doejohn@gmail.com -> johndoe@email.com -> doejohn@gmail.com", async () => {
+        const emailVerificationLinks: string[] = [];
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+          emailVerificationLinks,
+        });
+        server = s;
+        testPORT = port;
+        const originalEmail = "doejohn@gmail.com";
+        const replacementEmail = "johndoe@email.com";
+        const initial = await createPasswordlessSessionForUser(originalEmail);
+        const primary = await AccountLinking.createPrimaryUser(
+          initial.recipeUserId,
+        );
+        expect(primary.status).toBe("OK");
+        if (primary.status !== "OK") throw new Error("failed to create primary");
+        const phone = await Passwordless.signInUp({
+          tenantId: "public",
+          phoneNumber: "+15555550899",
+        });
+        const apple = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "apple",
+          "sirinbugra-apple-id",
+          originalEmail,
+          true,
+          undefined,
+          { rowndDisableAutomaticAccountLinking: true },
+        );
+        expect(apple.status).toBe("OK");
+        if (apple.status !== "OK") throw new Error("failed to create Apple user");
+        await expect(
+          AccountLinking.linkAccounts(phone.recipeUserId, primary.user.id),
+        ).resolves.toMatchObject({ status: "OK" });
+        await expect(
+          AccountLinking.linkAccounts(apple.recipeUserId, primary.user.id),
+        ).resolves.toMatchObject({ status: "OK" });
+        await MultiTenancy.createOrUpdateTenant("preserved-tenant");
+        await expect(
+          MultiTenancy.associateUserToTenant(
+            "preserved-tenant",
+            initial.recipeUserId,
+          ),
+        ).resolves.toMatchObject({ status: "OK" });
+
+        expect(
+          await requestEmailChange(initial.accessToken, replacementEmail),
+        ).toMatchObject({ status: 200 });
+        const firstLink = new URL(emailVerificationLinks[0]);
+        const firstVerification = await verifyEmailToken(
+          firstLink.searchParams.get("token") || "unused",
+          initial.accessToken,
+          firstLink.searchParams.get("rowndPendingVerificationId") || "unused",
+        );
+        await expect(firstVerification.json()).resolves.toEqual({ status: "OK" });
+        const firstReplacementToken =
+          firstVerification.headers.get("st-access-token");
+        expect(firstReplacementToken).toBeTruthy();
+
+        const afterFirstChange = await SuperTokens.getUser(initial.userId);
+        const firstMethods = afterFirstChange?.loginMethods.filter(
+          (method) =>
+            method.recipeId === "passwordless" &&
+            method.email &&
+            method.tenantIds.includes("public"),
+        );
+        expect(firstMethods).toEqual([
+          expect.objectContaining({ email: replacementEmail }),
+        ]);
+        const firstReplacementSession =
+          await Session.getSessionWithoutRequestResponse(firstReplacementToken!);
+        expect(firstReplacementSession?.getRecipeUserId().getAsString()).toBe(
+          firstMethods?.[0]?.recipeUserId.getAsString(),
+        );
+        expect(
+          afterFirstChange?.loginMethods.find(
+            (method) =>
+              method.recipeId === "passwordless" &&
+              method.email === originalEmail,
+          )?.tenantIds,
+        ).toEqual(["preserved-tenant"]);
+        expect(
+          afterFirstChange?.loginMethods.find(
+            (method) => method.phoneNumber === "+15555550899",
+          ),
+        ).toBeDefined();
+        expect(
+          afterFirstChange?.loginMethods.find(
+            (method) => method.thirdParty?.id === "apple",
+          ),
+        ).toBeDefined();
+
+        expect(
+          await requestEmailChange(firstReplacementToken!, originalEmail),
+        ).toMatchObject({ status: 200 });
+        const secondLink = new URL(emailVerificationLinks[1]);
+        const secondVerification = await verifyEmailToken(
+          secondLink.searchParams.get("token") || "unused",
+          firstReplacementToken!,
+          secondLink.searchParams.get("rowndPendingVerificationId") || "unused",
+        );
+        await expect(secondVerification.json()).resolves.toEqual({ status: "OK" });
+
+        const restored = await SuperTokens.getUser(initial.userId);
+        expect(
+          restored?.loginMethods.filter(
+            (method) =>
+              method.recipeId === "passwordless" &&
+              method.email &&
+              method.tenantIds.includes("public"),
+          ),
+        ).toEqual([expect.objectContaining({ email: originalEmail })]);
+        expect(
+          restored?.loginMethods.find(
+            (method) =>
+              method.recipeId === "passwordless" &&
+              method.email === originalEmail &&
+              method.tenantIds.includes("preserved-tenant"),
+          )?.tenantIds,
+        ).toEqual(["preserved-tenant"]);
+        await expect(
+          SuperTokens.listUsersByAccountInfo(
+            "public",
+            { email: replacementEmail },
+            false,
+          ),
+        ).resolves.toEqual([]);
       });
 
       it("rejects unsupported pending email-change purposes", async () => {
@@ -6955,7 +7536,6 @@ describe("rownd-nodejs plugin", () => {
         const user = await SuperTokens.getUser(initiatingUser.userId);
         expect(user?.loginMethods).toEqual(
           expect.arrayContaining([
-            expect.objectContaining({ email: currentEmail }),
             expect.objectContaining({ email: targetEmail }),
           ]),
         );
@@ -7261,7 +7841,7 @@ describe("rownd-nodejs plugin", () => {
         expect(replacementProfileRes.status).toBe(200);
       });
 
-      it("compensates credential state after a later generic Core failure", async () => {
+      it("preserves reconciliation state after cleanup and a later Core failure", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
         });
@@ -7329,30 +7909,28 @@ describe("rownd-nodejs plugin", () => {
             email: targetEmail,
             sessionHandle: initiatingUser.sessionHandle,
           }),
-        ).rejects.toThrow("second account revocation failed");
+        ).rejects.toThrow(
+          "email change cleanup incomplete; account reconciliation is required",
+        );
         expect(accountRevocationCount).toBe(3);
-        expect(emailAtSecondRevocation).toBe(currentEmail);
+        expect(emailAtSecondRevocation).toBeUndefined();
 
         const user = await SuperTokens.getUser(initiatingUser.userId);
-        expect(
-          user?.loginMethods.find(
-            (method) =>
-              method.recipeUserId.getAsString() ===
-              initiatingUser.recipeUserId.getAsString(),
-          )?.email,
-        ).toBe(currentEmail);
+        expect(user?.loginMethods).toEqual([
+          expect.objectContaining({ email: targetEmail }),
+        ]);
         const metadata = await UserMetadata.getUserMetadata(
           initiatingUser.userId,
         );
-        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
-          [],
-        );
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual([
+          expect.objectContaining({ status: "COMMITTING", value: targetEmail }),
+        ]);
         await expect(
           EmailVerification.isEmailVerified(
-            initiatingUser.recipeUserId,
+            user!.loginMethods[0].recipeUserId,
             targetEmail,
           ),
-        ).resolves.toBe(false);
+        ).resolves.toBe(true);
         await expect(
           Session.getAllSessionHandlesForUser(
             initiatingUser.userId,
@@ -7362,7 +7940,7 @@ describe("rownd-nodejs plugin", () => {
         ).resolves.toEqual([]);
       });
 
-      it("preserves reconciliation state when linked method rollback fails", async () => {
+      it("preserves reconciliation state when replaced-method cleanup fails", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
         });
@@ -7420,16 +7998,15 @@ describe("rownd-nodejs plugin", () => {
             sessionHandle: initiatingUser.sessionHandle,
           }),
         ).rejects.toThrow(
-          "email change rollback failed; account reconciliation is required",
+          "email change cleanup incomplete; account reconciliation is required",
         );
         expect(deleteUser).toHaveBeenCalledTimes(1);
-        expect(accountRevocationCount).toBe(3);
+        expect(accountRevocationCount).toBe(2);
         expect(unverifyEmail).not.toHaveBeenCalled();
 
         const user = await SuperTokens.getUser(initiatingUser.userId);
         expect(user?.loginMethods).toEqual(
           expect.arrayContaining([
-            expect.objectContaining({ email: currentEmail }),
             expect.objectContaining({ email: targetEmail }),
           ]),
         );
@@ -7441,6 +8018,10 @@ describe("rownd-nodejs plugin", () => {
             status: "COMMITTING",
             value: targetEmail,
             verificationRecipeUserId: initiatingUser.recipeUserId.getAsString(),
+            targetCanonicalRecipeUserId: expect.any(String),
+            cleanupRecipeUserIds: [
+              initiatingUser.recipeUserId.getAsString(),
+            ],
           }),
         ]);
         await expect(
@@ -7449,6 +8030,408 @@ describe("rownd-nodejs plugin", () => {
             targetEmail,
           ),
         ).resolves.toBe(true);
+      });
+
+      it("resumes durable reconciliation through the target method after partial cleanup", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const currentEmail = "durable-current@example.com";
+        const secondEmail = "durable-second@example.com";
+        const targetEmail = "durable-target@example.com";
+        const initiatingUser =
+          await createPasswordlessSessionForUser(currentEmail);
+        const primary = await AccountLinking.createPrimaryUser(
+          initiatingUser.recipeUserId,
+        );
+        expect(primary.status).toBe("OK");
+        if (primary.status !== "OK") throw new Error("failed to create primary");
+        const second = await Passwordless.signInUp({
+          tenantId: "public",
+          email: secondEmail,
+          userContext: { rowndDisableAutomaticAccountLinking: true },
+        });
+        await expect(
+          AccountLinking.linkAccounts(second.recipeUserId, primary.user.id),
+        ).resolves.toMatchObject({ status: "OK" });
+        await UserMetadata.updateUserMetadata(primary.user.id, {
+          rownd_email_recipe_user_id:
+            initiatingUser.recipeUserId.getAsString(),
+          rownd_email_recipe_user_ids: {
+            public: initiatingUser.recipeUserId.getAsString(),
+          },
+        });
+        expect(
+          await requestEmailChange(initiatingUser.accessToken, targetEmail),
+        ).toMatchObject({ status: 200 });
+        const token = await EmailVerification.createEmailVerificationToken(
+          "public",
+          initiatingUser.recipeUserId,
+          targetEmail,
+        );
+        expect(token.status).toBe("OK");
+        if (token.status !== "OK") throw new Error("failed to create token");
+        await EmailVerification.verifyEmailUsingToken(
+          "public",
+          token.token,
+          false,
+        );
+
+        const originalDeleteUser = SuperTokens.deleteUser;
+        let deleteCount = 0;
+        const deleteUser = vi
+          .spyOn(SuperTokens, "deleteUser")
+          .mockImplementation(async (...input) => {
+            deleteCount += 1;
+            if (deleteCount === 2) {
+              throw new Error("second cleanup failed");
+            }
+            return originalDeleteUser(...input);
+          });
+        await expect(
+          completePendingEmailVerification({
+            recipeUserId: initiatingUser.recipeUserId,
+            email: targetEmail,
+            sessionHandle: initiatingUser.sessionHandle,
+          }),
+        ).rejects.toThrow(
+          "email change cleanup incomplete; account reconciliation is required",
+        );
+        deleteUser.mockRestore();
+
+        const pendingMetadata = await UserMetadata.getUserMetadata(
+          primary.user.id,
+        );
+        const durablePlan = (pendingMetadata.metadata as any)
+          .rownd_pending_verification[0];
+        expect(durablePlan).toMatchObject({
+          status: "COMMITTING",
+          value: targetEmail,
+          targetCanonicalRecipeUserId: expect.any(String),
+          cleanupRecipeUserIds: expect.arrayContaining([
+            initiatingUser.recipeUserId.getAsString(),
+            second.recipeUserId.getAsString(),
+          ]),
+        });
+        const partiallyCleanedUser = await SuperTokens.getUser(primary.user.id);
+        expect(
+          durablePlan.cleanupRecipeUserIds.filter((recipeUserId: string) =>
+            partiallyCleanedUser?.loginMethods.some(
+              (method) => method.recipeUserId.getAsString() === recipeUserId,
+            ),
+          ),
+        ).toHaveLength(1);
+        const targetMethod = partiallyCleanedUser?.loginMethods.find(
+          (method) =>
+            method.recipeUserId.getAsString() ===
+            durablePlan.targetCanonicalRecipeUserId,
+        );
+        expect(targetMethod?.email).toBe(targetEmail);
+        const recoverySession =
+          await Session.createNewSessionWithoutRequestResponse(
+            "public",
+            targetMethod!.recipeUserId,
+            {},
+            {},
+            true,
+          );
+
+        const recoveryResponse = await requestEmailChange(
+          recoverySession.getAccessToken(),
+          targetEmail,
+        );
+        expect(recoveryResponse.status).toBe(200);
+        const reconciledMetadata = await UserMetadata.getUserMetadata(
+          primary.user.id,
+        );
+        expect(
+          (reconciledMetadata.metadata as any).rownd_pending_verification,
+        ).toEqual([]);
+        expect(
+          (reconciledMetadata.metadata as any).rownd_email_recipe_user_ids
+            .public,
+        ).toBe(targetMethod!.recipeUserId.getAsString());
+        expect(
+          (reconciledMetadata.metadata as any).original_rownd_user.data.email,
+        ).toBe(targetEmail);
+      });
+
+      it("requires sign-in again when reconciliation removes the authenticated cleanup method", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const currentEmail = "cleanup-retry-current@example.com";
+        const targetEmail = "cleanup-retry-target@example.com";
+        const account = await createPasswordlessSessionForUser(currentEmail);
+
+        expect(
+          await requestEmailChange(account.accessToken, targetEmail),
+        ).toMatchObject({ status: 200 });
+        const token = await EmailVerification.createEmailVerificationToken(
+          "public",
+          account.recipeUserId,
+          targetEmail,
+        );
+        expect(token.status).toBe("OK");
+        if (token.status !== "OK") throw new Error("failed to create token");
+        await EmailVerification.verifyEmailUsingToken(
+          "public",
+          token.token,
+          false,
+        );
+
+        const disassociate = vi
+          .spyOn(MultiTenancy, "disassociateUserFromTenant")
+          .mockRejectedValueOnce(new Error("tenant cleanup failed"));
+        await expect(
+          completePendingEmailVerification({
+            recipeUserId: account.recipeUserId,
+            email: targetEmail,
+            sessionHandle: account.sessionHandle,
+          }),
+        ).rejects.toThrow(
+          "email change cleanup incomplete; account reconciliation is required",
+        );
+        disassociate.mockRestore();
+
+        const cleanupSession =
+          await Session.createNewSessionWithoutRequestResponse(
+            "public",
+            account.recipeUserId,
+            {},
+            {},
+            true,
+          );
+        const retryResponse = await requestEmailChange(
+          cleanupSession.getAccessToken(),
+          "cleanup-retry-new@example.com",
+        );
+        expect(retryResponse.status).toBe(409);
+        await expect(retryResponse.json()).resolves.toMatchObject({
+          message: "email change sign-in method was removed; sign in again",
+        });
+        await expect(
+          Session.getSessionInformation(cleanupSession.getHandle()),
+        ).resolves.toBeUndefined();
+
+        const metadata = await UserMetadata.getUserMetadata(account.userId);
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
+          [],
+        );
+        expect(
+          (metadata.metadata as any).rownd_email_recipe_user_ids.public,
+        ).not.toBe(account.recipeUserId.getAsString());
+      });
+
+      it("extends a truncated cleanup plan before removing a current email alias", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const targetEmail = "truncated-plan-target@example.com";
+        const aliasEmail = "truncated-plan-alias@example.com";
+        const account = await createPasswordlessSessionForUser(targetEmail);
+        const primary = await AccountLinking.createPrimaryUser(
+          account.recipeUserId,
+        );
+        expect(primary.status).toBe("OK");
+        if (primary.status !== "OK") throw new Error("failed to create primary");
+        const alias = await Passwordless.signInUp({
+          tenantId: "public",
+          email: aliasEmail,
+          userContext: { rowndDisableAutomaticAccountLinking: true },
+        });
+        await expect(
+          AccountLinking.linkAccounts(alias.recipeUserId, primary.user.id),
+        ).resolves.toMatchObject({ status: "OK" });
+        await UserMetadata.updateUserMetadata(primary.user.id, {
+          rownd_pending_verification: [
+            {
+              id: "truncated-plan",
+              field: "email",
+              value: targetEmail,
+              created_at: new Date().toISOString(),
+              tenantId: "public",
+              purpose: "UPDATE_PASSWORDLESS",
+              initiatingSessionHandle: account.sessionHandle,
+              verificationRecipeUserId: account.recipeUserId.getAsString(),
+              status: "COMMITTING",
+              targetCanonicalRecipeUserId: account.recipeUserId.getAsString(),
+              cleanupRecipeUserIds: [],
+            },
+          ],
+        });
+
+        const originalDisassociate =
+          MultiTenancy.disassociateUserFromTenant;
+        let planPersistedBeforeCleanup = false;
+        vi.spyOn(
+          MultiTenancy,
+          "disassociateUserFromTenant",
+        ).mockImplementation(async (...input) => {
+          const metadata = await UserMetadata.getUserMetadata(primary.user.id);
+          expect(
+            (metadata.metadata as any).rownd_pending_verification[0]
+              .cleanupRecipeUserIds,
+          ).toContain(alias.recipeUserId.getAsString());
+          planPersistedBeforeCleanup = true;
+          return originalDisassociate(...input);
+        });
+        const originalDeleteUser = SuperTokens.deleteUser;
+        let aliasWasDisassociatedBeforeDelete = false;
+        vi.spyOn(SuperTokens, "deleteUser").mockImplementation(
+          async (...input) => {
+            if (input[0] === alias.recipeUserId.getAsString()) {
+              const owner = await SuperTokens.getUser(input[0]);
+              const method = owner?.loginMethods.find(
+                (candidate) =>
+                  candidate.recipeUserId.getAsString() === input[0],
+              );
+              aliasWasDisassociatedBeforeDelete =
+                method !== undefined && !method.tenantIds.includes("public");
+            }
+            return originalDeleteUser(...input);
+          },
+        );
+
+        const response = await requestEmailChange(
+          account.accessToken,
+          targetEmail,
+        );
+        expect(response.status).toBe(200);
+        expect(planPersistedBeforeCleanup).toBe(true);
+        expect(aliasWasDisassociatedBeforeDelete).toBe(true);
+        await expect(
+          SuperTokens.getUser(alias.recipeUserId.getAsString()),
+        ).resolves.toBeUndefined();
+        const replacementAlias = await Passwordless.signInUp({
+          tenantId: "public",
+          email: aliasEmail,
+          userContext: { rowndDisableAutomaticAccountLinking: true },
+        });
+        expect(replacementAlias.recipeUserId.getAsString()).not.toBe(
+          alias.recipeUserId.getAsString(),
+        );
+      });
+
+      it("fails closed when the target is unverified immediately before metadata finalization", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const targetEmail = "final-target-validation@example.com";
+        const account = await createPasswordlessSessionForUser(targetEmail);
+        await UserMetadata.updateUserMetadata(account.userId, {
+          rownd_pending_verification: [
+            {
+              id: "final-target-validation",
+              field: "email",
+              value: targetEmail,
+              created_at: new Date().toISOString(),
+              tenantId: "public",
+              purpose: "UPDATE_PASSWORDLESS",
+              initiatingSessionHandle: account.sessionHandle,
+              verificationRecipeUserId: account.recipeUserId.getAsString(),
+              status: "COMMITTING",
+              targetCanonicalRecipeUserId: account.recipeUserId.getAsString(),
+              cleanupRecipeUserIds: [],
+            },
+          ],
+        });
+
+        const originalGetUser = SuperTokens.getUser;
+        let targetLookupCount = 0;
+        vi.spyOn(SuperTokens, "getUser").mockImplementation(async (...input) => {
+          if (input[0] === account.userId) {
+            targetLookupCount += 1;
+            if (targetLookupCount === 4) {
+              await EmailVerification.unverifyEmail(
+                account.recipeUserId,
+                targetEmail,
+              );
+            }
+          }
+          return originalGetUser(...input);
+        });
+
+        await expect(
+          startPendingEmailVerification({
+            userId: account.userId,
+            recipeUserId: account.recipeUserId,
+            email: "final-target-validation-new@example.com",
+            tenantId: "public",
+            pendingVerificationId: "must-not-be-created",
+            initiatingSessionHandle: account.sessionHandle,
+          }),
+        ).rejects.toThrow(
+          "email change cleanup incomplete; account reconciliation is required",
+        );
+        const metadata = await UserMetadata.getUserMetadata(account.userId);
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual([
+          expect.objectContaining({ id: "final-target-validation" }),
+        ]);
+        expect(
+          (metadata.metadata as any).rownd_pending_verification,
+        ).not.toEqual([
+          expect.objectContaining({ id: "must-not-be-created" }),
+        ]);
+      });
+
+      it("fails closed for malformed committing cleanup state", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+        });
+        server = s;
+        testPORT = port;
+        const account = await createPasswordlessSessionForUser(
+          "malformed-committing@example.com",
+        );
+        const victim = await Passwordless.signInUp({
+          tenantId: "public",
+          email: "malformed-victim@example.com",
+          userContext: { rowndDisableAutomaticAccountLinking: true },
+        });
+        await UserMetadata.updateUserMetadata(account.userId, {
+          rownd_pending_verification: [
+            {
+              id: "malformed-committing",
+              field: "email",
+              value: "malformed-committing@example.com",
+              created_at: new Date().toISOString(),
+              tenantId: "public",
+              purpose: "UPDATE_PASSWORDLESS",
+              initiatingSessionHandle: account.sessionHandle,
+              verificationRecipeUserId: account.recipeUserId.getAsString(),
+              status: "COMMITTING",
+              targetCanonicalRecipeUserId:
+                account.recipeUserId.getAsString(),
+              cleanupRecipeUserIds: [victim.recipeUserId.getAsString()],
+            },
+          ],
+        });
+
+        const response = await requestEmailChange(
+          account.accessToken,
+          "malformed-new@example.com",
+        );
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({
+          message:
+            "email change cleanup incomplete; account reconciliation is required",
+        });
+        await expect(
+          SuperTokens.getUser(victim.recipeUserId.getAsString()),
+        ).resolves.toMatchObject({ id: victim.user.id });
+        const metadata = await UserMetadata.getUserMetadata(account.userId);
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual([
+          expect.objectContaining({ id: "malformed-committing" }),
+        ]);
       });
 
       it("rejects completion after the initiating session is revoked", async () => {
@@ -7787,14 +8770,7 @@ describe("rownd-nodejs plugin", () => {
         const passwordlessMethods = user?.loginMethods.filter(
           (method) => method.recipeId === "passwordless",
         );
-        expect(passwordlessMethods).toHaveLength(2);
-        expect(
-          passwordlessMethods?.find(
-            (method) =>
-              method.recipeUserId.getAsString() ===
-              initiatingUser.recipeUserId.getAsString(),
-          )?.email,
-        ).toBe("concurrent-envelope-current@example.com");
+        expect(passwordlessMethods).toHaveLength(1);
         expect(
           passwordlessMethods
             ?.find((method) => method.email === targetEmail)
@@ -8244,7 +9220,7 @@ describe("rownd-nodejs plugin", () => {
         },
       );
 
-      it("removes a newly created Passwordless method when metadata finalization fails", async () => {
+      it("preserves the new Passwordless method for reconciliation when metadata finalization fails", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
         });
@@ -8278,19 +9254,33 @@ describe("rownd-nodejs plugin", () => {
             email: targetEmail,
             sessionHandle: thirdPartyUser.sessionHandle,
           }),
-        ).rejects.toThrow("metadata finalization failed");
+        ).rejects.toThrow(
+          "email change cleanup incomplete; account reconciliation is required",
+        );
         metadataUpdate.mockRestore();
 
         const user = await SuperTokens.getUser(thirdPartyUser.userId);
-        expect(user?.loginMethods).toEqual([
-          expect.objectContaining({
-            recipeId: "thirdparty",
-            email: "metadata-failure-provider@example.com",
-          }),
+        expect(user?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              email: "metadata-failure-provider@example.com",
+            }),
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email: targetEmail,
+            }),
+          ]),
+        );
+        const metadata = await UserMetadata.getUserMetadata(
+          thirdPartyUser.userId,
+        );
+        expect((metadata.metadata as any).rownd_pending_verification).toEqual([
+          expect.objectContaining({ status: "COMMITTING", value: targetEmail }),
         ]);
       });
 
-      it("rolls back a new Passwordless method when replacement session creation fails", async () => {
+      it("retains the canonical method when replacement session creation fails", async () => {
         const emailVerificationLinks: string[] = [];
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
@@ -8322,77 +9312,41 @@ describe("rownd-nodejs plugin", () => {
 
         expect(verifyRes.status).toBe(500);
         const user = await SuperTokens.getUser(thirdPartyUser.userId);
-        expect(user?.loginMethods).toEqual([
-          expect.objectContaining({
-            recipeId: "thirdparty",
-            email: providerEmail,
-          }),
-        ]);
+        expect(user?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              email: providerEmail,
+            }),
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email: targetEmail,
+            }),
+          ]),
+        );
         const metadata = await UserMetadata.getUserMetadata(
           thirdPartyUser.userId,
         );
         expect((metadata.metadata as any).original_rownd_user.data.email).toBe(
-          providerEmail,
-        );
-        expect((metadata.metadata as any).rownd_pending_verification).toEqual(
-          [],
-        );
-        await expect(
-          EmailVerification.isEmailVerified(
-            thirdPartyUser.recipeUserId,
-            targetEmail,
-          ),
-        ).resolves.toBe(false);
-      });
-
-      it("continues replacement-session compensation after an unverify failure", async () => {
-        const { server: s, port } = await setup(coreConnectionURI, undefined, {
-          enableEmailVerification: true,
-        });
-        server = s;
-        testPORT = port;
-        const providerEmail = "rollback-failure-provider@example.com";
-        const targetEmail = "rollback-failure-target@example.com";
-        const thirdPartyUser =
-          await createThirdPartySessionForUser(providerEmail);
-        const updateRes = await requestEmailChange(
-          thirdPartyUser.accessToken,
           targetEmail,
         );
-        expect(updateRes.status).toBe(200);
-        const completion = await completePendingEmailVerification({
-          recipeUserId: thirdPartyUser.recipeUserId,
-          email: targetEmail,
-          sessionHandle: thirdPartyUser.sessionHandle,
-        });
-        expect(completion).toBeDefined();
-        const unverifyEmail = vi
-          .spyOn(EmailVerification, "unverifyEmail")
-          .mockRejectedValueOnce(new Error("unverify failed"));
-
-        await expect(
-          completion!.rollbackOnSessionReplacementFailure(),
-        ).rejects.toThrow(
-          "email change rollback failed; account reconciliation is required",
-        );
-        unverifyEmail.mockRestore();
-
-        const user = await SuperTokens.getUser(thirdPartyUser.userId);
-        expect(user?.loginMethods).toEqual([
-          expect.objectContaining({
-            recipeId: "thirdparty",
-            email: providerEmail,
-          }),
-        ]);
-        const metadata = await UserMetadata.getUserMetadata(
-          thirdPartyUser.userId,
-        );
-        expect((metadata.metadata as any).original_rownd_user.data.email).toBe(
-          providerEmail,
-        );
         expect((metadata.metadata as any).rownd_pending_verification).toEqual(
           [],
         );
+        await expect(
+          Session.getAllSessionHandlesForUser(
+            thirdPartyUser.userId,
+            true,
+            "public",
+          ),
+        ).resolves.toEqual([]);
+        await expect(
+          EmailVerification.isEmailVerified(
+            user!.loginMethods.find((method) => method.email === targetEmail)!
+              .recipeUserId,
+            targetEmail,
+          ),
+        ).resolves.toBe(true);
       });
 
       it("does not unverify another account when its token is submitted with a pending marker", async () => {
@@ -8510,6 +9464,106 @@ describe("rownd-nodejs plugin", () => {
             ?.find((method) => method.email === targetEmail)
             ?.recipeUserId.getAsString(),
         ).not.toBe(signInUpResponse.recipeUserId.getAsString());
+      });
+
+      it("ignores unrelated-tenant email methods when adding email to a phone and third-party account", async () => {
+        const emailVerificationLinks: string[] = [];
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+          emailVerificationLinks,
+          passwordlessContactMethod: "EMAIL_OR_PHONE",
+        });
+        server = s;
+        testPORT = port;
+        const otherTenant = "unrelated-email-tenant";
+        const targetEmail = "tenant-scoped-target@example.com";
+        await MultiTenancy.createOrUpdateTenant(otherTenant);
+        const phone = await Passwordless.signInUp({
+          phoneNumber: "+15555550200",
+          tenantId: "public",
+        });
+        const primary = await AccountLinking.createPrimaryUser(
+          phone.recipeUserId,
+        );
+        expect(primary.status).toBe("OK");
+        if (primary.status !== "OK") throw new Error("failed to create primary");
+        const thirdParty = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          "tenant-scoped-google-id",
+          "tenant-scoped-provider@example.com",
+          true,
+          undefined,
+          { rowndDisableAutomaticAccountLinking: true },
+        );
+        expect(thirdParty.status).toBe("OK");
+        if (thirdParty.status !== "OK") {
+          throw new Error("failed to create third-party user");
+        }
+        const unrelatedEmail = await Passwordless.signInUp({
+          email: "other-tenant-email@example.com",
+          tenantId: otherTenant,
+          userContext: { rowndDisableAutomaticAccountLinking: true },
+        });
+        await expect(
+          AccountLinking.linkAccounts(
+            thirdParty.recipeUserId,
+            primary.user.id,
+          ),
+        ).resolves.toMatchObject({ status: "OK" });
+        await expect(
+          AccountLinking.linkAccounts(
+            unrelatedEmail.recipeUserId,
+            primary.user.id,
+          ),
+        ).resolves.toMatchObject({ status: "OK" });
+        const session = await Session.createNewSessionWithoutRequestResponse(
+          "public",
+          phone.recipeUserId,
+          {},
+          {},
+          true,
+        );
+
+        const updateRes = await requestEmailChange(
+          session.getAccessToken(),
+          targetEmail,
+        );
+        expect(updateRes.status).toBe(200);
+        expect(emailVerificationLinks).toHaveLength(1);
+        const verificationUrl = new URL(emailVerificationLinks[0]);
+        const verifyRes = await verifyEmailToken(
+          verificationUrl.searchParams.get("token") || "unused",
+          session.getAccessToken(),
+          verificationUrl.searchParams.get("rowndPendingVerificationId") ||
+            "unused",
+        );
+        await expect(verifyRes.json()).resolves.toEqual({ status: "OK" });
+
+        const user = await SuperTokens.getUser(primary.user.id);
+        expect(user?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              recipeId: "passwordless",
+              phoneNumber: "+15555550200",
+              tenantIds: ["public"],
+            }),
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              tenantIds: ["public"],
+            }),
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email: "other-tenant-email@example.com",
+              tenantIds: [otherTenant],
+            }),
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email: targetEmail,
+              tenantIds: ["public"],
+            }),
+          ]),
+        );
       });
 
       it("removes duplicate matching pending email verifications on completion", async () => {
@@ -9585,9 +10639,13 @@ function makeVariantRequest(appVariantId: string) {
   return makeRequest({ app_variant_id: appVariantId });
 }
 
-function makeRequest(query: Record<string, string>) {
+function makeRequest(
+  query: Record<string, string>,
+  body: Record<string, unknown> = {},
+) {
   return {
     getKeyValueFromQuery: (key: string) => query[key],
+    getJSONBody: async () => body,
   };
 }
 
