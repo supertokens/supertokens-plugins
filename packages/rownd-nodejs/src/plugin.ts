@@ -56,6 +56,7 @@ import {
   addPendingEmailVerificationMarker,
   getPendingEmailVerificationIdFromUserContext,
   recordRowndAppVariantForUser,
+  recoverCommittingEmailVerificationForSignIn,
   resolvePendingEmailVerificationToken,
 } from "./supertokens-repository";
 import {
@@ -601,19 +602,39 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 }
                 if (
                   intent === "sign_in" &&
-                  isExplicitSignUpFlowEnabled(resolved.config, appVariantId) &&
-                  !(await doesRowndAccountInfoExist({
+                  isExplicitSignUpFlowEnabled(resolved.config, appVariantId)
+                ) {
+                  if ("email" in input) {
+                    try {
+                      await recoverCommittingEmailVerificationForSignIn({
+                        email: input.email,
+                        tenantId: input.tenantId,
+                        userContext: resolved.userContext,
+                      });
+                    } catch (error) {
+                      logDebugMessage(
+                        `Explicit sign-in email reconciliation failed. Error: ${error instanceof Error ? error.message : String(error)}`,
+                      );
+                      return {
+                        status: "GENERAL_ERROR" as const,
+                        message:
+                          "Account email reconciliation failed; please retry sign-in.",
+                      };
+                    }
+                  }
+
+                  if (!(await doesRowndAccountInfoExist({
                     tenantId: input.tenantId,
                     ...("email" in input
                       ? { email: input.email }
                       : { phoneNumber: input.phoneNumber }),
                     userContext: resolved.userContext,
-                  }))
-                ) {
-                  return {
-                    status: "SIGN_IN_UP_NOT_ALLOWED" as const,
-                    reason: "No existing account found",
-                  };
+                  }))) {
+                    return {
+                      status: "SIGN_IN_UP_NOT_ALLOWED" as const,
+                      reason: "No existing account found",
+                    };
+                  }
                 }
 
                 const operationContext = createDerivedUserContext(
