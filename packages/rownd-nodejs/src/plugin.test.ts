@@ -78,6 +78,7 @@ import {
   createMagicLinkWithConfirmationBypass,
   getUserById,
   recordRowndAppVariantForUser,
+  recoverCommittingEmailVerificationForSignIn,
   startPendingEmailVerification,
 } from "./supertokens-repository";
 import {
@@ -2194,6 +2195,284 @@ describe("rownd-nodejs plugin", () => {
       expect(originalCreateCodePOST).toHaveBeenCalledWith(
         expect.objectContaining({ email, tenantId: "public" }),
       );
+    });
+
+    it("recovers a committing email change before explicit target sign-in", async () => {
+      const config: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        appConfig: { auth: { useExplicitSignUpFlow: true } },
+      };
+      const { server: s, port } = await setup(coreConnectionURI, config);
+      server = s;
+      testPORT = port;
+      const oldEmail = "johndoe+sign-in-recovery@email.com";
+      const targetEmail = "doejohn+sign-in-recovery@gmail.com";
+      const oldMethod = await Passwordless.signInUp({
+        tenantId: "public",
+        email: oldEmail,
+      });
+      const primary = await AccountLinking.createPrimaryUser(
+        oldMethod.recipeUserId,
+      );
+      expect(primary.status).toBe("OK");
+      if (primary.status !== "OK") throw new Error("failed to create primary");
+      const targetMethod = await Passwordless.signInUp({
+        tenantId: "public",
+        email: targetEmail,
+        userContext: { rowndDisableAutomaticAccountLinking: true },
+      });
+      await expect(
+        AccountLinking.linkAccounts(targetMethod.recipeUserId, primary.user.id),
+      ).resolves.toMatchObject({ status: "OK" });
+      await UserMetadata.updateUserMetadata(primary.user.id, {
+        rownd_pending_verification: [
+          {
+            id: "explicit-sign-in-recovery",
+            field: "email",
+            value: targetEmail,
+            created_at: new Date().toISOString(),
+            tenantId: "public",
+            purpose: "UPDATE_PASSWORDLESS",
+            initiatingSessionHandle: "revoked-session",
+            verificationRecipeUserId: oldMethod.recipeUserId.getAsString(),
+            status: "COMMITTING",
+            targetCanonicalRecipeUserId:
+              targetMethod.recipeUserId.getAsString(),
+            cleanupRecipeUserIds: [oldMethod.recipeUserId.getAsString()],
+          },
+        ],
+      });
+      const createCodePOST = vi.fn().mockResolvedValue({ status: "OK" });
+      const deleteUser = vi.spyOn(SuperTokens, "deleteUser");
+      const passwordlessApis = init(config).overrideMap.passwordless.apis({
+        createCodePOST,
+      });
+
+      await expect(
+        passwordlessApis.createCodePOST!({
+          email: oldEmail,
+          tenantId: "public",
+          options: { req: makeRequest({}, { intent: "sign_in" }) },
+          userContext: {},
+        }),
+      ).resolves.toEqual({
+        status: "SIGN_IN_UP_NOT_ALLOWED",
+        reason: "No existing account found",
+      });
+      expect(createCodePOST).not.toHaveBeenCalled();
+      const pendingMetadata = await UserMetadata.getUserMetadata(
+        primary.user.id,
+      );
+      expect(
+        (pendingMetadata.metadata as any).rownd_pending_verification,
+      ).toEqual([
+        expect.objectContaining({
+          id: "explicit-sign-in-recovery",
+          status: "COMMITTING",
+        }),
+      ]);
+      expect(deleteUser).not.toHaveBeenCalled();
+
+      await expect(
+        passwordlessApis.createCodePOST!({
+          email: targetEmail,
+          tenantId: "public",
+          options: { req: makeRequest({}, { intent: "sign_in" }) },
+          userContext: {},
+        }),
+      ).resolves.toEqual({ status: "OK" });
+      expect(createCodePOST).toHaveBeenCalledOnce();
+
+      const metadata = await UserMetadata.getUserMetadata(primary.user.id);
+      expect((metadata.metadata as any).rownd_pending_verification).toEqual([]);
+      expect(
+        (metadata.metadata as any).rownd_email_recipe_user_ids.public,
+      ).toBe(targetMethod.recipeUserId.getAsString());
+      expect((metadata.metadata as any).original_rownd_user).toMatchObject({
+        data: { email: targetEmail },
+        verified_data: { email: targetEmail },
+      });
+      const reconciledUser = await SuperTokens.getUser(primary.user.id);
+      expect(
+        reconciledUser?.loginMethods.filter((method) =>
+          method.tenantIds.includes("public"),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          email: targetEmail,
+          recipeId: "passwordless",
+          verified: true,
+        }),
+      ]);
+      expect(deleteUser).not.toHaveBeenCalled();
+
+      await expect(
+        passwordlessApis.createCodePOST!({
+          email: oldEmail,
+          tenantId: "public",
+          options: { req: makeRequest({}, { intent: "sign_in" }) },
+          userContext: {},
+        }),
+      ).resolves.toEqual({
+        status: "SIGN_IN_UP_NOT_ALLOWED",
+        reason: "No existing account found",
+      });
+      expect(createCodePOST).toHaveBeenCalledOnce();
+    });
+
+    it("fails closed on sign-in reconciliation failure and retries idempotently", async () => {
+      const config: RowndPluginConfig = {
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        appConfig: { auth: { useExplicitSignUpFlow: true } },
+      };
+      const { server: s, port } = await setup(coreConnectionURI, config);
+      server = s;
+      testPORT = port;
+      const oldEmail = "johndoe+reconciliation@email.com";
+      const targetEmail = "doejohn+reconciliation@gmail.com";
+      const oldMethod = await Passwordless.signInUp({
+        tenantId: "public",
+        email: oldEmail,
+      });
+      const primary = await AccountLinking.createPrimaryUser(
+        oldMethod.recipeUserId,
+      );
+      expect(primary.status).toBe("OK");
+      if (primary.status !== "OK") throw new Error("failed to create primary");
+      const targetMethod = await Passwordless.signInUp({
+        tenantId: "public",
+        email: targetEmail,
+        userContext: { rowndDisableAutomaticAccountLinking: true },
+      });
+      await AccountLinking.linkAccounts(
+        targetMethod.recipeUserId,
+        primary.user.id,
+      );
+      await UserMetadata.updateUserMetadata(primary.user.id, {
+        rownd_pending_verification: [
+          {
+            id: "explicit-sign-in-retry",
+            field: "email",
+            value: targetEmail,
+            created_at: new Date().toISOString(),
+            tenantId: "public",
+            purpose: "UPDATE_PASSWORDLESS",
+            initiatingSessionHandle: "revoked-session",
+            verificationRecipeUserId: oldMethod.recipeUserId.getAsString(),
+            status: "COMMITTING",
+            targetCanonicalRecipeUserId:
+              targetMethod.recipeUserId.getAsString(),
+            cleanupRecipeUserIds: [oldMethod.recipeUserId.getAsString()],
+          },
+        ],
+      });
+      const createCodePOST = vi.fn().mockResolvedValue({ status: "OK" });
+      const passwordlessApis = init(config).overrideMap.passwordless.apis({
+        createCodePOST,
+      });
+      const originalDisassociateUserFromTenant =
+        MultiTenancy.disassociateUserFromTenant;
+      vi.spyOn(
+        MultiTenancy,
+        "disassociateUserFromTenant",
+      ).mockRejectedValueOnce(
+        new Error("cleanup failed"),
+      );
+
+      await expect(
+        passwordlessApis.createCodePOST!({
+          email: targetEmail,
+          tenantId: "public",
+          options: { req: makeRequest({}, { intent: "sign_in" }) },
+          userContext: {},
+        }),
+      ).resolves.toEqual({
+        status: "GENERAL_ERROR",
+        message: "Account email reconciliation failed; please retry sign-in.",
+      });
+      expect(createCodePOST).not.toHaveBeenCalled();
+      const failedMetadata = await UserMetadata.getUserMetadata(primary.user.id);
+      expect(
+        (failedMetadata.metadata as any).rownd_pending_verification,
+      ).toEqual([
+        expect.objectContaining({
+          id: "explicit-sign-in-retry",
+          status: "COMMITTING",
+        }),
+      ]);
+
+      vi.mocked(MultiTenancy.disassociateUserFromTenant).mockImplementation(
+        originalDisassociateUserFromTenant,
+      );
+      await expect(
+        passwordlessApis.createCodePOST!({
+          email: targetEmail,
+          tenantId: "public",
+          options: { req: makeRequest({}, { intent: "sign_in" }) },
+          userContext: {},
+        }),
+      ).resolves.toEqual({ status: "OK" });
+      expect(createCodePOST).toHaveBeenCalledOnce();
+      const recoveredMetadata = await UserMetadata.getUserMetadata(
+        primary.user.id,
+      );
+      expect(
+        (recoveredMetadata.metadata as any).rownd_pending_verification,
+      ).toEqual([]);
+      const recoveredUser = await SuperTokens.getUser(primary.user.id);
+      expect(
+        recoveredUser?.loginMethods.some(
+          (method) =>
+            method.recipeUserId.getAsString() ===
+              oldMethod.recipeUserId.getAsString() &&
+            method.tenantIds.includes("public"),
+        ),
+      ).toBe(false);
+    });
+
+    it("rejects duplicate matching committing plans without changing metadata", async () => {
+      const email = "doejohn+duplicate-plan@gmail.com";
+      const plans = ["first-plan", "second-plan"].map((id) => ({
+        id,
+        field: "email",
+        value: email,
+        created_at: new Date().toISOString(),
+        tenantId: "public",
+        purpose: "UPDATE_PASSWORDLESS" as const,
+        status: "COMMITTING" as const,
+        targetCanonicalRecipeUserId: "target-method",
+        cleanupRecipeUserIds: ["old-method"],
+      }));
+      vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([
+        {
+          id: "primary-user",
+          loginMethods: [
+            {
+              recipeId: "passwordless",
+              recipeUserId: { getAsString: () => "target-method" },
+              email,
+              verified: true,
+              tenantIds: ["public"],
+            },
+          ],
+        } as any,
+      ]);
+      vi.spyOn(UserMetadata, "getUserMetadata").mockResolvedValue({
+        status: "OK",
+        metadata: { rownd_pending_verification: plans },
+      });
+      const updateMetadata = vi.spyOn(UserMetadata, "updateUserMetadata");
+
+      await expect(
+        recoverCommittingEmailVerificationForSignIn({
+          email,
+          tenantId: "public",
+        }),
+      ).rejects.toThrow("multiple email reconciliation plans found");
+      expect(updateMetadata).not.toHaveBeenCalled();
+      expect(plans).toHaveLength(2);
     });
 
     it.each([undefined, "sign_up"])(
