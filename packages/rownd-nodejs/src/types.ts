@@ -1,4 +1,4 @@
-import type { JSONObject } from "supertokens-node/types";
+import type { JSONObject, PluginRouteHandler } from "supertokens-node/types";
 
 export type RowndSignInMethod =
   | {
@@ -689,7 +689,34 @@ export type RowndSubBrandConfigInput = RowndAppConfigInput & {
   };
 };
 
-export interface RowndPluginConfig {
+export type RowndPluginDynamicConfig = {
+  clientDomains?: RowndClientDomains;
+  crossDeviceConfirmationBypass?: {
+    allowedRedirectPaths: string[];
+  };
+  /** Optional field schema override. If omitted, DEFAULT_ROWND_SCHEMA is used. */
+  schema?: RowndSchema;
+  /** Optional app configuration served by GET /plugin/rownd/app-config. */
+  appConfig?: RowndAppConfigInput;
+  /** Optional app configs keyed by Rownd application variant ID. */
+  subBrands?: Record<string, RowndSubBrandConfigInput>;
+  emailChange?: {
+    /**
+     * Positive, finite maximum age in seconds for a native SuperTokens session
+     * to initiate a verified sign-in email change.
+     * @default 600
+     */
+    maxSessionAgeSeconds?: number;
+  };
+};
+
+export type RowndConfigResolverContext = {
+  tenantId?: string;
+  request?: Parameters<PluginRouteHandler["handler"]>[0];
+  userContext: Record<string, unknown>;
+};
+
+export interface RowndPluginConfig extends RowndPluginDynamicConfig {
   rowndAppKey?: string;
   rowndAppSecret?: string;
   /**
@@ -699,26 +726,11 @@ export interface RowndPluginConfig {
    */
   disableRowndUserMigration?: boolean;
   enableDebugLogs?: boolean;
-  clientDomains?: RowndClientDomains;
-  crossDeviceConfirmationBypass?: {
-    allowedRedirectPaths: string[];
-  };
   telemetry?: RowndTelemetryConfig;
-  // Optional field schema override. If omitted, DEFAULT_ROWND_SCHEMA is used.
-  schema?: RowndSchema;
-  // Optional app configuration served by GET /plugin/rownd/app-config.
-  appConfig?: RowndAppConfigInput;
-  // Optional sub-brand/app-variant app configs keyed by Rownd application variant ID.
-  subBrands?: Record<string, RowndSubBrandConfigInput>;
-  emailChange?: {
-    /**
-     * Positive, finite maximum age in seconds for a native SuperTokens session
-     * to initiate a verified sign-in email change. Migration-originated, guest,
-     * and instant sessions cannot use the profile email-change flow.
-     * @default 600
-     */
-    maxSessionAgeSeconds?: number;
-  };
+  /** Resolves request/tenant-specific fields. Returned fields override static dynamic fields. */
+  resolveConfig?: (
+    context: RowndConfigResolverContext,
+  ) => RowndPluginDynamicConfig | Promise<RowndPluginDynamicConfig>;
 }
 
 /**
@@ -859,6 +871,7 @@ export interface RowndPluginNormalisedConfig {
   emailChange: {
     maxSessionAgeSeconds: number;
   };
+  resolveConfig?: RowndPluginConfig["resolveConfig"];
 }
 
 export interface SuperTokensUserImport {

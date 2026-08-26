@@ -9,10 +9,12 @@ import {
   DEFAULT_ROWND_SCHEMA,
   GUEST_AUTH_METHOD_ID,
   INSTANT_AUTH_METHOD_ID,
+  RESERVED_SESSION_CLAIMS,
   ROWND_JWT_CLAIMS,
 } from "./constants";
-import { getPluginConfig } from "./config";
+import { getConfigForUserContext, getPluginConfig } from "./config";
 import type {
+  RowndPluginNormalisedConfig,
   RowndUser,
   RowndUserMetadata,
   SuperTokensUserImport,
@@ -455,9 +457,10 @@ export function buildRowndUserMetadata(rowndUser: RowndUser): JSONObject {
 export function buildRowndAudience(
   currentPayload: JsonRecord,
   appVariantId?: string,
+  pluginConfig: RowndPluginNormalisedConfig | undefined = getPluginConfig(),
 ) {
   const audience = getStringList(currentPayload.aud);
-  const appId = getPluginConfig()?.appConfig?.id;
+  const appId = pluginConfig?.appConfig?.id;
 
   if (appId) {
     audience.push(`app:${appId}`);
@@ -472,12 +475,13 @@ export function buildRowndAudience(
 
 export function buildConfiguredSessionClaims(
   metadata?: RowndMetadata,
+  pluginConfig: RowndPluginNormalisedConfig | undefined = getPluginConfig(),
 ): JsonRecord {
   if (!metadata) {
     return {};
   }
 
-  const schema = getPluginConfig()?.schema || DEFAULT_ROWND_SCHEMA;
+  const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;
   const claims: JsonRecord = {};
 
   for (const [key, field] of Object.entries(schema)) {
@@ -486,6 +490,9 @@ export function buildConfiguredSessionClaims(
     }
 
     const claimName = field.session_claim_name || key;
+    if (RESERVED_SESSION_CLAIMS.has(claimName)) {
+      continue;
+    }
     const value = metadata.original_rownd_user?.data?.[key] ?? metadata[key];
     if (value !== undefined) {
       claims[claimName] = value as JsonValue;
@@ -546,6 +553,7 @@ export function buildRowndSessionClaimPayload(input: {
   metadata?: RowndMetadata;
   currentPayload?: JsonRecord;
   appVariantId?: string;
+  pluginConfig?: RowndPluginNormalisedConfig;
 }) {
   const currentPayload = input.currentPayload ?? {};
   const originalRowndUser = input.metadata?.original_rownd_user;
@@ -574,9 +582,15 @@ export function buildRowndSessionClaimPayload(input: {
     currentPayload,
   );
   const isVerifiedUser = authLevel !== "unverified";
-  const audience = buildRowndAudience(currentPayload, input.appVariantId);
-  const configuredClaims = buildConfiguredSessionClaims(input.metadata);
-
+  const audience = buildRowndAudience(
+    currentPayload,
+    input.appVariantId,
+    input.pluginConfig,
+  );
+  const configuredClaims = buildConfiguredSessionClaims(
+    input.metadata,
+    input.pluginConfig,
+  );
   return {
     ...audience,
     ...configuredClaims,
@@ -646,7 +660,12 @@ export async function buildRowndOAuthPayload(input: {
     ? buildStandardOAuthClaims(input.user, input.scopes, metadata!)
     : {};
   const rowndClaims = input.user
-    ? buildRowndOAuthSessionClaims(input.user, currentPayload, metadata!)
+    ? buildRowndOAuthSessionClaims(
+      input.user,
+      currentPayload,
+        metadata!,
+        getConfigForUserContext(input.userContext),
+    )
     : {};
   const audience = getRowndOAuthAudience({
     requestedAudience:
@@ -654,7 +673,6 @@ export async function buildRowndOAuthPayload(input: {
         ? input.userContext.rowndOAuthAudience
         : undefined,
   });
-
   return {
     ...currentPayload,
     ...standardClaims,
@@ -802,12 +820,14 @@ function buildRowndOAuthSessionClaims(
   user: SuperTokensUser,
   currentPayload: JsonRecord,
   metadata: RowndMetadata,
+  pluginConfig?: RowndPluginNormalisedConfig,
 ) {
   return buildRowndSessionClaimPayload({
     userId: user.id,
     user,
     metadata,
     currentPayload,
+    pluginConfig,
   });
 }
 
@@ -957,9 +977,8 @@ async function hasCanonicalEmailForTenant(
   tenantId: string,
   userContext?: Record<string, any>,
 ) {
-  const metadata = (
-    await inspectLinkedUserMetadata(user.id, userContext, user)
-  ).combinedMetadata;
+  const metadata = (await inspectLinkedUserMetadata(user.id, userContext, user))
+    .combinedMetadata;
   const scopedCanonicalRecipeUserId =
     metadata.rownd_email_recipe_user_ids?.[tenantId];
   const legacyCanonicalRecipeUserId =
@@ -1242,8 +1261,11 @@ export function getEffectiveAuthLevel(
   );
 }
 
-export function canUpdateUserDataField(field: string) {
-  const schema = getPluginConfig()?.schema || DEFAULT_ROWND_SCHEMA;
+export function canUpdateUserDataField(
+  field: string,
+  pluginConfig: RowndPluginNormalisedConfig | undefined = getPluginConfig(),
+) {
+  const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;
   const schemaField = schema[field];
 
   if (!schemaField) {

@@ -1,17 +1,38 @@
 import type { SuperTokensPublicConfig } from "supertokens-node/types";
 
-import { DEFAULT_ROWND_SCHEMA } from "./constants";
+import { DEFAULT_ROWND_SCHEMA, RESERVED_SESSION_CLAIMS } from "./constants";
 import type {
   RowndAuthConfig,
   RowndPluginNormalisedConfig,
   RowndSchemaField,
   RowndSignInMethod,
   RowndSubBrandConfigInput,
+  RowndPluginDynamicConfig,
+  RowndConfigResolverContext,
 } from "./types";
+import { RowndConfigResolutionError } from "./errors";
+import { logDebugMessage } from "./logger";
+import { createDerivedUserContext } from "./utils";
 import { isRecord } from "./utils";
 
 let pluginConfig: RowndPluginNormalisedConfig | undefined;
 let superTokensConfig: SuperTokensPublicConfig | undefined;
+const RESOLVED_CONFIG = Symbol("rowndResolvedConfig");
+
+type ResolvedDynamicConfig = Pick<
+  RowndPluginNormalisedConfig,
+  | "clientDomains"
+  | "crossDeviceConfirmationBypass"
+  | "schema"
+  | "appConfig"
+  | "subBrands"
+  | "emailChange"
+>;
+
+type ResolvedConfigSnapshot = {
+  tenantId: string | undefined;
+  config: ResolvedDynamicConfig;
+};
 
 export function setPluginConfig(config: RowndPluginNormalisedConfig) {
   pluginConfig = config;
@@ -29,13 +50,470 @@ export function getSuperTokensConfig() {
   return superTokensConfig;
 }
 
-export function assertRowndAppVariantIsConfigured(appVariantId?: string) {
+export function assertRowndAppVariantIsConfigured(
+  config: RowndPluginNormalisedConfig,
+  appVariantId?: string,
+) {
   if (!appVariantId) {
     return;
   }
 
-  if (pluginConfig?.subBrands && !pluginConfig.subBrands[appVariantId]) {
+  if (config.subBrands && !config.subBrands[appVariantId]) {
     throw new Error(`Unknown Rownd app variant: ${appVariantId}`);
+  }
+}
+
+function requireRecord(
+  value: unknown,
+  field: string,
+): asserts value is Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new Error(`Rownd dynamic config ${field} must be an object`);
+  }
+}
+
+function validateAppConfig(value: unknown, field: string): void {
+  requireRecord(value, field);
+  const config = value as Record<string, unknown>;
+
+  for (const key of [
+    "branding",
+    "auth",
+    "legal",
+    "profile",
+    "customContent",
+    "capabilities",
+    "web",
+    "bottomSheet",
+  ]) {
+    if (config[key] !== undefined) {
+      requireRecord(config[key], `${field}.${key}`);
+    }
+  }
+
+  const branding = config.branding;
+  if (isRecord(branding)) {
+    for (const key of ["customStyles", "customScripts"]) {
+      if (branding[key] !== undefined && !Array.isArray(branding[key])) {
+        throw new Error(
+          `Rownd dynamic config ${field}.branding.${key} must be an array`,
+        );
+      }
+      for (const [index, item] of (Array.isArray(branding[key])
+        ? branding[key]
+        : []
+      ).entries()) {
+        requireRecord(item, `${field}.branding.${key}[${index}]`);
+        if (typeof item.content !== "string") {
+          throw new Error(
+            `Rownd dynamic config ${field}.branding.${key}[${index}].content must be a string`,
+          );
+        }
+      }
+    }
+  }
+
+  const auth = config.auth;
+  if (isRecord(auth)) {
+    if (auth.order !== undefined) {
+      const authOrder = auth.order;
+      requireRecord(authOrder, `${field}.auth.order`);
+      for (const platform of ["default", "ios", "android"]) {
+        const order = authOrder[platform];
+        if (order !== undefined && !Array.isArray(order)) {
+          throw new Error(
+            `Rownd dynamic config ${field}.auth.order.${platform} must be an array`,
+          );
+        }
+        for (const [index, item] of (Array.isArray(order)
+          ? order
+          : []
+        ).entries()) {
+          requireRecord(item, `${field}.auth.order.${platform}[${index}]`);
+          if (
+            (item.type !== "button" && item.type !== "input") ||
+            typeof item.name !== "string"
+          ) {
+            throw new Error(
+              `Rownd dynamic config ${field}.auth.order.${platform}[${index}] requires a supported type and string name`,
+            );
+          }
+        }
+      }
+    }
+    if (
+      auth.additionalFields !== undefined &&
+      !Array.isArray(auth.additionalFields)
+    ) {
+      throw new Error(
+        `Rownd dynamic config ${field}.auth.additionalFields must be an array`,
+      );
+    }
+    for (const [index, item] of (Array.isArray(auth.additionalFields)
+      ? auth.additionalFields
+      : []
+    ).entries()) {
+      requireRecord(item, `${field}.auth.additionalFields[${index}]`);
+      if (
+        typeof item.name !== "string" ||
+        typeof item.type !== "string" ||
+        typeof item.label !== "string" ||
+        !Array.isArray(item.options)
+      ) {
+        throw new Error(
+          `Rownd dynamic config ${field}.auth.additionalFields[${index}] is malformed`,
+        );
+      }
+      for (const [optionIndex, option] of item.options.entries()) {
+        requireRecord(
+          option,
+          `${field}.auth.additionalFields[${index}].options[${optionIndex}]`,
+        );
+        if (
+          typeof option.value !== "string" ||
+          typeof option.label !== "string"
+        ) {
+          throw new Error(
+            `Rownd dynamic config ${field}.auth.additionalFields[${index}].options[${optionIndex}] requires string value and label`,
+          );
+        }
+      }
+    }
+  }
+
+  for (const key of ["allowedWebOrigins", "userVerificationFields"]) {
+    const item = config[key];
+    if (
+      item !== undefined &&
+      (!Array.isArray(item) || item.some((entry) => typeof entry !== "string"))
+    ) {
+      throw new Error(
+        `Rownd dynamic config ${field}.${key} must be a string array`,
+      );
+    }
+  }
+
+  if (config.signInMethods !== undefined) {
+    if (!Array.isArray(config.signInMethods)) {
+      throw new Error(
+        `Rownd dynamic config ${field}.signInMethods must be an array`,
+      );
+    }
+    const methodIds = new Set<string>();
+    for (const [index, method] of config.signInMethods.entries()) {
+      requireRecord(method, `${field}.signInMethods[${index}]`);
+      if (
+        typeof method.method !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(method.method)
+      ) {
+        throw new Error(
+          `Rownd dynamic config ${field}.signInMethods[${index}].method is unsupported`,
+        );
+      }
+      if (methodIds.has(method.method)) {
+        throw new Error(
+          `Rownd dynamic config ${field}.signInMethods[${index}].method is duplicated`,
+        );
+      }
+      methodIds.add(method.method);
+      for (const property of ["displayName", "iconLightUrl", "iconDarkUrl"]) {
+        if (
+          method[property] !== undefined &&
+          typeof method[property] !== "string"
+        ) {
+          throw new Error(
+            `Rownd dynamic config ${field}.signInMethods[${index}].${property} must be a string`,
+          );
+        }
+      }
+      if (method.method === "anonymous") {
+        if (
+          method.type !== undefined &&
+          method.type !== "guest" &&
+          method.type !== "instant"
+        ) {
+          throw new Error(
+            `Rownd dynamic config ${field}.signInMethods[${index}].type is unsupported`,
+          );
+        }
+      }
+      if (method.method === "apple") {
+        for (const property of [
+          "clientId",
+          "webClientType",
+          "iosClientType",
+          "androidClientType",
+        ]) {
+          if (
+            method[property] !== undefined &&
+            typeof method[property] !== "string"
+          ) {
+            throw new Error(
+              `Rownd dynamic config ${field}.signInMethods[${index}].${property} must be a string`,
+            );
+          }
+        }
+      }
+      if (method.method === "google") {
+        for (const property of ["clientId", "iosClientId"]) {
+          if (
+            method[property] !== undefined &&
+            typeof method[property] !== "string"
+          ) {
+            throw new Error(
+              `Rownd dynamic config ${field}.signInMethods[${index}].${property} must be a string`,
+            );
+          }
+        }
+        if (
+          method.signInFasterWithGoogle !== undefined &&
+          method.signInFasterWithGoogle !== "enabled" &&
+          method.signInFasterWithGoogle !== "disabled"
+        ) {
+          throw new Error(
+            `Rownd dynamic config ${field}.signInMethods[${index}].signInFasterWithGoogle is unsupported`,
+          );
+        }
+        const scopes = method.scopes;
+        if (
+          scopes !== undefined &&
+          (!Array.isArray(scopes) ||
+            scopes.some((scope: unknown) => typeof scope !== "string"))
+        ) {
+          throw new Error(
+            `Rownd dynamic config ${field}.signInMethods[${index}].scopes must be a string array`,
+          );
+        }
+        if (method.oneTap !== undefined) {
+          requireRecord(
+            method.oneTap,
+            `${field}.signInMethods[${index}].oneTap`,
+          );
+          for (const platform of ["browser", "mobileApp"]) {
+            const platformConfig = method.oneTap[platform];
+            if (platformConfig === undefined) continue;
+            requireRecord(
+              platformConfig,
+              `${field}.signInMethods[${index}].oneTap.${platform}`,
+            );
+            if (
+              platformConfig.autoPrompt !== undefined &&
+              typeof platformConfig.autoPrompt !== "boolean"
+            ) {
+              throw new Error(
+                `Rownd dynamic config ${field}.signInMethods[${index}].oneTap.${platform}.autoPrompt must be a boolean`,
+              );
+            }
+            if (
+              platformConfig.delay !== undefined &&
+              (typeof platformConfig.delay !== "number" ||
+                !Number.isFinite(platformConfig.delay) ||
+                platformConfig.delay < 0)
+            ) {
+              throw new Error(
+                `Rownd dynamic config ${field}.signInMethods[${index}].oneTap.${platform}.delay must be a non-negative number`,
+              );
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+export function validateDynamicConfig(
+  config: RowndPluginDynamicConfig,
+  options: { rejectReservedSessionClaims?: boolean } = {},
+) {
+  requireRecord(config, "result");
+  if (
+    config.emailChange?.maxSessionAgeSeconds !== undefined &&
+    (!Number.isFinite(config.emailChange.maxSessionAgeSeconds) ||
+      config.emailChange.maxSessionAgeSeconds <= 0)
+  ) {
+    throw new Error(
+      "emailChange.maxSessionAgeSeconds must be a positive number",
+    );
+  }
+  for (const [key, value] of Object.entries(config.clientDomains ?? {})) {
+    validateClientDomainUrl(key, value);
+  }
+  if (config.crossDeviceConfirmationBypass !== undefined) {
+    requireRecord(
+      config.crossDeviceConfirmationBypass,
+      "crossDeviceConfirmationBypass",
+    );
+    if (
+      !Array.isArray(
+        config.crossDeviceConfirmationBypass.allowedRedirectPaths,
+      ) ||
+      config.crossDeviceConfirmationBypass.allowedRedirectPaths.some(
+        (path) => typeof path !== "string",
+      )
+    ) {
+      throw new Error(
+        "Rownd dynamic config crossDeviceConfirmationBypass.allowedRedirectPaths must be a string array",
+      );
+    }
+  }
+  if (config.schema !== undefined) {
+    requireRecord(config.schema, "schema");
+    for (const [key, field] of Object.entries(config.schema)) {
+      requireRecord(field, `schema.${key}`);
+      if (
+        typeof field.display_name !== "string" ||
+        typeof field.type !== "string"
+      ) {
+        throw new Error(
+          `Rownd dynamic config schema.${key} requires string display_name and type`,
+        );
+      }
+      const claimName = field.session_claim_name ?? key;
+      if (
+        options.rejectReservedSessionClaims &&
+        field.include_in_session_claims === true &&
+        RESERVED_SESSION_CLAIMS.has(claimName)
+      ) {
+        throw new Error(
+          `Rownd dynamic config schema.${key}.session_claim_name is reserved`,
+        );
+      }
+    }
+  }
+  if (config.appConfig !== undefined) {
+    validateAppConfig(config.appConfig, "appConfig");
+  }
+  if (config.subBrands !== undefined) {
+    requireRecord(config.subBrands, "subBrands");
+    for (const [key, subBrand] of Object.entries(config.subBrands)) {
+      validateAppConfig(subBrand, `subBrands.${key}`);
+      if (subBrand.variant !== undefined) {
+        requireRecord(subBrand.variant, `subBrands.${key}.variant`);
+        if (subBrand.variant.id !== key) {
+          throw new Error(
+            `Rownd dynamic config subBrands.${key}.variant.id must match its key`,
+          );
+        }
+      }
+    }
+  }
+}
+
+function dynamicConfigFrom(
+  config: RowndPluginNormalisedConfig,
+): ResolvedDynamicConfig {
+  return {
+    clientDomains: config.clientDomains,
+    crossDeviceConfirmationBypass: config.crossDeviceConfirmationBypass,
+    schema: config.schema,
+    appConfig: config.appConfig,
+    subBrands: config.subBrands,
+    emailChange: {
+      maxSessionAgeSeconds: config.emailChange?.maxSessionAgeSeconds ?? 600,
+    },
+  };
+}
+
+function configWithSnapshot(
+  config: RowndPluginNormalisedConfig,
+  snapshot: ResolvedDynamicConfig,
+): RowndPluginNormalisedConfig {
+  return { ...config, ...snapshot };
+}
+
+export async function resolvePluginConfigSnapshot<
+  T extends RowndConfigResolverContext["userContext"],
+>(
+  config: RowndPluginNormalisedConfig,
+  context: Omit<RowndConfigResolverContext, "userContext"> & {
+    userContext: T;
+  },
+) {
+  const authoritativeTenantId =
+    context.tenantId === undefined ? undefined : context.tenantId.trim();
+  const requestedTenantId =
+    context.request?.getKeyValueFromQuery("tenantId")?.trim() || undefined;
+  if (
+    authoritativeTenantId !== undefined &&
+    requestedTenantId !== undefined &&
+    requestedTenantId !== authoritativeTenantId
+  ) {
+    throw new RowndConfigResolutionError(
+      new Error("Authoritative and requested tenant IDs do not match"),
+    );
+  }
+  const tenantId = authoritativeTenantId ?? requestedTenantId;
+  const existing = Reflect.get(context.userContext, RESOLVED_CONFIG) as
+    ResolvedConfigSnapshot | undefined;
+  if (existing !== undefined && existing.tenantId === tenantId) {
+    return {
+      config: configWithSnapshot(config, existing.config),
+      userContext: context.userContext,
+    };
+  }
+
+  let dynamicConfig: RowndPluginDynamicConfig;
+  try {
+    dynamicConfig = config.resolveConfig
+      ? await config.resolveConfig({ ...context, tenantId })
+      : {};
+    validateDynamicConfig(dynamicConfig, { rejectReservedSessionClaims: true });
+  } catch (error) {
+    logDebugMessage(
+      `Rownd configuration resolution failed: ${
+        error instanceof Error ? (error.stack ?? error.message) : String(error)
+      }`,
+    );
+    throw new RowndConfigResolutionError(error);
+  }
+  const resolvedConfig: RowndPluginNormalisedConfig = {
+    ...config,
+    clientDomains: dynamicConfig.clientDomains ?? config.clientDomains,
+    crossDeviceConfirmationBypass:
+      dynamicConfig.crossDeviceConfirmationBypass ??
+      config.crossDeviceConfirmationBypass,
+    schema: dynamicConfig.schema ?? config.schema,
+    appConfig: dynamicConfig.appConfig ?? config.appConfig,
+    subBrands: dynamicConfig.subBrands ?? config.subBrands,
+    emailChange: {
+      maxSessionAgeSeconds:
+        dynamicConfig.emailChange?.maxSessionAgeSeconds ??
+        config.emailChange?.maxSessionAgeSeconds ??
+        600,
+    },
+  };
+  const userContext = createDerivedUserContext(context.userContext, {});
+  Object.defineProperty(userContext, RESOLVED_CONFIG, {
+    enumerable: false,
+    value: {
+      tenantId,
+      config: dynamicConfigFrom(resolvedConfig),
+    } satisfies ResolvedConfigSnapshot,
+  });
+  return { config: resolvedConfig, userContext };
+}
+
+export function getConfigForUserContext(userContext?: Record<string, unknown>) {
+  const snapshot = userContext
+    ? (Reflect.get(userContext, RESOLVED_CONFIG) as
+        ResolvedConfigSnapshot | undefined)
+    : undefined;
+  return snapshot && pluginConfig
+    ? configWithSnapshot(pluginConfig, snapshot.config)
+    : pluginConfig;
+}
+
+function validateClientDomainUrl(key: string, value: string) {
+  try {
+    if (
+      typeof value !== "string" ||
+      !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)
+    ) {
+      throw new Error();
+    }
+    new URL(value);
+  } catch {
+    throw new Error(`Invalid clientDomains.${key} in plugin config`);
   }
 }
 
@@ -43,9 +521,10 @@ export function isEmailSignInEnabled(
   config: RowndPluginNormalisedConfig,
   appVariantId?: string,
 ) {
-  const methods = appVariantId && config.subBrands?.[appVariantId]?.signInMethods
-    ? config.subBrands[appVariantId].signInMethods
-    : config.appConfig?.signInMethods;
+  const methods =
+    appVariantId && config.subBrands?.[appVariantId]?.signInMethods
+      ? config.subBrands[appVariantId].signInMethods
+      : config.appConfig?.signInMethods;
   return methods?.some((method) => method.method === "email") === true;
 }
 
@@ -54,10 +533,10 @@ export function isExplicitSignUpFlowEnabled(
   appVariantId?: string,
 ) {
   return (
-    (appVariantId
+    ((appVariantId
       ? config.subBrands?.[appVariantId]?.auth?.useExplicitSignUpFlow
-      : undefined) ?? config.appConfig?.auth?.useExplicitSignUpFlow
-  ) === true;
+      : undefined) ?? config.appConfig?.auth?.useExplicitSignUpFlow) === true
+  );
 }
 
 const BUILTIN_SIGN_IN_METHOD_KEYS = [
@@ -135,7 +614,9 @@ function buildSignInMethodsConfig(
       ios_client_id: getStringMethodProperty(googleMethod, "iosClientId") ?? "",
       scopes: getStringArrayMethodProperty(googleMethod, "scopes") ?? [],
       ...(getSignInFasterWithGoogle(googleMethod)
-        ? { sign_in_faster_with_google: getSignInFasterWithGoogle(googleMethod) }
+        ? {
+          sign_in_faster_with_google: getSignInFasterWithGoogle(googleMethod),
+        }
         : {}),
       one_tap: {
         browser: {
@@ -152,20 +633,38 @@ function buildSignInMethodsConfig(
       enabled: !!appleMethod,
       client_id: getStringMethodProperty(appleMethod, "clientId") ?? "",
       ...(getStringMethodProperty(appleMethod, "webClientType") !== undefined
-        ? { web_client_type: getStringMethodProperty(appleMethod, "webClientType") }
+        ? {
+          web_client_type: getStringMethodProperty(
+            appleMethod,
+            "webClientType",
+          ),
+        }
         : {}),
       ...(getStringMethodProperty(appleMethod, "iosClientType") !== undefined
-        ? { ios_client_type: getStringMethodProperty(appleMethod, "iosClientType") }
+        ? {
+          ios_client_type: getStringMethodProperty(
+            appleMethod,
+            "iosClientType",
+          ),
+        }
         : {}),
-      ...(getStringMethodProperty(appleMethod, "androidClientType") !== undefined
-        ? { android_client_type: getStringMethodProperty(appleMethod, "androidClientType") }
+      ...(getStringMethodProperty(appleMethod, "androidClientType") !==
+      undefined
+        ? {
+          android_client_type: getStringMethodProperty(
+            appleMethod,
+            "androidClientType",
+          ),
+        }
         : {}),
     },
     anonymous: {
       enabled: !!anonymousMethod && anonymousType !== "instant",
-      ...(anonymousMethod && anonymousType !== "instant" ? { type: anonymousType } : {}),
+      ...(anonymousMethod && anonymousType !== "instant"
+        ? { type: anonymousType }
+        : {}),
       ...(anonymousType !== "instant" &&
-          getStringMethodProperty(anonymousMethod, "displayName") !== undefined
+      getStringMethodProperty(anonymousMethod, "displayName") !== undefined
         ? {
           display_name: getStringMethodProperty(
             anonymousMethod,
@@ -174,7 +673,7 @@ function buildSignInMethodsConfig(
         }
         : {}),
       ...(anonymousType !== "instant" &&
-          getStringMethodProperty(anonymousMethod, "iconLightUrl") !== undefined
+      getStringMethodProperty(anonymousMethod, "iconLightUrl") !== undefined
         ? {
           icon_light_url: getStringMethodProperty(
             anonymousMethod,
@@ -183,7 +682,7 @@ function buildSignInMethodsConfig(
         }
         : {}),
       ...(anonymousType !== "instant" &&
-          getStringMethodProperty(anonymousMethod, "iconDarkUrl") !== undefined
+      getStringMethodProperty(anonymousMethod, "iconDarkUrl") !== undefined
         ? {
           icon_dark_url: getStringMethodProperty(
             anonymousMethod,
@@ -198,7 +697,8 @@ function buildSignInMethodsConfig(
 
 function isInstantAnonymousMethod(methods: RowndSignInMethod[] | undefined) {
   return (methods ?? []).some(
-    (method) => method.method === "anonymous" && getAnonymousType(method) === "instant",
+    (method) =>
+      method.method === "anonymous" && getAnonymousType(method) === "instant",
   );
 }
 
@@ -267,7 +767,11 @@ function parseOneTapPlatform(value: unknown) {
 }
 
 function getSubBrandVariant(app: unknown) {
-  if (isRecord(app) && isRecord(app.variant) && typeof app.variant.id === "string") {
+  if (
+    isRecord(app) &&
+    isRecord(app.variant) &&
+    typeof app.variant.id === "string"
+  ) {
     return app.variant as RowndSubBrandConfigInput["variant"];
   }
 
@@ -286,9 +790,10 @@ function mergeConfigInput<T extends Record<string, unknown>>(
     }
 
     const existing = result[key];
-    result[key] = isRecord(existing) && isRecord(value)
-      ? mergeConfigInput(existing, value)
-      : value;
+    result[key] =
+      isRecord(existing) && isRecord(value)
+        ? mergeConfigInput(existing, value)
+        : value;
   }
 
   return result as T;
@@ -303,7 +808,8 @@ export function buildRowndAppConfig(
   const baseApp = config.appConfig ?? {};
   const subBrand = appVariantId ? config.subBrands?.[appVariantId] : undefined;
   const app = appVariantId
-    ? subBrand && mergeConfigInput(baseApp, subBrand as unknown as Record<string, unknown>)
+    ? subBrand &&
+      mergeConfigInput(baseApp, subBrand as unknown as Record<string, unknown>)
     : baseApp;
 
   if (!app) {
@@ -409,8 +915,12 @@ export function buildRowndAppConfig(
             ...(branding.blurBackgroundOpacity !== undefined
               ? { blur_background_opacity: branding.blurBackgroundOpacity }
               : {}),
-            ...(branding.offsetX !== undefined ? { offset_x: branding.offsetX } : {}),
-            ...(branding.offsetY !== undefined ? { offset_y: branding.offsetY } : {}),
+            ...(branding.offsetX !== undefined
+              ? { offset_x: branding.offsetX }
+              : {}),
+            ...(branding.offsetY !== undefined
+              ? { offset_y: branding.offsetY }
+              : {}),
             ...(branding.propertyOverrides
               ? { property_overrides: branding.propertyOverrides }
               : {}),
@@ -424,7 +934,9 @@ export function buildRowndAppConfig(
             : {}),
           auth: {
             email: buildAuthEmailConfig(auth.email),
-            ...(auth.mobile ? { mobile: buildAuthMobileConfig(auth.mobile) } : {}),
+            ...(auth.mobile
+              ? { mobile: buildAuthMobileConfig(auth.mobile) }
+              : {}),
             sign_in_methods: signInMethods,
             additional_fields: auth.additionalFields ?? [],
             ...(auth.enforceSameDevicePasswordlessSignIn !== undefined
@@ -527,7 +1039,10 @@ export function buildRowndAppConfig(
                     ? { title: app.customContent.verificationModal.title }
                     : {}),
                   ...(app.customContent.verificationModal.subtitle
-                    ? { subtitle: app.customContent.verificationModal.subtitle }
+                    ? {
+                      subtitle:
+                            app.customContent.verificationModal.subtitle,
+                    }
                     : {}),
                 },
               }
@@ -564,7 +1079,10 @@ export function buildRowndAppConfig(
               ? { delete_account_button: app.profile.deleteAccountButton }
               : {}),
             ...(app.profile?.addSignInMethodsButton
-              ? { add_sign_in_methods_button: app.profile.addSignInMethodsButton }
+              ? {
+                add_sign_in_methods_button:
+                    app.profile.addSignInMethodsButton,
+              }
               : {}),
           },
         },

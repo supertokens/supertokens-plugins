@@ -21,3 +21,13 @@ export class RowndEmailChangeError extends Error {
     super(message);
   }
 }
+
+export class RowndConfigResolutionError extends Error {
+  readonly cause!: unknown;
+
+  constructor(cause: unknown) {
+    super("Rownd configuration could not be resolved");
+    this.name = "RowndConfigResolutionError";
+    Object.defineProperty(this, "cause", { enumerable: false, value: cause });
+  }
+}

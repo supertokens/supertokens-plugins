@@ -25,6 +25,7 @@ import {
   assertRowndAppVariantIsConfigured,
   buildRowndAppConfig,
   isEmailSignInEnabled,
+  resolvePluginConfigSnapshot,
 } from "./config";
 import {
   buildRowndAudience,
@@ -88,10 +89,20 @@ export type RowndRouteHandlerDeps = {
 };
 
 export function handleGetAppConfig(deps: RowndRouteHandlerDeps) {
-  return async (req: SuperTokensRequest) => {
+  return async (
+    req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    _session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+      tenantId: resolveTenantId(req),
+      request: req,
+      userContext,
+    });
     const appVariantId = getRequestedAppVariantIdFromRequest(req);
     const appConfig = buildRowndAppConfig(
-      deps.pluginConfig,
+      resolved.config,
       deps.stConfig,
       appVariantId,
     );
@@ -113,8 +124,18 @@ export function handleGetAppConfig(deps: RowndRouteHandlerDeps) {
 export function handleValidatePasswordlessConfirmationBypass(
   deps: RowndRouteHandlerDeps,
 ) {
-  return async (req: SuperTokensRequest) => {
+  return async (
+    req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    _session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
     try {
+      const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+        tenantId: resolveTenantId(req),
+        request: req,
+        userContext,
+      });
       const body = await getJsonBody(req);
       const clientDomain = isBodyString(body, "clientDomain")
         ? body.clientDomain
@@ -126,10 +147,10 @@ export function handleValidatePasswordlessConfirmationBypass(
         ? body.appVariantId
         : undefined;
 
-      assertRowndAppVariantIsConfigured(appVariantId);
+      assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
       const resolvedClientDomain = resolveAllowedClientDomain({
         clientDomain,
-        pluginConfig: deps.pluginConfig,
+        pluginConfig: resolved.config,
         stConfig: deps.stConfig,
         request: req,
       });
@@ -138,7 +159,7 @@ export function handleValidatePasswordlessConfirmationBypass(
         resolvedClientDomain,
       );
       assertAllowedBypassRedirectPath(
-        deps.pluginConfig,
+        resolved.config,
         normalizedRedirectToPath,
       );
 
@@ -171,10 +192,15 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
 
     try {
       tenantId = resolveTenantId(req);
+      const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+        tenantId,
+        request: req,
+        userContext,
+      });
 
       const body = parseGuestBody(await getJsonBody(req));
       const appVariantId = getRequestedAppVariantIdFromRequest(req);
-      assertRowndAppVariantIsConfigured(appVariantId);
+      assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
       const thirdPartyId =
         body.authLevel === INSTANT_AUTH_METHOD_ID
           ? INSTANT_AUTH_METHOD_ID
@@ -195,7 +221,7 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
         `${thirdPartyUserId}@anonymous.local`,
         false,
         undefined,
-        userContext,
+        resolved.userContext,
       );
 
       if (response.status !== "OK") {
@@ -207,7 +233,8 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
       await recordRowndAppVariantForUser(
         response.user.id,
         appVariantId,
-        userContext,
+        resolved.userContext,
+        tenantId,
       );
 
       await Session.createNewSession(
@@ -216,7 +243,7 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
         tenantId,
         response.recipeUserId,
         {
-          ...buildRowndAudience({}, appVariantId),
+          ...buildRowndAudience({}, appVariantId, resolved.config),
           auth_level: authLevel,
           ...([GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(authLevel)
             ? { is_anonymous: true }
@@ -224,7 +251,7 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
           app_user_id: response.user.id,
         },
         {},
-        userContext,
+        resolved.userContext,
       );
 
       logDebugMessage(`Guest session created for user: ${response.user.id}`);
@@ -275,10 +302,15 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       }
 
       tenantId = resolveTenantId(req);
+      const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+        tenantId,
+        request: req,
+        userContext,
+      });
 
       const parsed = await parseRequest(req);
       const appVariantId = getRequestedAppVariantIdFromRequest(req);
-      assertRowndAppVariantIsConfigured(appVariantId);
+      assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
       rowndUserId = await validateRowndToken(parsed.token);
       const rowndUser = await fetchOptionalRowndUserInfo(rowndUserId);
 
@@ -289,9 +321,9 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         return { status: "OK" as const };
       }
 
-      user = await SuperTokens.getUser(rowndUserId, userContext);
+      user = await SuperTokens.getUser(rowndUserId, resolved.userContext);
       const existingMetadata = user
-        ? await getUserMetadata(user.id, userContext)
+        ? await getUserMetadata(user.id, resolved.userContext)
         : undefined;
 
       if (!user || existingMetadata?.rownd_migration_complete !== true) {
@@ -303,7 +335,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         const reconciled = await reconcileRowndUserWithExistingLoginMethods(
           stUserImport,
           tenantId,
-          userContext,
+          resolved.userContext,
         );
         if (!reconciled) {
           if (user) {
@@ -311,8 +343,8 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
           }
           await importUser(stUserImport, deps.stConfig.supertokens);
         }
-        clearSuperTokensCoreCallCache(userContext);
-        user = await SuperTokens.getUser(rowndUserId, userContext);
+        clearSuperTokensCoreCallCache(resolved.userContext);
+        user = await SuperTokens.getUser(rowndUserId, resolved.userContext);
         if (!user) {
           throw new Error("Imported user could not be resolved");
         }
@@ -334,7 +366,8 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         await recordRowndAppVariantForUser(
           superTokensUserId,
           appVariantId,
-          userContext,
+          resolved.userContext,
+          tenantId,
         );
       }
 
@@ -348,7 +381,11 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       }
 
       if (user) {
-        await associateUserLoginMethodsToTenant(user, tenantId, userContext);
+        await associateUserLoginMethodsToTenant(
+          user,
+          tenantId,
+          resolved.userContext,
+        );
       }
 
       await Session.createNewSession(
@@ -357,10 +394,10 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         tenantId,
         recipeUserId,
         {
-          ...buildRowndAudience({}, appVariantId),
+          ...buildRowndAudience({}, appVariantId, resolved.config),
         },
         {},
-        userContext,
+        resolved.userContext,
       );
 
       logDebugMessage(
@@ -456,17 +493,22 @@ function nativeEmailVerificationUpgradeRequiredResponse() {
   };
 }
 
-export function handleGetUser() {
+export function handleGetUser(deps: RowndRouteHandlerDeps) {
   return async (
-    _req: SuperTokensRequest,
+    req: SuperTokensRequest,
     _res: SuperTokensResponse,
     session: SuperTokensSession,
     userContext: SuperTokensUserContext,
   ) => {
-    const user = await getUserById(
-      session!.getUserId(userContext),
-      session!.getTenantId(userContext),
+    const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+      tenantId: session!.getTenantId(userContext),
+      request: req,
       userContext,
+    });
+    const user = await getUserById(
+      session!.getUserId(resolved.userContext),
+      session!.getTenantId(resolved.userContext),
+      resolved.userContext,
     );
     return {
       status: "OK" as const,
@@ -482,23 +524,26 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
     session: SuperTokensSession,
     userContext: SuperTokensUserContext,
   ) => {
+    const tenantId = session!.getTenantId(userContext);
+    const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+      tenantId,
+      request: req,
+      userContext,
+    });
     const appVariantId = getRequestedAppVariantIdFromRequest(req);
-    assertRowndAppVariantIsConfigured(appVariantId);
+    assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
     const payload = parseUpdateUserBody(await getJsonBody(req));
     const inputData = payload.data ?? {};
-    const operationContext = createDerivedUserContext(
-      userContext,
-      {
-        ...getEmailChangeUserContextValues(payload.context),
-        rowndAppVariantId: appVariantId,
-      },
-    );
+    const operationContext = createDerivedUserContext(resolved.userContext, {
+      ...getEmailChangeUserContextValues(payload.context),
+      rowndAppVariantId: appVariantId,
+    });
     {
       const { email, ...dataWithoutEmail } = inputData;
       const hasEmailField = hasOwn(inputData, "email");
       if (
         hasEmailField &&
-          (typeof email !== "string" || email.trim().length === 0)
+        (typeof email !== "string" || email.trim().length === 0)
       ) {
         return {
           status: "ERROR" as const,
@@ -509,6 +554,7 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
       const hasEmailUpdate = hasEmailField && typeof email === "string";
       const permissionError = validateWritableFields(
         Object.keys(dataWithoutEmail),
+        resolved.config,
       );
 
       if (permissionError) {
@@ -518,51 +564,52 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
       const currentEmail = hasEmailUpdate
         ? (
           await getUserById(
-                session!.getUserId(operationContext),
-                session!.getTenantId(operationContext),
-                operationContext,
+              session!.getUserId(operationContext),
+              session!.getTenantId(operationContext),
+              operationContext,
           )
         ).data.email
         : undefined;
       const changesEmail =
-          hasEmailUpdate &&
-          (typeof currentEmail !== "string" ||
-            currentEmail.trim().toLowerCase() !== email.trim().toLowerCase());
+        hasEmailUpdate &&
+        (typeof currentEmail !== "string" ||
+          currentEmail.trim().toLowerCase() !== email.trim().toLowerCase());
 
       if (changesEmail) {
         if (nativeEmailVerificationUpgradeRequired(operationContext)) {
           return nativeEmailVerificationUpgradeRequiredResponse();
         }
         const sessionError = await validateEmailChangeSession(
-          deps,
-            session!,
-            appVariantId,
-            operationContext,
+          { ...deps, pluginConfig: resolved.config },
+          session!,
+          appVariantId,
+          operationContext,
         );
         if (sessionError) return sessionError;
       }
 
       if (hasEmailUpdate) {
         try {
-          const pendingVerificationResult =
-              await startPendingEmailVerification({
-                userId: session!.getUserId(operationContext),
-                recipeUserId: session!.getRecipeUserId(operationContext),
-                initiatingSessionHandle: session!.getHandle(operationContext),
-                tenantId: session!.getTenantId(operationContext),
-                email,
-                pendingVerificationId: randomUUID(),
-                userContext: operationContext,
-              });
+          const pendingVerificationResult = await startPendingEmailVerification(
+            {
+              userId: session!.getUserId(operationContext),
+              recipeUserId: session!.getRecipeUserId(operationContext),
+              initiatingSessionHandle: session!.getHandle(operationContext),
+              tenantId: session!.getTenantId(operationContext),
+              email,
+              pendingVerificationId: randomUUID(),
+              userContext: operationContext,
+            },
+          );
           const updateResult =
-              Object.keys(dataWithoutEmail).length > 0
-                ? await updateUserData(
-                    session!.getUserId(operationContext),
-                    dataWithoutEmail,
-                    session!.getTenantId(operationContext),
-                    operationContext,
-                )
-                : pendingVerificationResult;
+            Object.keys(dataWithoutEmail).length > 0
+              ? await updateUserData(
+                  session!.getUserId(operationContext),
+                  dataWithoutEmail,
+                  session!.getTenantId(operationContext),
+                  operationContext,
+              )
+              : pendingVerificationResult;
           return {
             status: "OK" as const,
             ...updateResult,
@@ -582,17 +629,17 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
 
       if (Object.keys(dataWithoutEmail).length > 0) {
         await updateUserData(
-            session!.getUserId(operationContext),
-            dataWithoutEmail,
-            session!.getTenantId(operationContext),
-            operationContext,
+          session!.getUserId(operationContext),
+          dataWithoutEmail,
+          session!.getTenantId(operationContext),
+          operationContext,
         );
       }
 
       const user = await getUserById(
-          session!.getUserId(operationContext),
-          session!.getTenantId(operationContext),
-          operationContext,
+        session!.getUserId(operationContext),
+        session!.getTenantId(operationContext),
+        operationContext,
       );
       return {
         status: "OK" as const,
@@ -691,22 +738,27 @@ export function handleUpdateUserMeta() {
   };
 }
 
-export function handleGetUserField() {
+export function handleGetUserField(deps: RowndRouteHandlerDeps) {
   return async (
     req: SuperTokensRequest,
     _res: SuperTokensResponse,
     session: SuperTokensSession,
     userContext: SuperTokensUserContext,
   ) => {
+    const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+      tenantId: session!.getTenantId(userContext),
+      request: req,
+      userContext,
+    });
     const field = req.getKeyValueFromQuery("field");
     if (!field) {
       return missingFieldResponse();
     }
 
     const user = await getUserById(
-      session!.getUserId(userContext),
-      session!.getTenantId(userContext),
-      userContext,
+      session!.getUserId(resolved.userContext),
+      session!.getTenantId(resolved.userContext),
+      resolved.userContext,
     );
     return {
       status: "OK" as const,
@@ -722,26 +774,29 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
     session: SuperTokensSession,
     userContext: SuperTokensUserContext,
   ) => {
+    const tenantId = session!.getTenantId(userContext);
+    const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+      tenantId,
+      request: req,
+      userContext,
+    });
     const appVariantId = getRequestedAppVariantIdFromRequest(req);
-    assertRowndAppVariantIsConfigured(appVariantId);
+    assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
     const field = req.getKeyValueFromQuery("field");
     if (!field) {
       return missingFieldResponse();
     }
 
     const payload = parseUpdateFieldBody(await getJsonBody(req));
-    const operationContext = createDerivedUserContext(
-      userContext,
-      {
-        ...getEmailChangeUserContextValues(payload.context),
-        rowndAppVariantId: appVariantId,
-      },
-    );
+    const operationContext = createDerivedUserContext(resolved.userContext, {
+      ...getEmailChangeUserContextValues(payload.context),
+      rowndAppVariantId: appVariantId,
+    });
     {
       if (field === "email") {
         if (
           typeof payload.value !== "string" ||
-            payload.value.trim().length === 0
+          payload.value.trim().length === 0
         ) {
           return {
             status: "ERROR" as const,
@@ -752,39 +807,40 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
 
         const currentEmail = (
           await getUserById(
-              session!.getUserId(operationContext),
-              session!.getTenantId(operationContext),
-              operationContext,
+            session!.getUserId(operationContext),
+            session!.getTenantId(operationContext),
+            operationContext,
           )
         ).data.email;
         const changesEmail =
-            typeof currentEmail !== "string" ||
-            currentEmail.trim().toLowerCase() !==
-              payload.value.trim().toLowerCase();
+          typeof currentEmail !== "string" ||
+          currentEmail.trim().toLowerCase() !==
+            payload.value.trim().toLowerCase();
         if (changesEmail) {
           if (nativeEmailVerificationUpgradeRequired(operationContext)) {
             return nativeEmailVerificationUpgradeRequiredResponse();
           }
           const sessionError = await validateEmailChangeSession(
-            deps,
-              session!,
-              appVariantId,
-              operationContext,
+            { ...deps, pluginConfig: resolved.config },
+            session!,
+            appVariantId,
+            operationContext,
           );
           if (sessionError) return sessionError;
         }
 
         try {
-          const pendingVerificationResult =
-              await startPendingEmailVerification({
-                userId: session!.getUserId(operationContext),
-                recipeUserId: session!.getRecipeUserId(operationContext),
-                initiatingSessionHandle: session!.getHandle(operationContext),
-                tenantId: session!.getTenantId(operationContext),
-                email: payload.value,
-                pendingVerificationId: randomUUID(),
-                userContext: operationContext,
-              });
+          const pendingVerificationResult = await startPendingEmailVerification(
+            {
+              userId: session!.getUserId(operationContext),
+              recipeUserId: session!.getRecipeUserId(operationContext),
+              initiatingSessionHandle: session!.getHandle(operationContext),
+              tenantId: session!.getTenantId(operationContext),
+              email: payload.value,
+              pendingVerificationId: randomUUID(),
+              userContext: operationContext,
+            },
+          );
           return {
             status: "OK" as const,
             ...pendingVerificationResult,
@@ -802,16 +858,16 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
         }
       }
 
-      const permissionError = validateWritableFields([field]);
+      const permissionError = validateWritableFields([field], resolved.config);
       if (permissionError) {
         return permissionError;
       }
 
       const updateUserDataResult = await updateUserData(
-          session!.getUserId(operationContext),
-          { [field]: payload.value },
-          session!.getTenantId(operationContext),
-          operationContext,
+        session!.getUserId(operationContext),
+        { [field]: payload.value },
+        session!.getTenantId(operationContext),
+        operationContext,
       );
       return {
         status: "OK" as const,
@@ -865,8 +921,13 @@ function recentAuthenticationRequiredResponse() {
   };
 }
 
-function validateWritableFields(fields: string[]) {
-  const readOnlyField = fields.find((field) => !canUpdateUserDataField(field));
+function validateWritableFields(
+  fields: string[],
+  pluginConfig?: RowndPluginNormalisedConfig,
+) {
+  const readOnlyField = fields.find(
+    (field) => !canUpdateUserDataField(field, pluginConfig),
+  );
 
   if (!readOnlyField) {
     return undefined;

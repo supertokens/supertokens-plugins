@@ -26,8 +26,10 @@ import { RowndEmailChangeError, RowndPluginError } from "./errors";
 import { logDebugMessage } from "./logger";
 import {
   assertRowndAppVariantIsConfigured,
+  getConfigForUserContext,
   getPluginConfig,
   getSuperTokensConfig,
+  resolvePluginConfigSnapshot,
 } from "./config";
 import type { SuperTokensUserImport } from "./types";
 import {
@@ -230,10 +232,9 @@ export async function createMissingLoginMethod(
   primaryUserId: string,
   userContext: JsonRecord,
 ) {
-  const operationContext = createDerivedUserContext(
-    userContext,
-    { rowndDisableAutomaticAccountLinking: true },
-  );
+  const operationContext = createDerivedUserContext(userContext, {
+    rowndDisableAutomaticAccountLinking: true,
+  });
   if (importMethod.recipeId === "thirdparty") {
     const result = await ThirdParty.manuallyCreateOrUpdateUser(
       tenantId,
@@ -708,12 +709,17 @@ export async function recordRowndAppVariantForUser(
   userId: string,
   appVariantId?: string,
   userContext?: JsonRecord,
+  tenantId?: string,
 ) {
   if (!appVariantId) {
     return;
   }
 
-  assertRowndAppVariantIsConfigured(appVariantId);
+  const pluginConfig = getConfigForUserContext(userContext);
+  if (!pluginConfig) {
+    throw new Error("Rownd plugin config is not initialized");
+  }
+  assertRowndAppVariantIsConfigured(pluginConfig, appVariantId);
 
   const operationContext = userContext ?? {};
   const inspection = await inspectLinkedUserMetadata(userId, operationContext);
@@ -729,7 +735,24 @@ export async function recordRowndAppVariantForUser(
   const attributes: JsonRecord = isJsonRecord(originalRowndUser.attributes)
     ? originalRowndUser.attributes
     : {};
-  const appVariants = getStringList(attributes["rownd:app_variants"]);
+  // Keep the shipped account-wide array for public/tenantless callers; explicit tenants must never reinterpret it.
+  const tenantKey =
+    tenantId !== undefined && tenantId !== PUBLIC_TENANT_ID
+      ? tenantId
+      : undefined;
+  const variantsByTenant = isRecord(attributes["rownd:app_variants_by_tenant"])
+    ? attributes["rownd:app_variants_by_tenant"]
+    : {};
+  const hasTenantVariants =
+    tenantKey !== undefined &&
+    Object.prototype.hasOwnProperty.call(variantsByTenant, tenantKey);
+  const appVariants = getStringList(
+    tenantKey !== undefined
+      ? hasTenantVariants || pluginConfig.resolveConfig
+        ? variantsByTenant[tenantKey]
+        : attributes["rownd:app_variants"]
+      : attributes["rownd:app_variants"],
+  );
 
   if (appVariants.includes(appVariantId)) {
     return;
@@ -748,7 +771,16 @@ export async function recordRowndAppVariantForUser(
           : {},
         attributes: {
           ...attributes,
-          "rownd:app_variants": [...appVariants, appVariantId],
+          ...(tenantKey !== undefined
+            ? {
+              "rownd:app_variants_by_tenant": {
+                ...variantsByTenant,
+                [tenantKey]: [...appVariants, appVariantId],
+              },
+            }
+            : {
+              "rownd:app_variants": [...appVariants, appVariantId],
+            }),
         },
       },
     },
@@ -789,6 +821,7 @@ export async function buildRowndSessionClaims(
     metadata,
     currentPayload,
     appVariantId,
+    pluginConfig: getConfigForUserContext(userContext),
   });
 }
 
@@ -806,6 +839,7 @@ export async function buildRowndSessionAndAnonymousClaims(
     metadata: user ? inspection.combinedMetadata : undefined,
     currentPayload,
     appVariantId,
+    pluginConfig: getConfigForUserContext(userContext),
   });
   const isAnonymous = [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(
     getEffectiveAuthLevel(user),
@@ -836,21 +870,27 @@ export async function createMagicLinkWithConfirmationBypass(
     throw new Error("SuperTokens config is not initialized");
   }
 
-  const pluginConfig = getPluginConfig();
-  if (!pluginConfig) {
+  const staticPluginConfig = getPluginConfig();
+  if (!staticPluginConfig) {
     throw new Error("Rownd plugin config is not initialized");
   }
 
   const tenantId = input.tenantId ?? PUBLIC_TENANT_ID;
+  const resolved = await resolvePluginConfigSnapshot(staticPluginConfig, {
+    tenantId,
+    request: input.request,
+    userContext: input.userContext ?? {},
+  });
+  const pluginConfig = resolved.config;
   const appVariantId = input.appVariantId;
-  assertRowndAppVariantIsConfigured(appVariantId);
+  assertRowndAppVariantIsConfigured(pluginConfig, appVariantId);
 
   const clientDomain = resolveAllowedClientDomain({
     clientDomain: input.clientDomain,
     pluginConfig,
     stConfig,
     request: input.request,
-    userContext: input.userContext,
+    userContext: resolved.userContext,
   });
   const redirectToPath = normalizeRedirectToPathForClientDomain(
     input.redirectToPath,
@@ -858,8 +898,7 @@ export async function createMagicLinkWithConfirmationBypass(
   );
   assertAllowedBypassRedirectPath(pluginConfig, redirectToPath);
 
-  const userContext = input.userContext ?? {};
-  const operationContext = createDerivedUserContext(userContext, {
+  const operationContext = createDerivedUserContext(resolved.userContext, {
     rowndDisplayContext: input.displayContext,
     rowndRedirectToPath: redirectToPath,
     rowndClientDomain: input.clientDomain,
@@ -905,9 +944,9 @@ export async function createMagicLinkWithConfirmationBypass(
         redirectToPath,
         clientDomainKey: input.clientDomain,
         oauthLoginChallenge:
-              typeof oauthLoginChallenge === "string"
-                ? oauthLoginChallenge
-                : undefined,
+          typeof oauthLoginChallenge === "string"
+            ? oauthLoginChallenge
+            : undefined,
       }),
     }),
   );
@@ -980,7 +1019,8 @@ export async function getUserById(
     }
   }
 
-  const schema = getPluginConfig()?.schema || DEFAULT_ROWND_SCHEMA;
+  const schema =
+    getConfigForUserContext(userContext)?.schema || DEFAULT_ROWND_SCHEMA;
   for (const key of Object.keys(schema)) {
     dataFieldKeys.add(key);
     if (
@@ -1139,6 +1179,35 @@ export async function getUserById(
     first_sign_in_method: firstMethod ? mapMethod(firstMethod) : "email",
     last_sign_in_method: lastMethod ? mapMethod(lastMethod) : "email",
   };
+  const attributes = {
+    ...((originalRowndUser?.attributes || {}) as JsonRecord),
+  };
+  const pluginConfig = getConfigForUserContext(userContext);
+  const variantsByTenant = isRecord(attributes["rownd:app_variants_by_tenant"])
+    ? attributes["rownd:app_variants_by_tenant"]
+    : {};
+  delete attributes["rownd:app_variants_by_tenant"];
+  if (tenantId !== PUBLIC_TENANT_ID) {
+    const configuredVariants = new Set(
+      Object.keys(pluginConfig?.subBrands ?? {}),
+    );
+    const hasTenantVariants = Object.prototype.hasOwnProperty.call(
+      variantsByTenant,
+      tenantId,
+    );
+    if (hasTenantVariants || pluginConfig?.resolveConfig) {
+      attributes["rownd:app_variants"] = getStringList(
+        variantsByTenant[tenantId],
+      ).filter((variantId) => configuredVariants.has(variantId));
+    }
+  } else if (pluginConfig?.resolveConfig) {
+    const configuredVariants = new Set(
+      Object.keys(pluginConfig.subBrands ?? {}),
+    );
+    attributes["rownd:app_variants"] = getStringList(
+      attributes["rownd:app_variants"],
+    ).filter((variantId) => configuredVariants.has(variantId));
+  }
 
   return {
     rownd_user: rowndUser,
@@ -1149,7 +1218,7 @@ export async function getUserById(
     auth_level: authLevel,
     redacted: [],
     groups: (originalRowndUser?.groups || []) as JSONObject[],
-    attributes: (originalRowndUser?.attributes || {}) as JsonRecord,
+    attributes,
   };
 }
 
@@ -1322,10 +1391,7 @@ export async function startPendingEmailVerification(input: {
     );
     if (!refreshedInitiatingLoginMethod) {
       await Promise.allSettled([
-        Session.revokeSession(
-          input.initiatingSessionHandle,
-          input.userContext,
-        ),
+        Session.revokeSession(input.initiatingSessionHandle, input.userContext),
       ]);
       throw new RowndEmailChangeError(
         "CONFLICT",
@@ -1738,10 +1804,9 @@ export async function completePendingEmailVerification(input: {
       );
     }
 
-    const operationContext = createDerivedUserContext(
-      userContext,
-      { rowndDisableAutomaticAccountLinking: true },
-    );
+    const operationContext = createDerivedUserContext(userContext, {
+      rowndDisableAutomaticAccountLinking: true,
+    });
     const passwordlessUser = await Passwordless.signInUp({
       email: normalizedEmail,
       tenantId,

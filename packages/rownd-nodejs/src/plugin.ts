@@ -34,8 +34,11 @@ import {
   assertRowndAppVariantIsConfigured,
   isExplicitSignUpFlowEnabled,
   isEmailSignInEnabled,
+  getConfigForUserContext,
+  resolvePluginConfigSnapshot,
   setPluginConfig,
   setSuperTokensConfig,
+  validateDynamicConfig,
 } from "./config";
 import { RowndEmailChangeError } from "./errors";
 import {
@@ -98,6 +101,7 @@ async function refreshRowndSessionClaims(input: {
       input.appVariantId,
       input.userContext,
     );
+  delete rowndSessionClaims.aud;
   await input.session.mergeIntoAccessTokenPayload(
     {
       ...rowndSessionClaims,
@@ -112,13 +116,14 @@ async function refreshRowndSessionClaims(input: {
 
 function getRowndPasswordlessRequestContextValues(
   req: Parameters<typeof getRequestedDisplayContextFromRequest>[0],
+  pluginConfig: RowndPluginNormalisedConfig,
 ) {
   const displayContext = getRequestedDisplayContextFromRequest(req);
   const redirectToPath = getRequestedRedirectToPathFromRequest(req);
   const clientDomain = getRequestedClientDomainFromRequest(req);
   const appVariantId = getRequestedAppVariantIdFromRequest(req);
   const oauthLoginChallenge = getRequestedOAuthLoginChallengeFromRequest(req);
-  assertRowndAppVariantIsConfigured(appVariantId);
+  assertRowndAppVariantIsConfigured(pluginConfig, appVariantId);
   return {
     rowndDisplayContext: displayContext,
     rowndRedirectToPath: redirectToPath,
@@ -169,6 +174,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         targetPath: string,
         additionalParams: Record<string, string> = {},
       ) => {
+        const resolvedPluginConfig =
+          getConfigForUserContext(input?.userContext) ?? pluginConfig;
         const appVariantId = input?.userContext?.rowndAppVariantId as
           string | undefined;
         const displayContext = input?.userContext?.rowndDisplayContext as
@@ -182,7 +189,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         const clientDomainKey =
           clientDomain ??
           (displayContext === "mobile_app" ? "mobile" : "browser");
-        const clientBaseUrl = pluginConfig.clientDomains?.[clientDomainKey];
+        const clientBaseUrl =
+          resolvedPluginConfig.clientDomains?.[clientDomainKey];
         const bootstrapParams = {
           appKey: pluginConfig.rowndAppKey,
           ...(hubBootstrapParams ?? {}),
@@ -332,7 +340,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user`,
                 method: "get" as const,
                 verifySessionOptions: verifyRowndUserSessionOptions,
-                handler: withRequestHandler(handleGetUser()),
+                handler: withRequestHandler(handleGetUser(routeHandlerDeps)),
               },
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user`,
@@ -371,7 +379,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user/field`,
                 method: "get" as const,
                 verifySessionOptions: verifyRowndUserSessionOptions,
-                handler: withRequestHandler(handleGetUserField()),
+                handler: withRequestHandler(
+                  handleGetUserField(routeHandlerDeps),
+                ),
               },
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user/field`,
@@ -419,14 +429,23 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 });
               },
               buildUserInfo: async (input) => {
-                const payload =
-                  await originalImplementation.buildUserInfo(input);
+                const resolved = await resolvePluginConfigSnapshot(
+                  pluginConfig,
+                  {
+                    tenantId: input.tenantId,
+                    userContext: input.userContext,
+                  },
+                );
+                const payload = await originalImplementation.buildUserInfo({
+                  ...input,
+                  userContext: resolved.userContext,
+                });
                 return buildRowndOAuthUserInfo({
                   user: input.user,
                   accessTokenPayload: input.accessTokenPayload,
                   scopes: input.scopes,
                   currentPayload: payload,
-                  userContext: input.userContext,
+                  userContext: resolved.userContext,
                 });
               },
             }),
@@ -437,12 +456,19 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   throw new Error("OAuth2Provider authGET is unavailable");
                 }
 
+                const resolved = await resolvePluginConfigSnapshot(
+                  pluginConfig,
+                  {
+                    request: input.options.req,
+                    userContext: input.userContext,
+                  },
+                );
                 const audience = applyRowndOAuthResourceParams({
                   params: input.params,
-                  userContext: input.userContext,
+                  userContext: resolved.userContext,
                 });
                 const operationContext = createDerivedUserContext(
-                  input.userContext,
+                  resolved.userContext,
                   { rowndOAuthAudience: audience },
                 );
                 return originalImplementation.authGET({
@@ -455,12 +481,19 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   throw new Error("OAuth2Provider tokenPOST is unavailable");
                 }
 
+                const resolved = await resolvePluginConfigSnapshot(
+                  pluginConfig,
+                  {
+                    request: input.options.req,
+                    userContext: input.userContext,
+                  },
+                );
                 const audience = applyRowndOAuthResourceParams({
                   params: input.body,
-                  userContext: input.userContext,
+                  userContext: resolved.userContext,
                 });
                 const operationContext = createDerivedUserContext(
-                  input.userContext,
+                  resolved.userContext,
                   { rowndOAuthAudience: audience },
                 );
                 return originalImplementation.tokenPOST({
@@ -542,20 +575,25 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const appVariantId = getRequestedAppVariantIdFromRequest(
                   input.options.req,
                 );
-                assertRowndAppVariantIsConfigured(appVariantId);
+                const resolved = await resolvePluginConfigSnapshot(
+                  pluginConfig,
+                  {
+                    tenantId: input.tenantId,
+                    request: input.options.req,
+                    userContext: input.userContext,
+                  },
+                );
+                assertRowndAppVariantIsConfigured(
+                  resolved.config,
+                  appVariantId,
+                );
                 const body = await input.options.req.getJSONBody();
                 const hasIntent =
-                  body !== null &&
-                  typeof body === "object" &&
-                  "intent" in body;
+                  body !== null && typeof body === "object" && "intent" in body;
                 const intent = hasIntent
                   ? (body as { intent?: unknown }).intent
                   : undefined;
-                if (
-                  hasIntent &&
-                  intent !== "sign_in" &&
-                  intent !== "sign_up"
-                ) {
+                if (hasIntent && intent !== "sign_in" && intent !== "sign_up") {
                   return {
                     status: "GENERAL_ERROR" as const,
                     message: "intent must be sign_in or sign_up",
@@ -563,13 +601,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 }
                 if (
                   intent === "sign_in" &&
-                  isExplicitSignUpFlowEnabled(pluginConfig, appVariantId) &&
+                  isExplicitSignUpFlowEnabled(resolved.config, appVariantId) &&
                   !(await doesRowndAccountInfoExist({
                     tenantId: input.tenantId,
                     ...("email" in input
                       ? { email: input.email }
                       : { phoneNumber: input.phoneNumber }),
-                    userContext: input.userContext,
+                    userContext: resolved.userContext,
                   }))
                 ) {
                   return {
@@ -579,8 +617,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 }
 
                 const operationContext = createDerivedUserContext(
-                  input.userContext,
-                  getRowndPasswordlessRequestContextValues(input.options.req),
+                  resolved.userContext,
+                  getRowndPasswordlessRequestContextValues(
+                    input.options.req,
+                    resolved.config,
+                  ),
                 );
                 return originalImplementation.createCodePOST({
                   ...input,
@@ -596,9 +637,20 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   throw new Error("Passwordless resendCodePOST is unavailable");
                 }
 
+                const resolved = await resolvePluginConfigSnapshot(
+                  pluginConfig,
+                  {
+                    tenantId: input.tenantId,
+                    request: input.options.req,
+                    userContext: input.userContext,
+                  },
+                );
                 const operationContext = createDerivedUserContext(
-                  input.userContext,
-                  getRowndPasswordlessRequestContextValues(input.options.req),
+                  resolved.userContext,
+                  getRowndPasswordlessRequestContextValues(
+                    input.options.req,
+                    resolved.config,
+                  ),
                 );
                 return originalImplementation.resendCodePOST({
                   ...input,
@@ -619,9 +671,20 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const appVariantId = getRequestedAppVariantIdFromRequest(
                   input.options.req,
                 );
-                assertRowndAppVariantIsConfigured(appVariantId);
+                const resolved = await resolvePluginConfigSnapshot(
+                  pluginConfig,
+                  {
+                    tenantId: input.tenantId,
+                    request: input.options.req,
+                    userContext: input.userContext,
+                  },
+                );
+                assertRowndAppVariantIsConfigured(
+                  resolved.config,
+                  appVariantId,
+                );
                 const operationContext = createDerivedUserContext(
-                  input.userContext,
+                  resolved.userContext,
                   { rowndAppVariantId: appVariantId },
                 );
                 const response = await originalImplementation.consumeCodePOST({
@@ -634,6 +697,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     response.user.id,
                     appVariantId,
                     operationContext,
+                    input.tenantId,
                   );
 
                   await refreshRowndSessionClaims({
@@ -663,9 +727,20 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const appVariantId = getRequestedAppVariantIdFromRequest(
                   input.options.req,
                 );
-                assertRowndAppVariantIsConfigured(appVariantId);
+                const resolved = await resolvePluginConfigSnapshot(
+                  pluginConfig,
+                  {
+                    tenantId: input.tenantId,
+                    request: input.options.req,
+                    userContext: input.userContext,
+                  },
+                );
+                assertRowndAppVariantIsConfigured(
+                  resolved.config,
+                  appVariantId,
+                );
                 const operationContext = createDerivedUserContext(
-                  input.userContext,
+                  resolved.userContext,
                   { rowndAppVariantId: appVariantId },
                 );
                 const response = await originalImplementation.signInUpPOST({
@@ -678,6 +753,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     response.user.id,
                     appVariantId,
                     operationContext,
+                    input.tenantId,
                   );
                   await refreshRowndSessionClaims({
                     session: response.session,
@@ -729,16 +805,23 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
             functions: (originalImplementation) => ({
               ...originalImplementation,
               createNewSession: async (input) => {
+                const resolved = await resolvePluginConfigSnapshot(
+                  pluginConfig,
+                  {
+                    tenantId: input.tenantId,
+                    userContext: input.userContext,
+                  },
+                );
                 const appVariantId =
-                  typeof input.userContext.rowndAppVariantId === "string"
-                    ? input.userContext.rowndAppVariantId
+                  typeof resolved.userContext.rowndAppVariantId === "string"
+                    ? resolved.userContext.rowndAppVariantId
                     : undefined;
                 const { rowndSessionClaims, rowndIsAnonymousClaim } =
                   await buildRowndSessionAndAnonymousClaims(
                     input.userId,
                     input.accessTokenPayload,
                     appVariantId,
-                    input.userContext,
+                    resolved.userContext,
                   );
                 input.accessTokenPayload = {
                   ...input.accessTokenPayload,
@@ -746,7 +829,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   ...rowndIsAnonymousClaim,
                 };
 
-                return originalImplementation.createNewSession(input);
+                return originalImplementation.createNewSession({
+                  ...input,
+                  userContext: resolved.userContext,
+                });
               },
             }),
           },
@@ -906,6 +992,17 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
     },
     () => ({}),
     (config: RowndPluginConfig) => {
+      const telemetryProvider = (
+        config.telemetry as { provider?: unknown } | undefined
+      )?.provider;
+      if (
+        telemetryProvider !== undefined &&
+        telemetryProvider !== "opentelemetry" &&
+        telemetryProvider !== "axiom" &&
+        telemetryProvider !== "custom"
+      ) {
+        throw new Error("Unknown telemetry provider in plugin config");
+      }
       if (
         config?.disableRowndUserMigration !== undefined &&
         typeof config.disableRowndUserMigration !== "boolean"
@@ -936,18 +1033,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           );
         }
       }
-      if (
-        config.emailChange?.maxSessionAgeSeconds !== undefined &&
-        (!Number.isFinite(config.emailChange.maxSessionAgeSeconds) ||
-          config.emailChange.maxSessionAgeSeconds <= 0)
-      ) {
-        throw new Error(
-          "emailChange.maxSessionAgeSeconds must be a positive number",
-        );
-      }
-      for (const [key, value] of Object.entries(config.clientDomains ?? {})) {
-        validateClientDomainUrl(key, value);
-      }
+      validateDynamicConfig(config);
       return {
         rowndAppKey: config.rowndAppKey ?? DISABLED_MIGRATION_ROWND_APP_KEY,
         rowndAppSecret: config.rowndAppSecret,
@@ -962,20 +1048,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         emailChange: {
           maxSessionAgeSeconds: config.emailChange?.maxSessionAgeSeconds ?? 600,
         },
+        resolveConfig: config.resolveConfig,
       };
     },
   );
-
-function validateClientDomainUrl(key: string, value: string) {
-  try {
-    if (
-      typeof value !== "string" ||
-      !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value)
-    ) {
-      throw new Error();
-    }
-    new URL(value);
-  } catch {
-    throw new Error(`Invalid clientDomains.${key} in plugin config`);
-  }
-}

@@ -1,4 +1,4 @@
-import { RowndSchema } from "./types";
+import type { RowndSchema } from "./types";
 
 export const PLUGIN_ID = "supertokens-plugin-rownd";
 export const PLUGIN_VERSION = "0.3.0";
@@ -21,6 +21,36 @@ export const ROWND_JWT_CLAIMS = {
   PlatformJwt: "https://auth.rownd.io/platform_jwt",
   AuthLevel: "https://auth.rownd.io/auth_level",
 } as const;
+
+export const JWT_REGISTERED_CLAIMS = [
+  "iss",
+  "sub",
+  "aud",
+  "exp",
+  "nbf",
+  "iat",
+  "jti",
+] as const;
+
+export const RESERVED_SESSION_CLAIMS = new Set<string>([
+  ...JWT_REGISTERED_CLAIMS,
+  "app_user_id",
+  "auth_level",
+  "is_verified_user",
+  "is_anonymous",
+  "anonymous_id",
+  "sessionHandle",
+  "refreshTokenHash1",
+  "parentRefreshTokenHash1",
+  "antiCsrfToken",
+  "expiryTime",
+  "timeCreated",
+  "recipeUserId",
+  "tenantId",
+  "tId",
+  "rsub",
+  ...Object.values(ROWND_JWT_CLAIMS),
+]);
 
 export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
   zip_code: {

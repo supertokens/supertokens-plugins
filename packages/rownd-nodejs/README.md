@@ -64,6 +64,44 @@ The plugin logs a warning during initialization while migration is disabled.
 Without `disableRowndUserMigration: true`, both `rowndAppKey` and
 `rowndAppSecret` are required.
 
+### Tenant-Specific Configuration
+
+Use `resolveConfig` when Rownd app configuration differs by SuperTokens tenant.
+The resolver runs once per logical operation. `tenantId` and `request` are
+optional because SDK function calls do not always originate from an HTTP route;
+`userContext` is always provided. It may return `clientDomains`,
+`crossDeviceConfirmationBypass`, `schema`, `appConfig`, `subBrands`, or
+`emailChange`.
+
+```typescript
+RowndMigrationPlugin.init({
+  disableRowndUserMigration: true,
+  resolveConfig: async ({ tenantId }) => {
+    const config = await loadTenantConfiguration(tenantId);
+    return {
+      appConfig: config.appConfig,
+      schema: config.schema,
+      subBrands: config.subBrands,
+    };
+  },
+});
+```
+
+`rowndAppKey`, `rowndAppSecret`, `disableRowndUserMigration`, debug logging,
+and telemetry remain startup-static. Resolver failures and malformed results
+fail the operation instead of falling back to another tenant. The plugin keeps
+the resolved snapshot tenant-bound and does not place static credentials in the
+downstream user context. An authoritative non-public tenant supplied by a
+recipe or session takes precedence over the request query; a conflicting
+non-public `tenantId` query is rejected. Public or tenantless plugin operations
+may use the query as their explicit tenant.
+
+Each returned top-level field replaces its static counterpart for that
+operation. Omitted fields fall back to the corresponding top-level static
+value; objects are not deep-merged with that static value. Setting
+`disableRowndUserMigration` in resolver output is unsupported: when it is true
+at startup, migration routes and credentials remain disabled for every tenant.
+
 ### Email Changes
 
 When email sign-in is configured, changing the Rownd profile email starts a

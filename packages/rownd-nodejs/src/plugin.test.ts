@@ -16,6 +16,7 @@ import UserMetadata, {
   getUserMetadata,
 } from "supertokens-node/recipe/usermetadata";
 import Passwordless from "supertokens-node/recipe/passwordless";
+import type { APIInterface as PasswordlessAPIInterface } from "supertokens-node/recipe/passwordless";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
 import EmailVerification from "supertokens-node/recipe/emailverification";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
@@ -39,8 +40,15 @@ import { GenericContainer, StartedTestContainer, Wait } from "testcontainers";
 import { Network, StartedNetwork } from "testcontainers";
 
 import { init } from "./plugin";
-import { RowndPluginConfig, RowndTelemetryClient } from "./types";
-import { ROWND_PLUGIN_ERROR_MESSAGES } from "./errors";
+import {
+  RowndPluginConfig,
+  RowndPluginDynamicConfig,
+  RowndTelemetryClient,
+} from "./types";
+import {
+  ROWND_PLUGIN_ERROR_MESSAGES,
+  RowndConfigResolutionError,
+} from "./errors";
 import {
   DEFAULT_ROWND_SCHEMA,
   NATIVE_EMAIL_VERIFICATION_UPGRADE_REQUIRED_MESSAGE,
@@ -53,7 +61,11 @@ import {
   mapRowndUserToSuperTokens,
   shouldLinkRowndAccounts,
 } from "./rownd-compatibility";
-import { DEFAULT_PRIMARY_COLOR } from "./config";
+import {
+  DEFAULT_PRIMARY_COLOR,
+  getPluginConfig,
+  resolvePluginConfigSnapshot,
+} from "./config";
 import {
   RowndIsAnonymousClaim,
   buildRowndSessionAndAnonymousClaims,
@@ -64,6 +76,7 @@ import {
   ensurePrimaryUser,
   reconcileRowndUserWithExistingLoginMethods,
   createMagicLinkWithConfirmationBypass,
+  getUserById,
   recordRowndAppVariantForUser,
   startPendingEmailVerification,
 } from "./supertokens-repository";
@@ -318,15 +331,19 @@ describe("rownd-nodejs plugin", () => {
         rowndDisableAutomaticAccountLinking: true,
       });
 
-      expect(Object.prototype.hasOwnProperty.call(
-        derived,
-        "rowndDisableAutomaticAccountLinking",
-      )).toBe(true);
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          derived,
+          "rowndDisableAutomaticAccountLinking",
+        ),
+      ).toBe(true);
       expect(derived.rowndDisableAutomaticAccountLinking).toBe(true);
-      expect(Object.getOwnPropertyDescriptor(
-        prototype,
-        "rowndDisableAutomaticAccountLinking",
-      )?.set).not.toHaveBeenCalled();
+      expect(
+        Object.getOwnPropertyDescriptor(
+          prototype,
+          "rowndDisableAutomaticAccountLinking",
+        )?.set,
+      ).not.toHaveBeenCalled();
     });
 
     it("rejects deceptive parent cache assignment", () => {
@@ -1303,6 +1320,15 @@ describe("rownd-nodejs plugin", () => {
       );
     });
 
+    it("rejects unknown telemetry providers", () => {
+      expect(() =>
+        init({
+          disableRowndUserMigration: true,
+          telemetry: { provider: "unknown" },
+        } as unknown as RowndPluginConfig),
+      ).toThrow("Unknown telemetry provider");
+    });
+
     it("warns during plugin initialization", async () => {
       vi.spyOn(SuperTokens, "isRecipeInitialized").mockReturnValue(true);
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -1633,13 +1659,19 @@ describe("rownd-nodejs plugin", () => {
     });
 
     it("creates a confirmation-bypass passwordless magic link for allowlisted redirect paths", async () => {
+      const resolveConfig = vi.fn(
+        async ({ tenantId }: { tenantId?: string }) => ({
+          clientDomains: { browser_local: "http://localhost:3000" },
+          crossDeviceConfirmationBypass: {
+            allowedRedirectPaths: ["/profile?tab=security"],
+          },
+          appConfig: { id: `app-${tenantId}` },
+        }),
+      );
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
-        clientDomains: { browser_local: "http://localhost:3000" },
-        crossDeviceConfirmationBypass: {
-          allowedRedirectPaths: ["/profile?tab=security"],
-        },
+        resolveConfig,
       };
       const { server: s, port } = await setup(coreConnectionURI, pluginConfig);
       server = s;
@@ -1659,6 +1691,10 @@ describe("rownd-nodejs plugin", () => {
         "/profile?tab=security",
       );
       expect(url.searchParams.get("clientDomain")).toBe("browser_local");
+      expect(resolveConfig).toHaveBeenCalledOnce();
+      expect(resolveConfig.mock.calls[0]?.[0]).toMatchObject({
+        tenantId: "public",
+      });
     });
 
     it("rejects confirmation-bypass magic links without configured allowlisted redirect paths", async () => {
@@ -1863,12 +1899,10 @@ describe("rownd-nodejs plugin", () => {
 
     it("requires a session when a pending verification marker is present", async () => {
       const originalVerifyEmailPOST = vi.fn();
-      const emailVerificationApis = (
-        init({
-          rowndAppKey: "test-key",
-          rowndAppSecret: "test-secret",
-        }) as any
-      ).overrideMap.emailverification.apis({
+      const emailVerificationApis = init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+      }).overrideMap.emailverification.apis({
         verifyEmailPOST: originalVerifyEmailPOST,
       });
 
@@ -2039,7 +2073,7 @@ describe("rownd-nodejs plugin", () => {
         [ROWND_JWT_CLAIMS.AuthLevel]: "verified",
         [ROWND_JWT_CLAIMS.IsVerifiedUser]: true,
         anonymous_id: anonymousId,
-        aud: ["app:app_xyz", "app_variant:variant_123"],
+        aud: "app:app_xyz",
       });
       expect(refreshedPayload).not.toHaveProperty(ROWND_JWT_CLAIMS.IsAnonymous);
     });
@@ -2140,13 +2174,11 @@ describe("rownd-nodejs plugin", () => {
         status: "OK",
         metadata: {},
       });
-      const passwordlessApis = (
-        init({
-          rowndAppKey: "test-key",
-          rowndAppSecret: "test-secret",
-          appConfig: { auth: { useExplicitSignUpFlow: true } },
-        }) as any
-      ).overrideMap.passwordless.apis({
+      const passwordlessApis = init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        appConfig: { auth: { useExplicitSignUpFlow: true } },
+      }).overrideMap.passwordless.apis({
         createCodePOST: originalCreateCodePOST,
       });
 
@@ -2200,9 +2232,10 @@ describe("rownd-nodejs plugin", () => {
       async (intent) => {
         const originalCreateCodePOST = vi.fn();
         const listUsers = vi.spyOn(SuperTokens, "listUsersByAccountInfo");
-        const passwordlessApis = (
-          init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret" }) as any
-        ).overrideMap.passwordless.apis({
+        const passwordlessApis = init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+        }).overrideMap.passwordless.apis({
           createCodePOST: originalCreateCodePOST,
         });
 
@@ -2231,7 +2264,9 @@ describe("rownd-nodejs plugin", () => {
           rowndAppSecret: "test-secret",
           appConfig: { auth: { useExplicitSignUpFlow: true } },
         }) as any
-      ).overrideMap.passwordless.apis({ createCodePOST: originalCreateCodePOST });
+      ).overrideMap.passwordless.apis({
+        createCodePOST: originalCreateCodePOST,
+      });
 
       await expect(
         passwordlessApis.createCodePOST({
@@ -2261,7 +2296,9 @@ describe("rownd-nodejs plugin", () => {
           rowndAppSecret: "test-secret",
           subBrands: {},
         }) as any
-      ).overrideMap.passwordless.apis({ createCodePOST: originalCreateCodePOST });
+      ).overrideMap.passwordless.apis({
+        createCodePOST: originalCreateCodePOST,
+      });
 
       await expect(
         passwordlessApis.createCodePOST({
@@ -2323,7 +2360,10 @@ describe("rownd-nodejs plugin", () => {
       };
       const originalCreateCodePOST = vi.fn().mockImplementation((input) => {
         expect(input.userContext).not.toBe(userContext);
-        expect(input.userContext).toHaveProperty("rowndAppVariantId", undefined);
+        expect(input.userContext).toHaveProperty(
+          "rowndAppVariantId",
+          undefined,
+        );
         expect(input.userContext).toHaveProperty(
           "rowndOAuthLoginChallenge",
           undefined,
@@ -2620,7 +2660,7 @@ describe("rownd-nodejs plugin", () => {
         [ROWND_JWT_CLAIMS.AuthLevel]: "verified",
         [ROWND_JWT_CLAIMS.IsVerifiedUser]: true,
         anonymous_id: anonymousId,
-        aud: ["app:app_xyz", "app_variant:variant_123"],
+        aud: "app:app_xyz",
       });
       expect(refreshedPayload).not.toHaveProperty(ROWND_JWT_CLAIMS.IsAnonymous);
     });
@@ -2697,6 +2737,131 @@ describe("rownd-nodejs plugin", () => {
       expect(originalSignInUpPOST).not.toHaveBeenCalled();
     });
 
+    it("rejects a query tenant that conflicts with the authenticated recipe tenant", async () => {
+      const resolveConfig = vi.fn(async () => ({}));
+      const originalConsumeCodePOST = vi.fn();
+      const plugin = init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        resolveConfig,
+      }) as unknown as {
+        overrideMap: {
+          passwordless: {
+            apis: (
+              implementation: PasswordlessAPIInterface,
+            ) => PasswordlessAPIInterface;
+          };
+        };
+      };
+      const apis = plugin.overrideMap.passwordless.apis({
+        consumeCodePOST: originalConsumeCodePOST,
+      } as unknown as PasswordlessAPIInterface);
+      type ConsumeCodeInput = Parameters<
+        NonNullable<PasswordlessAPIInterface["consumeCodePOST"]>
+      >[0];
+
+      await expect(
+        apis.consumeCodePOST?.({
+          tenantId: "tenant-a",
+          options: { req: makeRequest({ tenantId: "tenant-b" }) },
+          userContext: { authenticatedSession: true },
+        } as unknown as ConsumeCodeInput),
+      ).rejects.toBeInstanceOf(RowndConfigResolutionError);
+      expect(resolveConfig).not.toHaveBeenCalled();
+      expect(originalConsumeCodePOST).not.toHaveBeenCalled();
+    });
+
+    it("rejects a query tenant that conflicts with an explicit public recipe tenant", async () => {
+      const resolveConfig = vi.fn(async () => ({}));
+      const originalConsumeCodePOST = vi.fn();
+      const plugin = init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        resolveConfig,
+      });
+      const apis = plugin.overrideMap.passwordless.apis({
+        consumeCodePOST: originalConsumeCodePOST,
+      } as unknown as PasswordlessAPIInterface);
+      type ConsumeCodeInput = Parameters<
+        NonNullable<PasswordlessAPIInterface["consumeCodePOST"]>
+      >[0];
+
+      await expect(
+        apis.consumeCodePOST?.({
+          tenantId: "public",
+          options: { req: makeRequest({ tenantId: "tenant-b" }) },
+          userContext: {},
+        } as unknown as ConsumeCodeInput),
+      ).rejects.toBeInstanceOf(RowndConfigResolutionError);
+      expect(resolveConfig).not.toHaveBeenCalled();
+      expect(originalConsumeCodePOST).not.toHaveBeenCalled();
+    });
+
+    it("resolves config once across passwordless consumption and session creation", async () => {
+      const { server: s, port } = await setup(coreConnectionURI);
+      server = s;
+      testPORT = port;
+      const user = await Passwordless.signInUp({
+        tenantId: "public",
+        email: "single-snapshot-chain@example.com",
+      });
+      const resolveConfig = vi.fn(async () => ({ appConfig: { id: "app" } }));
+      type SessionInput = {
+        userId: string;
+        recipeUserId: typeof user.recipeUserId;
+        tenantId: string;
+        accessTokenPayload: Record<string, unknown>;
+        userContext: Record<string, unknown>;
+      };
+      type SessionImplementation = {
+        createNewSession: (input: SessionInput) => Promise<SessionInput>;
+      };
+      const plugin = init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        resolveConfig,
+      }) as unknown as {
+        overrideMap: {
+          passwordless: {
+            apis: (
+              implementation: PasswordlessAPIInterface,
+            ) => PasswordlessAPIInterface;
+          };
+          session: {
+            functions: (
+              implementation: SessionImplementation,
+            ) => SessionImplementation;
+          };
+        };
+      };
+      const sessionFunctions = plugin.overrideMap.session.functions({
+        createNewSession: async (input) => input,
+      });
+      const passwordlessApis = plugin.overrideMap.passwordless.apis({
+        consumeCodePOST: async (input) => {
+          await sessionFunctions.createNewSession({
+            userId: user.user.id,
+            recipeUserId: user.recipeUserId,
+            tenantId: input.tenantId,
+            accessTokenPayload: {},
+            userContext: input.userContext,
+          });
+          return { status: "RESTART_FLOW_ERROR" };
+        },
+      } as unknown as PasswordlessAPIInterface);
+      type ConsumeCodeInput = Parameters<
+        NonNullable<PasswordlessAPIInterface["consumeCodePOST"]>
+      >[0];
+
+      await passwordlessApis.consumeCodePOST?.({
+        tenantId: "public",
+        options: { req: makeRequest({ tenantId: "public" }) },
+        userContext: {},
+      } as unknown as ConsumeCodeInput);
+
+      expect(resolveConfig).toHaveBeenCalledTimes(1);
+    });
+
     it("passes Rownd OAuth scopes through unchanged and de-duplicated", async () => {
       const oauthFunctions = (
         init({
@@ -2731,6 +2896,7 @@ describe("rownd-nodejs plugin", () => {
       });
       const input = {
         params: { resource: "app:app_123", client_id: "client_123" },
+        options: { req: makeRequest({}) },
         userContext,
       };
 
@@ -2764,6 +2930,7 @@ describe("rownd-nodejs plugin", () => {
       });
       const input = {
         body: { resource: "app:app_123", grant_type: "client_credentials" },
+        options: { req: makeRequest({}) },
         userContext,
       };
 
@@ -2799,10 +2966,63 @@ describe("rownd-nodejs plugin", () => {
 
       await oauthApis.authGET({
         params: { client_id: "client_123" },
+        options: { req: makeRequest({}) },
         userContext,
       });
 
       expect(userContext.rowndOAuthAudience).toBe("app:stale");
+    });
+
+    it("resolves once per OAuth operation and re-resolves a reused context for another tenant", async () => {
+      const resolveConfig = vi.fn(async ({ tenantId }) => ({
+        appConfig: { id: `app-${tenantId}` },
+      }));
+      const operationContexts: Array<Record<PropertyKey, unknown>> = [];
+      const plugin = init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        resolveConfig,
+      });
+      const oauthFunctions = plugin.overrideMap.oauth2provider.functions({
+        buildAccessTokenPayload: vi.fn().mockResolvedValue({}),
+      });
+      const originalAuthGET = vi.fn().mockImplementation(async (input) => {
+        operationContexts.push(input.userContext);
+        await oauthFunctions.buildAccessTokenPayload({
+          user: undefined,
+          client: {},
+          sessionHandle: undefined,
+          scopes: [],
+          userContext: input.userContext,
+        });
+        return { redirectTo: "ok" };
+      });
+      const oauthApis = plugin.overrideMap.oauth2provider.apis({
+        authGET: originalAuthGET,
+      });
+
+      await oauthApis.authGET({
+        params: { client_id: "client_123" },
+        options: { req: makeRequest({ tenantId: "tenant-a" }) },
+        userContext: {},
+      });
+      await oauthApis.authGET({
+        params: { client_id: "client_123" },
+        options: { req: makeRequest({ tenantId: "tenant-b" }) },
+        userContext: operationContexts[0],
+      });
+
+      expect(
+        resolveConfig.mock.calls.map(([context]) => context.tenantId),
+      ).toEqual(["tenant-a", "tenant-b"]);
+      expect(JSON.stringify(operationContexts)).not.toContain("test-key");
+      expect(JSON.stringify(operationContexts)).not.toContain("test-secret");
+      for (const context of operationContexts) {
+        const symbols = Object.getOwnPropertySymbols(context);
+        expect(
+          JSON.stringify(symbols.map((symbol) => context[symbol])),
+        ).not.toContain("test-secret");
+      }
     });
   });
 
@@ -4988,6 +5208,208 @@ describe("rownd-nodejs plugin", () => {
     });
 
     describe("GET /app-config", () => {
+      it("resolves isolated tenant app config and schema snapshots", async () => {
+        const resolverContexts: Array<{
+          tenantId?: string;
+          userContext: Record<string, unknown>;
+        }> = [];
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: { id: "static", name: "Static fallback" },
+          resolveConfig: async (context) => {
+            resolverContexts.push(context);
+            if (context.tenantId === "tenant-slow") {
+              await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+            return {
+              appConfig: {
+                id: context.tenantId,
+                name: `App ${context.tenantId}`,
+              },
+              schema: {
+                [context.tenantId ?? "unknown"]: {
+                  display_name: context.tenantId ?? "unknown",
+                  type: "string",
+                },
+              },
+            };
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const [slowResponse, fastResponse] = await Promise.all([
+          fetch(
+            `http://localhost:${testPORT}/auth/plugin/rownd/app-config?tenantId=tenant-slow`,
+          ),
+          fetch(
+            `http://localhost:${testPORT}/auth/plugin/rownd/app-config?tenantId=tenant-fast`,
+          ),
+        ]);
+        const [slow, fast] = await Promise.all([
+          slowResponse.json(),
+          fastResponse.json(),
+        ]);
+
+        expect(slow.app).toMatchObject({
+          id: "tenant-slow",
+          name: "App tenant-slow",
+        });
+        expect(slow.app.schema).toHaveProperty("tenant-slow");
+        expect(slow.app.schema).not.toHaveProperty("tenant-fast");
+        expect(fast.app).toMatchObject({
+          id: "tenant-fast",
+          name: "App tenant-fast",
+        });
+        expect(fast.app.schema).toHaveProperty("tenant-fast");
+        expect(fast.app.schema).not.toHaveProperty("tenant-slow");
+        expect(resolverContexts).toHaveLength(2);
+        expect(resolverContexts.every(({ userContext }) => userContext)).toBe(
+          true,
+        );
+      });
+
+      it("surfaces resolver failures without falling back to another tenant", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: { id: "static" },
+          resolveConfig: async () => {
+            throw new Error("config unavailable");
+          },
+        });
+        server = s;
+        testPORT = port;
+
+        const response = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config?tenantId=tenant-error`,
+        );
+
+        expect(response.status).toBe(500);
+        const body = await response.text();
+        expect(body).not.toContain("config unavailable");
+      });
+
+      it("rejects malformed dynamic app config with a controlled error", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          resolveConfig: async () =>
+            ({ appConfig: "invalid" }) as unknown as RowndPluginDynamicConfig,
+        });
+        server = s;
+        testPORT = port;
+
+        const response = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config?tenantId=tenant-invalid`,
+        );
+        const body = await response.text();
+
+        expect(response.status).toBe(500);
+        expect(body).not.toContain("appConfig must be an object");
+      });
+
+      it("rejects reserved dynamic session claim names", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          resolveConfig: async () => ({
+            schema: {
+              attacker: {
+                display_name: "Attacker",
+                type: "string",
+                user_visible: false,
+                include_in_session_claims: true,
+                session_claim_name: "sub",
+              },
+            },
+          }),
+        });
+        server = s;
+        testPORT = port;
+
+        const response = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config?tenantId=tenant-invalid`,
+        );
+        const body = await response.text();
+
+        expect(response.status).toBe(500);
+        expect(body).not.toContain("session_claim_name is reserved");
+      });
+
+      it.each([
+        [
+          "unsupported method IDs",
+          { appConfig: { signInMethods: [{ method: "bad method" }] } },
+        ],
+        [
+          "malformed Google One Tap config",
+          {
+            appConfig: {
+              signInMethods: [
+                { method: "google", oneTap: { browser: "invalid" } },
+              ],
+            },
+          },
+        ],
+        [
+          "duplicate method IDs",
+          {
+            appConfig: {
+              signInMethods: [{ method: "email" }, { method: "email" }],
+            },
+          },
+        ],
+        [
+          "invalid signInFasterWithGoogle",
+          {
+            appConfig: {
+              signInMethods: [
+                { method: "google", signInFasterWithGoogle: "sometimes" },
+              ],
+            },
+          },
+        ],
+        [
+          "malformed Apple client ID",
+          {
+            appConfig: {
+              signInMethods: [{ method: "apple", clientId: 123 }],
+            },
+          },
+        ],
+        [
+          "malformed Apple client type",
+          {
+            appConfig: {
+              signInMethods: [{ method: "apple", webClientType: false }],
+            },
+          },
+        ],
+        [
+          "malformed provider display name",
+          {
+            appConfig: {
+              signInMethods: [{ method: "github", displayName: 123 }],
+            },
+          },
+        ],
+        [
+          "malformed anonymous icon",
+          {
+            appConfig: {
+              signInMethods: [{ method: "anonymous", iconLightUrl: false }],
+            },
+          },
+        ],
+      ])("rejects %s from the dynamic provider", async (_name, config) => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          resolveConfig: async () =>
+            config as unknown as RowndPluginDynamicConfig,
+        });
+        server = s;
+        testPORT = port;
+
+        const response = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/app-config?tenantId=tenant-invalid`,
+        );
+
+        expect(response.status).toBe(500);
+      });
+
       it("returns 200 with defaults when no appConfig is provided", async () => {
         const { server: s, port } = await setup(coreConnectionURI);
         server = s;
@@ -5320,6 +5742,248 @@ describe("rownd-nodejs plugin", () => {
             "rownd:app_variants"
           ],
         ).toEqual(["variant_123", "variant_456"]);
+      });
+
+      it("uses legacy app variants for a static non-public tenant without scoped data", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          subBrands: {
+            variant_legacy: {
+              id: "app_xyz",
+              variant: { id: "variant_legacy" },
+            },
+            variant_new: {
+              id: "app_xyz",
+              variant: { id: "variant_new" },
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+        const result = await Passwordless.signInUp({
+          email: "static-legacy-variant@example.com",
+          tenantId: "public",
+        });
+        await MultiTenancy.createOrUpdateTenant("tenant-static");
+        await MultiTenancy.associateUserToTenant(
+          "tenant-static",
+          result.recipeUserId,
+        );
+        await UserMetadata.updateUserMetadata(result.user.id, {
+          original_rownd_user: {
+            data: { user_id: result.user.id },
+            verified_data: {},
+            attributes: { "rownd:app_variants": ["variant_legacy"] },
+          },
+        });
+        await recordRowndAppVariantForUser(
+          result.user.id,
+          "variant_new",
+          {},
+          "tenant-static",
+        );
+
+        const user = await getUserById(result.user.id, "tenant-static", {});
+
+        expect(user.attributes["rownd:app_variants"]).toEqual([
+          "variant_legacy",
+          "variant_new",
+        ]);
+      });
+
+      it.each([
+        {
+          description: "subBrands is absent",
+          suffix: "absent",
+          config: {},
+        },
+        {
+          description: "subBrands excludes the legacy variant",
+          suffix: "excluded",
+          config: {
+            subBrands: {
+              variant_other: {
+                id: "app_xyz",
+                variant: { id: "variant_other" },
+              },
+            },
+          },
+        },
+      ])(
+        "preserves legacy app variants for a static non-public tenant when $description",
+        async ({ config, suffix }) => {
+          const { server: s, port } = await setup(coreConnectionURI, config);
+          server = s;
+          testPORT = port;
+          const result = await Passwordless.signInUp({
+            email: `static-legacy-variant-${suffix}@example.com`,
+            tenantId: "public",
+          });
+          const tenantId = `tenant-static-${suffix}`;
+          await MultiTenancy.createOrUpdateTenant(tenantId);
+          await MultiTenancy.associateUserToTenant(
+            tenantId,
+            result.recipeUserId,
+          );
+          await UserMetadata.updateUserMetadata(result.user.id, {
+            original_rownd_user: {
+              data: { user_id: result.user.id },
+              verified_data: {},
+              attributes: { "rownd:app_variants": ["variant_legacy"] },
+            },
+          });
+
+          const user = await getUserById(result.user.id, tenantId, {});
+
+          expect(user.attributes["rownd:app_variants"]).toEqual([
+            "variant_legacy",
+          ]);
+        },
+      );
+
+      it("does not use legacy app variants for a dynamic non-public tenant", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          resolveConfig: async () => ({
+            subBrands: {
+              variant_legacy: {
+                id: "app_xyz",
+                variant: { id: "variant_legacy" },
+              },
+            },
+          }),
+        });
+        server = s;
+        testPORT = port;
+        const result = await Passwordless.signInUp({
+          email: "dynamic-legacy-variant@example.com",
+          tenantId: "public",
+        });
+        await MultiTenancy.createOrUpdateTenant("tenant-dynamic");
+        await MultiTenancy.associateUserToTenant(
+          "tenant-dynamic",
+          result.recipeUserId,
+        );
+        await UserMetadata.updateUserMetadata(result.user.id, {
+          original_rownd_user: {
+            data: { user_id: result.user.id },
+            verified_data: {},
+            attributes: { "rownd:app_variants": ["variant_legacy"] },
+          },
+        });
+        const config = getPluginConfig();
+        if (!config) {
+          throw new Error("Rownd plugin config was not initialized");
+        }
+        const resolved = await resolvePluginConfigSnapshot(config, {
+          tenantId: "tenant-dynamic",
+          userContext: {},
+        });
+
+        const user = await getUserById(
+          result.user.id,
+          "tenant-dynamic",
+          resolved.userContext,
+        );
+
+        expect(user.attributes["rownd:app_variants"]).toEqual([]);
+      });
+
+      it("stores the same app variant ID independently for two tenants", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          resolveConfig: async ({ tenantId }) => ({
+            subBrands: {
+              variant_shared: {
+                id: `app_${tenantId}`,
+                variant: { id: "variant_shared" },
+              },
+              ...(tenantId === "tenant-a"
+                ? {
+                    variant_a_only: {
+                      id: "app_tenant-a",
+                      variant: { id: "variant_a_only" },
+                    },
+                  }
+                : {}),
+            },
+          }),
+        });
+        server = s;
+        testPORT = port;
+        const result = await Passwordless.signInUp({
+          email: "tenant-variant-member@example.com",
+          tenantId: "public",
+        });
+        await MultiTenancy.createOrUpdateTenant("tenant-a");
+        await MultiTenancy.createOrUpdateTenant("tenant-b");
+        await MultiTenancy.associateUserToTenant(
+          "tenant-a",
+          result.recipeUserId,
+        );
+        await MultiTenancy.associateUserToTenant(
+          "tenant-b",
+          result.recipeUserId,
+        );
+        const config = getPluginConfig();
+        if (!config) {
+          throw new Error("Rownd plugin config was not initialized");
+        }
+        const tenantA = await resolvePluginConfigSnapshot(config, {
+          tenantId: "tenant-a",
+          userContext: {},
+        });
+        const tenantB = await resolvePluginConfigSnapshot(config, {
+          tenantId: "tenant-b",
+          userContext: {},
+        });
+        await recordRowndAppVariantForUser(
+          result.user.id,
+          "variant_shared",
+          tenantA.userContext,
+          "tenant-a",
+        );
+        await recordRowndAppVariantForUser(
+          result.user.id,
+          "variant_a_only",
+          tenantA.userContext,
+          "tenant-a",
+        );
+        await recordRowndAppVariantForUser(
+          result.user.id,
+          "variant_shared",
+          tenantB.userContext,
+          "tenant-b",
+        );
+
+        const metadata = await getUserMetadata(result.user.id);
+        expect(
+          (
+            metadata.metadata as unknown as {
+              original_rownd_user: {
+                attributes: Record<string, unknown>;
+              };
+            }
+          ).original_rownd_user.attributes["rownd:app_variants_by_tenant"],
+        ).toEqual({
+          "tenant-a": ["variant_shared", "variant_a_only"],
+          "tenant-b": ["variant_shared"],
+        });
+        const userA = await getUserById(
+          result.user.id,
+          "tenant-a",
+          tenantA.userContext,
+        );
+        const userB = await getUserById(
+          result.user.id,
+          "tenant-b",
+          tenantB.userContext,
+        );
+
+        expect(userA.attributes["rownd:app_variants"]).toEqual([
+          "variant_shared",
+          "variant_a_only",
+        ]);
+        expect(userB.attributes["rownd:app_variants"]).toEqual([
+          "variant_shared",
+        ]);
       });
 
       it("rejects unknown app variants", async () => {
@@ -7282,7 +7946,8 @@ describe("rownd-nodejs plugin", () => {
           initial.recipeUserId,
         );
         expect(primary.status).toBe("OK");
-        if (primary.status !== "OK") throw new Error("failed to create primary");
+        if (primary.status !== "OK")
+          throw new Error("failed to create primary");
         const phone = await Passwordless.signInUp({
           tenantId: "public",
           phoneNumber: "+15555550899",
@@ -7297,7 +7962,8 @@ describe("rownd-nodejs plugin", () => {
           { rowndDisableAutomaticAccountLinking: true },
         );
         expect(apple.status).toBe("OK");
-        if (apple.status !== "OK") throw new Error("failed to create Apple user");
+        if (apple.status !== "OK")
+          throw new Error("failed to create Apple user");
         await expect(
           AccountLinking.linkAccounts(phone.recipeUserId, primary.user.id),
         ).resolves.toMatchObject({ status: "OK" });
@@ -7321,7 +7987,9 @@ describe("rownd-nodejs plugin", () => {
           initial.accessToken,
           firstLink.searchParams.get("rowndPendingVerificationId") || "unused",
         );
-        await expect(firstVerification.json()).resolves.toEqual({ status: "OK" });
+        await expect(firstVerification.json()).resolves.toEqual({
+          status: "OK",
+        });
         const firstReplacementToken =
           firstVerification.headers.get("st-access-token");
         expect(firstReplacementToken).toBeTruthy();
@@ -7337,7 +8005,9 @@ describe("rownd-nodejs plugin", () => {
           expect.objectContaining({ email: replacementEmail }),
         ]);
         const firstReplacementSession =
-          await Session.getSessionWithoutRequestResponse(firstReplacementToken!);
+          await Session.getSessionWithoutRequestResponse(
+            firstReplacementToken!,
+          );
         expect(firstReplacementSession?.getRecipeUserId().getAsString()).toBe(
           firstMethods?.[0]?.recipeUserId.getAsString(),
         );
@@ -7368,7 +8038,9 @@ describe("rownd-nodejs plugin", () => {
           firstReplacementToken!,
           secondLink.searchParams.get("rowndPendingVerificationId") || "unused",
         );
-        await expect(secondVerification.json()).resolves.toEqual({ status: "OK" });
+        await expect(secondVerification.json()).resolves.toEqual({
+          status: "OK",
+        });
 
         const restored = await SuperTokens.getUser(initial.userId);
         expect(
@@ -8019,9 +8691,7 @@ describe("rownd-nodejs plugin", () => {
             value: targetEmail,
             verificationRecipeUserId: initiatingUser.recipeUserId.getAsString(),
             targetCanonicalRecipeUserId: expect.any(String),
-            cleanupRecipeUserIds: [
-              initiatingUser.recipeUserId.getAsString(),
-            ],
+            cleanupRecipeUserIds: [initiatingUser.recipeUserId.getAsString()],
           }),
         ]);
         await expect(
@@ -8047,7 +8717,8 @@ describe("rownd-nodejs plugin", () => {
           initiatingUser.recipeUserId,
         );
         expect(primary.status).toBe("OK");
-        if (primary.status !== "OK") throw new Error("failed to create primary");
+        if (primary.status !== "OK")
+          throw new Error("failed to create primary");
         const second = await Passwordless.signInUp({
           tenantId: "public",
           email: secondEmail,
@@ -8057,8 +8728,7 @@ describe("rownd-nodejs plugin", () => {
           AccountLinking.linkAccounts(second.recipeUserId, primary.user.id),
         ).resolves.toMatchObject({ status: "OK" });
         await UserMetadata.updateUserMetadata(primary.user.id, {
-          rownd_email_recipe_user_id:
-            initiatingUser.recipeUserId.getAsString(),
+          rownd_email_recipe_user_id: initiatingUser.recipeUserId.getAsString(),
           rownd_email_recipe_user_ids: {
             public: initiatingUser.recipeUserId.getAsString(),
           },
@@ -8240,7 +8910,8 @@ describe("rownd-nodejs plugin", () => {
           account.recipeUserId,
         );
         expect(primary.status).toBe("OK");
-        if (primary.status !== "OK") throw new Error("failed to create primary");
+        if (primary.status !== "OK")
+          throw new Error("failed to create primary");
         const alias = await Passwordless.signInUp({
           tenantId: "public",
           email: aliasEmail,
@@ -8267,21 +8938,27 @@ describe("rownd-nodejs plugin", () => {
           ],
         });
 
-        const originalDisassociate =
-          MultiTenancy.disassociateUserFromTenant;
+        const originalDisassociate = MultiTenancy.disassociateUserFromTenant;
         let planPersistedBeforeCleanup = false;
-        vi.spyOn(
-          MultiTenancy,
-          "disassociateUserFromTenant",
-        ).mockImplementation(async (...input) => {
-          const metadata = await UserMetadata.getUserMetadata(primary.user.id);
-          expect(
-            (metadata.metadata as any).rownd_pending_verification[0]
-              .cleanupRecipeUserIds,
-          ).toContain(alias.recipeUserId.getAsString());
-          planPersistedBeforeCleanup = true;
-          return originalDisassociate(...input);
-        });
+        vi.spyOn(MultiTenancy, "disassociateUserFromTenant").mockImplementation(
+          async (...input) => {
+            const metadata = await UserMetadata.getUserMetadata(
+              primary.user.id,
+            );
+            const pendingVerifications = (
+              metadata.metadata as unknown as {
+                rownd_pending_verification: Array<{
+                  cleanupRecipeUserIds: string[];
+                }>;
+              }
+            ).rownd_pending_verification;
+            expect(pendingVerifications[0].cleanupRecipeUserIds).toContain(
+              alias.recipeUserId.getAsString(),
+            );
+            planPersistedBeforeCleanup = true;
+            return originalDisassociate(...input);
+          },
+        );
         const originalDeleteUser = SuperTokens.deleteUser;
         let aliasWasDisassociatedBeforeDelete = false;
         vi.spyOn(SuperTokens, "deleteUser").mockImplementation(
@@ -8347,18 +9024,20 @@ describe("rownd-nodejs plugin", () => {
 
         const originalGetUser = SuperTokens.getUser;
         let targetLookupCount = 0;
-        vi.spyOn(SuperTokens, "getUser").mockImplementation(async (...input) => {
-          if (input[0] === account.userId) {
-            targetLookupCount += 1;
-            if (targetLookupCount === 4) {
-              await EmailVerification.unverifyEmail(
-                account.recipeUserId,
-                targetEmail,
-              );
+        vi.spyOn(SuperTokens, "getUser").mockImplementation(
+          async (...input) => {
+            if (input[0] === account.userId) {
+              targetLookupCount += 1;
+              if (targetLookupCount === 4) {
+                await EmailVerification.unverifyEmail(
+                  account.recipeUserId,
+                  targetEmail,
+                );
+              }
             }
-          }
-          return originalGetUser(...input);
-        });
+            return originalGetUser(...input);
+          },
+        );
 
         await expect(
           startPendingEmailVerification({
@@ -8378,9 +9057,7 @@ describe("rownd-nodejs plugin", () => {
         ]);
         expect(
           (metadata.metadata as any).rownd_pending_verification,
-        ).not.toEqual([
-          expect.objectContaining({ id: "must-not-be-created" }),
-        ]);
+        ).not.toEqual([expect.objectContaining({ id: "must-not-be-created" })]);
       });
 
       it("fails closed for malformed committing cleanup state", async () => {
@@ -8409,8 +9086,7 @@ describe("rownd-nodejs plugin", () => {
               initiatingSessionHandle: account.sessionHandle,
               verificationRecipeUserId: account.recipeUserId.getAsString(),
               status: "COMMITTING",
-              targetCanonicalRecipeUserId:
-                account.recipeUserId.getAsString(),
+              targetCanonicalRecipeUserId: account.recipeUserId.getAsString(),
               cleanupRecipeUserIds: [victim.recipeUserId.getAsString()],
             },
           ],
@@ -9486,7 +10162,8 @@ describe("rownd-nodejs plugin", () => {
           phone.recipeUserId,
         );
         expect(primary.status).toBe("OK");
-        if (primary.status !== "OK") throw new Error("failed to create primary");
+        if (primary.status !== "OK")
+          throw new Error("failed to create primary");
         const thirdParty = await ThirdParty.manuallyCreateOrUpdateUser(
           "public",
           "google",
@@ -9506,10 +10183,7 @@ describe("rownd-nodejs plugin", () => {
           userContext: { rowndDisableAutomaticAccountLinking: true },
         });
         await expect(
-          AccountLinking.linkAccounts(
-            thirdParty.recipeUserId,
-            primary.user.id,
-          ),
+          AccountLinking.linkAccounts(thirdParty.recipeUserId, primary.user.id),
         ).resolves.toMatchObject({ status: "OK" });
         await expect(
           AccountLinking.linkAccounts(
@@ -9664,6 +10338,78 @@ describe("rownd-nodejs plugin", () => {
           [ROWND_JWT_CLAIMS.IsVerifiedUser]: true,
         });
         expect(claims).not.toHaveProperty(ROWND_JWT_CLAIMS.IsAnonymous);
+      });
+
+      it("does not rebuild registered claims while preserving the OAuth payload", async () => {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          schema: {
+            spoofed_auth_level: {
+              display_name: "Spoofed auth level",
+              type: "string",
+              include_in_session_claims: true,
+              session_claim_name: ROWND_JWT_CLAIMS.AuthLevel,
+            },
+            spoofed_audience: {
+              display_name: "Spoofed audience",
+              type: "string",
+              include_in_session_claims: true,
+              session_claim_name: "aud",
+            },
+            spoofed_subject: {
+              display_name: "Spoofed subject",
+              type: "string",
+              include_in_session_claims: true,
+              session_claim_name: "sub",
+            },
+            spoofed_issuer: {
+              display_name: "Spoofed issuer",
+              type: "string",
+              include_in_session_claims: true,
+              session_claim_name: "iss",
+            },
+            spoofed_expiry: {
+              display_name: "Spoofed expiry",
+              type: "number",
+              include_in_session_claims: true,
+              session_claim_name: "exp",
+            },
+          },
+        });
+        server = s;
+        testPORT = port;
+        const result = await Passwordless.signInUp({
+          email: "reserved-claims@example.com",
+          tenantId: "public",
+        });
+        await UserMetadata.updateUserMetadata(result.user.id, {
+          spoofed_auth_level: "attacker",
+          spoofed_audience: ["app:attacker"],
+          spoofed_subject: "attacker",
+          spoofed_issuer: "https://attacker.example.com",
+          spoofed_expiry: 1,
+        });
+
+        const authoritativeClaims = {
+          sub: result.user.id,
+          iss: "https://issuer.example.com",
+          exp: 4_000_000_000,
+        };
+        const claims = await buildRowndSessionClaims(
+          result.user.id,
+          authoritativeClaims,
+        );
+        const oauthClaims = await buildRowndOAuthPayload({
+          user: result.user,
+          scopes: ["openid"],
+          currentPayload: authoritativeClaims,
+        });
+
+        expect(claims[ROWND_JWT_CLAIMS.AuthLevel]).toBe("verified");
+        expect(claims.aud).toBeUndefined();
+        expect(claims).not.toHaveProperty("sub");
+        expect(claims).not.toHaveProperty("iss");
+        expect(claims).not.toHaveProperty("exp");
+        expect(oauthClaims).toMatchObject(authoritativeClaims);
       });
 
       it("stores pending verification for a new email even if the current email is verified", async () => {
