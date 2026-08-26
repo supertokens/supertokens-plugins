@@ -1,5 +1,12 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.6.14
+
+### Patch Changes
+
+- Fix Passwordless email replacement and explicit sign-in
+- fea92a7: Replace confirmed Passwordless email methods tenant-safely and enforce explicit Passwordless sign-in intent.
+
 ## 0.6.13
 
 ### Patch Changes
