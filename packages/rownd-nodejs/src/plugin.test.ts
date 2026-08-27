@@ -3982,6 +3982,142 @@ describe("rownd-nodejs plugin", () => {
         expect(passwordlessMethod?.verified).toBe(false);
       });
 
+      it("reconciles a fresh Google identity and Rownd passwordless email to its existing primary ThirdParty owner", async () => {
+        const { server: s, port } = await setup(
+          importCoreConnectionURI,
+          undefined,
+          { enableEmailVerification: true },
+        );
+        server = s;
+        testPORT = port;
+        const rowndUserId = "rownd-thirdparty-email-owner-collision";
+        const appleId = "apple-email-owner-collision";
+        const googleId = "google-thirdparty-email-owner-collision";
+        const email = "thirdparty-email-owner-collision@example.com";
+        const thirdPartyUser = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "apple",
+          appleId,
+          email,
+          true,
+        );
+        expect(thirdPartyUser.status).toBe("OK");
+        if (thirdPartyUser.status !== "OK") {
+          throw new Error("failed to create ThirdParty user");
+        }
+        await expect(
+          AccountLinking.createPrimaryUser(thirdPartyUser.recipeUserId),
+        ).resolves.toMatchObject({ status: "OK" });
+        const existingOwner = await SuperTokens.getUser(thirdPartyUser.user.id);
+        expect(existingOwner?.isPrimaryUser).toBe(true);
+        expect(existingOwner?.loginMethods).toEqual([
+          expect.objectContaining({
+            recipeId: "thirdparty",
+            email,
+            verified: true,
+            thirdParty: { id: "apple", userId: appleId },
+          }),
+        ]);
+
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: rowndUserId,
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: rowndUserId,
+          auth_level: "verified",
+          data: {
+            user_id: rowndUserId,
+            google_id: googleId,
+            email,
+          },
+          verified_data: { google_id: true, email: true },
+        });
+        const fetchSpy = vi.spyOn(global, "fetch");
+
+        const response = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({ status: "OK" });
+        await expect(
+          SuperTokens.getUserIdMapping({
+            userId: rowndUserId,
+            userIdType: "EXTERNAL",
+          }),
+        ).resolves.toMatchObject({
+          status: "OK",
+          superTokensUserId: thirdPartyUser.user.id,
+        });
+        const migratedUser = await SuperTokens.getUser(rowndUserId);
+        expect(migratedUser?.isPrimaryUser).toBe(true);
+        expect(migratedUser?.loginMethods).toHaveLength(3);
+        expect(migratedUser?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              email,
+              verified: true,
+              thirdParty: { id: "apple", userId: appleId },
+            }),
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email,
+              verified: true,
+            }),
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: { id: "google", userId: googleId },
+            }),
+          ]),
+        );
+        await expect(
+          SuperTokens.listUsersByAccountInfo("public", { email }, false),
+        ).resolves.toHaveLength(1);
+        await expect(
+          SuperTokens.listUsersByAccountInfo(
+            "public",
+            { thirdParty: { id: "google", userId: googleId } },
+            false,
+          ),
+        ).resolves.toHaveLength(1);
+        expect(
+          fetchSpy.mock.calls.some(([input]) =>
+            String(input).includes("/bulk-import/import"),
+          ),
+        ).toBe(false);
+
+        const repeatedResponse = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+        expect(repeatedResponse.status).toBe(200);
+        await expect(repeatedResponse.json()).resolves.toEqual({ status: "OK" });
+        const repeatedUser = await SuperTokens.getUser(rowndUserId);
+        expect(repeatedUser?.loginMethods).toHaveLength(3);
+        expect(repeatedUser).toMatchObject({
+          isPrimaryUser: true,
+          loginMethods: expect.arrayContaining([
+            expect.objectContaining({ recipeId: "passwordless" }),
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: { id: "apple", userId: appleId },
+            }),
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: { id: "google", userId: googleId },
+            }),
+          ]),
+        });
+      });
+
       it("reconciles an unverified Rownd email with its existing passwordless account", async () => {
         const { server: s, port } = await setup(
           importCoreConnectionURI,
