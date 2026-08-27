@@ -171,13 +171,15 @@ disassociated methods are treated as complete. Invalid reconciliation state
 fails closed without deleting methods. Replacement-session failure does not
 restore removed login aliases.
 
-When `auth.useExplicitSignUpFlow` is enabled, Passwordless create-code and
-consume-code HTTP requests require `intent: "sign_in" | "sign_up"`; missing or
-invalid intent returns `GENERAL_ERROR`. Explicit `sign_in` accepts only the
-tenant's canonical email. A retired old email returns `SIGN_IN_UP_NOT_ALLOWED`
-with reason `No existing account found` before a code is sent. Explicit
-`sign_up` may reuse that email after cleanup succeeds. This policy is implemented
-only by the plugin's HTTP overrides; direct Passwordless SDK calls bypass it.
+When `auth.useExplicitSignUpFlow` is enabled, a valid `intent: "sign_in" |
+"sign_up"` on Passwordless create-code and consume-code HTTP requests opts into
+explicit behavior. Omitting `intent` preserves legacy combined sign-in/up
+behavior; a supplied malformed value returns `GENERAL_ERROR`. Explicit
+`sign_in` accepts only the tenant's canonical email. A retired old email returns
+`SIGN_IN_UP_NOT_ALLOWED` with reason `No existing account found` before a code is
+sent. Explicit `sign_up` may reuse that email after cleanup succeeds. This policy
+is implemented only by the plugin's HTTP overrides; direct Passwordless SDK
+calls bypass it.
 Canonical email metadata is considered during account lookup and automatic
 linking, so a stale email retained by Apple or another provider cannot restore a
 replaced Passwordless email.

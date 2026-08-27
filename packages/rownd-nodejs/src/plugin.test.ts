@@ -2696,8 +2696,9 @@ describe("rownd-nodejs plugin", () => {
       },
     );
 
-    it("requires passwordless intent when explicit sign-up flow is enabled", async () => {
-      const createCodePOST = vi.fn();
+    it("delegates missing passwordless intent as a legacy combined flow", async () => {
+      const createCodePOST = vi.fn().mockResolvedValue({ status: "OK" });
+      vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([]);
       const passwordlessApis = init({
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
@@ -2711,12 +2712,63 @@ describe("rownd-nodejs plugin", () => {
           options: { req: makeRequest({}) },
           userContext: {},
         } as any),
-      ).resolves.toEqual({
-        status: "GENERAL_ERROR",
-        message: "intent must be sign_in or sign_up",
-      });
-      expect(createCodePOST).not.toHaveBeenCalled();
+      ).resolves.toEqual({ status: "OK" });
+      expect(createCodePOST).toHaveBeenCalledOnce();
     });
+
+    it("delegates missing consume intent as a legacy combined flow", async () => {
+      const consumeCodePOST = vi
+        .fn()
+        .mockResolvedValue({ status: "RESTART_FLOW_ERROR" });
+      const passwordlessApis = init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        appConfig: { auth: { useExplicitSignUpFlow: true } },
+      }).overrideMap.passwordless.apis({ consumeCodePOST });
+
+      await expect(
+        passwordlessApis.consumeCodePOST!({
+          tenantId: "public",
+          preAuthSessionId: "missing-intent",
+          options: {
+            req: makeRequest({}),
+            recipeImplementation: {
+              listCodesByPreAuthSessionId: vi.fn().mockResolvedValue(undefined),
+            },
+          },
+          userContext: {},
+        } as any),
+      ).resolves.toEqual({ status: "RESTART_FLOW_ERROR" });
+      expect(consumeCodePOST).toHaveBeenCalledOnce();
+    });
+
+    it.each([null, "login", 1])(
+      "rejects supplied invalid consume intent %s",
+      async (intent) => {
+        const consumeCodePOST = vi.fn();
+        const passwordlessApis = init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+          appConfig: { auth: { useExplicitSignUpFlow: true } },
+        }).overrideMap.passwordless.apis({ consumeCodePOST });
+
+        await expect(
+          passwordlessApis.consumeCodePOST!({
+            tenantId: "public",
+            preAuthSessionId: "invalid-intent",
+            options: {
+              req: makeRequest({}, { intent }),
+              recipeImplementation: {},
+            },
+            userContext: {},
+          } as any),
+        ).resolves.toEqual({
+          status: "GENERAL_ERROR",
+          message: "intent must be sign_in or sign_up",
+        });
+        expect(consumeCodePOST).not.toHaveBeenCalled();
+      },
+    );
 
     it.each([null, "login", 1])(
       "rejects invalid passwordless intent %s",
@@ -8492,13 +8544,13 @@ describe("rownd-nodejs plugin", () => {
         ).toHaveLength(1);
       });
 
-      it("allows HTTP sign-in-or-sign-up without intent when explicit flow is disabled", async () => {
+      it("allows legacy HTTP sign-in-or-sign-up without intent when explicit flow is enabled", async () => {
         const passwordlessLinks: string[] = [];
         const { server: s, port } = await setup(
           coreConnectionURI,
           {
             appConfig: {
-              auth: { useExplicitSignUpFlow: false },
+              auth: { useExplicitSignUpFlow: true },
               signInMethods: [{ method: "email" }],
             },
           },
@@ -8521,6 +8573,18 @@ describe("rownd-nodejs plugin", () => {
         await expect(
           SuperTokens.listUsersByAccountInfo("public", { email }, false),
         ).resolves.toHaveLength(1);
+
+        const existingCreateCode = await requestPasswordlessCode(email);
+        await expect(existingCreateCode.json()).resolves.toMatchObject({
+          status: "OK",
+        });
+        const existingConsume = await consumePasswordlessLink(
+          passwordlessLinks[1],
+        );
+        await expect(existingConsume.json()).resolves.toMatchObject({
+          status: "OK",
+          createdNewRecipeUser: false,
+        });
       });
 
       it("retires a verified email for explicit HTTP sign-in and allows sign-up reuse", async () => {
@@ -8601,13 +8665,6 @@ describe("rownd-nodejs plugin", () => {
             false,
           ),
         ).resolves.toEqual([]);
-
-        const missingIntent = await requestPasswordlessCode(oldEmail);
-        await expect(missingIntent.json()).resolves.toEqual({
-          status: "GENERAL_ERROR",
-          message: "intent must be sign_in or sign_up",
-        });
-        expect(createCode).not.toHaveBeenCalled();
 
         const signUp = await requestPasswordlessCode(oldEmail, "sign_up");
         await expect(signUp.json()).resolves.toMatchObject({ status: "OK" });

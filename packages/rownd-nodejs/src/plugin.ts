@@ -602,7 +602,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   appVariantId,
                 );
                 if (
-                  (explicitFlowEnabled || hasIntent) &&
+                  hasIntent &&
                   intent !== "sign_in" &&
                   intent !== "sign_up"
                 ) {
@@ -797,16 +797,17 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   appVariantId,
                 );
                 const body = await input.options.req.getJSONBody();
-                const requestedIntent =
-                  body !== null && typeof body === "object"
-                    ? (body as { intent?: unknown }).intent
-                    : undefined;
+                const hasIntent =
+                  body !== null && typeof body === "object" && "intent" in body;
+                const requestedIntent = hasIntent
+                  ? (body as { intent?: unknown }).intent
+                  : undefined;
                 const explicitFlowEnabled = isExplicitSignUpFlowEnabled(
                   resolved.config,
                   appVariantId,
                 );
                 if (
-                  explicitFlowEnabled &&
+                  hasIntent &&
                   requestedIntent !== "sign_in" &&
                   requestedIntent !== "sign_up"
                 ) {
@@ -815,6 +816,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     message: "intent must be sign_in or sign_up",
                   };
                 }
+                const explicitIntent =
+                  explicitFlowEnabled &&
+                  (requestedIntent === "sign_in" ||
+                    requestedIntent === "sign_up")
+                    ? requestedIntent
+                    : undefined;
                 let consumedEmail: string | undefined;
                 try {
                   const device =
@@ -870,11 +877,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                           recipeUserId,
                           email: consumedEmail,
                           tenantId: input.tenantId,
-                          intent:
-                            requestedIntent === "sign_in" ||
-                            requestedIntent === "sign_up"
-                              ? requestedIntent
-                              : undefined,
+                          intent: explicitIntent,
                           createdNewRecipeUser: response.createdNewRecipeUser,
                           userContext: operationContext,
                         });
