@@ -48,7 +48,7 @@ export type RowndPendingVerification = {
   verificationRecipeUserId?: string;
   status?: "PENDING" | "COMMITTING";
   targetCanonicalRecipeUserId?: string;
-  cleanupRecipeUserIds?: string[];
+  retiredMethods?: Array<{ recipeUserId: string; email: string }>;
 };
 
 export type RowndCompatUserResponse = {

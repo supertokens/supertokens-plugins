@@ -160,23 +160,27 @@ email preserves the phone method. Verification must use the same active session
 that started the change. Completion revokes every account session and returns a
 replacement for that initiating session.
 
-Completion marks the pending operation `COMMITTING` before changing login
-methods. Once replaced-email cleanup starts, failures roll forward: the target
-method is retained, all sessions are revoked, and `COMMITTING` metadata remains
-with the target and cleanup recipe-user IDs required for reconciliation. A later
-authenticated profile-email update first retries that idempotent cleanup and
-canonical finalization. Already removed or disassociated methods are treated as
-complete. Invalid reconciliation state fails closed without deleting methods.
-Replacement-session failure does not restore removed login aliases.
+Completion creates and links the verified target method, then publishes it as
+canonical together with a `COMMITTING` cleanup plan. Once replaced-email cleanup
+starts, failures roll forward: the target method is retained, all sessions are
+revoked, and `COMMITTING` metadata retains `retiredMethods` entries containing
+`{ recipeUserId, email }` for reconciliation. A later authenticated profile-email
+update retries that idempotent cleanup. Successful cleanup removes the
+`COMMITTING` state; no permanent tombstone remains. Already removed or
+disassociated methods are treated as complete. Invalid reconciliation state
+fails closed without deleting methods. Replacement-session failure does not
+restore removed login aliases.
 
-When `auth.useExplicitSignUpFlow` is enabled, Rownd Hub sends `intent` as
-`sign_in` or `sign_up` in Passwordless create-code requests. An explicit
-`sign_in` for an identifier with no tenant account returns
-`SIGN_IN_UP_NOT_ALLOWED` with reason `No existing account found`. `sign_up` and
-requests without an intent retain standard Passwordless behavior. Canonical
-email metadata is considered during account lookup and automatic linking, so a
-stale email retained by Apple or another provider cannot restore a replaced
-Passwordless email.
+When `auth.useExplicitSignUpFlow` is enabled, Passwordless create-code and
+consume-code HTTP requests require `intent: "sign_in" | "sign_up"`; missing or
+invalid intent returns `GENERAL_ERROR`. Explicit `sign_in` accepts only the
+tenant's canonical email. A retired old email returns `SIGN_IN_UP_NOT_ALLOWED`
+with reason `No existing account found` before a code is sent. Explicit
+`sign_up` may reuse that email after cleanup succeeds. This policy is implemented
+only by the plugin's HTTP overrides; direct Passwordless SDK calls bypass it.
+Canonical email metadata is considered during account lookup and automatic
+linking, so a stale email retained by Apple or another provider cannot restore a
+replaced Passwordless email.
 
 Successful update responses that start verification include
 `email_verification_pending: true`. The returned profile continues to contain

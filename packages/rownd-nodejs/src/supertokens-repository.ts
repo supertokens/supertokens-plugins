@@ -1357,9 +1357,9 @@ export async function startPendingEmailVerification(input: {
   }
   let metadata = await getRawUserMetadata(user.id, input.userContext);
 
-  const committingVerifications = getPendingVerifications(metadata).filter(
-    (verification) =>
-      verification.field === "email" && verification.status === "COMMITTING",
+  const committingVerifications = getCommittingEmailPlansForTenant(
+    metadata,
+    input.tenantId,
   );
   if (committingVerifications.length > 0) {
     try {
@@ -1440,7 +1440,9 @@ export async function startPendingEmailVerification(input: {
   ).data.email;
   const pendingVerifications = getPendingVerifications(metadata);
   const pendingEmailVerifications = pendingVerifications.filter(
-    (pendingVerification) => pendingVerification.field === "email",
+    (pendingVerification) =>
+      pendingVerification.field === "email" &&
+      (pendingVerification.tenantId ?? PUBLIC_TENANT_ID) === input.tenantId,
   );
   if (
     typeof currentEmail === "string" &&
@@ -1474,7 +1476,10 @@ export async function startPendingEmailVerification(input: {
       : {
         ...metadata,
         rownd_pending_verification: pendingVerifications.filter(
-          (pendingVerification) => pendingVerification.field !== "email",
+          (pendingVerification) =>
+            pendingVerification.field !== "email" ||
+              (pendingVerification.tenantId ?? PUBLIC_TENANT_ID) !==
+                input.tenantId,
         ),
       };
     if (pendingEmailVerifications.length > 0 || currentPasswordlessMethod) {
@@ -1526,7 +1531,10 @@ export async function startPendingEmailVerification(input: {
       ...metadata,
       rownd_pending_verification: [
         ...pendingVerifications.filter(
-          (pendingVerification) => pendingVerification.field !== "email",
+          (pendingVerification) =>
+            pendingVerification.field !== "email" ||
+            (pendingVerification.tenantId ?? PUBLIC_TENANT_ID) !==
+              input.tenantId,
         ),
         pendingVerification,
       ],
@@ -1571,6 +1579,7 @@ export async function startPendingEmailVerification(input: {
     await removePendingEmailVerification(
       input.userId,
       input.pendingVerificationId,
+      input.tenantId,
       input.userContext,
     );
     throw error;
@@ -1608,6 +1617,7 @@ export async function completePendingEmailVerification(input: {
       await removePendingEmailVerification(
         input.pendingUserId,
         input.pendingVerificationId,
+        tenantId,
         input.userContext,
       );
     }
@@ -1646,6 +1656,7 @@ export async function completePendingEmailVerification(input: {
         await removePendingEmailVerification(
           userId,
           input.pendingVerificationId,
+          tenantId,
           input.userContext,
         );
       }
@@ -1686,8 +1697,6 @@ export async function completePendingEmailVerification(input: {
     );
   }
 
-  type CompletionPhase = "PENDING" | "COMMITTING" | "COMPLETED";
-  let completionPhase: CompletionPhase = "PENDING";
   let rollbackCredentialChange: (() => Promise<void>) | undefined;
   let destructiveCleanupStarted = false;
   try {
@@ -1758,13 +1767,6 @@ export async function completePendingEmailVerification(input: {
       );
     }
 
-    completionPhase = "COMMITTING";
-    await markPendingEmailVerificationStatus(
-      userId,
-      pendingVerification.id,
-      "COMMITTING",
-      input.userContext,
-    );
     if (
       !(await Session.revokeSession(initiatingSessionHandle, input.userContext))
     ) {
@@ -1790,10 +1792,14 @@ export async function completePendingEmailVerification(input: {
     );
     const committingVerification = getPendingVerifications(
       committingMetadata,
-    ).find((verification) => verification.field === "email");
+    ).find(
+      (verification) =>
+        verification.id === pendingVerification.id &&
+        (verification.tenantId ?? PUBLIC_TENANT_ID) === tenantId,
+    );
     if (
       committingVerification?.id !== pendingVerification.id ||
-      committingVerification.status !== "COMMITTING"
+      (committingVerification.status ?? "PENDING") !== "PENDING"
     ) {
       return rejectInactivePendingEmailVerification(
         userId,
@@ -1815,6 +1821,12 @@ export async function completePendingEmailVerification(input: {
     if (passwordlessUser.status !== "OK") {
       throw emailOwnershipConflict();
     }
+    await assertVerifiedPasswordlessTarget({
+      recipeUserId: passwordlessUser.recipeUserId.getAsString(),
+      email: normalizedEmail,
+      tenantId,
+      userContext: input.userContext,
+    });
     const targetMethodBeforeSignInUp = currentUser.loginMethods.find(
       (method) =>
         method.recipeUserId.getAsString() ===
@@ -1889,7 +1901,18 @@ export async function completePendingEmailVerification(input: {
     );
     const canonicalEmailRecipeUserId =
       passwordlessUser.recipeUserId.getAsString();
-    const replacedEmailMethods = currentUser.loginMethods.filter(
+    const linkedUser = await SuperTokens.getUser(userId, input.userContext);
+    await assertVerifiedPasswordlessTarget({
+      recipeUserId: canonicalEmailRecipeUserId,
+      email: normalizedEmail,
+      tenantId,
+      expectedUserId: userId,
+      userContext: input.userContext,
+    });
+    if (!linkedUser) {
+      throw new Error("verified email target owner is missing");
+    }
+    const replacedEmailMethods = linkedUser.loginMethods.filter(
       (method) =>
         method.recipeId === "passwordless" &&
         method.email !== undefined &&
@@ -1901,15 +1924,19 @@ export async function completePendingEmailVerification(input: {
       ...pendingVerification,
       status: "COMMITTING",
       targetCanonicalRecipeUserId: canonicalEmailRecipeUserId,
-      cleanupRecipeUserIds: [
-        ...new Set(
-          replacedEmailMethods.map((method) =>
+      retiredMethods: [
+        ...new Map(
+          replacedEmailMethods.map((method) => [
             method.recipeUserId.getAsString(),
-          ),
-        ),
+            {
+              recipeUserId: method.recipeUserId.getAsString(),
+              email: normalizeEmail(method.email!),
+            },
+          ]),
+        ).values(),
       ],
     };
-    await persistPendingEmailReconciliationPlan(
+    await publishEmailReplacementPlan(
       userId,
       committingPlan,
       input.userContext,
@@ -1918,11 +1945,8 @@ export async function completePendingEmailVerification(input: {
     await reconcileCommittingEmailVerification({
       userId,
       pendingVerification: committingPlan,
-      revokeSessions: true,
       userContext: input.userContext,
     });
-    completionPhase = "COMPLETED";
-
     return {
       userId,
       recipeUserId: passwordlessUser.recipeUserId,
@@ -1948,58 +1972,33 @@ export async function completePendingEmailVerification(input: {
         "email change cleanup incomplete; account reconciliation is required",
       );
     }
-    if (completionPhase !== "COMPLETED") {
-      let rollbackError: unknown;
-      if (rollbackCredentialChange) {
-        try {
-          await rollbackCredentialChange();
-        } catch (caughtRollbackError) {
-          rollbackError = caughtRollbackError;
-        }
-      }
-      if (completionPhase === "COMMITTING") {
-        await Promise.allSettled([
-          Session.revokeAllSessionsForUser(
-            userId,
-            true,
-            undefined,
-            input.userContext,
-          ),
-        ]);
-      }
-      if (rollbackError !== undefined) {
-        logDebugMessage(
-          `Email change rollback failed for user ${userId}; reconciliation required. Error: ${getErrorMessage(rollbackError)}`,
-        );
-        throw new RowndEmailChangeError(
-          "CONFLICT",
-          409,
-          "email change rollback failed; account reconciliation is required",
-        );
-      }
-      const [cleanupResult] = await Promise.allSettled([
-        cleanupPendingEmailVerification(
-          userId,
-          pendingVerification,
-          input.recipeUserId,
-          normalizedEmail,
-          input.userContext,
-        ),
-      ]);
-      if (
-        completionPhase === "COMMITTING" &&
-        cleanupResult.status === "rejected"
-      ) {
-        await Promise.allSettled([
-          markPendingEmailVerificationStatus(
-            userId,
-            pendingVerification.id,
-            "PENDING",
-            input.userContext,
-          ),
-        ]);
+    let rollbackError: unknown;
+    if (rollbackCredentialChange) {
+      try {
+        await rollbackCredentialChange();
+      } catch (caughtRollbackError) {
+        rollbackError = caughtRollbackError;
       }
     }
+    if (rollbackError !== undefined) {
+      logDebugMessage(
+        `Email change rollback failed for user ${userId}; reconciliation required. Error: ${getErrorMessage(rollbackError)}`,
+      );
+      throw new RowndEmailChangeError(
+        "CONFLICT",
+        409,
+        "email change rollback failed; account reconciliation is required",
+      );
+    }
+    await Promise.allSettled([
+      cleanupPendingEmailVerification(
+        userId,
+        pendingVerification,
+        input.recipeUserId,
+        normalizedEmail,
+        input.userContext,
+      ),
+    ]);
     throw error;
   }
 }
@@ -2198,6 +2197,31 @@ async function assertEmailAvailableForUser(
   }
 }
 
+async function assertVerifiedPasswordlessTarget(input: {
+  recipeUserId: string;
+  email: string;
+  tenantId: string;
+  expectedUserId?: string;
+  userContext?: Record<string, any>;
+}) {
+  const owner = await SuperTokens.getUser(input.recipeUserId, input.userContext);
+  const method = owner?.loginMethods.find(
+    (candidate) =>
+      candidate.recipeUserId.getAsString() === input.recipeUserId,
+  );
+  if (
+    !owner ||
+    (input.expectedUserId !== undefined && owner.id !== input.expectedUserId) ||
+    !method ||
+    method.recipeId !== "passwordless" ||
+    !method.verified ||
+    !method.tenantIds.includes(input.tenantId) ||
+    normalizeEmail(method.email ?? "") !== normalizeEmail(input.email)
+  ) {
+    throw new Error("verified email target is invalid");
+  }
+}
+
 function emailOwnershipConflict() {
   return new RowndEmailChangeError(
     "CONFLICT",
@@ -2285,6 +2309,7 @@ function getCanonicalEmailRecipeUserId(
 async function removePendingEmailVerification(
   userId: string,
   pendingVerificationId: string,
+  tenantId: string,
   userContext?: Record<string, any>,
 ) {
   const metadata = await getRawUserMetadata(userId, userContext);
@@ -2292,35 +2317,16 @@ async function removePendingEmailVerification(
     userId,
     {
       rownd_pending_verification: getPendingVerifications(metadata).filter(
-        (verification) => verification.id !== pendingVerificationId,
-      ),
-    },
-    userContext,
-  );
-}
-
-async function markPendingEmailVerificationStatus(
-  userId: string,
-  pendingVerificationId: string,
-  status: NonNullable<RowndPendingVerification["status"]>,
-  userContext?: Record<string, any>,
-) {
-  const metadata = await getRawUserMetadata(userId, userContext);
-  await updatePrimaryUserMetadata(
-    userId,
-    {
-      rownd_pending_verification: getPendingVerifications(metadata).map(
         (verification) =>
-          verification.id === pendingVerificationId
-            ? { ...verification, status }
-            : verification,
+          verification.id !== pendingVerificationId ||
+          (verification.tenantId ?? PUBLIC_TENANT_ID) !== tenantId,
       ),
     },
     userContext,
   );
 }
 
-async function persistPendingEmailReconciliationPlan(
+async function publishEmailReplacementPlan(
   userId: string,
   plan: RowndPendingVerification,
   userContext?: Record<string, any>,
@@ -2329,7 +2335,53 @@ async function persistPendingEmailReconciliationPlan(
   let found = false;
   const pendingVerifications = getPendingVerifications(metadata).map(
     (verification) => {
-      if (verification.id !== plan.id) return verification;
+      if (
+        verification.id !== plan.id ||
+        (verification.tenantId ?? PUBLIC_TENANT_ID) !==
+          (plan.tenantId ?? PUBLIC_TENANT_ID)
+      ) {
+        return verification;
+      }
+      found = true;
+      return plan;
+    },
+  );
+  if (!found || !plan.targetCanonicalRecipeUserId) {
+    throw new Error("pending email reconciliation state is missing");
+  }
+
+  await updatePrimaryUserMetadata(
+    userId,
+    {
+      ...buildVerifiedEmailMetadata(
+        metadata,
+        userId,
+        normalizeEmail(plan.value),
+        plan.targetCanonicalRecipeUserId,
+        plan.tenantId ?? PUBLIC_TENANT_ID,
+      ),
+      rownd_pending_verification: pendingVerifications,
+    },
+    userContext,
+  );
+}
+
+async function updateEmailReplacementPlan(
+  userId: string,
+  plan: RowndPendingVerification,
+  userContext?: Record<string, any>,
+) {
+  const metadata = await getRawUserMetadata(userId, userContext);
+  let found = false;
+  const pendingVerifications = getPendingVerifications(metadata).map(
+    (verification) => {
+      if (
+        verification.id !== plan.id ||
+        (verification.tenantId ?? PUBLIC_TENANT_ID) !==
+          (plan.tenantId ?? PUBLIC_TENANT_ID)
+      ) {
+        return verification;
+      }
       found = true;
       return plan;
     },
@@ -2344,41 +2396,94 @@ async function persistPendingEmailReconciliationPlan(
   );
 }
 
-async function reconcileCommittingEmailVerification(input: {
+function getCommittingEmailPlansForTenant(
+  metadata: RowndMetadata,
+  tenantId: string,
+) {
+  const pendingVerifications = metadata.rownd_pending_verification;
+  if (pendingVerifications === undefined) return [];
+  if (!Array.isArray(pendingVerifications)) {
+    throw new Error("pending email reconciliation state is invalid");
+  }
+
+  const tenantVerifications = pendingVerifications.filter(
+    (verification) =>
+      isRecord(verification) &&
+      (verification.tenantId ?? PUBLIC_TENANT_ID) === tenantId,
+  );
+  const committingPlans = tenantVerifications.flatMap((verification) => {
+    const isCommittingLike =
+      isRecord(verification) &&
+      (verification.status === "COMMITTING" ||
+        "targetCanonicalRecipeUserId" in verification ||
+        "retiredMethods" in verification);
+    if (!isCommittingLike) return [];
+    if (
+      !isPendingVerification(verification) ||
+      verification.field !== "email" ||
+      verification.status !== "COMMITTING" ||
+      (verification.tenantId !== undefined &&
+        (typeof verification.tenantId !== "string" ||
+          !verification.tenantId)) ||
+      (verification.purpose !== "UPDATE_PASSWORDLESS" &&
+        verification.purpose !== "ADD_PASSWORDLESS") ||
+      !normalizeEmail(verification.value) ||
+      typeof verification.targetCanonicalRecipeUserId !== "string" ||
+      !verification.targetCanonicalRecipeUserId ||
+      !Array.isArray(verification.retiredMethods) ||
+      verification.retiredMethods.some(
+        (method) =>
+          !isRecord(method) ||
+          typeof method.recipeUserId !== "string" ||
+          !method.recipeUserId ||
+          typeof method.email !== "string" ||
+          !normalizeEmail(method.email) ||
+          method.recipeUserId === verification.targetCanonicalRecipeUserId,
+      ) ||
+      new Set(verification.retiredMethods.map((method) => method.recipeUserId))
+        .size !== verification.retiredMethods.length
+    ) {
+      throw new Error("pending email reconciliation state is invalid");
+    }
+    return [verification];
+  });
+
+  return committingPlans;
+}
+
+async function validateCommittingEmailVerificationPlan(input: {
   userId: string;
-  pendingVerification: RowndPendingVerification;
-  revokeSessions?: boolean;
-  deleteOrphanedCleanupMethods?: boolean;
+  pendingVerificationId: string;
+  tenantId: string;
+  expectedTargetRecipeUserId: string;
+  expectedEmail: string;
   userContext?: Record<string, any>;
 }) {
   const metadata = await getRawUserMetadata(input.userId, input.userContext);
-  const pendingVerifications = getPendingVerifications(metadata);
-  const pendingVerification = pendingVerifications.find(
-    (verification) => verification.id === input.pendingVerification.id,
+  const committingEmailPlans = getCommittingEmailPlansForTenant(
+    metadata,
+    input.tenantId,
+  );
+  const pendingVerification = committingEmailPlans.find(
+    (verification) => verification.id === input.pendingVerificationId,
   );
   const tenantId = pendingVerification?.tenantId ?? PUBLIC_TENANT_ID;
-  const committingEmailPlans = pendingVerifications.filter(
-    (verification) =>
-      verification.field === "email" &&
-      verification.status === "COMMITTING" &&
-      (verification.tenantId ?? PUBLIC_TENANT_ID) === tenantId,
-  );
   const targetRecipeUserId = pendingVerification?.targetCanonicalRecipeUserId;
-  const cleanupRecipeUserIds = pendingVerification?.cleanupRecipeUserIds;
+  const retiredMethods = pendingVerification?.retiredMethods;
   const normalizedEmail = pendingVerification
     ? normalizeEmail(pendingVerification.value)
     : "";
   if (
     !pendingVerification ||
+    tenantId !== input.tenantId ||
     committingEmailPlans.length !== 1 ||
     pendingVerification.field !== "email" ||
     pendingVerification.status !== "COMMITTING" ||
     !normalizedEmail ||
     !targetRecipeUserId ||
-    !Array.isArray(cleanupRecipeUserIds) ||
-    cleanupRecipeUserIds.some((id) => typeof id !== "string" || !id) ||
-    new Set(cleanupRecipeUserIds).size !== cleanupRecipeUserIds.length ||
-    cleanupRecipeUserIds.includes(targetRecipeUserId)
+    targetRecipeUserId !== input.expectedTargetRecipeUserId ||
+    normalizedEmail !== normalizeEmail(input.expectedEmail) ||
+    !Array.isArray(retiredMethods)
   ) {
     throw new Error("pending email reconciliation state is invalid");
   }
@@ -2406,81 +2511,140 @@ async function reconcileCommittingEmailVerification(input: {
     throw new Error("pending email reconciliation target is invalid");
   }
 
-  const currentCleanupRecipeUserIds = user.loginMethods
-    .filter(
-      (method) =>
-        method.recipeId === "passwordless" &&
-        method.email !== undefined &&
-        method.tenantIds.includes(tenantId) &&
-        method.recipeUserId.getAsString() !== targetRecipeUserId,
-    )
-    .map((method) => method.recipeUserId.getAsString());
-  const updatedCleanupRecipeUserIds = [
-    ...new Set([...cleanupRecipeUserIds, ...currentCleanupRecipeUserIds]),
-  ];
-
-  for (const cleanupRecipeUserId of updatedCleanupRecipeUserIds) {
+  for (const retiredMethod of retiredMethods) {
     const owner = await SuperTokens.getUser(
-      cleanupRecipeUserId,
+      retiredMethod.recipeUserId,
       input.userContext,
     );
     if (!owner) continue;
     const method = owner.loginMethods.find(
       (candidate) =>
-        candidate.recipeUserId.getAsString() === cleanupRecipeUserId,
+        candidate.recipeUserId.getAsString() === retiredMethod.recipeUserId,
     );
     if (!method || !method.tenantIds.includes(tenantId)) continue;
     if (
       owner.id !== input.userId ||
       method.recipeId !== "passwordless" ||
-      !method.email
+      !method.email ||
+      normalizeEmail(method.email) !== normalizeEmail(retiredMethod.email)
     ) {
       throw new Error("pending email reconciliation cleanup method is invalid");
     }
   }
 
-  if (updatedCleanupRecipeUserIds.length !== cleanupRecipeUserIds.length) {
-    await persistPendingEmailReconciliationPlan(
+  return {
+    pendingVerification,
+    tenantId,
+    targetRecipeUserId,
+    retiredMethods,
+    normalizedEmail,
+    user,
+  };
+}
+
+async function reconcileCommittingEmailVerification(input: {
+  userId: string;
+  pendingVerification: RowndPendingVerification;
+  userContext?: Record<string, any>;
+}) {
+  let {
+    pendingVerification,
+    tenantId,
+    targetRecipeUserId,
+    retiredMethods,
+    normalizedEmail,
+    user,
+  } = await validateCommittingEmailVerificationPlan({
+    userId: input.userId,
+    pendingVerificationId: input.pendingVerification.id,
+    tenantId: input.pendingVerification.tenantId ?? PUBLIC_TENANT_ID,
+    expectedTargetRecipeUserId:
+      input.pendingVerification.targetCanonicalRecipeUserId ?? "",
+    expectedEmail: input.pendingVerification.value,
+    userContext: input.userContext,
+  });
+
+  const completeRetiredMethods = [
+    ...new Map(
+      [
+        ...retiredMethods,
+        ...user.loginMethods
+          .filter(
+            (method) =>
+              method.recipeId === "passwordless" &&
+              method.email !== undefined &&
+              method.tenantIds.includes(tenantId) &&
+              method.recipeUserId.getAsString() !== targetRecipeUserId,
+          )
+          .map((method) => ({
+            recipeUserId: method.recipeUserId.getAsString(),
+            email: normalizeEmail(method.email!),
+          })),
+      ].map((method) => [method.recipeUserId, method]),
+    ).values(),
+  ];
+  if (
+    JSON.stringify(completeRetiredMethods) !== JSON.stringify(retiredMethods)
+  ) {
+    pendingVerification = {
+      ...pendingVerification,
+      retiredMethods: completeRetiredMethods,
+    };
+    await updateEmailReplacementPlan(
       input.userId,
-      {
-        ...pendingVerification,
-        cleanupRecipeUserIds: updatedCleanupRecipeUserIds,
-      },
+      pendingVerification,
       input.userContext,
     );
+    retiredMethods = completeRetiredMethods;
   }
 
-  for (const cleanupRecipeUserId of updatedCleanupRecipeUserIds) {
+  for (const { email } of retiredMethods) {
+    const revocation = await Passwordless.revokeAllCodes({
+      email,
+      tenantId,
+      userContext: input.userContext,
+    });
+    if (revocation.status !== "OK") {
+      throw new Error("Failed to revoke replaced email passwordless codes");
+    }
+  }
+
+  for (const { recipeUserId } of retiredMethods) {
     await removePasswordlessMethodFromTenant(
-      cleanupRecipeUserId,
+      recipeUserId,
       tenantId,
       input.userId,
-      input.deleteOrphanedCleanupMethods !== false,
-      input.userContext,
-    );
-  }
-  if (input.revokeSessions) {
-    await Session.revokeAllSessionsForUser(
-      input.userId,
       true,
-      undefined,
       input.userContext,
     );
   }
+  await Session.revokeAllSessionsForUser(
+    input.userId,
+    true,
+    undefined,
+    input.userContext,
+  );
 
   const finalMetadata = await getRawUserMetadata(
     input.userId,
     input.userContext,
   );
-  const finalPendingVerification = getPendingVerifications(finalMetadata).find(
+  const finalCommittingPlans = getCommittingEmailPlansForTenant(
+    finalMetadata,
+    tenantId,
+  );
+  const finalPendingVerification = finalCommittingPlans.find(
     (verification) => verification.id === pendingVerification.id,
   );
   if (
+    finalCommittingPlans.length !== 1 ||
     finalPendingVerification?.status !== "COMMITTING" ||
+    (finalPendingVerification.tenantId ?? PUBLIC_TENANT_ID) !== tenantId ||
+    normalizeEmail(finalPendingVerification.value) !== normalizedEmail ||
     finalPendingVerification.targetCanonicalRecipeUserId !==
       targetRecipeUserId ||
-    JSON.stringify(finalPendingVerification.cleanupRecipeUserIds) !==
-      JSON.stringify(updatedCleanupRecipeUserIds)
+    JSON.stringify(finalPendingVerification.retiredMethods) !==
+      JSON.stringify(retiredMethods)
   ) {
     throw new Error("pending email reconciliation state changed");
   }
@@ -2523,18 +2687,21 @@ async function reconcileCommittingEmailVerification(input: {
       normalizedEmail,
       targetRecipeUserId,
       tenantId,
+      undefined,
+      pendingVerification.id,
     ),
     input.userContext,
   );
 }
 
-export async function recoverCommittingEmailVerificationForSignIn(input: {
+export async function prepareEmailForPasswordlessAuth(input: {
   email: string;
   tenantId: string;
+  reconcileTarget: boolean;
   userContext?: Record<string, any>;
 }) {
   const normalizedEmail = normalizeEmail(input.email);
-  if (!normalizedEmail) return false;
+  if (!normalizedEmail) return { status: "ALLOW" } as const;
 
   const users = await SuperTokens.listUsersByAccountInfo(
     input.tenantId,
@@ -2542,56 +2709,235 @@ export async function recoverCommittingEmailVerificationForSignIn(input: {
     true,
     input.userContext,
   );
-  const recoveryCandidates: Array<{
-    userId: string;
-    pendingVerification: RowndPendingVerification;
-  }> = [];
+  const matchingPlans: Array<
+    | {
+        userId: string;
+        pendingVerification: RowndPendingVerification;
+        disposition: "TARGET";
+      }
+    | { userId: string; disposition: "CLEANUP" }
+  > = [];
 
   for (const user of users) {
-    const ownsTargetMethod = user.loginMethods.some(
+    const listedMatchingMethods = user.loginMethods.filter(
       (method) =>
         method.recipeId === "passwordless" &&
-        method.verified &&
         method.tenantIds.includes(input.tenantId) &&
         normalizeEmail(method.email ?? "") === normalizedEmail,
     );
-    if (!ownsTargetMethod) continue;
+    if (listedMatchingMethods.length === 0) continue;
 
     const metadata = await getRawUserMetadata(user.id, input.userContext);
-    const committingPlans = getPendingVerifications(metadata).filter(
-      (verification) =>
-        verification.field === "email" &&
-        verification.status === "COMMITTING" &&
-        (verification.tenantId ?? PUBLIC_TENANT_ID) === input.tenantId,
+    const committingPlans = getCommittingEmailPlansForTenant(
+      metadata,
+      input.tenantId,
     );
     if (committingPlans.length > 1) {
       throw new Error("multiple email reconciliation plans found");
     }
     const committingPlan = committingPlans[0];
-    if (
-      committingPlan &&
-      normalizeEmail(committingPlan.value) === normalizedEmail
-    ) {
-      recoveryCandidates.push({
+    if (!committingPlan) {
+      const canonicalRecipeUserId = getCanonicalEmailRecipeUserId(
+        metadata,
+        input.tenantId,
+      );
+      const tenantEmailMethods = user.loginMethods.filter(
+        (method) =>
+          method.recipeId === "passwordless" &&
+          method.email !== undefined &&
+          method.tenantIds.includes(input.tenantId),
+      );
+      if (!canonicalRecipeUserId && tenantEmailMethods.length > 1) {
+        throw new Error(
+          "multiple passwordless email methods found without a canonical method",
+        );
+      }
+      if (
+        canonicalRecipeUserId &&
+        !tenantEmailMethods.some(
+          (method) =>
+            method.recipeUserId.getAsString() === canonicalRecipeUserId,
+        )
+      ) {
+        throw new Error("canonical passwordless email method is invalid");
+      }
+      if (
+        canonicalRecipeUserId &&
+        listedMatchingMethods.some(
+          (method) =>
+            method.recipeUserId.getAsString() !== canonicalRecipeUserId,
+        )
+      ) {
+        matchingPlans.push({
+          userId: user.id,
+          disposition: "CLEANUP",
+        });
+      }
+      continue;
+    }
+
+    const validatedPlan = await validateCommittingEmailVerificationPlan({
+      userId: user.id,
+      pendingVerificationId: committingPlan.id,
+      tenantId: input.tenantId,
+      expectedTargetRecipeUserId:
+        committingPlan.targetCanonicalRecipeUserId ?? "",
+      expectedEmail: committingPlan.value,
+      userContext: input.userContext,
+    });
+    const matchingRecipeUserIds = validatedPlan.user.loginMethods
+      .filter(
+        (method) =>
+          method.recipeId === "passwordless" &&
+          method.tenantIds.includes(input.tenantId) &&
+          normalizeEmail(method.email ?? "") === normalizedEmail,
+      )
+      .map((method) => method.recipeUserId.getAsString());
+    if (matchingRecipeUserIds.length === 0) {
+      throw new Error("passwordless auth method changed during preparation");
+    }
+
+    const retiredRecipeUserIds = new Set(
+      validatedPlan.retiredMethods.map((method) => method.recipeUserId),
+    );
+    const matchesCleanupMethod = matchingRecipeUserIds.some((recipeUserId) =>
+      retiredRecipeUserIds.has(recipeUserId),
+    );
+    const matchesTargetMethod = matchingRecipeUserIds.includes(
+      validatedPlan.targetRecipeUserId,
+    );
+    if (matchesCleanupMethod) {
+      matchingPlans.push({
         userId: user.id,
-        pendingVerification: committingPlan,
+        disposition: "CLEANUP",
+      });
+    } else if (
+      matchesTargetMethod &&
+      validatedPlan.normalizedEmail === normalizedEmail
+    ) {
+      matchingPlans.push({
+        userId: user.id,
+        pendingVerification: validatedPlan.pendingVerification,
+        disposition: "TARGET",
       });
     }
   }
 
-  if (recoveryCandidates.length === 0) return false;
-  if (recoveryCandidates.length > 1) {
+  if (matchingPlans.length === 0) return { status: "ALLOW" } as const;
+  if (matchingPlans.length > 1) {
     throw new Error("multiple matching email reconciliation accounts found");
   }
-  const recoveryCandidate = recoveryCandidates[0];
-  if (!recoveryCandidate) return false;
+  const matchingPlan = matchingPlans[0];
+  if (!matchingPlan) return { status: "ALLOW" } as const;
+  if (matchingPlan.disposition === "CLEANUP") {
+    return { status: "REJECT_CLEANUP_METHOD" } as const;
+  }
 
-  await reconcileCommittingEmailVerification({
-    ...recoveryCandidate,
-    deleteOrphanedCleanupMethods: false,
-    userContext: input.userContext,
-  });
-  return true;
+  if (input.reconcileTarget) {
+    await reconcileCommittingEmailVerification({
+      userId: matchingPlan.userId,
+      pendingVerification: matchingPlan.pendingVerification,
+      userContext: input.userContext,
+    });
+  }
+  return { status: "ALLOW" } as const;
+}
+
+export async function validateConsumedPasswordlessEmail(input: {
+  userId: string;
+  recipeUserId: string;
+  email: string;
+  tenantId: string;
+  intent?: "sign_in" | "sign_up";
+  createdNewRecipeUser: boolean;
+  userContext?: Record<string, any>;
+}) {
+  const owner = await SuperTokens.getUser(input.recipeUserId, input.userContext);
+  const method = owner?.loginMethods.find(
+    (candidate) =>
+      candidate.recipeUserId.getAsString() === input.recipeUserId,
+  );
+  if (
+    !owner ||
+    owner.id !== input.userId ||
+    !method ||
+    method.recipeId !== "passwordless" ||
+    !method.tenantIds.includes(input.tenantId) ||
+    normalizeEmail(method.email ?? "") !== normalizeEmail(input.email)
+  ) {
+    return { status: "REJECT" } as const;
+  }
+
+  if (input.createdNewRecipeUser) {
+    const isStandaloneMethod =
+      input.intent !== "sign_in" &&
+      owner.id === input.recipeUserId &&
+      owner.loginMethods.length === 1;
+    return isStandaloneMethod
+      ? ({ status: "ALLOW" } as const)
+      : ({ status: "REJECT_AND_DELETE" } as const);
+  }
+
+  const metadata = await getRawUserMetadata(owner.id, input.userContext);
+  const committingPlans = getCommittingEmailPlansForTenant(
+    metadata,
+    input.tenantId,
+  );
+  if (committingPlans.length > 1) {
+    throw new Error("multiple email reconciliation plans found");
+  }
+  const committingTarget = committingPlans[0]?.targetCanonicalRecipeUserId;
+  if (committingTarget) {
+    return committingTarget === input.recipeUserId
+      ? ({ status: "ALLOW" } as const)
+      : ({ status: "REJECT" } as const);
+  }
+
+  const canonicalRecipeUserId = getCanonicalEmailRecipeUserId(
+    metadata,
+    input.tenantId,
+  );
+  if (canonicalRecipeUserId) {
+    return canonicalRecipeUserId === input.recipeUserId
+      ? ({ status: "ALLOW" } as const)
+      : ({ status: "REJECT" } as const);
+  }
+
+  const tenantEmailMethods = owner.loginMethods.filter(
+    (candidate) =>
+      candidate.recipeId === "passwordless" &&
+      candidate.email !== undefined &&
+      candidate.tenantIds.includes(input.tenantId),
+  );
+  return tenantEmailMethods.length === 1 &&
+    tenantEmailMethods[0]?.recipeUserId.getAsString() === input.recipeUserId
+    ? ({ status: "ALLOW" } as const)
+    : ({ status: "REJECT" } as const);
+}
+
+export async function deleteRejectedConsumedPasswordlessUser(input: {
+  userId: string;
+  recipeUserId: string;
+  tenantId: string;
+  email: string;
+  userContext?: Record<string, any>;
+}) {
+  const owner = await SuperTokens.getUser(input.recipeUserId, input.userContext);
+  const method = owner?.loginMethods[0];
+  if (
+    !owner ||
+    owner.id !== input.userId ||
+    owner.id !== input.recipeUserId ||
+    owner.loginMethods.length !== 1 ||
+    method?.recipeUserId.getAsString() !== input.recipeUserId ||
+    method.recipeId !== "passwordless" ||
+    method.tenantIds.length !== 1 ||
+    method.tenantIds[0] !== input.tenantId ||
+    normalizeEmail(method.email ?? "") !== normalizeEmail(input.email)
+  ) {
+    throw new Error("refusing to delete non-standalone consumed user");
+  }
+  await SuperTokens.deleteUser(input.recipeUserId, false, input.userContext);
 }
 
 function emailReconciliationRequired() {
@@ -2634,6 +2980,7 @@ async function cleanupPendingEmailVerification(
   await removePendingEmailVerification(
     userId,
     pendingVerification.id,
+    pendingVerification.tenantId ?? PUBLIC_TENANT_ID,
     userContext,
   );
 }
@@ -2645,6 +2992,7 @@ function buildVerifiedEmailMetadata(
   canonicalEmailRecipeUserId: string,
   tenantId: string,
   fallbackOriginalRowndUser?: RowndMetadata["original_rownd_user"],
+  completedPendingVerificationId?: string,
 ): RowndMetadata {
   const compatibilityUser = metadata.original_rownd_user ??
     fallbackOriginalRowndUser ?? {
@@ -2676,7 +3024,15 @@ function buildVerifiedEmailMetadata(
       [tenantId]: canonicalEmailRecipeUserId,
     },
     rownd_pending_verification: getPendingVerifications(metadata).filter(
-      (verification) => verification.field !== "email",
+      (verification) =>
+        completedPendingVerificationId
+          ? !(
+            verification.field === "email" &&
+              verification.id === completedPendingVerificationId &&
+              (verification.tenantId ?? PUBLIC_TENANT_ID) === tenantId
+          )
+          : verification.field !== "email" ||
+            (verification.tenantId ?? PUBLIC_TENANT_ID) !== tenantId,
     ),
   };
 }
