@@ -843,8 +843,8 @@ export type RowndUserMetadata = {
     status?: "PENDING" | "COMMITTING";
     /** Identifies the verified Passwordless method that cleanup must make canonical. */
     targetCanonicalRecipeUserId?: string;
-    /** Lists superseded Passwordless methods that durable cleanup must remove from the tenant. */
-    cleanupRecipeUserIds?: string[];
+    /** Temporarily records superseded methods until their codes and tenant associations are removed. */
+    retiredMethods?: Array<{ recipeUserId: string; email: string }>;
   }>;
   /** Allows application metadata to coexist with the plugin's reserved Rownd fields. */
   [key: string]: unknown;

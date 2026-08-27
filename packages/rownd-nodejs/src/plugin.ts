@@ -53,11 +53,13 @@ import { setRowndClient } from "./rownd-repository";
 import {
   buildRowndSessionAndAnonymousClaims,
   completePendingEmailVerification,
+  deleteRejectedConsumedPasswordlessUser,
   addPendingEmailVerificationMarker,
   getPendingEmailVerificationIdFromUserContext,
+  prepareEmailForPasswordlessAuth,
   recordRowndAppVariantForUser,
-  recoverCommittingEmailVerificationForSignIn,
   resolvePendingEmailVerificationToken,
+  validateConsumedPasswordlessEmail,
 } from "./supertokens-repository";
 import {
   getRequestedAppVariantIdFromRequest,
@@ -87,6 +89,7 @@ import {
 const DISABLED_MIGRATION_ROWND_APP_KEY = "migration-disabled";
 const PENDING_EMAIL_VERIFICATION_SESSION_ERROR =
   "email change verification requires the initiating session";
+const INACTIVE_PASSWORDLESS_EMAIL_REASON = "No existing account found";
 
 async function refreshRowndSessionClaims(input: {
   session: SessionContainerInterface;
@@ -594,42 +597,61 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const intent = hasIntent
                   ? (body as { intent?: unknown }).intent
                   : undefined;
-                if (hasIntent && intent !== "sign_in" && intent !== "sign_up") {
+                const explicitFlowEnabled = isExplicitSignUpFlowEnabled(
+                  resolved.config,
+                  appVariantId,
+                );
+                if (
+                  (explicitFlowEnabled || hasIntent) &&
+                  intent !== "sign_in" &&
+                  intent !== "sign_up"
+                ) {
                   return {
                     status: "GENERAL_ERROR" as const,
                     message: "intent must be sign_in or sign_up",
                   };
                 }
-                if (
-                  intent === "sign_in" &&
-                  isExplicitSignUpFlowEnabled(resolved.config, appVariantId)
-                ) {
-                  if ("email" in input) {
-                    try {
-                      await recoverCommittingEmailVerificationForSignIn({
-                        email: input.email,
-                        tenantId: input.tenantId,
-                        userContext: resolved.userContext,
-                      });
-                    } catch (error) {
-                      logDebugMessage(
-                        `Explicit sign-in email reconciliation failed. Error: ${error instanceof Error ? error.message : String(error)}`,
-                      );
-                      return {
-                        status: "GENERAL_ERROR" as const,
-                        message:
-                          "Account email reconciliation failed; please retry sign-in.",
-                      };
-                    }
+                const usesExplicitAuthIntent =
+                  (intent === "sign_in" || intent === "sign_up") &&
+                  explicitFlowEnabled;
+                if ("email" in input) {
+                  let preparation: Awaited<
+                    ReturnType<typeof prepareEmailForPasswordlessAuth>
+                  >;
+                  try {
+                    preparation = await prepareEmailForPasswordlessAuth({
+                      email: input.email,
+                      tenantId: input.tenantId,
+                      reconcileTarget: usesExplicitAuthIntent,
+                      userContext: resolved.userContext,
+                    });
+                  } catch (error) {
+                    logDebugMessage(
+                      `Explicit passwordless email preparation failed. Error: ${error instanceof Error ? error.message : String(error)}`,
+                    );
+                    return {
+                      status: "GENERAL_ERROR" as const,
+                      message:
+                        "Account email reconciliation failed; please retry.",
+                    };
                   }
-
-                  if (!(await doesRowndAccountInfoExist({
-                    tenantId: input.tenantId,
-                    ...("email" in input
-                      ? { email: input.email }
-                      : { phoneNumber: input.phoneNumber }),
-                    userContext: resolved.userContext,
-                  }))) {
+                  if (preparation.status === "REJECT_CLEANUP_METHOD") {
+                    return {
+                      status: "SIGN_IN_UP_NOT_ALLOWED" as const,
+                      reason: INACTIVE_PASSWORDLESS_EMAIL_REASON,
+                    };
+                  }
+                }
+                if (usesExplicitAuthIntent && intent === "sign_in") {
+                  if (
+                    !(await doesRowndAccountInfoExist({
+                      tenantId: input.tenantId,
+                      ...("email" in input
+                        ? { email: input.email }
+                        : { phoneNumber: input.phoneNumber }),
+                      userContext: resolved.userContext,
+                    }))
+                  ) {
                     return {
                       status: "SIGN_IN_UP_NOT_ALLOWED" as const,
                       reason: "No existing account found",
@@ -666,12 +688,82 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     userContext: input.userContext,
                   },
                 );
-                const operationContext = createDerivedUserContext(
-                  resolved.userContext,
+                const requestContextValues =
                   getRowndPasswordlessRequestContextValues(
                     input.options.req,
                     resolved.config,
-                  ),
+                  );
+                try {
+                  const [deviceById, deviceByPreAuthSessionId] =
+                    await Promise.all([
+                      input.options.recipeImplementation.listCodesByDeviceId({
+                        deviceId: input.deviceId,
+                        tenantId: input.tenantId,
+                        userContext: resolved.userContext,
+                      }),
+                      input.options.recipeImplementation.listCodesByPreAuthSessionId(
+                        {
+                          preAuthSessionId: input.preAuthSessionId,
+                          tenantId: input.tenantId,
+                          userContext: resolved.userContext,
+                        },
+                      ),
+                    ]);
+                  const hasEmail =
+                    typeof deviceById?.email === "string" &&
+                    deviceById.email.length > 0;
+                  const hasPhoneNumber =
+                    typeof deviceById?.phoneNumber === "string" &&
+                    deviceById.phoneNumber.length > 0;
+                  if (
+                    !deviceById ||
+                    !deviceByPreAuthSessionId ||
+                    deviceById.preAuthSessionId !== input.preAuthSessionId ||
+                    deviceByPreAuthSessionId.preAuthSessionId !==
+                      input.preAuthSessionId ||
+                    deviceByPreAuthSessionId.email !== deviceById.email ||
+                    deviceByPreAuthSessionId.phoneNumber !==
+                      deviceById.phoneNumber ||
+                    hasEmail === hasPhoneNumber
+                  ) {
+                    throw new Error(
+                      "Passwordless resend device state is invalid",
+                    );
+                  }
+                  if (hasEmail) {
+                    const preparation = await prepareEmailForPasswordlessAuth({
+                      email: deviceById.email!,
+                      tenantId: input.tenantId,
+                      reconcileTarget: false,
+                      userContext: resolved.userContext,
+                    });
+                    if (preparation.status === "REJECT_CLEANUP_METHOD") {
+                      const revocation =
+                        await input.options.recipeImplementation.revokeCode({
+                          preAuthSessionId: input.preAuthSessionId,
+                          tenantId: input.tenantId,
+                          userContext: resolved.userContext,
+                        });
+                      if (revocation.status !== "OK") {
+                        throw new Error(
+                          "Passwordless resend device revocation failed",
+                        );
+                      }
+                      return { status: "RESTART_FLOW_ERROR" as const };
+                    }
+                  }
+                } catch (error) {
+                  logDebugMessage(
+                    `Passwordless resend authorization failed. Error: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                  return {
+                    status: "GENERAL_ERROR" as const,
+                    message: "Unable to resend passwordless code.",
+                  };
+                }
+                const operationContext = createDerivedUserContext(
+                  resolved.userContext,
+                  requestContextValues,
                 );
                 return originalImplementation.resendCodePOST({
                   ...input,
@@ -704,6 +796,59 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   resolved.config,
                   appVariantId,
                 );
+                const body = await input.options.req.getJSONBody();
+                const requestedIntent =
+                  body !== null && typeof body === "object"
+                    ? (body as { intent?: unknown }).intent
+                    : undefined;
+                const explicitFlowEnabled = isExplicitSignUpFlowEnabled(
+                  resolved.config,
+                  appVariantId,
+                );
+                if (
+                  explicitFlowEnabled &&
+                  requestedIntent !== "sign_in" &&
+                  requestedIntent !== "sign_up"
+                ) {
+                  return {
+                    status: "GENERAL_ERROR" as const,
+                    message: "intent must be sign_in or sign_up",
+                  };
+                }
+                let consumedEmail: string | undefined;
+                try {
+                  const device =
+                    await input.options.recipeImplementation.listCodesByPreAuthSessionId(
+                      {
+                        preAuthSessionId: input.preAuthSessionId,
+                        tenantId: input.tenantId,
+                        userContext: resolved.userContext,
+                      },
+                    );
+                  if (device?.email) {
+                    consumedEmail = device.email;
+                    const preparation = await prepareEmailForPasswordlessAuth({
+                      email: device.email,
+                      tenantId: input.tenantId,
+                      reconcileTarget: false,
+                      userContext: resolved.userContext,
+                    });
+                    if (preparation.status === "REJECT_CLEANUP_METHOD") {
+                      return {
+                        status: "SIGN_IN_UP_NOT_ALLOWED" as const,
+                        reason: INACTIVE_PASSWORDLESS_EMAIL_REASON,
+                      };
+                    }
+                  }
+                } catch (error) {
+                  logDebugMessage(
+                    `Passwordless consume authorization failed. Error: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                  return {
+                    status: "GENERAL_ERROR" as const,
+                    message: "Unable to complete passwordless authentication.",
+                  };
+                }
                 const operationContext = createDerivedUserContext(
                   resolved.userContext,
                   { rowndAppVariantId: appVariantId },
@@ -714,6 +859,53 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 });
 
                 if (response.status === "OK") {
+                  if (consumedEmail) {
+                    try {
+                      const recipeUserId = response.session
+                        .getRecipeUserId()
+                        .getAsString();
+                      const disposition =
+                        await validateConsumedPasswordlessEmail({
+                          userId: response.user.id,
+                          recipeUserId,
+                          email: consumedEmail,
+                          tenantId: input.tenantId,
+                          intent:
+                            requestedIntent === "sign_in" ||
+                            requestedIntent === "sign_up"
+                              ? requestedIntent
+                              : undefined,
+                          createdNewRecipeUser: response.createdNewRecipeUser,
+                          userContext: operationContext,
+                        });
+                      if (disposition.status !== "ALLOW") {
+                        await response.session.revokeSession(operationContext);
+                        if (disposition.status === "REJECT_AND_DELETE") {
+                          await deleteRejectedConsumedPasswordlessUser({
+                            userId: response.user.id,
+                            recipeUserId,
+                            email: consumedEmail,
+                            tenantId: input.tenantId,
+                            userContext: operationContext,
+                          });
+                        }
+                        return {
+                          status: "SIGN_IN_UP_NOT_ALLOWED" as const,
+                          reason: INACTIVE_PASSWORDLESS_EMAIL_REASON,
+                        };
+                      }
+                    } catch (error) {
+                      await response.session.revokeSession(operationContext);
+                      logDebugMessage(
+                        `Passwordless consumed identity validation failed. Error: ${error instanceof Error ? error.message : String(error)}`,
+                      );
+                      return {
+                        status: "GENERAL_ERROR" as const,
+                        message:
+                          "Unable to complete passwordless authentication.",
+                      };
+                    }
+                  }
                   await recordRowndAppVariantForUser(
                     response.user.id,
                     appVariantId,
