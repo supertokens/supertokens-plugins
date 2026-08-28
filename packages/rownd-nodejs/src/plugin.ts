@@ -190,6 +190,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           string | undefined;
         const oauthLoginChallenge = input?.userContext
           ?.rowndOAuthLoginChallenge as string | undefined;
+        const authIntent = input?.userContext?.rowndAuthIntent as
+          | "sign_in"
+          | "sign_up"
+          | undefined;
         const clientDomainKey =
           clientDomain ??
           (displayContext === "mobile_app" ? "mobile" : "browser");
@@ -206,6 +210,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           ...(typeof redirectToPath === "string" ? { redirectToPath } : {}),
           ...(typeof oauthLoginChallenge === "string"
             ? { oauthLoginChallenge }
+            : {}),
+          ...(authIntent === "sign_in" || authIntent === "sign_up"
+            ? { rowndAuthIntent: authIntent }
             : {}),
           ...additionalParams,
         };
@@ -661,10 +668,15 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
 
                 const operationContext = createDerivedUserContext(
                   resolved.userContext,
-                  getRowndPasswordlessRequestContextValues(
-                    input.options.req,
-                    resolved.config,
-                  ),
+                  {
+                    ...getRowndPasswordlessRequestContextValues(
+                      input.options.req,
+                      resolved.config,
+                    ),
+                    ...(usesExplicitAuthIntent
+                      ? { rowndAuthIntent: intent }
+                      : {}),
+                  },
                 );
                 return originalImplementation.createCodePOST({
                   ...input,
@@ -693,6 +705,31 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     input.options.req,
                     resolved.config,
                   );
+                const body = await input.options.req.getJSONBody();
+                const hasIntent =
+                  body !== null && typeof body === "object" && "intent" in body;
+                const requestedIntent = hasIntent
+                  ? (body as { intent?: unknown }).intent
+                  : undefined;
+                if (
+                  hasIntent &&
+                  requestedIntent !== "sign_in" &&
+                  requestedIntent !== "sign_up"
+                ) {
+                  return {
+                    status: "GENERAL_ERROR" as const,
+                    message: "intent must be sign_in or sign_up",
+                  };
+                }
+                const explicitIntent =
+                  isExplicitSignUpFlowEnabled(
+                    resolved.config,
+                    getRequestedAppVariantIdFromRequest(input.options.req),
+                  ) &&
+                  (requestedIntent === "sign_in" ||
+                    requestedIntent === "sign_up")
+                    ? requestedIntent
+                    : undefined;
                 try {
                   const [deviceById, deviceByPreAuthSessionId] =
                     await Promise.all([
@@ -763,7 +800,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 }
                 const operationContext = createDerivedUserContext(
                   resolved.userContext,
-                  requestContextValues,
+                  {
+                    ...requestContextValues,
+                    ...(explicitIntent
+                      ? { rowndAuthIntent: explicitIntent }
+                      : {}),
+                  },
                 );
                 return originalImplementation.resendCodePOST({
                   ...input,

@@ -386,13 +386,16 @@ auth: {
   to `true`.
 - `useExplicitSignUpFlow?: boolean`: separates sign-in and sign-up intent flows.
   Defaults to `false`. When enabled, a valid `intent: "sign_in" | "sign_up"` on
-  the plugin's Passwordless create-code and consume-code HTTP overrides opts into
-  explicit behavior. Omission preserves legacy combined sign-in/up behavior; a
+  the plugin's Passwordless create-code, resend-code, and consume-code HTTP
+  overrides opts into explicit behavior. The plugin carries validated intent
+  through `userContext` and adds it to generated magic links as
+  `rowndAuthIntent`. Omission preserves legacy combined sign-in/up behavior; a
   supplied malformed value returns `GENERAL_ERROR`. `sign_in` accepts only the
   tenant's canonical email, so a retired email returns `SIGN_IN_UP_NOT_ALLOWED`
   with reason `No existing account found` before a code is sent. `sign_up` may
-  reuse the email after cleanup succeeds. Direct Passwordless SDK calls bypass
-  these HTTP overrides.
+  reuse the email after cleanup succeeds. `rowndAuthIntent` is propagation
+  metadata, not cryptographic proof or authorization. Direct Passwordless SDK
+  calls bypass these HTTP overrides.
 - `allowUnverifiedUsers?: boolean`: allows users to close the passwordless
   waiting or verification UI. It does not alter backend verification or session
   policy. Defaults to `false`.

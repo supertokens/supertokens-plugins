@@ -1387,6 +1387,7 @@ describe("rownd-nodejs plugin", () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
+        appConfig: { auth: { useExplicitSignUpFlow: true } },
       };
       const plugin = init(pluginConfig) as any;
       plugin.routeHandlers(
@@ -1406,6 +1407,7 @@ describe("rownd-nodejs plugin", () => {
           rowndAppVariantId: "variant_123",
           rowndDisplayContext: "mobile_app",
           rowndRedirectToPath: "/profile.html",
+          rowndAuthIntent: "sign_up",
         },
       });
 
@@ -1426,6 +1428,7 @@ describe("rownd-nodejs plugin", () => {
       expect(rewrittenUrl.searchParams.get("redirectToPath")).toBe(
         "/profile.html",
       );
+      expect(rewrittenUrl.searchParams.get("rowndAuthIntent")).toBe("sign_up");
     });
 
     it("preserves passwordless user input codes while rewriting combined delivery links", async () => {
@@ -2937,6 +2940,7 @@ describe("rownd-nodejs plugin", () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
+        appConfig: { auth: { useExplicitSignUpFlow: true } },
       };
       const userContext = {};
       const originalCreateCodePOST = vi.fn().mockImplementation((input) => {
@@ -2944,6 +2948,7 @@ describe("rownd-nodejs plugin", () => {
         expect(input.userContext).toMatchObject({
           rowndDisplayContext: "browser",
           rowndClientDomain: "browser_local",
+          rowndAuthIntent: "sign_up",
         });
         return { status: "OK" };
       });
@@ -2955,10 +2960,13 @@ describe("rownd-nodejs plugin", () => {
 
       await passwordlessApis.createCodePOST({
         options: {
-          req: makeRequest({
-            rownd_display_context: "browser",
-            rownd_client_domain: "browser_local",
-          }),
+          req: makeRequest(
+            {
+              rownd_display_context: "browser",
+              rownd_client_domain: "browser_local",
+            },
+            { intent: "sign_up" },
+          ),
         },
         userContext,
       });
@@ -3006,6 +3014,7 @@ describe("rownd-nodejs plugin", () => {
             id: "app_xyz",
             name: "Variant App",
             variant: { id: "variant_123", name: "Variant App" },
+            auth: { useExplicitSignUpFlow: true },
           },
         },
       };
@@ -3018,6 +3027,7 @@ describe("rownd-nodejs plugin", () => {
           rowndClientDomain: "mobile",
           rowndAppVariantId: "variant_123",
           rowndOAuthLoginChallenge: "login_challenge_123",
+          rowndAuthIntent: "sign_in",
         });
         return { status: "OK" };
       });
@@ -3041,13 +3051,16 @@ describe("rownd-nodejs plugin", () => {
         deviceId: "device-id",
         preAuthSessionId: "pre-auth-session",
         options: {
-          req: makeRequest({
-            rownd_display_context: "mobile_app",
-            rownd_redirect_to_path: "/profile",
-            rownd_client_domain: "mobile",
-            app_variant_id: "variant_123",
-            rownd_oauth_login_challenge: "login_challenge_123",
-          }),
+          req: makeRequest(
+            {
+              rownd_display_context: "mobile_app",
+              rownd_redirect_to_path: "/profile",
+              rownd_client_domain: "mobile",
+              app_variant_id: "variant_123",
+              rownd_oauth_login_challenge: "login_challenge_123",
+            },
+            { intent: "sign_in" },
+          ),
           recipeImplementation,
         },
         userContext,

@@ -198,8 +198,14 @@ The plugin receives a link from SuperTokens, rewrites it to a Rownd Hub route, a
 For example, with `clientDomains.mobile: "https://my-app.rownd-hub.supertokens.com"`, a mobile magic link becomes a Universal Link URL such as:
 
 ```text
-https://my-app.rownd-hub.supertokens.com/account/login?preAuthSessionId=...&tenantId=public&appKey=...&apiDomain=...&apiBasePath=/auth&displayContext=mobile_app
+https://my-app.rownd-hub.supertokens.com/account/login?preAuthSessionId=...&tenantId=public&appKey=...&apiDomain=...&apiBasePath=/auth&displayContext=mobile_app&rowndAuthIntent=sign_up
 ```
+
+When explicit sign-up flow is enabled, generated passwordless links include the
+validated intent as `rowndAuthIntent`. Link rewriting and custom delivery must
+preserve it with the original SuperTokens and Hub bootstrap parameters. The
+marker transports intent to the Hub; it is not cryptographic proof and must not
+replace normal token or authorization validation.
 
 The value selected from `clientDomains` is based on client context:
 
@@ -215,8 +221,10 @@ End-to-end, the setup works like this:
 1. The client SDK configures a `clientDomain` key or uses the mobile Hub loader.
 2. The Hub keeps that as `clientDomain` or infers `displayContext=mobile_app`.
 3. The Hub appends `rownd_client_domain` and `rownd_display_context` to SuperTokens passwordless requests.
-4. The plugin stores those values in `userContext` before SuperTokens creates the code.
-5. The plugin email delivery overrides rewrite the generated link to the selected frontend base URL.
+4. For explicit flows, the Hub sends validated intent on create-code and resend-code requests.
+5. The plugin stores the request context and intent in `userContext` before SuperTokens creates or resends the code.
+6. The plugin email delivery overrides rewrite the generated link and add validated intent as `rowndAuthIntent`.
+7. The Hub restores that marker for callback consumption and removes it during URL cleanup.
 
 ### CORS
 
