@@ -80,6 +80,7 @@ import {
   prepareEmailForPasswordlessAuth,
   recordRowndAppVariantForUser,
   startPendingEmailVerification,
+  validateConsumedPasswordlessEmail,
 } from "./supertokens-repository";
 import {
   associateUserLoginMethodsToTenant,
@@ -1046,6 +1047,44 @@ describe("rownd-nodejs plugin", () => {
           {},
         ] as any),
       ).resolves.toBeUndefined();
+    });
+  });
+
+  describe("validateConsumedPasswordlessEmail", () => {
+    it("rejects explicit sign-in when the new Passwordless method is linked only to an unrelated email method", async () => {
+      const consumedRecipeUserId = {
+        getAsString: () => "consumed-passwordless-method",
+      };
+      vi.spyOn(SuperTokens, "getUser").mockResolvedValue({
+        id: "existing-primary",
+        loginMethods: [
+          {
+            recipeId: "passwordless",
+            recipeUserId: consumedRecipeUserId,
+            email: "consumed@example.com",
+            verified: true,
+            tenantIds: ["public"],
+          },
+          {
+            recipeId: "thirdparty",
+            recipeUserId: { getAsString: () => "unrelated-google-method" },
+            email: "unrelated@example.com",
+            verified: true,
+            tenantIds: ["public"],
+            thirdParty: { id: "google", userId: "unrelated-google-user" },
+          },
+        ],
+      } as never);
+
+      await expect(
+        validateConsumedPasswordlessEmail({
+          userId: "existing-primary",
+          email: "consumed@example.com",
+          tenantId: "public",
+          intent: "sign_in",
+          createdNewRecipeUser: true,
+        }),
+      ).resolves.toEqual({ status: "REJECT" });
     });
   });
 
@@ -8630,6 +8669,75 @@ describe("rownd-nodejs plugin", () => {
         expect(linkedUser?.loginMethods).toContainEqual(
           expect.objectContaining({ recipeId: "passwordless", email }),
         );
+      });
+
+      it("allows first explicit email sign-in to a verified Google-only primary account", async () => {
+        const passwordlessLinks: string[] = [];
+        const { server: s, port } = await setup(
+          importCoreConnectionURI,
+          {
+            appConfig: {
+              auth: { useExplicitSignUpFlow: true },
+              signInMethods: [{ method: "email" }],
+            },
+          },
+          { passwordlessLinks },
+        );
+        server = s;
+        testPORT = port;
+        const email = `google-only-explicit-sign-in-${randomUUID()}@example.com`;
+        const thirdParty = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          `google-only-${randomUUID()}`,
+          email,
+          true,
+        );
+        expect(thirdParty.status).toBe("OK");
+        if (thirdParty.status !== "OK") {
+          throw new Error("failed to create Google user");
+        }
+        const primary = await AccountLinking.createPrimaryUser(
+          thirdParty.recipeUserId,
+        );
+        expect(primary.status).toBe("OK");
+        if (primary.status !== "OK") {
+          throw new Error("failed to create primary user");
+        }
+        expect(primary.user.isPrimaryUser).toBe(true);
+        expect(primary.user.loginMethods).toEqual([
+          expect.objectContaining({
+            recipeId: "thirdparty",
+            email,
+            verified: true,
+            thirdParty: expect.objectContaining({ id: "google" }),
+          }),
+        ]);
+
+        const createCode = await requestPasswordlessCode(email, "sign_in");
+        await expect(createCode.json()).resolves.toMatchObject({ status: "OK" });
+        expect(passwordlessLinks).toHaveLength(1);
+
+        const consume = await consumePasswordlessLink(
+          passwordlessLinks[0],
+          "sign_in",
+        );
+        await expect(consume.json()).resolves.toMatchObject({
+          status: "OK",
+          createdNewRecipeUser: true,
+        });
+        expect(consume.headers.get("st-access-token")).toBeTruthy();
+
+        const linkedUser = await SuperTokens.getUser(primary.user.id);
+        expect(linkedUser?.id).toBe(primary.user.id);
+        expect(
+          linkedUser?.loginMethods.filter(
+            (method) =>
+              method.recipeId === "passwordless" &&
+              method.tenantIds.includes("public") &&
+              method.email?.toLowerCase() === email.toLowerCase(),
+          ),
+        ).toHaveLength(1);
       });
 
       it("retires a verified email for explicit HTTP sign-in and allows sign-up reuse", async () => {

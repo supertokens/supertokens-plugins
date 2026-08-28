@@ -2922,9 +2922,20 @@ export async function validateConsumedPasswordlessEmail(input: {
 
   if (input.createdNewRecipeUser) {
     if (owner.id !== recipeUserId) {
-      return input.intent === "sign_in"
-        ? ({ status: "REJECT" } as const)
-        : ({ status: "ALLOW" } as const);
+      const isLinkedToVerifiedMatchingEmailMethod = owner.loginMethods.some(
+        (candidate) =>
+          candidate.recipeUserId.getAsString() !== recipeUserId &&
+          candidate.tenantIds.includes(input.tenantId) &&
+          candidate.verified &&
+          normalizeEmail(candidate.email ?? "") === normalizeEmail(input.email),
+      );
+      if (
+        input.intent === "sign_in" &&
+        !isLinkedToVerifiedMatchingEmailMethod
+      ) {
+        return { status: "REJECT" } as const;
+      }
+      return { status: "ALLOW" } as const;
     }
     const isStandaloneMethod =
       input.intent !== "sign_in" && owner.loginMethods.length === 1;
