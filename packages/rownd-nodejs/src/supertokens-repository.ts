@@ -2898,37 +2898,39 @@ export async function prepareEmailForPasswordlessAuth(input: {
 
 export async function validateConsumedPasswordlessEmail(input: {
   userId: string;
-  recipeUserId: string;
   email: string;
   tenantId: string;
   intent?: "sign_in" | "sign_up";
   createdNewRecipeUser: boolean;
   userContext?: Record<string, any>;
 }) {
-  const owner = await SuperTokens.getUser(input.recipeUserId, input.userContext);
-  const method = owner?.loginMethods.find(
-    (candidate) =>
-      candidate.recipeUserId.getAsString() === input.recipeUserId,
-  );
-  if (
-    !owner ||
-    owner.id !== input.userId ||
-    !method ||
-    method.recipeId !== "passwordless" ||
-    !method.tenantIds.includes(input.tenantId) ||
-    normalizeEmail(method.email ?? "") !== normalizeEmail(input.email)
-  ) {
+  const owner = await SuperTokens.getUser(input.userId, input.userContext);
+  if (!owner || owner.id !== input.userId) {
     return { status: "REJECT" } as const;
   }
+  const matchingMethods = owner.loginMethods.filter(
+    (candidate) =>
+      candidate.recipeId === "passwordless" &&
+      candidate.tenantIds.includes(input.tenantId) &&
+      normalizeEmail(candidate.email ?? "") === normalizeEmail(input.email),
+  );
+  const method = matchingMethods[0];
+  if (matchingMethods.length !== 1 || !method) {
+    return { status: "REJECT" } as const;
+  }
+  const recipeUserId = method.recipeUserId.getAsString();
 
   if (input.createdNewRecipeUser) {
+    if (owner.id !== recipeUserId) {
+      return input.intent === "sign_in"
+        ? ({ status: "REJECT" } as const)
+        : ({ status: "ALLOW" } as const);
+    }
     const isStandaloneMethod =
-      input.intent !== "sign_in" &&
-      owner.id === input.recipeUserId &&
-      owner.loginMethods.length === 1;
+      input.intent !== "sign_in" && owner.loginMethods.length === 1;
     return isStandaloneMethod
       ? ({ status: "ALLOW" } as const)
-      : ({ status: "REJECT_AND_DELETE" } as const);
+      : ({ status: "REJECT_AND_DELETE", recipeUserId } as const);
   }
 
   const metadata = await getRawUserMetadata(owner.id, input.userContext);
@@ -2941,7 +2943,7 @@ export async function validateConsumedPasswordlessEmail(input: {
   }
   const committingTarget = committingPlans[0]?.targetCanonicalRecipeUserId;
   if (committingTarget) {
-    return committingTarget === input.recipeUserId
+    return committingTarget === recipeUserId
       ? ({ status: "ALLOW" } as const)
       : ({ status: "REJECT" } as const);
   }
@@ -2951,7 +2953,7 @@ export async function validateConsumedPasswordlessEmail(input: {
     input.tenantId,
   );
   if (canonicalRecipeUserId) {
-    return canonicalRecipeUserId === input.recipeUserId
+    return canonicalRecipeUserId === recipeUserId
       ? ({ status: "ALLOW" } as const)
       : ({ status: "REJECT" } as const);
   }
@@ -2963,7 +2965,7 @@ export async function validateConsumedPasswordlessEmail(input: {
       candidate.tenantIds.includes(input.tenantId),
   );
   return tenantEmailMethods.length === 1 &&
-    tenantEmailMethods[0]?.recipeUserId.getAsString() === input.recipeUserId
+    tenantEmailMethods[0]?.recipeUserId.getAsString() === recipeUserId
     ? ({ status: "ALLOW" } as const)
     : ({ status: "REJECT" } as const);
 }

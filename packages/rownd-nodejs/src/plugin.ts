@@ -910,13 +910,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 if (response.status === "OK") {
                   if (consumedEmail) {
                     try {
-                      const recipeUserId = response.session
-                        .getRecipeUserId()
-                        .getAsString();
                       const disposition =
                         await validateConsumedPasswordlessEmail({
                           userId: response.user.id,
-                          recipeUserId,
                           email: consumedEmail,
                           tenantId: input.tenantId,
                           intent: explicitIntent,
@@ -928,7 +924,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                         if (disposition.status === "REJECT_AND_DELETE") {
                           await deleteRejectedConsumedPasswordlessUser({
                             userId: response.user.id,
-                            recipeUserId,
+                            recipeUserId: disposition.recipeUserId,
                             email: consumedEmail,
                             tenantId: input.tenantId,
                             userContext: operationContext,

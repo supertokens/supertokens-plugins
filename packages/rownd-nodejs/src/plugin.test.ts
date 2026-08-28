@@ -8600,6 +8600,38 @@ describe("rownd-nodejs plugin", () => {
         });
       });
 
+      it("allows a consumed Passwordless method linked to an instant user", async () => {
+        const passwordlessLinks: string[] = [];
+        const { server: s, port } = await setup(
+          coreConnectionURI,
+          undefined,
+          { passwordlessLinks },
+        );
+        server = s;
+        testPORT = port;
+        const email = "instant-passwordless-link@example.com";
+        const instantSession = await createGuestSession("instant");
+
+        const createCode = await requestPasswordlessCode(email);
+        await expect(createCode.json()).resolves.toMatchObject({ status: "OK" });
+        expect(passwordlessLinks).toHaveLength(1);
+
+        const consume = await consumePasswordlessLink(
+          passwordlessLinks[0],
+          undefined,
+          instantSession.accessToken,
+        );
+        await expect(consume.json()).resolves.toMatchObject({
+          status: "OK",
+          createdNewRecipeUser: true,
+        });
+
+        const linkedUser = await SuperTokens.getUser(instantSession.userId);
+        expect(linkedUser?.loginMethods).toContainEqual(
+          expect.objectContaining({ recipeId: "passwordless", email }),
+        );
+      });
+
       it("retires a verified email for explicit HTTP sign-in and allows sign-up reuse", async () => {
         const emailVerificationLinks: string[] = [];
         const passwordlessLinks: string[] = [];
@@ -12721,6 +12753,7 @@ describe("rownd-nodejs plugin", () => {
     async function consumePasswordlessLink(
       link: string,
       intent?: "sign_in" | "sign_up",
+      accessToken?: string,
     ) {
       const url = new URL(link);
       return fetch(`http://localhost:${testPORT}/auth/signinup/code/consume`, {
@@ -12730,12 +12763,14 @@ describe("rownd-nodejs plugin", () => {
           "content-type": "application/json",
           "fdi-version": "1.18",
           "st-auth-mode": "header",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         },
         body: JSON.stringify({
           preAuthSessionId: url.searchParams.get("preAuthSessionId"),
           linkCode:
             url.searchParams.get("linkCode") || url.hash.replace(/^#/, ""),
           ...(intent ? { intent } : {}),
+          ...(accessToken ? { shouldTryLinkingWithSessionUser: true } : {}),
         }),
       });
     }
