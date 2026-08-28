@@ -2696,8 +2696,9 @@ describe("rownd-nodejs plugin", () => {
       },
     );
 
-    it("requires passwordless intent when explicit sign-up flow is enabled", async () => {
-      const createCodePOST = vi.fn();
+    it("delegates missing passwordless intent as a legacy combined flow", async () => {
+      const createCodePOST = vi.fn().mockResolvedValue({ status: "OK" });
+      vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([]);
       const passwordlessApis = init({
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
@@ -2711,12 +2712,63 @@ describe("rownd-nodejs plugin", () => {
           options: { req: makeRequest({}) },
           userContext: {},
         } as any),
-      ).resolves.toEqual({
-        status: "GENERAL_ERROR",
-        message: "intent must be sign_in or sign_up",
-      });
-      expect(createCodePOST).not.toHaveBeenCalled();
+      ).resolves.toEqual({ status: "OK" });
+      expect(createCodePOST).toHaveBeenCalledOnce();
     });
+
+    it("delegates missing consume intent as a legacy combined flow", async () => {
+      const consumeCodePOST = vi
+        .fn()
+        .mockResolvedValue({ status: "RESTART_FLOW_ERROR" });
+      const passwordlessApis = init({
+        rowndAppKey: "test-key",
+        rowndAppSecret: "test-secret",
+        appConfig: { auth: { useExplicitSignUpFlow: true } },
+      }).overrideMap.passwordless.apis({ consumeCodePOST });
+
+      await expect(
+        passwordlessApis.consumeCodePOST!({
+          tenantId: "public",
+          preAuthSessionId: "missing-intent",
+          options: {
+            req: makeRequest({}),
+            recipeImplementation: {
+              listCodesByPreAuthSessionId: vi.fn().mockResolvedValue(undefined),
+            },
+          },
+          userContext: {},
+        } as any),
+      ).resolves.toEqual({ status: "RESTART_FLOW_ERROR" });
+      expect(consumeCodePOST).toHaveBeenCalledOnce();
+    });
+
+    it.each([null, "login", 1])(
+      "rejects supplied invalid consume intent %s",
+      async (intent) => {
+        const consumeCodePOST = vi.fn();
+        const passwordlessApis = init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+          appConfig: { auth: { useExplicitSignUpFlow: true } },
+        }).overrideMap.passwordless.apis({ consumeCodePOST });
+
+        await expect(
+          passwordlessApis.consumeCodePOST!({
+            tenantId: "public",
+            preAuthSessionId: "invalid-intent",
+            options: {
+              req: makeRequest({}, { intent }),
+              recipeImplementation: {},
+            },
+            userContext: {},
+          } as any),
+        ).resolves.toEqual({
+          status: "GENERAL_ERROR",
+          message: "intent must be sign_in or sign_up",
+        });
+        expect(consumeCodePOST).not.toHaveBeenCalled();
+      },
+    );
 
     it.each([null, "login", 1])(
       "rejects invalid passwordless intent %s",
@@ -3980,6 +4032,142 @@ describe("rownd-nodejs plugin", () => {
         expect(googleMethod?.verified).toBe(false);
         expect(passwordlessMethod?.email).toBe("g@example.com");
         expect(passwordlessMethod?.verified).toBe(false);
+      });
+
+      it("reconciles a fresh Google identity and Rownd passwordless email to its existing primary ThirdParty owner", async () => {
+        const { server: s, port } = await setup(
+          importCoreConnectionURI,
+          undefined,
+          { enableEmailVerification: true },
+        );
+        server = s;
+        testPORT = port;
+        const rowndUserId = "rownd-thirdparty-email-owner-collision";
+        const appleId = "apple-email-owner-collision";
+        const googleId = "google-thirdparty-email-owner-collision";
+        const email = "thirdparty-email-owner-collision@example.com";
+        const thirdPartyUser = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "apple",
+          appleId,
+          email,
+          true,
+        );
+        expect(thirdPartyUser.status).toBe("OK");
+        if (thirdPartyUser.status !== "OK") {
+          throw new Error("failed to create ThirdParty user");
+        }
+        await expect(
+          AccountLinking.createPrimaryUser(thirdPartyUser.recipeUserId),
+        ).resolves.toMatchObject({ status: "OK" });
+        const existingOwner = await SuperTokens.getUser(thirdPartyUser.user.id);
+        expect(existingOwner?.isPrimaryUser).toBe(true);
+        expect(existingOwner?.loginMethods).toEqual([
+          expect.objectContaining({
+            recipeId: "thirdparty",
+            email,
+            verified: true,
+            thirdParty: { id: "apple", userId: appleId },
+          }),
+        ]);
+
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: rowndUserId,
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: rowndUserId,
+          auth_level: "verified",
+          data: {
+            user_id: rowndUserId,
+            google_id: googleId,
+            email,
+          },
+          verified_data: { google_id: true, email: true },
+        });
+        const fetchSpy = vi.spyOn(global, "fetch");
+
+        const response = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({ status: "OK" });
+        await expect(
+          SuperTokens.getUserIdMapping({
+            userId: rowndUserId,
+            userIdType: "EXTERNAL",
+          }),
+        ).resolves.toMatchObject({
+          status: "OK",
+          superTokensUserId: thirdPartyUser.user.id,
+        });
+        const migratedUser = await SuperTokens.getUser(rowndUserId);
+        expect(migratedUser?.isPrimaryUser).toBe(true);
+        expect(migratedUser?.loginMethods).toHaveLength(3);
+        expect(migratedUser?.loginMethods).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              email,
+              verified: true,
+              thirdParty: { id: "apple", userId: appleId },
+            }),
+            expect.objectContaining({
+              recipeId: "passwordless",
+              email,
+              verified: true,
+            }),
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: { id: "google", userId: googleId },
+            }),
+          ]),
+        );
+        await expect(
+          SuperTokens.listUsersByAccountInfo("public", { email }, false),
+        ).resolves.toHaveLength(1);
+        await expect(
+          SuperTokens.listUsersByAccountInfo(
+            "public",
+            { thirdParty: { id: "google", userId: googleId } },
+            false,
+          ),
+        ).resolves.toHaveLength(1);
+        expect(
+          fetchSpy.mock.calls.some(([input]) =>
+            String(input).includes("/bulk-import/import"),
+          ),
+        ).toBe(false);
+
+        const repeatedResponse = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+        expect(repeatedResponse.status).toBe(200);
+        await expect(repeatedResponse.json()).resolves.toEqual({ status: "OK" });
+        const repeatedUser = await SuperTokens.getUser(rowndUserId);
+        expect(repeatedUser?.loginMethods).toHaveLength(3);
+        expect(repeatedUser).toMatchObject({
+          isPrimaryUser: true,
+          loginMethods: expect.arrayContaining([
+            expect.objectContaining({ recipeId: "passwordless" }),
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: { id: "apple", userId: appleId },
+            }),
+            expect.objectContaining({
+              recipeId: "thirdparty",
+              thirdParty: { id: "google", userId: googleId },
+            }),
+          ]),
+        });
       });
 
       it("reconciles an unverified Rownd email with its existing passwordless account", async () => {
@@ -8356,13 +8544,13 @@ describe("rownd-nodejs plugin", () => {
         ).toHaveLength(1);
       });
 
-      it("allows HTTP sign-in-or-sign-up without intent when explicit flow is disabled", async () => {
+      it("allows legacy HTTP sign-in-or-sign-up without intent when explicit flow is enabled", async () => {
         const passwordlessLinks: string[] = [];
         const { server: s, port } = await setup(
           coreConnectionURI,
           {
             appConfig: {
-              auth: { useExplicitSignUpFlow: false },
+              auth: { useExplicitSignUpFlow: true },
               signInMethods: [{ method: "email" }],
             },
           },
@@ -8385,6 +8573,18 @@ describe("rownd-nodejs plugin", () => {
         await expect(
           SuperTokens.listUsersByAccountInfo("public", { email }, false),
         ).resolves.toHaveLength(1);
+
+        const existingCreateCode = await requestPasswordlessCode(email);
+        await expect(existingCreateCode.json()).resolves.toMatchObject({
+          status: "OK",
+        });
+        const existingConsume = await consumePasswordlessLink(
+          passwordlessLinks[1],
+        );
+        await expect(existingConsume.json()).resolves.toMatchObject({
+          status: "OK",
+          createdNewRecipeUser: false,
+        });
       });
 
       it("retires a verified email for explicit HTTP sign-in and allows sign-up reuse", async () => {
@@ -8465,13 +8665,6 @@ describe("rownd-nodejs plugin", () => {
             false,
           ),
         ).resolves.toEqual([]);
-
-        const missingIntent = await requestPasswordlessCode(oldEmail);
-        await expect(missingIntent.json()).resolves.toEqual({
-          status: "GENERAL_ERROR",
-          message: "intent must be sign_in or sign_up",
-        });
-        expect(createCode).not.toHaveBeenCalled();
 
         const signUp = await requestPasswordlessCode(oldEmail, "sign_up");
         await expect(signUp.json()).resolves.toMatchObject({ status: "OK" });

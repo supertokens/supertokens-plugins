@@ -176,23 +176,49 @@ function matchesImportLoginMethod(
   return loginMethod.hasSameEmailAs(importMethod.email);
 }
 
-function getImportMethodAccountInfo(importMethod: ImportLoginMethod) {
+function getImportMethodAccountInfos(importMethod: ImportLoginMethod) {
   if (importMethod.recipeId === "thirdparty") {
-    return {
-      thirdParty: {
-        id: importMethod.thirdPartyId,
-        userId: importMethod.thirdPartyUserId,
+    return [
+      {
+        thirdParty: {
+          id: importMethod.thirdPartyId,
+          userId: importMethod.thirdPartyUserId,
+        },
       },
-    };
+      { email: importMethod.email },
+    ];
   }
 
   if (importMethod.recipeId === "emailpassword") {
-    return { email: importMethod.email };
+    return [{ email: importMethod.email }];
   }
 
-  return importMethod.email
-    ? { email: importMethod.email }
-    : { phoneNumber: importMethod.phoneNumber! };
+  return [
+    importMethod.email
+      ? { email: importMethod.email }
+      : { phoneNumber: importMethod.phoneNumber! },
+  ];
+}
+
+function ownsImportAccountInfo(
+  user: SuperTokensUser,
+  loginMethod: SuperTokensLoginMethod,
+  importMethod: ImportLoginMethod,
+) {
+  if (matchesImportLoginMethod(loginMethod, importMethod)) {
+    return true;
+  }
+  if (!user.isPrimaryUser) {
+    return false;
+  }
+
+  if (importMethod.recipeId === "thirdparty") {
+    return loginMethod.hasSameEmailAs(importMethod.email);
+  }
+  if (importMethod.recipeId === "passwordless" && !importMethod.email) {
+    return loginMethod.hasSamePhoneNumberAs(importMethod.phoneNumber);
+  }
+  return loginMethod.hasSameEmailAs(importMethod.email);
 }
 
 async function inspectImportMethod(
@@ -200,30 +226,50 @@ async function inspectImportMethod(
   tenantId: string,
   userContext: JsonRecord,
 ) {
-  const users = await SuperTokens.listUsersByAccountInfo(
-    tenantId,
-    getImportMethodAccountInfo(importMethod),
-    false,
-    userContext,
+  const users = new Map(
+    (
+      await Promise.all(
+        getImportMethodAccountInfos(importMethod).map((accountInfo) =>
+          SuperTokens.listUsersByAccountInfo(
+            tenantId,
+            accountInfo,
+            false,
+            userContext,
+          ),
+        ),
+      )
+    )
+      .flat()
+      .map((user) => [user.id, user] as const),
   );
 
-  const owners = users.flatMap((user) =>
+  const owners = [...users.values()].flatMap((user) =>
     user.loginMethods
       .filter(
         (method) =>
           method.tenantIds.includes(tenantId) &&
-          matchesImportLoginMethod(method, importMethod),
+          ownsImportAccountInfo(user, method, importMethod),
       )
       .map((loginMethod) => ({ user, loginMethod })),
   );
   const match = owners.find(
     ({ loginMethod }) =>
-      importMethod.recipeId === "thirdparty" ||
-      importMethod.recipeId === "passwordless" ||
-      (importMethod.isVerified && loginMethod.verified),
+      matchesImportLoginMethod(loginMethod, importMethod) &&
+      (importMethod.recipeId === "thirdparty" ||
+        importMethod.recipeId === "passwordless" ||
+        (importMethod.isVerified && loginMethod.verified)),
   );
+  const reconciliationMatch =
+    match ??
+    (importMethod.recipeId === "passwordless" &&
+    importMethod.email &&
+    importMethod.isVerified
+      ? owners.find(
+        ({ user, loginMethod }) => user.isPrimaryUser && loginMethod.verified,
+      )
+      : undefined);
 
-  return { importMethod, owners, match };
+  return { importMethod, owners, match, reconciliationMatch };
 }
 
 export async function createMissingLoginMethod(
@@ -489,13 +535,20 @@ export async function reconcileRowndUserWithExistingLoginMethods(
       inspectImportMethod(method, tenantId, userContext),
     ),
   );
-  const matches = inspections.flatMap(({ match }) => (match ? [match] : []));
+  const matches = inspections.flatMap(({ reconciliationMatch }) =>
+    reconciliationMatch ? [reconciliationMatch] : [],
+  );
   if (matches.length === 0) {
+    if (inspections.some(({ owners }) => owners.length > 0)) {
+      throw new Error(
+        "Migrated account information is reserved by an existing SuperTokens user and cannot be safely reconciled",
+      );
+    }
     return false;
   }
 
-  const thirdPartyMatches = matches.filter(
-    ({ loginMethod }) => loginMethod.recipeId === "thirdparty",
+  const thirdPartyMatches = inspections.flatMap(({ importMethod, match }) =>
+    importMethod.recipeId === "thirdparty" && match ? [match] : [],
   );
   const target = thirdPartyMatches[0] ?? matches[0]!;
   const targetSuperTokensUserId = await resolveUserId(target.user.id);
