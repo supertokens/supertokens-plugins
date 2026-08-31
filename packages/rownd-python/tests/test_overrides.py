@@ -14,7 +14,11 @@ from supertokens_python.types import LoginMethod, User
 
 from supertokens_rownd import plugin
 import supertokens_rownd.plugin_implementation as impl
-from supertokens_rownd.constants import ROWND_JWT_CLAIMS
+from supertokens_rownd.constants import (
+    RESERVED_OAUTH_CLAIMS,
+    RESERVED_SESSION_CLAIMS,
+    ROWND_JWT_CLAIMS,
+)
 from supertokens_rownd.types import RowndPluginConfig
 
 
@@ -388,6 +392,267 @@ async def test_init_rejects_invalid_client_domain():
         )
 
 
+@pytest.mark.parametrize(
+    "claim_name",
+    ["sub", "st-role", ROWND_JWT_CLAIMS["auth_level"]],
+)
+async def test_init_allows_reserved_session_claim_name(claim_name: str):
+    plugin.init(
+        RowndPluginConfig(
+            rownd_app_key="app-key",
+            rownd_app_secret="secret",
+            schema={
+                "profile_field": {
+                    "include_in_session_claims": True,
+                    "session_claim_name": claim_name,
+                }
+            },
+        )
+    )
+
+
+async def test_init_accepts_non_reserved_session_claim_name():
+    plugin.init(
+        RowndPluginConfig(
+            rownd_app_key="app-key",
+            rownd_app_secret="secret",
+            schema={
+                "profile_field": {
+                    "include_in_session_claims": True,
+                    "session_claim_name": "profile_field_claim",
+                }
+            },
+        )
+    )
+
+
+async def test_reserved_session_claim_contract():
+    assert RESERVED_SESSION_CLAIMS == {
+        "iss",
+        "sub",
+        "aud",
+        "exp",
+        "nbf",
+        "iat",
+        "jti",
+        "app_user_id",
+        "auth_level",
+        "is_verified_user",
+        "is_anonymous",
+        "anonymous_id",
+        "sessionHandle",
+        "refreshTokenHash1",
+        "parentRefreshTokenHash1",
+        "antiCsrfToken",
+        "expiryTime",
+        "timeCreated",
+        "recipeUserId",
+        "tenantId",
+        "tId",
+        "rsub",
+        "st-mfa",
+        "st-role",
+        "st-perm",
+        "st-ev",
+        "https://auth.rownd.io/app_user_id",
+        "https://auth.rownd.io/is_verified_user",
+        "https://auth.rownd.io/is_anonymous",
+        "https://auth.rownd.io/issued_offline",
+        "https://auth.rownd.io/jwt_type",
+        "https://auth.rownd.io/platform_jwt",
+        "https://auth.rownd.io/auth_level",
+    }
+
+
+async def test_reserved_oauth_claim_contract():
+    assert RESERVED_OAUTH_CLAIMS == RESERVED_SESSION_CLAIMS | {
+        "email",
+        "email_verified",
+        "emails",
+        "phone_number",
+        "phone_number_verified",
+        "phoneNumber",
+        "phoneNumber_verified",
+        "phoneNumbers",
+        "name",
+        "given_name",
+        "family_name",
+        "updated_at",
+        "auth_time",
+        "nonce",
+        "azp",
+        "acr",
+        "amr",
+        "sid",
+        "at_hash",
+        "c_hash",
+        "client_id",
+        "scope",
+        "scp",
+        "stt",
+    }
+
+
+async def test_reserved_claim_constants_are_immutable():
+    assert isinstance(RESERVED_SESSION_CLAIMS, frozenset)
+    assert isinstance(RESERVED_OAUTH_CLAIMS, frozenset)
+    with pytest.raises(TypeError):
+        cast(Any, ROWND_JWT_CLAIMS)["app_user_id"] = "changed"
+    with pytest.raises(AttributeError):
+        cast(Any, RESERVED_SESSION_CLAIMS).add("changed")
+
+
+@pytest.mark.parametrize("claim_name", sorted(RESERVED_SESSION_CLAIMS))
+async def test_configured_claim_builder_filters_every_reserved_name(claim_name: str):
+    config = make_config()
+    config.schema = {
+        "profile_field": {
+            "include_in_session_claims": True,
+            "session_claim_name": claim_name,
+        }
+    }
+
+    assert impl.build_configured_session_claims(config, {"profile_field": "attacker"}) == {}
+
+
+@pytest.mark.parametrize("claim_name", sorted(RESERVED_OAUTH_CLAIMS - RESERVED_SESSION_CLAIMS))
+async def test_configured_claim_builder_filters_every_oauth_only_reserved_name(
+    claim_name: str,
+):
+    config = make_config()
+    config.schema = {
+        "profile_field": {
+            "include_in_session_claims": True,
+            "session_claim_name": claim_name,
+        }
+    }
+
+    assert (
+        impl.build_configured_session_claims(
+            config, {"profile_field": "attacker"}, RESERVED_OAUTH_CLAIMS
+        )
+        == {}
+    )
+
+
+@pytest.mark.parametrize("claim_name", ["email", "name", "phone_number", "updated_at"])
+async def test_normal_session_preserves_custom_oidc_named_claims(claim_name: str):
+    config = make_config()
+    config.schema = {
+        "profile_field": {
+            "include_in_session_claims": True,
+            "session_claim_name": claim_name,
+        }
+    }
+
+    assert impl.build_configured_session_claims(config, {"profile_field": "preserved"}) == {
+        claim_name: "preserved"
+    }
+
+
+@pytest.mark.parametrize(
+    "field_config",
+    [
+        {"include_in_session_claims": True},
+        {"include_in_session_claims": True, "session_claim_name": ""},
+        {"include_in_session_claims": True, "session_claim_name": None},
+    ],
+)
+async def test_configured_claim_builder_filters_reserved_field_name_fallback(
+    field_config: Dict[str, Any],
+):
+    config = make_config()
+    config.schema = cast(Any, {"sub": field_config})
+
+    assert impl.build_configured_session_claims(config, {"sub": "attacker"}) == {}
+
+
+@pytest.mark.parametrize(
+    "field_config",
+    [
+        {"include_in_session_claims": True},
+        {"include_in_session_claims": True, "session_claim_name": ""},
+        {"include_in_session_claims": True, "session_claim_name": None},
+    ],
+)
+async def test_configured_claim_builder_uses_field_name_fallback(
+    field_config: Dict[str, Any],
+):
+    config = make_config()
+    config.schema = cast(Any, {"profile_field": field_config})
+
+    assert impl.build_configured_session_claims(config, {"profile_field": "preserved"}) == {
+        "profile_field": "preserved"
+    }
+
+
+async def test_configured_claim_builder_preserves_valid_custom_claim():
+    config = make_config()
+    config.schema = {
+        "profile_field": {
+            "include_in_session_claims": True,
+            "session_claim_name": "profile_field_claim",
+        }
+    }
+
+    assert impl.build_configured_session_claims(config, {"profile_field": "preserved"}) == {
+        "profile_field_claim": "preserved"
+    }
+
+
+async def test_reserved_session_claim_is_allowed_and_ignored_when_excluded():
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        schema={
+            "profile_field": {
+                "include_in_session_claims": False,
+                "session_claim_name": "st-role",
+            }
+        },
+    )
+
+    plugin.init(config)
+    assert impl.build_configured_session_claims(config, {"profile_field": "attacker"}) == {}
+
+
+@pytest.mark.parametrize("claim_name", [[], {}, 1, 0, True, False])
+async def test_init_rejects_malformed_session_claim_name(claim_name: Any):
+    with pytest.raises(
+        ValueError, match=r"schema\.profile_field\.session_claim_name must be a string"
+    ):
+        plugin.init(
+            RowndPluginConfig(
+                rownd_app_key="app-key",
+                rownd_app_secret="secret",
+                schema=cast(
+                    Any,
+                    {
+                        "profile_field": {
+                            "include_in_session_claims": True,
+                            "session_claim_name": claim_name,
+                        }
+                    },
+                ),
+            )
+        )
+
+
+async def test_post_init_schema_mutation_fails_with_field_path():
+    config = RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        schema={"profile_field": {"include_in_session_claims": True}},
+    )
+    plugin.init(config)
+    config.schema["profile_field"]["session_claim_name"] = cast(Any, [])
+
+    with pytest.raises(
+        ValueError, match=r"schema\.profile_field\.session_claim_name must be a string"
+    ):
+        impl.build_configured_session_claims(config, {"profile_field": "value"})
+
+
 async def test_passwordless_create_code_rejects_unknown_app_variant():
     called = False
 
@@ -631,6 +896,104 @@ async def test_rownd_oauth_payload_adds_standard_and_rownd_claims(monkeypatch: p
     assert payload["auth_level"] == "verified"
     assert payload[ROWND_JWT_CLAIMS["app_user_id"]] == "rownd-user"
     assert payload["aud"] == "app:app_123"
+
+
+async def test_oauth_payload_preserves_authoritative_reserved_claims(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    login_method = LoginMethod(
+        "passwordless",
+        "recipe-user",
+        ["public"],
+        "oauth-reserved@example.com",
+        None,
+        None,
+        None,
+        1000,
+        True,
+    )
+    user = User(
+        "st-user",
+        False,
+        ["public"],
+        ["oauth-reserved@example.com"],
+        [],
+        [],
+        cast(Any, []),
+        [login_method],
+        1000,
+    )
+    oauth_only_claims = sorted(RESERVED_OAUTH_CLAIMS - RESERVED_SESSION_CLAIMS)
+    authoritative_claims: Dict[str, Any] = {
+        claim_name: "authoritative-%s" % claim_name for claim_name in oauth_only_claims
+    }
+    authoritative_claims.update(
+        {
+            "st-role": ["admin"],
+            "st-perm": ["read"],
+            "st-mfa": {"v": True},
+            "st-ev": {"v": True},
+        }
+    )
+    configured_claim_names = [
+        *oauth_only_claims,
+        "st-role",
+        "st-perm",
+        "st-mfa",
+        "st-ev",
+    ]
+    config = make_config()
+    config.schema = {
+        "spoofed_%s" % index: {
+            "include_in_session_claims": True,
+            "session_claim_name": claim_name,
+        }
+        for index, claim_name in enumerate(configured_claim_names)
+    }
+    metadata: Dict[str, Any] = {
+        "original_rownd_user": {
+            "data": {
+                "user_id": "rownd-user",
+                "email": "oauth-reserved@example.com",
+                "first_name": "Ada",
+                "last_name": "Lovelace",
+                "updated_at": "2026-01-01T00:00:00Z",
+            },
+            "verified_data": {"email": True},
+        },
+        **{
+            "spoofed_%s" % index: "attacker"
+            for index in range(len(configured_claim_names))
+        },
+    }
+
+    async def inspect(*_args: Any, **_kwargs: Any):
+        return {"user": user, "combined_metadata": metadata}
+
+    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
+
+    payload = await impl.build_rownd_oauth_payload(
+        config,
+        user,
+        ["email", "profile"],
+        authoritative_claims,
+        {},
+    )
+
+    standard_claims = {
+        "email": "oauth-reserved@example.com",
+        "email_verified": True,
+        "name": "Ada Lovelace",
+        "given_name": "Ada",
+        "family_name": "Lovelace",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }
+    for claim_name in oauth_only_claims:
+        assert payload[claim_name] == standard_claims.get(
+            claim_name, authoritative_claims[claim_name]
+        )
+    for claim_name in ["st-role", "st-perm", "st-mfa", "st-ev"]:
+        assert payload[claim_name] == authoritative_claims[claim_name]
 
 
 async def test_rownd_oauth_user_info_picks_rownd_claims(monkeypatch: pytest.MonkeyPatch):
@@ -882,6 +1245,91 @@ async def test_refresh_rownd_session_claims_clears_stale_configured_claim(
     assert session.merged is not None
     assert session.merged["authorization_role"] is None
     assert "nickname" not in session.merged
+
+
+async def test_refresh_does_not_clear_reserved_claims_from_runtime_config(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = make_config()
+    config.schema = {
+        "spoofed_%s" % index: {
+            "include_in_session_claims": True,
+            "session_claim_name": claim_name,
+        }
+        for index, claim_name in enumerate(
+            ["sub", "st-role", "st-perm", "st-mfa", "st-ev"]
+        )
+    }
+    protected_payload = {
+        "sub": "real-user",
+        "st-role": ["admin"],
+        "st-perm": ["read"],
+        "st-mfa": {"v": True},
+        "st-ev": {"v": True},
+    }
+    session = RefreshSession(protected_payload)
+
+    async def build_claims(*_args: Any, **_kwargs: Any):
+        return {"auth_level": "verified"}, {"is_anonymous": {"v": False, "t": 1}}
+
+    monkeypatch.setattr(plugin, "build_rownd_session_and_anonymous_claims", build_claims)
+
+    await plugin.refresh_rownd_session_claims(config, cast(Any, session), "user", None, {})
+
+    assert session.merged is not None
+    assert protected_payload.keys().isdisjoint(session.merged)
+
+
+async def test_refresh_preserves_configured_oidc_named_session_claims(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = make_config()
+    config.schema = {
+        "profile_email": {
+            "include_in_session_claims": True,
+            "session_claim_name": "email",
+        },
+        "profile_name": {
+            "include_in_session_claims": True,
+            "session_claim_name": "name",
+        },
+    }
+    session = RefreshSession({"email": "old@example.com", "name": "Old Name"})
+
+    async def build_claims(*_args: Any, **_kwargs: Any):
+        return {
+            "email": "new@example.com",
+            "name": "New Name",
+        }, {"is_anonymous": {"v": False, "t": 1}}
+
+    monkeypatch.setattr(plugin, "build_rownd_session_and_anonymous_claims", build_claims)
+
+    await plugin.refresh_rownd_session_claims(config, cast(Any, session), "user", None, {})
+
+    assert session.merged is not None
+    assert session.merged["email"] == "new@example.com"
+    assert session.merged["name"] == "New Name"
+
+
+async def test_refresh_fails_safely_after_malformed_schema_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = make_config()
+    config.schema = {"profile_field": {"include_in_session_claims": True}}
+    plugin.init(config)
+    config.schema["profile_field"]["session_claim_name"] = cast(Any, [])
+    session = RefreshSession({})
+
+    async def build_claims(*_args: Any, **_kwargs: Any):
+        return {}, {"is_anonymous": {"v": False, "t": 1}}
+
+    monkeypatch.setattr(plugin, "build_rownd_session_and_anonymous_claims", build_claims)
+
+    with pytest.raises(
+        ValueError, match=r"schema\.profile_field\.session_claim_name must be a string"
+    ):
+        await plugin.refresh_rownd_session_claims(config, cast(Any, session), "user", None, {})
+    assert session.merged is None
 
 
 @pytest.mark.parametrize("revoke_outcome", ["success", "false", "exception"])

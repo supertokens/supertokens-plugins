@@ -1,3 +1,7 @@
+from types import MappingProxyType
+from typing import Mapping
+
+
 PLUGIN_ID = "supertokens-plugin-rownd"
 PLUGIN_VERSION = "0.1.9"
 PLUGIN_SDK_VERSION = ">=0.31.3"
@@ -7,12 +11,75 @@ PUBLIC_TENANT_ID = "public"
 GUEST_AUTH_METHOD_ID = "guest"
 INSTANT_AUTH_METHOD_ID = "instant"
 
-ROWND_JWT_CLAIMS = {
-    "app_user_id": "https://auth.rownd.io/app_user_id",
-    "is_verified_user": "https://auth.rownd.io/is_verified_user",
-    "is_anonymous": "https://auth.rownd.io/is_anonymous",
-    "auth_level": "https://auth.rownd.io/auth_level",
-}
+ROWND_JWT_CLAIMS: Mapping[str, str] = MappingProxyType(
+    {
+        "app_user_id": "https://auth.rownd.io/app_user_id",
+        "is_verified_user": "https://auth.rownd.io/is_verified_user",
+        "is_anonymous": "https://auth.rownd.io/is_anonymous",
+        "issued_offline": "https://auth.rownd.io/issued_offline",
+        "jwt_type": "https://auth.rownd.io/jwt_type",
+        "platform_jwt": "https://auth.rownd.io/platform_jwt",
+        "auth_level": "https://auth.rownd.io/auth_level",
+    }
+)
+
+JWT_REGISTERED_CLAIMS = frozenset({"iss", "sub", "aud", "exp", "nbf", "iat", "jti"})
+
+RESERVED_SESSION_CLAIMS = frozenset(
+    {
+        *JWT_REGISTERED_CLAIMS,
+        "app_user_id",
+        "auth_level",
+        "is_verified_user",
+        "is_anonymous",
+        "anonymous_id",
+        "sessionHandle",
+        "refreshTokenHash1",
+        "parentRefreshTokenHash1",
+        "antiCsrfToken",
+        "expiryTime",
+        "timeCreated",
+        "recipeUserId",
+        "tenantId",
+        "tId",
+        "rsub",
+        "st-mfa",
+        "st-role",
+        "st-perm",
+        "st-ev",
+        *ROWND_JWT_CLAIMS.values(),
+    }
+)
+
+RESERVED_OAUTH_CLAIMS = frozenset(
+    {
+        *RESERVED_SESSION_CLAIMS,
+        "email",
+        "email_verified",
+        "emails",
+        "phone_number",
+        "phone_number_verified",
+        "phoneNumber",
+        "phoneNumber_verified",
+        "phoneNumbers",
+        "name",
+        "given_name",
+        "family_name",
+        "updated_at",
+        "auth_time",
+        "nonce",
+        "azp",
+        "acr",
+        "amr",
+        "sid",
+        "at_hash",
+        "c_hash",
+        "client_id",
+        "scope",
+        "scp",
+        "stt",
+    }
+)
 
 DEFAULT_ROWND_SCHEMA = {
     "zip_code": {"display_name": "Zip code", "type": "string", "user_visible": True},

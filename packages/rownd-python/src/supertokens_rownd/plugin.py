@@ -72,6 +72,7 @@ from .constants import (
     PLUGIN_SDK_VERSION,
     PLUGIN_VERSION,
     ROWND_JWT_CLAIMS,
+    RESERVED_SESSION_CLAIMS,
 )
 from .plugin_implementation import (
     add_hub_bootstrap_params,
@@ -108,6 +109,7 @@ from .plugin_implementation import (
     is_guest_account_info,
     normalize_rownd_oauth_scopes,
     record_rownd_app_variant_for_user,
+    resolve_session_claim_name,
     resolve_pending_email_verification_token,
     set_active_rownd_config,
 )
@@ -157,12 +159,9 @@ async def refresh_rownd_session_claims(
     }
     for field_name, field_config in config.schema.items():
         if field_config.get("include_in_session_claims") is True:
-            configured_name = field_config.get("session_claim_name")
-            managed_claim_names.add(
-                configured_name
-                if isinstance(configured_name, str) and configured_name
-                else field_name
-            )
+            claim_name = resolve_session_claim_name(field_name, field_config)
+            if claim_name not in RESERVED_SESSION_CLAIMS:
+                managed_claim_names.add(claim_name)
     for key in managed_claim_names:
         if key in current_payload and key not in refreshed_claims:
             refreshed_claims[key] = None
@@ -1106,6 +1105,9 @@ def _normalise_path(path: str) -> str:
 
 
 def _validate_config(config: RowndPluginConfig) -> None:
+    for field_name, field_config in config.schema.items():
+        resolve_session_claim_name(field_name, field_config)
+
     telemetry = config.telemetry
     if isinstance(telemetry, dict):
         provider = telemetry.get("provider")

@@ -5,6 +5,8 @@
 ### Patch Changes
 
 - Recover simultaneous E006 passwordless email import races
+- Ignore custom claims that conflict with JWT, SuperTokens, Rownd, or authoritative OAuth claims
+- Reject malformed custom session claim names with their schema field path
 
 ## 0.1.13
 

@@ -9,7 +9,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from hashlib import sha256
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, NoReturn, Optional, Tuple, Union, cast
+from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, NamedTuple, NoReturn, Optional, Tuple, Union, cast
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
@@ -55,6 +55,8 @@ from .constants import (
     PENDING_EMAIL_VERIFICATION_QUERY_PARAM,
     PUBLIC_TENANT_ID,
     PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM,
+    RESERVED_OAUTH_CLAIMS,
+    RESERVED_SESSION_CLAIMS,
     ROWND_OAUTH_LOGIN_CHALLENGE_PARAM,
     ROWND_JWT_CLAIMS,
 )
@@ -1816,6 +1818,7 @@ def build_rownd_session_claim_payload(
     metadata: JsonDict,
     current_payload: JsonDict,
     app_variant_id: Optional[str],
+    reserved_claims: AbstractSet[str] = RESERVED_SESSION_CLAIMS,
 ) -> JsonDict:
     original = as_json_dict(metadata.get("original_rownd_user"))
     verified_data = as_json_dict(original.get("verified_data"))
@@ -1835,7 +1838,7 @@ def build_rownd_session_claim_payload(
     anonymous_id = get_anonymous_id(user_id, user, metadata, current_payload) if user else None
     claims = {
         **build_rownd_audience(current_payload, config, app_variant_id),
-        **build_configured_session_claims(config, metadata),
+        **build_configured_session_claims(config, metadata, reserved_claims),
         "app_user_id": app_user_id,
         "auth_level": auth_level,
         "is_verified_user": auth_level != "unverified",
@@ -1949,7 +1952,9 @@ async def build_rownd_oauth_payload(
         **payload,
         **(build_standard_oauth_claims(user, scopes, metadata) if user else {}),
         **(
-            build_rownd_session_claim_payload(config, user.id, user, metadata, payload, None)
+            build_rownd_session_claim_payload(
+                config, user.id, user, metadata, payload, None, RESERVED_OAUTH_CLAIMS
+            )
             if user
             else {}
         ),
@@ -2048,14 +2053,29 @@ def is_rownd_email_verified(value: object, email: str) -> bool:
     return value is True or (isinstance(value, str) and value.lower() == email.lower())
 
 
-def build_configured_session_claims(config: RowndPluginConfig, metadata: JsonDict) -> JsonDict:
+def resolve_session_claim_name(key: str, field_config: JsonDict) -> str:
+    configured_name = field_config.get("session_claim_name")
+    if configured_name is None or configured_name == "":
+        return key
+    if not isinstance(configured_name, str):
+        raise ValueError("schema.%s.session_claim_name must be a string" % key)
+    return configured_name
+
+
+def build_configured_session_claims(
+    config: RowndPluginConfig,
+    metadata: JsonDict,
+    reserved_claims: AbstractSet[str] = RESERVED_SESSION_CLAIMS,
+) -> JsonDict:
     original = as_json_dict(metadata.get("original_rownd_user"))
     original_data = as_json_dict(original.get("data"))
     claims = {}
     for key, field_config in config.schema.items():
         if field_config.get("include_in_session_claims") is not True:
             continue
-        claim_name = field_config.get("session_claim_name") or key
+        claim_name = resolve_session_claim_name(key, field_config)
+        if claim_name in reserved_claims:
+            continue
         value = original_data.get(key, metadata.get(key))
         if value is not None:
             claims[claim_name] = value
