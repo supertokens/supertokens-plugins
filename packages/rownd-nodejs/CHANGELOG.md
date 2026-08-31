@@ -1,5 +1,27 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.7.2
+
+### Patch Changes
+
+- Take into account intent in the login flow and fix email updates
+
+## 0.7.1
+
+### Patch Changes
+
+- Recover from incomplete email update flows
+
+## 0.7.0
+
+### Minor Changes
+
+- 7806fb9: Support tenant-scoped dynamic Rownd configuration.
+
+### Patch Changes
+
+- Support tenant specific config
+
 ## 0.6.14
 
 ### Patch Changes
