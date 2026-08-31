@@ -77,6 +77,8 @@ import {
   reconcileRowndUserWithExistingLoginMethods,
   createMagicLinkWithConfirmationBypass,
   getUserById,
+  importUser,
+  isBulkImportDuplicateIdentityError,
   prepareEmailForPasswordlessAuth,
   recordRowndAppVariantForUser,
   startPendingEmailVerification,
@@ -249,6 +251,35 @@ describe("rownd-nodejs plugin", () => {
     resetST();
     vi.clearAllMocks();
     vi.restoreAllMocks();
+  });
+
+  it("does not classify mixed bulk import errors as a duplicate identity race", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            errors: ["E006: duplicate identity", "E007: invalid user"],
+          }),
+          { status: 400 },
+        ),
+      ),
+    );
+    let importError: unknown;
+
+    try {
+      await importUser(
+        mapRowndUserToSuperTokens({
+          data: { user_id: "mixed-error-user", email: "mixed@example.com" },
+          verified_data: { email: true },
+        }),
+        { connectionURI: "http://core.example.com" },
+      );
+    } catch (error) {
+      importError = error;
+    }
+
+    expect(isBulkImportDuplicateIdentityError(importError)).toBe(false);
   });
 
   describe("resolveTenantId", () => {
@@ -5683,6 +5714,91 @@ describe("rownd-nodejs plugin", () => {
         expect(migratedUser).toBeDefined();
         const user = migratedUser!.user;
         expect(user).toBeDefined();
+      });
+
+      it("recovers when concurrent fresh migrations race during bulk import", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const suffix = randomUUID();
+        const rowndUserId = `rownd-concurrent-import-${suffix}`;
+        const email = `concurrent-import-${suffix}@example.com`;
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: rowndUserId,
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          app_user_id: rowndUserId,
+          data: { user_id: rowndUserId, email },
+          verified_data: { email: true },
+        });
+
+        const originalFetch = global.fetch;
+        const coreImportResponses: string[] = [];
+        let importCount = 0;
+        let releaseBothAtImport!: () => void;
+        const bothAtImport = new Promise<void>((resolve) => {
+          releaseBothAtImport = resolve;
+        });
+        let releaseWinnerFinished!: () => void;
+        const winnerFinished = new Promise<void>((resolve) => {
+          releaseWinnerFinished = resolve;
+        });
+        const forwardImport = async (...args: Parameters<typeof fetch>) => {
+          const response = await originalFetch(...args);
+          coreImportResponses.push(await response.clone().text());
+          return response;
+        };
+
+        vi.stubGlobal(
+          "fetch",
+          async (...args: Parameters<typeof fetch>): Promise<Response> => {
+            if (!String(args[0]).includes("/bulk-import/import")) {
+              return originalFetch(...args);
+            }
+
+            importCount += 1;
+            if (importCount === 1) {
+              await bothAtImport;
+              try {
+                return await forwardImport(...args);
+              } finally {
+                releaseWinnerFinished();
+              }
+            }
+            if (importCount === 2) {
+              releaseBothAtImport();
+              await winnerFinished;
+              return forwardImport(...args);
+            }
+            throw new Error("Unexpected additional bulk import");
+          },
+        );
+
+        const migrate = () =>
+          fetch(`http://localhost:${testPORT}/auth/plugin/rownd/migrate`, {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          });
+        const responses = await Promise.all([migrate(), migrate()]);
+
+        expect(importCount).toBe(2);
+        expect(JSON.parse(coreImportResponses[0]!)).toMatchObject({
+          status: "OK",
+        });
+        expect(JSON.parse(coreImportResponses[1]!)).toMatchObject({
+          errors: [expect.stringMatching(/^E006:/)],
+        });
+        await expect(
+          Promise.all(responses.map((response) => response.json())),
+        ).resolves.toEqual([{ status: "OK" }, { status: "OK" }]);
+
+        const migratedUser = await getMigratedUserByRowndUserId(rowndUserId);
+        expect(migratedUser?.user.loginMethods).toEqual([
+          expect.objectContaining({ recipeId: "passwordless", email }),
+        ]);
+        expect(migratedUser?.metadata.metadata).toMatchObject({
+          rownd_migration_complete: true,
+        });
       });
 
       it("skips migration if user not found in rownd", async () => {

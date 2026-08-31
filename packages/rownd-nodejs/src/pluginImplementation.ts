@@ -41,6 +41,7 @@ import {
   getUserById,
   getUserMetadata,
   importUser,
+  isBulkImportDuplicateIdentityError,
   reconcileRowndUserWithExistingLoginMethods,
   recordRowndAppVariantForUser,
   startPendingEmailVerification,
@@ -341,7 +342,23 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
           if (user) {
             throw new Error("Incomplete migrated user could not be reconciled");
           }
-          await importUser(stUserImport, deps.stConfig.supertokens);
+          try {
+            await importUser(stUserImport, deps.stConfig.supertokens);
+          } catch (importError) {
+            if (!isBulkImportDuplicateIdentityError(importError)) {
+              throw importError;
+            }
+            // Another migration may have completed after the initial reconciliation.
+            const recovered =
+              await reconcileRowndUserWithExistingLoginMethods(
+                stUserImport,
+                tenantId,
+                resolved.userContext,
+              );
+            if (!recovered) {
+              throw importError;
+            }
+          }
         }
         clearSuperTokensCoreCallCache(resolved.userContext);
         user = await SuperTokens.getUser(rowndUserId, resolved.userContext);

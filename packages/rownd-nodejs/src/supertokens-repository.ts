@@ -69,6 +69,37 @@ import {
 
 type BypassDisplayContext = "browser" | "mobile_app" | "customer_web_view";
 
+class BulkImportError extends Error {
+  constructor(
+    readonly status: number,
+    readonly responseText: string,
+  ) {
+    super(
+      `Bulk import failed with status ${status}: ${responseText}`,
+    );
+  }
+}
+
+export function isBulkImportDuplicateIdentityError(error: unknown) {
+  if (!(error instanceof BulkImportError) || error.status !== 400) {
+    return false;
+  }
+
+  try {
+    const body: unknown = JSON.parse(error.responseText);
+    return (
+      isRecord(body) &&
+      Array.isArray(body.errors) &&
+      body.errors.length > 0 &&
+      body.errors.every(
+        (entry) => typeof entry === "string" && entry.startsWith("E006:"),
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
 export type CreateMagicLinkWithConfirmationBypassInput = {
   email?: string;
   phoneNumber?: string;
@@ -106,9 +137,7 @@ export async function importUser(
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(
-      `Bulk import failed with status ${response.status}: ${errorText}`,
-    );
+    throw new BulkImportError(response.status, errorText);
   }
 
   const importResponse = (await response.json()) as {
