@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from types import SimpleNamespace
 
@@ -196,6 +197,39 @@ async def test_migrate_bulk_import_500_returns_error(
 
     assert res.status_code == 200
     assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+
+
+async def test_migrate_bulk_import_mixed_errors_returns_error(
+    core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch
+):
+    async def post(self, url: str, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if str(url).endswith("/bulk-import/import"):
+            return httpx.Response(
+                400,
+                json={"errors": ["E006: duplicate identity", "E007: invalid user"]},
+            )
+        return await original_post(self, url, *args, **kwargs)
+
+    original_post = httpx.AsyncClient.post
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    client = make_client(core_url, rownd_client)
+
+    res = migrate_rownd_user(
+        client,
+        rownd_client,
+        "py-import-mixed-error-user",
+        {
+            "data": {
+                "user_id": "py-import-mixed-error-user",
+                "email": "import-mixed-error@example.com",
+            },
+            "verified_data": {"email": True},
+        },
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert res.headers.get("st-access-token") is None
 
 
 async def test_migrate_bulk_import_malformed_json_returns_error(
@@ -1050,6 +1084,157 @@ async def test_migrate_existing_user_does_not_duplicate(core_url: str, rownd_cli
     user = await get_user("py-duplicate-user")
     assert user is not None
     assert len(user.login_methods) == 1
+
+
+async def test_concurrent_fresh_migrations_recover_bulk_import_race(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "migration-concurrent-fresh-import"
+    email = "migration-concurrent-fresh-import@example.com"
+    user_info = {
+        "data": {"user_id": rownd_user_id, "email": email},
+        "verified_data": {"email": True},
+    }
+    rownd_client.user_id = rownd_user_id
+    rownd_client.user_info = user_info
+    initial_count = await get_user_count(tenant_id="public")
+    both_at_import = threading.Event()
+    winner_finished = threading.Event()
+    invocation_lock = threading.Lock()
+    import_count = 0
+    import_responses: list[tuple[int, str]] = []
+    original_post = httpx.AsyncClient.post
+
+    async def controlled_post(self, url: str, *args: Any, **kwargs: Any):
+        nonlocal import_count
+        if not str(url).endswith("/bulk-import/import"):
+            return await original_post(self, url, *args, **kwargs)
+        with invocation_lock:
+            import_count += 1
+            invocation = import_count
+        if invocation == 1:
+            if not await asyncio.to_thread(both_at_import.wait, 10):
+                raise RuntimeError("Second migration did not reach bulk import")
+            try:
+                response = await original_post(self, url, *args, **kwargs)
+                import_responses.append((response.status_code, response.text))
+                return response
+            finally:
+                winner_finished.set()
+        if invocation == 2:
+            both_at_import.set()
+            if not await asyncio.to_thread(winner_finished.wait, 10):
+                raise RuntimeError("Winning bulk import did not finish")
+            response = await original_post(self, url, *args, **kwargs)
+            import_responses.append((response.status_code, response.text))
+            return response
+        raise RuntimeError("Unexpected additional bulk import")
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", controlled_post)
+
+    def migrate():
+        return client.post(
+            "/auth/plugin/rownd/migrate",
+            headers={"Authorization": "Bearer rownd-token", **session_headers()},
+        )
+
+    responses = await asyncio.gather(
+        asyncio.to_thread(migrate),
+        asyncio.to_thread(migrate),
+    )
+
+    assert import_count == 2
+    assert import_responses[0][0] == 200
+    assert import_responses[1][0] == 400
+    assert all(
+        isinstance(error, str) and error.startswith("E006:")
+        for error in cast(dict[str, Any], json.loads(import_responses[1][1]))["errors"]
+    )
+    assert [response.json() for response in responses] == [
+        {"status": "OK"},
+        {"status": "OK"},
+    ]
+    assert all(response.headers.get("st-access-token") for response in responses)
+    sessions = await asyncio.gather(
+        *(
+            session_asyncio.get_session_without_request_response(
+                cast(str, response.headers.get("st-access-token"))
+            )
+            for response in responses
+        )
+    )
+    assert all(session is not None for session in sessions)
+    assert all(
+        session is not None and session.get_user_id() == rownd_user_id for session in sessions
+    )
+    assert await get_user_count(tenant_id="public") == initial_count + 1
+    user = await get_user(rownd_user_id)
+    assert user is not None
+    assert len(user.login_methods) == 1
+    assert user.login_methods[0].recipe_id == "passwordless"
+    assert user.login_methods[0].email == email
+    metadata = await usermetadata_asyncio.get_user_metadata(rownd_user_id)
+    assert metadata.metadata["rownd_migration_complete"] is True
+
+
+async def test_e006_recovery_rejects_passwordless_owner_mapped_to_another_rownd_user(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "migration-e006-conflicting-owner"
+    existing_rownd_user_id = "migration-e006-existing-owner"
+    email = "migration-e006-conflicting-owner@example.com"
+    telemetry_errors: list[Exception] = []
+
+    async def racing_import(*args: Any, **kwargs: Any):
+        owner = await passwordless_asyncio.signinup("public", email, None, None, {})
+        mapping = await create_user_id_mapping(
+            owner.user.id,
+            existing_rownd_user_id,
+            user_context={},
+        )
+        assert getattr(mapping, "status", "OK") == "OK"
+        raise impl._BulkImportError(400, '{"errors":["E006: duplicate identity"]}')
+
+    async def capture_error(
+        _telemetry_client: Any,
+        _started_at: float,
+        error: Exception,
+        *_args: Any,
+    ):
+        telemetry_errors.append(error)
+
+    monkeypatch.setattr(impl, "import_user", racing_import)
+    monkeypatch.setattr(impl, "record_error", capture_error)
+
+    res = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "data": {"user_id": rownd_user_id, "email": email},
+            "verified_data": {"email": True},
+        },
+    )
+
+    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert res.headers.get("st-access-token") is None
+    assert len(telemetry_errors) == 1
+    assert str(telemetry_errors[0]) == (
+        "The SuperTokens user is already mapped to another external user ID"
+    )
+    assert isinstance(telemetry_errors[0].__cause__, impl._BulkImportError)
+    existing_mapping = await get_user_id_mapping(existing_rownd_user_id, "EXTERNAL", {})
+    assert isinstance(existing_mapping, GetUserIdMappingOkResult)
+    owner = await get_user(existing_rownd_user_id)
+    assert owner is not None
+    assert len(owner.login_methods) == 1
+    assert owner.login_methods[0].email == email
 
 
 async def test_concurrent_reconciliation_normalizes_late_passwordless_owner(

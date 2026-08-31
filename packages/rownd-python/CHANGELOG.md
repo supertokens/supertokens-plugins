@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## Unreleased
+
+### Patch Changes
+
+- Recover simultaneous E006 passwordless email import races
+
 ## 0.1.13
 
 ### Patch Changes

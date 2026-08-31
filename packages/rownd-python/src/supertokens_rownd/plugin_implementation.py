@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 import re
@@ -77,6 +78,57 @@ _LINKED_OPERATIONAL_METADATA_FIELDS = {
     "rownd_migration_complete",
     "rownd_pending_verification",
 }
+
+
+class _BulkImportError(RuntimeError):
+    status: int
+    response_text: str
+
+    def __init__(self, status: int, response_text: str):
+        self.status = status
+        self.response_text = response_text
+        super().__init__("Bulk import failed with status %s: %s" % (status, response_text))
+
+
+def is_bulk_import_duplicate_identity_error(error: object) -> bool:
+    if not isinstance(error, _BulkImportError) or error.status != 400:
+        return False
+    try:
+        body = json.loads(error.response_text)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(body, dict):
+        return False
+    errors = body.get("errors")
+    return (
+        isinstance(errors, list)
+        and bool(errors)
+        and all(isinstance(entry, str) and entry.startswith("E006:") for entry in errors)
+    )
+
+
+async def _import_user_with_e006_recovery(
+    user_import: JsonDict,
+    tenant_id: str,
+    supertokens_config: SupertokensConfig,
+    user_context: UserContext,
+) -> None:
+    try:
+        await import_user(user_import, supertokens_config, user_context)
+    except Exception as import_error:
+        if not is_bulk_import_duplicate_identity_error(import_error):
+            raise
+        try:
+            # Match Node by rerunning full reconciliation, including authoritative-passwordless checks.
+            recovered = await reconcile_rownd_user_with_existing_login_methods(
+                user_import,
+                tenant_id,
+                user_context,
+            )
+        except Exception as reconciliation_error:
+            raise reconciliation_error from import_error
+        if not recovered:
+            raise
 
 
 class _DerivedUserContext(dict[str, Any]):
@@ -730,7 +782,12 @@ async def handle_migrate(
             if not reconciled:
                 if user is not None:
                     raise RuntimeError("Incomplete migrated user could not be reconciled")
-                await import_user(user_import, supertokens_config, user_context)
+                await _import_user_with_e006_recovery(
+                    user_import,
+                    tenant_id,
+                    supertokens_config,
+                    user_context,
+                )
             user = await get_user(rownd_user_id, user_context)
             if user is None:
                 raise RowndPluginError("Imported user could not be resolved")
@@ -2162,7 +2219,7 @@ async def import_user(
     finally:
         clear_supertokens_core_call_cache(user_context)
     if res.status_code < 200 or res.status_code >= 300:
-        raise RuntimeError("Bulk import failed with status %s: %s" % (res.status_code, res.text))
+        raise _BulkImportError(res.status_code, res.text)
     data = res.json()
     if data.get("status") != "OK" or not data.get("user"):
         raise RuntimeError(

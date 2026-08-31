@@ -788,6 +788,86 @@ async def test_raw_bulk_import_clears_active_context_on_unknown_write_outcome(
     assert context["_default"]["core_call_cache"] == {}
 
 
+@pytest.mark.parametrize(
+    "status,response_text,expected",
+    [
+        (400, '{"errors":["E006: duplicate identity"]}', True),
+        (400, '{"errors":["E006: first","E006: second"]}', True),
+        (500, '{"errors":["E006: duplicate identity"]}', False),
+        (400, "not-json", False),
+        (400, "{}", False),
+        (400, '{"errors":[]}', False),
+        (400, '{"errors":"E006: duplicate identity"}', False),
+        (400, '{"errors":[6]}', False),
+        (400, '{"errors":["E006: duplicate identity","E007: invalid user"]}', False),
+    ],
+)
+async def test_bulk_import_duplicate_identity_classifier(
+    status: int,
+    response_text: str,
+    expected: bool,
+):
+    error = impl._BulkImportError(status, response_text)
+
+    assert impl.is_bulk_import_duplicate_identity_error(error) is expected
+
+
+async def test_e006_recovery_preserves_import_error_when_reconciliation_finds_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import_error = impl._BulkImportError(400, '{"errors":["E006: duplicate identity"]}')
+
+    async def failed_import(*args: Any, **kwargs: Any):
+        raise import_error
+
+    async def reconcile_nothing(*args: Any, **kwargs: Any):
+        return False
+
+    monkeypatch.setattr(impl, "import_user", failed_import)
+    monkeypatch.setattr(impl, "reconcile_rownd_user_with_existing_login_methods", reconcile_nothing)
+
+    with pytest.raises(impl._BulkImportError) as caught:
+        await impl._import_user_with_e006_recovery(
+            {},
+            "public",
+            cast(Any, SimpleNamespace()),
+            {},
+        )
+
+    assert caught.value is import_error
+
+
+async def test_e006_recovery_propagates_reconciliation_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import_error = impl._BulkImportError(400, '{"errors":["E006: duplicate identity"]}')
+    reconciliation_error = RuntimeError("owner is mapped to another Rownd user")
+
+    async def failed_import(*args: Any, **kwargs: Any):
+        raise import_error
+
+    async def unsafe_reconciliation(*args: Any, **kwargs: Any):
+        raise reconciliation_error
+
+    monkeypatch.setattr(impl, "import_user", failed_import)
+    monkeypatch.setattr(
+        impl,
+        "reconcile_rownd_user_with_existing_login_methods",
+        unsafe_reconciliation,
+    )
+
+    with pytest.raises(RuntimeError, match="owner is mapped to another Rownd user") as caught:
+        await impl._import_user_with_e006_recovery(
+            {},
+            "public",
+            cast(Any, SimpleNamespace()),
+            {},
+        )
+
+    assert caught.value is reconciliation_error
+    assert caught.value.__cause__ is import_error
+
+
 async def test_tenant_association_failure_does_not_disassociate_published_state(
     monkeypatch: pytest.MonkeyPatch,
 ):
