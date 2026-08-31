@@ -387,6 +387,173 @@ async def test_migrate_reconciles_unverified_rownd_email_with_existing_passwordl
     assert len(google_owners) == 1
 
 
+async def test_migrate_reconciles_cross_recipe_primary_email_owner(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    rownd_user_id = "migration-cross-recipe-owner"
+    apple_id = "migration-cross-recipe-owner-apple"
+    google_id = "migration-cross-recipe-owner-google"
+    email = "migration-cross-recipe-owner@example.com"
+    apple = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="apple",
+        third_party_user_id=apple_id,
+        email=email,
+        is_verified=True,
+        user_context={},
+    )
+    apple = cast(Any, apple)
+    primary = await accountlinking_asyncio.create_primary_user(apple.recipe_user_id, {})
+    assert getattr(primary, "status", "OK") == "OK"
+
+    bulk_import_calls: list[str] = []
+    original_post = httpx.AsyncClient.post
+
+    async def post(self, url: str, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if str(url).endswith("/bulk-import/import"):
+            bulk_import_calls.append(str(url))
+        return await original_post(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    user_info = {
+        "auth_level": "verified",
+        "data": {
+            "user_id": rownd_user_id,
+            "google_id": google_id,
+            "email": email,
+        },
+        "verified_data": {"google_id": True, "email": True},
+    }
+
+    res = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
+
+    assert res.status_code == 200
+    assert res.json() == {"status": "OK"}
+    mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    assert mapping.supertokens_user_id == apple.user.id
+    migrated_user = await get_user(rownd_user_id)
+    assert migrated_user is not None
+    assert migrated_user.is_primary_user is True
+    assert len(migrated_user.login_methods) == 3
+    assert any(
+        method.recipe_id == "thirdparty"
+        and method.third_party is not None
+        and method.third_party.id == "apple"
+        and method.third_party.user_id == apple_id
+        and method.verified is True
+        for method in migrated_user.login_methods
+    )
+    assert any(
+        method.recipe_id == "thirdparty"
+        and method.third_party is not None
+        and method.third_party.id == "google"
+        and method.third_party.user_id == google_id
+        for method in migrated_user.login_methods
+    )
+    assert any(
+        method.recipe_id == "passwordless"
+        and method.email == email
+        and method.verified is True
+        for method in migrated_user.login_methods
+    )
+    provider_owners = await supertokens_list_users_by_account_info(
+        "public", AccountInfoInput(third_party=ThirdPartyInfo(google_id, "google")), False, {}
+    )
+    email_owners = await supertokens_list_users_by_account_info(
+        "public", AccountInfoInput(email=email), False, {}
+    )
+    assert len(provider_owners) == 1
+    assert len(email_owners) == 1
+    assert bulk_import_calls == []
+
+    repeated_res = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
+
+    assert repeated_res.status_code == 200
+    assert repeated_res.json() == {"status": "OK"}
+    repeated_user = await get_user(rownd_user_id)
+    assert repeated_user is not None
+    assert len(repeated_user.login_methods) == 3
+    assert bulk_import_calls == []
+
+
+@pytest.mark.parametrize(
+    "incoming_verified, existing_verified",
+    [(False, True), (True, False)],
+)
+async def test_migrate_fails_closed_for_cross_recipe_owner_without_mutual_verification(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+    incoming_verified: bool,
+    existing_verified: bool,
+):
+    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    suffix = "incoming" if not incoming_verified else "existing"
+    rownd_user_id = "migration-cross-recipe-unverified-%s" % suffix
+    apple_id = "%s-apple" % rownd_user_id
+    google_id = "%s-google" % rownd_user_id
+    email = "%s@example.com" % rownd_user_id
+    apple = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="apple",
+        third_party_user_id=apple_id,
+        email=email,
+        is_verified=existing_verified,
+        user_context={},
+    )
+    apple = cast(Any, apple)
+    primary = await accountlinking_asyncio.create_primary_user(apple.recipe_user_id, {})
+    assert getattr(primary, "status", "OK") == "OK"
+
+    bulk_import_calls: list[str] = []
+    original_post = httpx.AsyncClient.post
+
+    async def post(self, url: str, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if str(url).endswith("/bulk-import/import"):
+            bulk_import_calls.append(str(url))
+        return await original_post(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    res = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "auth_level": "verified",
+            "data": {
+                "user_id": rownd_user_id,
+                "google_id": google_id,
+                "email": email,
+            },
+            "verified_data": {"google_id": True, "email": incoming_verified},
+        },
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert res.headers.get("st-access-token") is None
+    assert (await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})).__class__.__name__ == (
+        "UnknownMappingError"
+    )
+    assert await get_user(rownd_user_id) is None
+    unchanged_owner = await get_user(apple.user.id)
+    assert unchanged_owner is not None
+    assert unchanged_owner.is_primary_user is True
+    assert len(unchanged_owner.login_methods) == 1
+    email_owners = await supertokens_list_users_by_account_info(
+        "public", AccountInfoInput(email=email), False, {}
+    )
+    assert len(email_owners) == 1
+    assert await supertokens_list_users_by_account_info(
+        "public", AccountInfoInput(third_party=ThirdPartyInfo(google_id, "google")), False, {}
+    ) == []
+    assert bulk_import_calls == []
+
+
 async def test_migrate_links_existing_provider_and_verified_email_owner(
     core_url: str, rownd_client: MockRowndClient
 ):

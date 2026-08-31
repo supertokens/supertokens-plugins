@@ -8,7 +8,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from hashlib import sha256
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Dict, List, NoReturn, Optional, Tuple, Union, cast
+from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, NoReturn, Optional, Tuple, Union, cast
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
@@ -2198,53 +2198,105 @@ def login_method_matches_import(login_method: LoginMethod, method_import: JsonDi
     return login_method.has_same_email_as(optional_string(method_import.get("email")))
 
 
-def import_method_account_info(method_import: JsonDict) -> AccountInfoInput:
+def import_method_account_infos(method_import: JsonDict) -> List[AccountInfoInput]:
     if method_import.get("recipeId") == "thirdparty":
         third_party_user_id = optional_string(method_import.get("thirdPartyUserId"))
         third_party_id = optional_string(method_import.get("thirdPartyId"))
-        if not third_party_user_id or not third_party_id:
+        email = optional_string(method_import.get("email"))
+        if not third_party_user_id or not third_party_id or not email:
             raise RuntimeError("Migrated third-party login method is incomplete")
-        return AccountInfoInput(
-            third_party=ThirdPartyInfo(
-                third_party_user_id,
-                third_party_id,
-            )
-        )
+        return [
+            AccountInfoInput(
+                third_party=ThirdPartyInfo(
+                    third_party_user_id,
+                    third_party_id,
+                )
+            ),
+            AccountInfoInput(email=email),
+        ]
     email = optional_string(method_import.get("email"))
     if email:
-        return AccountInfoInput(email=email)
-    return AccountInfoInput(phone_number=optional_string(method_import.get("phoneNumber")))
+        return [AccountInfoInput(email=email)]
+    phone_number = optional_string(method_import.get("phoneNumber"))
+    if phone_number:
+        return [AccountInfoInput(phone_number=phone_number)]
+    raise RuntimeError("Migrated login method has no account information")
+
+
+def login_method_owns_import_account_info(
+    user: User, login_method: LoginMethod, method_import: JsonDict
+) -> bool:
+    if login_method_matches_import(login_method, method_import):
+        return True
+    if not user.is_primary_user:
+        return False
+
+    email = optional_string(method_import.get("email"))
+    if method_import.get("recipeId") == "thirdparty":
+        return login_method.has_same_email_as(email)
+    if method_import.get("recipeId") == "passwordless" and not email:
+        return login_method.has_same_phone_number_as(
+            optional_string(method_import.get("phoneNumber"))
+        )
+    return login_method.has_same_email_as(email)
+
+
+class ImportMethodInspection(NamedTuple):
+    method_import: JsonDict
+    owners: List[Tuple[User, LoginMethod]]
+    match: Optional[Tuple[User, LoginMethod]]
+    reconciliation_match: Optional[Tuple[User, LoginMethod]]
 
 
 async def inspect_import_method(
     method_import: JsonDict,
     tenant_id: str,
     user_context: UserContext,
-) -> Tuple[JsonDict, List[Tuple[User, LoginMethod]], Optional[Tuple[User, LoginMethod]]]:
-    users = await list_users_by_account_info(
-        tenant_id,
-        import_method_account_info(method_import),
-        False,
-        user_context,
+) -> ImportMethodInspection:
+    user_lists = await asyncio.gather(
+        *(
+            list_users_by_account_info(
+                tenant_id,
+                account_info,
+                False,
+                user_context,
+            )
+            for account_info in import_method_account_infos(method_import)
+        )
     )
+    users = {user.id: user for user_list in user_lists for user in user_list}.values()
     owners = [
         (user, login_method)
         for user in users
         for login_method in user.login_methods
         if tenant_id in login_method.tenant_ids
-        and login_method_matches_import(login_method, method_import)
+        and login_method_owns_import_account_info(user, login_method, method_import)
     ]
     match = next(
         (
             owner
             for owner in owners
-            if method_import.get("recipeId") == "thirdparty"
-            or method_import.get("recipeId") == "passwordless"
-            or (method_import.get("isVerified") is True and owner[1].verified)
+            if login_method_matches_import(owner[1], method_import)
+            and (
+                method_import.get("recipeId") == "thirdparty"
+                or method_import.get("recipeId") == "passwordless"
+                or (method_import.get("isVerified") is True and owner[1].verified)
+            )
         ),
         None,
     )
-    return method_import, owners, match
+    reconciliation_match = match
+    if (
+        reconciliation_match is None
+        and method_import.get("recipeId") == "passwordless"
+        and isinstance(method_import.get("email"), str)
+        and method_import.get("isVerified") is True
+    ):
+        reconciliation_match = next(
+            (owner for owner in owners if owner[0].is_primary_user and owner[1].verified),
+            None,
+        )
+    return ImportMethodInspection(method_import, owners, match, reconciliation_match)
 
 
 async def create_missing_login_method(
@@ -2432,14 +2484,24 @@ async def reconcile_rownd_user_with_existing_login_methods(
     inspections = await asyncio.gather(
         *(inspect_import_method(method, tenant_id, user_context) for method in method_imports)
     )
-    matches = [match for _, _, match in inspections if match is not None]
+    matches = [
+        inspection.reconciliation_match
+        for inspection in inspections
+        if inspection.reconciliation_match is not None
+    ]
     if not matches:
+        if any(inspection.owners for inspection in inspections):
+            raise RuntimeError(
+                "Migrated account information is reserved by an existing SuperTokens user "
+                "and cannot be safely reconciled"
+            )
         return False
 
     third_party_matches = [
-        match
-        for method, _, match in inspections
-        if method.get("recipeId") == "thirdparty" and match is not None
+        inspection.match
+        for inspection in inspections
+        if inspection.method_import.get("recipeId") == "thirdparty"
+        and inspection.match is not None
     ]
     target_user, target_login_method = third_party_matches[0] if third_party_matches else matches[0]
     resolved_user_ids: Dict[str, "asyncio.Task[str]"] = {}
@@ -2453,9 +2515,9 @@ async def reconcile_rownd_user_with_existing_login_methods(
 
     target_supertokens_user_id = await resolve_user_id(target_user.id)
     owner_inputs = [
-        (method, owner, login_method)
-        for method, owners, _match in inspections
-        for owner, login_method in owners
+        (inspection.method_import, owner, login_method)
+        for inspection in inspections
+        for owner, login_method in inspection.owners
     ]
     owner_ids = await asyncio.gather(*(resolve_user_id(owner.id) for _, owner, _ in owner_inputs))
     inspected_owners = [
@@ -2491,9 +2553,10 @@ async def reconcile_rownd_user_with_existing_login_methods(
         )
     unsupported = next(
         (
-            method
-            for method, _, match in inspections
-            if match is None and method.get("recipeId") == "emailpassword"
+            inspection.method_import
+            for inspection in inspections
+            if inspection.match is None
+            and inspection.method_import.get("recipeId") == "emailpassword"
         ),
         None,
     )
@@ -2525,8 +2588,9 @@ async def reconcile_rownd_user_with_existing_login_methods(
             raise RuntimeError(
                 "Failed to link migrated login method: %s" % getattr(link_result, "status", "ERROR")
             )
-    for method_import, _, match in inspections:
-        if match is not None:
+    for inspection in inspections:
+        method_import = inspection.method_import
+        if inspection.match is not None:
             continue
         verified_matching_email = None
         email = optional_string(method_import.get("email"))
