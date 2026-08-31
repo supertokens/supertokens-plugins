@@ -3,7 +3,7 @@ from typing import Mapping
 
 
 PLUGIN_ID = "supertokens-plugin-rownd"
-PLUGIN_VERSION = "0.1.9"
+PLUGIN_VERSION = "0.1.13"
 PLUGIN_SDK_VERSION = ">=0.31.3"
 HANDLE_BASE_PATH = "/plugin/rownd"
 PUBLIC_TENANT_ID = "public"

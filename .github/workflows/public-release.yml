@@ -51,12 +51,16 @@ jobs:
         if: ${{ inputs.skip_tests == false }}
         run: npm test
 
+      - name: Check Python package versions
+        run: npm run check:python-versions
+
       - name: build
         run: npm run build
 
       - name: Publish
         uses: changesets/action@v1
         with:
+          version: npm run version
           publish: npm run release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

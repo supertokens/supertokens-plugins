@@ -20,6 +20,9 @@ jobs:
         with:
           node-version: 18
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Install Dependencies
         run: npm ci
 
