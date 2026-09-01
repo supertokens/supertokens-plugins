@@ -1,5 +1,16 @@
 # @supertokens-plugins/rownd-python
 
+## 0.2.0
+
+### Minor Changes
+
+- Fix migrate race conditions and port rownd-nodejs changes
+- a9af441: Add an opt-in email credential retirement mode so operators can prevent authentication through previously replaced Passwordless email aliases while durable email-change completion remains unavailable without Core metadata compare-and-swap. Guard mode disables email-change start and completion, so pending changes must be drained and all workers upgraded before rollout. Direct SuperTokens SDK calls outside plugin-owned APIs remain out of scope.
+
+### Patch Changes
+
+- a5150ef: Report the current package version in plugin metadata
+
 ## Unreleased
 
 ### Patch Changes
