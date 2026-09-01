@@ -11,3 +11,23 @@ export class RowndPluginError extends Error {
     super(ROWND_PLUGIN_ERROR_MESSAGES[type]);
   }
 }
+
+export class RowndEmailChangeError extends Error {
+  constructor(
+    public readonly code: "CONFLICT" | "AMBIGUOUS" | "INVALID_EMAIL",
+    public readonly httpStatus: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export class RowndConfigResolutionError extends Error {
+  readonly cause!: unknown;
+
+  constructor(cause: unknown) {
+    super("Rownd configuration could not be resolved");
+    this.name = "RowndConfigResolutionError";
+    Object.defineProperty(this, "cause", { enumerable: false, value: cause });
+  }
+}

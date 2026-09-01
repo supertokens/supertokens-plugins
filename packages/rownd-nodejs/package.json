@@ -1,19 +1,30 @@
 {
   "name": "@supertokens-plugins/rownd-nodejs",
-  "version": "0.2.1",
+  "version": "0.7.2",
   "description": "Rownd User Migration Plugin for SuperTokens",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "rownd-nodejs": "./dist/cli.js"
+  },
   "files": [
-    "dist",
-    "src",
-    "scripts"
+    "dist"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts",
-    "bulk-import": "tsx scripts/bulkMigrate.ts",
+    "build": "rm -rf dist && tsup",
+    "cli": "npm run build && node dist/cli.js",
     "lint": "eslint ./src --ext .ts",
+    "prepack": "npm run build",
+    "typecheck": "tsc --noEmit",
     "test": "TEST_MODE=testing vitest run --pool=forks"
   },
   "keywords": [
@@ -25,7 +36,9 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
-    "@rownd/node": "^3.0.4"
+    "@rownd/node": "^3.0.4",
+    "yaml": "^2.8.3",
+    "zod": "^4.3.6"
   },
   "peerDependencies": {
     "supertokens-node": ">=23.0.0"
@@ -40,9 +53,7 @@
     "tsup": "^8.0.2",
     "tsx": "^4.21.0",
     "typescript": "^5.7.3",
-    "vitest": "^1.3.1",
-    "yaml": "^2.8.3",
-    "zod": "^4.3.6"
+    "vitest": "^1.3.1"
   },
   "publishConfig": {
     "access": "public"

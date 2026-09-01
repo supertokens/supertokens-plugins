@@ -15,7 +15,7 @@ npm install @supertokens-plugins/rownd-nodejs
 Initialize the plugin in your SuperTokens backend configuration.
 
 > [!IMPORTANT]
-> This plugin requires the `Session` and `UserMetadata` recipes to be initialized in your SuperTokens configuration.
+> This plugin always requires the `Session` and `UserMetadata` recipes. Enable `Passwordless` for email/phone, `ThirdParty` for Google/Apple/guest/anonymous users, and `EmailVerification` for verified email profile updates. `AccountLinking` is required for email changes and whenever migrated Rownd users may have multiple supported login methods.
 
 ```typescript
 import SuperTokens from "supertokens-node";
@@ -44,19 +44,315 @@ SuperTokens.init({
 });
 ```
 
-## API Endpoint
+### Disabling Rownd User Migration
 
-The plugin exposes a single endpoint:
+After migration is complete, disable Rownd user and session migration to run
+the compatibility endpoints without Rownd credentials:
+
+```typescript
+RowndMigrationPlugin.init({
+  disableRowndUserMigration: true,
+});
+```
+
+This prevents the Rownd API client and the `/plugin/rownd/migrate` and
+`/plugin/migrate-session` routes from being initialized. Other compatibility
+endpoints remain enabled. Passwordless and email-verification links continue to
+use the Rownd Hub with an internal dummy app key when `rowndAppKey` is omitted.
+The plugin logs a warning during initialization while migration is disabled.
+
+Without `disableRowndUserMigration: true`, both `rowndAppKey` and
+`rowndAppSecret` are required.
+
+### Tenant-Specific Configuration
+
+Use `resolveConfig` when Rownd app configuration differs by SuperTokens tenant.
+The resolver runs once per logical operation. `tenantId` and `request` are
+optional because SDK function calls do not always originate from an HTTP route;
+`userContext` is always provided. It may return `clientDomains`,
+`crossDeviceConfirmationBypass`, `schema`, `appConfig`, `subBrands`, or
+`emailChange`.
+
+```typescript
+RowndMigrationPlugin.init({
+  disableRowndUserMigration: true,
+  resolveConfig: async ({ tenantId }) => {
+    const config = await loadTenantConfiguration(tenantId);
+    return {
+      appConfig: config.appConfig,
+      schema: config.schema,
+      subBrands: config.subBrands,
+    };
+  },
+});
+```
+
+`rowndAppKey`, `rowndAppSecret`, `disableRowndUserMigration`, debug logging,
+and telemetry remain startup-static. Resolver failures and malformed results
+fail the operation instead of falling back to another tenant. The plugin keeps
+the resolved snapshot tenant-bound and does not place static credentials in the
+downstream user context. An authoritative non-public tenant supplied by a
+recipe or session takes precedence over the request query; a conflicting
+non-public `tenantId` query is rejected. Public or tenantless plugin operations
+may use the query as their explicit tenant.
+
+Each returned top-level field replaces its static counterpart for that
+operation. Omitted fields fall back to the corresponding top-level static
+value; objects are not deep-merged with that static value. Setting
+`disableRowndUserMigration` in resolver output is unsupported: when it is true
+at startup, migration routes and credentials remain disabled for every tenant.
+
+### Email Changes
+
+When email sign-in is configured, changing the Rownd profile email starts a
+verified passwordless email change for the initiating tenant. After
+verification, the plugin creates a new passwordless method or reuses one already
+linked to the same primary user in that tenant, then makes it the canonical
+Rownd profile email. It removes replaced Passwordless email methods from the
+initiating tenant. Methods also associated with another tenant remain available
+there. Phone, third-party, and email-password methods are not modified. For
+updates, the canonical Passwordless method acts as the EmailVerification
+subject. For third-party-only accounts, the initiating third-party method acts
+as the subject because the new Passwordless recipe user does not exist until
+proof succeeds.
+
+Email changes for established accounts require a database-checked native
+SuperTokens session created within the last ten minutes by default. Normal
+session refresh does not reset this window. Guest and instant accounts must use
+a supported sign-up flow instead. The target email is rejected when it belongs
+to another account; the plugin never merges accounts as a side effect of a
+profile edit. Profile metadata is account-wide. A new passwordless method is
+associated only with the tenant that initiated the change; an existing method
+retains its current tenant associations.
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  appConfig: {
+    signInMethods: [{ method: "email" }],
+  },
+  emailChange: {
+    maxSessionAgeSeconds: 600,
+  },
+});
+```
+
+If the active app or sub-brand `signInMethods` does not enable email, profile
+email updates are rejected rather than creating a hidden authentication method.
+`Passwordless`, `EmailVerification`, and `AccountLinking` must be initialized
+when email changes are enabled, and Passwordless must use `EMAIL` or
+`EMAIL_OR_PHONE` as its contact method.
+
+Previous Passwordless emails stop being login aliases in the initiating tenant
+after verification. The replacement session uses the surviving canonical
+Passwordless method. A pending change remains usable only while its underlying
+SuperTokens verification token, pending metadata, and initiating session remain
+valid. Starting another change revokes the previous pending token. Email
+ownership is checked across every SuperTokens tenant both when the change starts
+and when verification completes. Accounts with multiple Passwordless methods
+must have a valid tenant-scoped `rownd_email_recipe_user_ids` canonical marker.
+The legacy `rownd_email_recipe_user_id` marker remains available for metadata
+compatibility. Accounts with
+only real third-party methods can add a Passwordless method; guest and instant
+methods cannot. Phone-only Passwordless methods are supported, and adding an
+email preserves the phone method. Verification must use the same active session
+that started the change. Completion revokes every account session and returns a
+replacement for that initiating session.
+
+Completion creates and links the verified target method, then publishes it as
+canonical together with a `COMMITTING` cleanup plan. Once replaced-email cleanup
+starts, failures roll forward: the target method is retained, all sessions are
+revoked, and `COMMITTING` metadata retains `retiredMethods` entries containing
+`{ recipeUserId, email }` for reconciliation. A later authenticated profile-email
+update retries that idempotent cleanup. Successful cleanup removes the
+`COMMITTING` state; no permanent tombstone remains. Already removed or
+disassociated methods are treated as complete. Invalid reconciliation state
+fails closed without deleting methods. Replacement-session failure does not
+restore removed login aliases.
+
+When `auth.useExplicitSignUpFlow` is enabled, a valid `intent: "sign_in" |
+"sign_up"` on Passwordless create-code, resend-code, and consume-code HTTP
+requests opts into explicit behavior. The plugin carries validated intent through
+`userContext` and adds it to generated magic links as `rowndAuthIntent`. Omitting
+`intent` preserves legacy combined sign-in/up behavior; a supplied malformed
+value returns `GENERAL_ERROR`. Explicit `sign_in` accepts only the tenant's
+canonical email. A retired old email returns `SIGN_IN_UP_NOT_ALLOWED` with reason
+`No existing account found` before a code is sent. Explicit `sign_up` may reuse
+that email after cleanup succeeds. `rowndAuthIntent` is propagation metadata, not
+cryptographic proof or authorization. This policy is implemented only by the
+plugin's HTTP overrides; direct Passwordless SDK calls bypass it.
+Canonical email metadata is considered during account lookup and automatic
+linking, so a stale email retained by Apple or another provider cannot restore a
+replaced Passwordless email.
+
+Successful update responses that start verification include
+`email_verification_pending: true`. The returned profile continues to contain
+the current canonical email until verification completes.
+
+Native clients using `rowndDisplayContext: "mobile_app"` must also send
+`rowndNativeEmailVerification: true` in the validated `context` object for
+`PUT /plugin/rownd/user` and `PUT /plugin/rownd/user/field` email changes. Older
+clients receive HTTP 426 before pending metadata is created or verification
+email is sent. Browser requests do not require this flag. It is capability and
+routing metadata only; session, recent-authentication, email ownership, and
+verification checks remain authoritative.
+
+Pending email-change links preserve the raw SuperTokens verification token.
+Custom email-delivery overrides must preserve all existing query parameters, including
+`token`, `rowndPendingVerificationId`, `apiDomain`, `apiBasePath`, `tenantId`
+when present, and Hub bootstrap parameters. The pending marker selects the
+email-change flow; without it, verification remains an ordinary SuperTokens
+verification and does not change the Passwordless login method. Removing the
+marker can consume the raw token without completing the credential change. This
+denial-of-service case is accepted: the plugin intentionally does not classify
+or wrap Core tokens, and each pending link carries exactly one raw `token` value.
+Native clients require the API parameters to match their trusted SuperTokens
+configuration before providing a session token.
+
+SuperTokens atomically consumes its verification token, but user-metadata
+updates are read/modify/write operations without compare-and-swap. Concurrent
+profile writes can still overwrite pending-operation metadata. A process crash
+between Core token consumption and terminal cleanup can leave stale pending
+metadata until it is repaired. Terminal operations attempt to remove their
+pending record. Durable `COMMITTING` cleanup failures are retried by the next
+authenticated profile-email update; malformed state still requires operator
+reconciliation.
+
+### Session Claim Fields
+
+Schema fields can be copied into the SuperTokens access-token payload by setting `include_in_session_claims: true`. Use `session_claim_name` when the claim name should differ from the Rownd data field name.
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  schema: {
+    employee_id: {
+      display_name: "Employee ID",
+      type: "string",
+      user_visible: false,
+      include_in_session_claims: true,
+      session_claim_name: "employee_id_claim",
+    },
+  },
+});
+```
+
+### Client Link Domains
+
+Set `clientDomains` to rewrite account links to different frontend URL bases. Values must be absolute URL bases, including custom schemes for native deep links. The plugin selects `mobile` for `mobile_app` display context and `browser` otherwise. Consumers can pass `rownd_client_domain` to select any custom key.
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  clientDomains: {
+    browser: "https://app.example.com",
+    mobile: "customDomain://",
+    browser_local: "http://localhost:3000",
+  },
+});
+```
+
+### Same-device Passwordless Hub Policy
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  appConfig: {
+    auth: {
+      enforceSameDevicePasswordlessSignIn: true,
+    },
+  },
+});
+```
+
+This is a supported Hub UI policy scoped by the Hub to passwordless flows originating from `mobile_app`. It is not server-side device binding.
+
+### Passwordless Confirmation Bypass
+
+Use `createMagicLinkWithConfirmationBypass` when your backend needs to create a passwordless magic link that can be opened on a different device without showing the SuperTokens cross-device confirmation prompt.
+This is intended for trusted server-side flows only.
+
+First, configure the exact post-login paths that may use the bypass:
+
+```typescript
+const rowndPluginConfig = {
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  clientDomains: {
+    browser: "https://app.example.com",
+  },
+  crossDeviceConfirmationBypass: {
+    allowedRedirectPaths: ["/profile", "/settings/security"],
+  },
+};
+
+const superTokensConfig = {
+  // your app info and recipe list
+  experimental: {
+    plugins: [RowndMigrationPlugin.init(rowndPluginConfig)],
+  },
+};
+
+SuperTokens.init(superTokensConfig);
+```
+
+Then call the helper from your backend:
+
+```typescript
+import { createMagicLinkWithConfirmationBypass } from "@supertokens-plugins/rownd-nodejs";
+
+const magicLink = await createMagicLinkWithConfirmationBypass({
+  email: "user@example.com",
+  tenantId: "tenant-a",
+  clientDomain: "browser",
+  redirectToPath: "/profile",
+  displayContext: "browser",
+});
+```
+
+`redirectToPath` is required and must match `crossDeviceConfirmationBypass.allowedRedirectPaths` exactly after normalization. Absolute URLs are accepted only when their origin matches the resolved `clientDomain`; they are normalized back to a relative path before being added to the magic link.
+
+`clientDomain` must be a configured `clientDomains` key, not a raw domain. Omit it to use the SuperTokens website domain.
+
+Pass exactly one of `email` or `phoneNumber`. `tenantId` defaults to `public`. The helper returns the rewritten magic link with `bypassDeviceConfirmation=true`.
+
+Before skipping the cross-device confirmation prompt, the frontend should validate the callback against the plugin. Routes are mounted under your SuperTokens `apiBasePath`, which defaults to `/auth`.
+
+- **POST** `{apiBasePath}/plugin/passwordless-cross-device-confirmation/validate`
+- **Default**: `POST /auth/plugin/passwordless-cross-device-confirmation/validate`
+- **Body**: `{ "clientDomain": "browser", "redirectToPath": "/profile", "appVariantId": "optional_variant" }`
+- **Success response**: `{ "status": "OK", "bypass": true }`
+
+If validation fails, the frontend should show the normal cross-device confirmation prompt.
+
+## API Endpoints
+
+Routes are mounted under your SuperTokens `apiBasePath`, which defaults to `/auth`. The migration endpoint is the main Rownd-to-SuperTokens session handoff endpoint; the plugin also exposes Rownd-compatible app config, guest, user, metadata, field, and sign-out endpoints under `{apiBasePath}/plugin/rownd/...`.
+
+Unauthenticated migration and guest routes accept an optional `tenantId` query parameter. It defaults to `public`. SuperTokens Core validates the tenant when the operation runs. Authenticated identity-field and sign-out operations use the tenant from the current session; custom Rownd metadata remains global to the SuperTokens user.
 
 > [!IMPORTANT]
-> The plugin always migrates users and sessions into the `public` tenant.
 > Rownd users with multiple supported login methods are rejected unless SuperTokens account linking is enabled in the target environment.
 
 ### Migrate
 
-- **POST** `/plugin/rownd/migrate`
-- **Headers**: `Authorization: Bearer <Rownd_JWT>`
-- **Description**: Validates the Rownd JWT, ensures the user is migrated to SuperTokens in the `public` tenant, syncs Rownd user data to SuperTokens UserMetadata, and then creates a new SuperTokens session for that user.
+- **POST** `{apiBasePath}/plugin/rownd/migrate`
+- **Default**: `POST /auth/plugin/rownd/migrate`
+- **Non-public tenant**: `POST /auth/plugin/rownd/migrate?tenantId=tenant-a`
+- **Headers**: `Authorization: Bearer <Rownd_JWT>`. Header-token clients should also send `rid: session`, `fdi-version: 1.18`, and `st-auth-mode: header`.
+- **Description**: Validates the Rownd JWT, imports new users with their Rownd profile data, ensures the selected login method is associated with the requested SuperTokens tenant, and then creates a new SuperTokens session in that tenant. Header-token clients must receive `st-access-token`, `st-refresh-token`, and `front-token` response headers.
+- **Identity reconciliation**: Rownd passwordless identifiers are authoritative during migration. When an exact third-party identity and an existing Passwordless email belong to separate users, the plugin links the Passwordless method only if Rownd verifies that email, its owner is not already primary, and it is not mapped to another Rownd user. `verified_data.email` must be `true` or match `data.email` case-insensitively. Other ownership conflicts still fail migration.
+
+### Guest
+
+- **POST** `{apiBasePath}/plugin/rownd/guest`
+- **Default**: `POST /auth/plugin/rownd/guest`
+- **Non-public tenant**: `POST /auth/plugin/rownd/guest?tenantId=tenant-a`
+- **Description**: Creates a guest or instant user and session in the requested tenant.
 
 ## Debug Logging
 
@@ -72,13 +368,11 @@ The plugin emits exactly one telemetry event per `/migrate` call result.
 
 Each event includes endpoint outcome data only (not step-by-step events), including:
 
-- `operation`: `migrate`
 - `outcome`: `success` or `error`
 - `durationMs`
 - `tenantId` (when available)
 - `rowndUserId` (when available)
 - `superTokensUserId` (when available)
-- `migrationState`: `already-migrated` or `imported-during-request` (when available)
 - for errors: `error.message` and `error.name`
 
 > [!NOTE]
@@ -136,19 +430,22 @@ RowndMigrationPlugin.init({
 
 The package includes a bulk migration script for importing Rownd users into SuperTokens.
 
-The script now runs directly from a YAML config file that lives beside the script:
+Set `supertokens.tenantId` in the generated configuration to associate every imported login method with a non-public tenant. It defaults to `public` when omitted. Resuming from a checkpoint with a different tenant is rejected.
 
-- config file: `packages/rownd-nodejs/scripts/config.yaml`
-- script: `packages/rownd-nodejs/scripts/bulkMigrate.ts`
+The script runs from a YAML config file generated from the included template.
 
 ### Usage
 
-1. Edit `scripts/config.yaml` with your Rownd and SuperTokens credentials.
-2. Run the script from `packages/rownd-nodejs`.
+1. Generate a local config file.
+2. Edit the config with your Rownd and SuperTokens credentials.
+3. Run the migration.
 
 ```bash
-npm run bulk-import
+npx rownd-nodejs init-config --output ./rownd-bulk-migrate.yaml
+npx rownd-nodejs bulk-migrate --config ./rownd-bulk-migrate.yaml
 ```
+
+For repo-local development, use `npm run cli -- bulk-migrate --config ./rownd-bulk-migrate.yaml` from `packages/rownd-nodejs`.
 
 The script:
 
@@ -160,5 +457,5 @@ The script:
 
 ### Config File
 
-All runtime config is read from `scripts/config.yaml`.
+All runtime config is read from the YAML file passed with `--config`.
 There is no environment variable parsing.
