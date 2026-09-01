@@ -150,6 +150,9 @@ init(
                     api_domain=API_DOMAIN,
                     app_name=APP_NAME,
                     enable_debug_logs=os.environ.get("ROWND_ENABLE_DEBUG_LOGS") == "true",
+                    # "observe" preserves legacy email changes. Drain pending changes before
+                    # switching every worker to "guard", which disables email changes.
+                    email_change={"retirement_mode": "observe"},
                     app_config={
                         "id": os.environ.get("ROWND_APP_KEY", ""),
                         "name": APP_NAME,

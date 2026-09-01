@@ -52,7 +52,15 @@ from .config import (
 from .errors import RowndEmailChangeError, RowndPluginError
 from .logger import log_debug
 from . import rownd_compatibility
-from .types import JsonDict, RowndPluginConfig
+from .types import (
+    EmailCredentialAuthorization,
+    EmailCredentialReason,
+    EmailCredentialState,
+    JsonDict,
+    ParsedCommittingEmailVerification,
+    ParsedPendingEmailVerification,
+    RowndPluginConfig,
+)
 from .utils import (
     clear_supertokens_core_call_cache,
     create_derived_user_context,
@@ -1212,6 +1220,12 @@ async def start_pending_email_verification(
     email: str,
     user_context: UserContext,
 ) -> JsonDict:
+    if config.email_change.get("retirement_mode", "observe") == "guard":
+        raise RowndEmailChangeError(
+            "EMAIL_CHANGE_DISABLED",
+            409,
+            "email changes are disabled while email credential retirement guard mode is active",
+        )
     user_id = session.get_user_id(user_context)
     tenant_id = session.get_tenant_id(user_context)
     user = await get_user(user_id, user_context)
@@ -1456,6 +1470,12 @@ async def complete_pending_email_verification(
     pending_verification_id: Optional[str] = None,
     pending_user_id: Optional[str] = None,
 ) -> Optional[Dict[str, object]]:
+    if get_active_rownd_config().email_change.get("retirement_mode", "observe") == "guard":
+        raise RowndEmailChangeError(
+            "EMAIL_CHANGE_DISABLED",
+            409,
+            "email changes are disabled while email credential retirement guard mode is active",
+        )
     user = await get_user(recipe_user_id.get_as_string(), user_context)
     user_id = user.id if user else recipe_user_id.get_as_string()
     if pending_user_id and user_id != pending_user_id:
@@ -1723,7 +1743,7 @@ async def complete_pending_email_verification(
 
         return {
             "user_id": user_id,
-            "recipe_user_id": initiating_recipe_user_id,
+            "recipe_user_id": passwordless_user.recipe_user_id,
             "initiating_session_handle": initiating_session_handle,
             "replace_session": True,
             "rollback_on_session_replacement_failure": (rollback_on_session_replacement_failure),
@@ -1784,6 +1804,420 @@ def get_pending_verifications(metadata: JsonDict) -> List[JsonDict]:
 
 def normalize_email(email: str) -> str:
     return email.strip().lower()
+
+
+def _nonempty_string(value: object) -> Optional[str]:
+    return value if isinstance(value, str) and bool(value.strip()) else None
+
+
+def parse_tenant_pending_email_verifications(
+    metadata: JsonDict, tenant_id: str
+) -> Union[
+    tuple[ParsedPendingEmailVerification | ParsedCommittingEmailVerification, ...],
+    EmailCredentialAuthorization,
+]:
+    if "rownd_pending_verification" not in metadata:
+        return ()
+    raw_pending = metadata["rownd_pending_verification"]
+    if not isinstance(raw_pending, list):
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED, EmailCredentialReason.SECURITY_METADATA
+        )
+
+    parsed: List[ParsedPendingEmailVerification | ParsedCommittingEmailVerification] = []
+    for raw in raw_pending:
+        if not isinstance(raw, dict):
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED, EmailCredentialReason.SECURITY_METADATA
+            )
+        raw_tenant_value = raw.get("tenantId", PUBLIC_TENANT_ID)
+        raw_tenant = _nonempty_string(raw_tenant_value)
+        if raw_tenant is None or raw_tenant != raw_tenant.strip():
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED, EmailCredentialReason.SECURITY_METADATA
+            )
+        if raw_tenant != tenant_id:
+            continue
+        field = raw.get("field")
+        if field != "email":
+            continue
+        operation_id = _nonempty_string(raw.get("id"))
+        normalized_value = _nonempty_string(raw.get("normalizedEmail"))
+        legacy_value = _nonempty_string(raw.get("value"))
+        value = normalized_value or legacy_value
+        purpose = raw.get("purpose")
+        verification_id = _nonempty_string(raw.get("verificationRecipeUserId"))
+        created_at = _nonempty_string(raw.get("created_at"))
+        status = raw.get("status", "PENDING")
+        if (
+            operation_id is None
+            or value is None
+            or purpose not in {"UPDATE_PASSWORDLESS", "ADD_PASSWORDLESS"}
+            or verification_id is None
+            or created_at is None
+            or status not in {"PENDING", "COMMITTING"}
+        ):
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED, EmailCredentialReason.SECURITY_METADATA
+            )
+        normalized = normalize_email(value)
+        if (
+            not normalized
+            or (normalized_value is not None and normalized_value != normalized)
+            or (
+                normalized_value is not None
+                and legacy_value is not None
+                and normalize_email(legacy_value) != normalized_value
+            )
+        ):
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED, EmailCredentialReason.SECURITY_METADATA
+            )
+        if status == "PENDING":
+            if not _nonempty_string(raw.get("initiatingSessionHandle")):
+                return EmailCredentialAuthorization(
+                    EmailCredentialState.MALFORMED, EmailCredentialReason.SECURITY_METADATA
+                )
+            parsed.append(
+                ParsedPendingEmailVerification(
+                    operation_id, tenant_id, normalized, cast(Any, purpose), verification_id
+                )
+            )
+            continue
+
+        target_id = _nonempty_string(raw.get("targetCanonicalRecipeUserId"))
+        initiating_recipe_user_id = _nonempty_string(raw.get("initiatingRecipeUserId"))
+        initiating_session_handle = _nonempty_string(raw.get("initiatingSessionHandle"))
+        retired = raw.get("retiredMethods")
+        if (
+            raw.get("schemaVersion") != 2
+            or target_id is None
+            or initiating_recipe_user_id is None
+            or initiating_session_handle is None
+            or not isinstance(retired, list)
+        ):
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED, EmailCredentialReason.SECURITY_METADATA
+            )
+        retired_methods: List[tuple[str, str]] = []
+        for method in retired:
+            if not isinstance(method, dict):
+                return EmailCredentialAuthorization(
+                    EmailCredentialState.MALFORMED, EmailCredentialReason.SECURITY_METADATA
+                )
+            retired_id = _nonempty_string(method.get("recipeUserId"))
+            retired_email = _nonempty_string(method.get("normalizedEmail"))
+            if retired_id is None or retired_email is None or normalize_email(retired_email) != retired_email:
+                return EmailCredentialAuthorization(
+                    EmailCredentialState.MALFORMED, EmailCredentialReason.SECURITY_METADATA
+                )
+            retired_methods.append((retired_id, retired_email))
+        retired_ids = [recipe_user_id for recipe_user_id, _ in retired_methods]
+        if target_id in retired_ids or len(retired_ids) != len(set(retired_ids)):
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED, EmailCredentialReason.SECURITY_METADATA
+            )
+        parsed.append(
+            ParsedCommittingEmailVerification(
+                operation_id,
+                tenant_id,
+                normalized,
+                cast(Any, purpose),
+                verification_id,
+                initiating_recipe_user_id,
+                initiating_session_handle,
+                target_id,
+                tuple(retired_methods),
+            )
+        )
+    return tuple(parsed)
+
+
+def classify_email_credential(
+    user: User,
+    metadata: JsonDict,
+    tenant_id: str,
+    email: str,
+    consumed_recipe_user_id: Optional[str] = None,
+) -> EmailCredentialAuthorization:
+    normalized_email = normalize_email(email)
+    methods = [
+        method
+        for method in user.login_methods
+        if method.recipe_id == "passwordless"
+        and tenant_id in method.tenant_ids
+        and bool(method.email)
+    ]
+    method_ids = [method.recipe_user_id.get_as_string() for method in methods]
+    if len(method_ids) != len(set(method_ids)) or any(
+        not method.verified or not normalize_email(cast(str, method.email)) for method in methods
+    ):
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED,
+            EmailCredentialReason.CANONICAL_TOPOLOGY,
+            user.id,
+        )
+
+    canonical_map_present = "rownd_email_recipe_user_ids" in metadata
+    canonical_id: Optional[str]
+    if canonical_map_present:
+        canonical_map = metadata["rownd_email_recipe_user_ids"]
+        if not isinstance(canonical_map, dict):
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED,
+                EmailCredentialReason.SECURITY_METADATA,
+                user.id,
+            )
+        raw_canonical = canonical_map.get(tenant_id)
+        if raw_canonical is not None and _nonempty_string(raw_canonical) is None:
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED,
+                EmailCredentialReason.SECURITY_METADATA,
+                user.id,
+            )
+        canonical_id = cast(Optional[str], raw_canonical)
+    else:
+        raw_canonical = metadata.get("rownd_email_recipe_user_id")
+        if raw_canonical is not None and _nonempty_string(raw_canonical) is None:
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED,
+                EmailCredentialReason.SECURITY_METADATA,
+                user.id,
+            )
+        canonical_id = cast(Optional[str], raw_canonical)
+
+    pending = parse_tenant_pending_email_verifications(metadata, tenant_id)
+    if isinstance(pending, EmailCredentialAuthorization):
+        return EmailCredentialAuthorization(pending.state, pending.reason, user.id)
+    committing = [item for item in pending if isinstance(item, ParsedCommittingEmailVerification)]
+    if len(committing) > 1:
+        return EmailCredentialAuthorization(
+            EmailCredentialState.AMBIGUOUS, EmailCredentialReason.SECURITY_METADATA, user.id
+        )
+    methods_by_id = {
+        method.recipe_user_id.get_as_string(): normalize_email(cast(str, method.email))
+        for method in methods
+    }
+    if committing:
+        plan = committing[0]
+        expected_retired = {
+            (method_id, method_email)
+            for method_id, method_email in methods_by_id.items()
+            if method_id != plan.target_canonical_recipe_user_id
+        }
+        if (
+            canonical_id != plan.target_canonical_recipe_user_id
+            or plan.initiating_recipe_user_id != plan.verification_recipe_user_id
+            or methods_by_id.get(plan.target_canonical_recipe_user_id) != plan.normalized_email
+            or set(plan.retired_methods) != expected_retired
+        ):
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED,
+                EmailCredentialReason.CANONICAL_TOPOLOGY,
+                user.id,
+            )
+        if plan.purpose == "UPDATE_PASSWORDLESS":
+            if plan.initiating_recipe_user_id not in {
+                method_id for method_id, _ in plan.retired_methods
+            }:
+                return EmailCredentialAuthorization(
+                    EmailCredentialState.MALFORMED,
+                    EmailCredentialReason.CANONICAL_TOPOLOGY,
+                    user.id,
+                )
+        else:
+            initiating_method = next(
+                (
+                    method
+                    for method in user.login_methods
+                    if tenant_id in method.tenant_ids
+                    and method.recipe_user_id.get_as_string() == plan.initiating_recipe_user_id
+                    and method.recipe_user_id.get_as_string()
+                    != plan.target_canonical_recipe_user_id
+                ),
+                None,
+            )
+            if (
+                initiating_method is None
+                or not rownd_compatibility.is_real_third_party_method(initiating_method)
+                or len(methods) != 1
+                or bool(plan.retired_methods)
+            ):
+                return EmailCredentialAuthorization(
+                    EmailCredentialState.MALFORMED,
+                    EmailCredentialReason.CANONICAL_TOPOLOGY,
+                    user.id,
+                )
+        matching = [
+            method
+            for method in methods
+            if normalize_email(cast(str, method.email)) == normalized_email
+        ]
+        if len(matching) != 1:
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED,
+                EmailCredentialReason.METHOD_MISMATCH,
+                user.id,
+            )
+        matching_id = matching[0].recipe_user_id.get_as_string()
+        if consumed_recipe_user_id is not None and consumed_recipe_user_id != matching_id:
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED,
+                EmailCredentialReason.METHOD_MISMATCH,
+                user.id,
+                matching_id,
+            )
+        if matching_id == plan.target_canonical_recipe_user_id:
+            return EmailCredentialAuthorization(
+                EmailCredentialState.TARGET_COMMITTING,
+                EmailCredentialReason.COMMITTING_TARGET,
+                user.id,
+                matching_id,
+            )
+        return EmailCredentialAuthorization(
+            EmailCredentialState.RETIRED,
+            EmailCredentialReason.NONCANONICAL,
+            user.id,
+            matching_id,
+        )
+
+    if canonical_id is None:
+        if not methods:
+            if consumed_recipe_user_id is not None:
+                return EmailCredentialAuthorization(
+                    EmailCredentialState.MALFORMED,
+                    EmailCredentialReason.METHOD_MISMATCH,
+                    user.id,
+                )
+            return EmailCredentialAuthorization(
+                EmailCredentialState.ALLOW,
+                EmailCredentialReason.NO_OWNER,
+                user.id,
+            )
+        if len(methods) > 1:
+            return EmailCredentialAuthorization(
+                EmailCredentialState.AMBIGUOUS,
+                EmailCredentialReason.CANONICAL_TOPOLOGY,
+                user.id,
+            )
+        canonical_id = method_ids[0] if method_ids else None
+    if canonical_id not in method_ids:
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED,
+            EmailCredentialReason.CANONICAL_TOPOLOGY,
+            user.id,
+        )
+
+    matching = [method for method in methods if normalize_email(cast(str, method.email)) == normalized_email]
+    if len(matching) != 1:
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED,
+            EmailCredentialReason.METHOD_MISMATCH,
+            user.id,
+        )
+    matching_id = matching[0].recipe_user_id.get_as_string()
+    if consumed_recipe_user_id is not None and consumed_recipe_user_id != matching_id:
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED,
+            EmailCredentialReason.METHOD_MISMATCH,
+            user.id,
+            matching_id,
+        )
+    if matching_id == canonical_id:
+        return EmailCredentialAuthorization(
+            EmailCredentialState.ALLOW,
+            EmailCredentialReason.CANONICAL,
+            user.id,
+            matching_id,
+        )
+    return EmailCredentialAuthorization(
+        EmailCredentialState.RETIRED,
+        EmailCredentialReason.NONCANONICAL,
+        user.id,
+        matching_id,
+    )
+
+
+async def authorize_passwordless_email(
+    tenant_id: str,
+    email: str,
+    user_context: UserContext,
+    consumed_recipe_user_id: Optional[str] = None,
+    expected_owner_user_id: Optional[str] = None,
+) -> EmailCredentialAuthorization:
+    normalized_email = normalize_email(email)
+    if not normalized_email:
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED, EmailCredentialReason.METHOD_MISMATCH
+        )
+    owners = await list_users_by_account_info(
+        tenant_id, AccountInfoInput(email=normalized_email), False, user_context
+    )
+    owners_by_id = {owner.id: owner for owner in owners}
+    if not owners_by_id:
+        if consumed_recipe_user_id is not None:
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED, EmailCredentialReason.OWNER_CHANGED
+            )
+        return EmailCredentialAuthorization(
+            EmailCredentialState.ALLOW, EmailCredentialReason.NO_OWNER
+        )
+    if len(owners_by_id) != 1:
+        return EmailCredentialAuthorization(
+            EmailCredentialState.AMBIGUOUS, EmailCredentialReason.MULTIPLE_OWNERS
+        )
+    owner = next(iter(owners_by_id.values()))
+    inspection = await inspect_linked_user_metadata(owner.id, user_context, owner)
+    inspected_user = cast(Optional[User], inspection["user"])
+    primary_user_id = cast(str, inspection["primary_user_id"])
+    expected_primary_user_id = expected_owner_user_id
+    if expected_owner_user_id is not None:
+        expected_mapping = await get_primary_user_mapping(expected_owner_user_id, user_context)
+        if expected_mapping is not None:
+            expected_primary_user_id = expected_mapping.supertokens_user_id
+    if (
+        inspected_user is None
+        or (expected_primary_user_id is not None and primary_user_id != expected_primary_user_id)
+    ):
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED, EmailCredentialReason.OWNER_CHANGED, primary_user_id
+        )
+    result = classify_email_credential(
+        inspected_user,
+        cast(JsonDict, inspection["primary_metadata"]),
+        tenant_id,
+        normalized_email,
+        consumed_recipe_user_id,
+    )
+    return EmailCredentialAuthorization(
+        result.state, result.reason, primary_user_id, result.recipe_user_id
+    )
+
+
+async def resolve_passwordless_device_email(
+    tenant_id: str,
+    pre_auth_session_id: str,
+    user_context: UserContext,
+    device_id: Optional[str] = None,
+) -> Optional[str]:
+    by_pre_auth = await passwordless_asyncio.list_codes_by_pre_auth_session_id(
+        tenant_id, pre_auth_session_id, user_context
+    )
+    if by_pre_auth is None:
+        return None
+    if device_id is not None:
+        by_device = await passwordless_asyncio.list_codes_by_device_id(
+            tenant_id, device_id, user_context
+        )
+        if by_device is None or by_device.pre_auth_session_id != by_pre_auth.pre_auth_session_id:
+            return None
+        if by_device.email != by_pre_auth.email or by_device.phone_number != by_pre_auth.phone_number:
+            return None
+    has_email = isinstance(by_pre_auth.email, str) and bool(by_pre_auth.email)
+    has_phone = isinstance(by_pre_auth.phone_number, str) and bool(by_pre_auth.phone_number)
+    if has_email == has_phone:
+        return None
+    return by_pre_auth.email if has_email else ""
 
 
 def get_passwordless_email_login_methods(login_methods: List[LoginMethod]) -> List[LoginMethod]:

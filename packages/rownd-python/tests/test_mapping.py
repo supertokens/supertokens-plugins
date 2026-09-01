@@ -26,6 +26,8 @@ from supertokens_rownd.rownd_compatibility import (
     map_rownd_user_to_supertokens,
 )
 from supertokens_rownd.types import (
+    EmailCredentialAuthorization,
+    EmailCredentialState,
     JsonDict,
     JsonList,
     JsonValue,
@@ -262,6 +264,458 @@ def test_canonical_passwordless_method_is_tenant_local_and_requires_marker_for_m
         is methods[1]
     )
     assert find_canonical_passwordless_method(user, {}, "tenant-b") is methods[2]
+
+
+def _email_method(recipe_user_id: str, email: str, tenant_id: str = "public") -> Any:
+    return SimpleNamespace(
+        recipe_id="passwordless",
+        recipe_user_id=SimpleNamespace(get_as_string=lambda: recipe_user_id),
+        tenant_ids=[tenant_id],
+        email=email,
+        verified=True,
+    )
+
+
+def test_strict_classifier_allows_legacy_single_canonical_method():
+    user = cast(Any, SimpleNamespace(id="owner", login_methods=[_email_method("canonical", "A@x.com")]))
+
+    result = impl.classify_email_credential(user, {}, "public", "a@x.com")
+
+    assert result.state is EmailCredentialState.ALLOW
+    assert result.recipe_user_id == "canonical"
+
+
+def test_strict_classifier_allows_thirdparty_only_pre_enrollment():
+    user = cast(Any, SimpleNamespace(id="owner", login_methods=[]))
+
+    result = impl.classify_email_credential(user, {}, "public", "new@example.com")
+
+    assert result.state is EmailCredentialState.ALLOW
+    assert (
+        impl.classify_email_credential(
+            user,
+            {"rownd_email_recipe_user_ids": {"public": "missing"}},
+            "public",
+            "new@example.com",
+        ).state
+        is EmailCredentialState.MALFORMED
+    )
+
+
+def test_strict_classifier_retires_noncanonical_linked_email():
+    user = cast(
+        Any,
+        SimpleNamespace(
+            id="owner",
+            login_methods=[
+                _email_method("retired", "a@x.com"),
+                _email_method("canonical", "b@x.com"),
+            ],
+        ),
+    )
+
+    result = impl.classify_email_credential(
+        user,
+        {"rownd_email_recipe_user_ids": {"public": "canonical"}},
+        "public",
+        "a@x.com",
+    )
+
+    assert result.state is EmailCredentialState.RETIRED
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"rownd_email_recipe_user_ids": []},
+        {"rownd_email_recipe_user_ids": {"public": 1}},
+        {"rownd_email_recipe_user_ids": {"public": "missing"}},
+        {"rownd_email_recipe_user_id": []},
+    ],
+)
+def test_strict_classifier_rejects_malformed_canonical_metadata(metadata: JsonDict):
+    user = cast(Any, SimpleNamespace(id="owner", login_methods=[_email_method("method", "a@x.com")]))
+
+    assert (
+        impl.classify_email_credential(user, metadata, "public", "a@x.com").state
+        is EmailCredentialState.MALFORMED
+    )
+
+
+def test_strict_classifier_rejects_multiple_methods_without_marker():
+    user = cast(
+        Any,
+        SimpleNamespace(
+            id="owner",
+            login_methods=[_email_method("a", "a@x.com"), _email_method("b", "b@x.com")],
+        ),
+    )
+
+    assert (
+        impl.classify_email_credential(user, {}, "public", "a@x.com").state
+        is EmailCredentialState.AMBIGUOUS
+    )
+
+
+def test_strict_classifier_allows_complete_committing_target():
+    user = cast(
+        Any,
+        SimpleNamespace(
+            id="owner",
+            login_methods=[_email_method("old", "a@x.com"), _email_method("target", "b@x.com")],
+        ),
+    )
+    metadata: JsonDict = {
+        "rownd_email_recipe_user_ids": {"public": "target"},
+        "rownd_pending_verification": [
+            {
+                "schemaVersion": 2,
+                "id": "operation",
+                "field": "email",
+                "created_at": "2026-01-01T00:00:00Z",
+                "normalizedEmail": "b@x.com",
+                "tenantId": "public",
+                "purpose": "UPDATE_PASSWORDLESS",
+                "initiatingSessionHandle": "session",
+                "verificationRecipeUserId": "old",
+                "initiatingRecipeUserId": "old",
+                "status": "COMMITTING",
+                "targetCanonicalRecipeUserId": "target",
+                "retiredMethods": [{"recipeUserId": "old", "normalizedEmail": "a@x.com"}],
+            }
+        ],
+    }
+
+    result = impl.classify_email_credential(user, metadata, "public", "b@x.com", "target")
+
+    assert result.state is EmailCredentialState.TARGET_COMMITTING
+    assert (
+        impl.classify_email_credential(user, metadata, "public", "a@x.com", "old").state
+        is EmailCredentialState.RETIRED
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"targetCanonicalRecipeUserId": ""},
+        {"targetCanonicalRecipeUserId": "old"},
+        {"retiredMethods": [{"recipeUserId": "old", "normalizedEmail": "a@x.com"}] * 2},
+        {"normalizedEmail": ""},
+        {"initiatingSessionHandle": ""},
+        {"initiatingRecipeUserId": "unknown"},
+        {"verificationRecipeUserId": "unknown"},
+        {"retiredMethods": []},
+        {
+            "retiredMethods": [
+                {"recipeUserId": "old", "normalizedEmail": "a@x.com"},
+                {"recipeUserId": "extra", "normalizedEmail": "extra@x.com"},
+            ]
+        },
+        {"value": "conflict@x.com"},
+    ],
+)
+def test_strict_classifier_rejects_malformed_committing_plan(change: JsonDict):
+    plan: JsonDict = {
+        "schemaVersion": 2,
+        "id": "operation",
+        "field": "email",
+        "created_at": "2026-01-01T00:00:00Z",
+        "normalizedEmail": "b@x.com",
+        "tenantId": "public",
+        "purpose": "UPDATE_PASSWORDLESS",
+        "initiatingSessionHandle": "session",
+        "verificationRecipeUserId": "old",
+        "initiatingRecipeUserId": "old",
+        "status": "COMMITTING",
+        "targetCanonicalRecipeUserId": "target",
+        "retiredMethods": [{"recipeUserId": "old", "normalizedEmail": "a@x.com"}],
+        **change,
+    }
+    user = cast(
+        Any,
+        SimpleNamespace(
+            id="owner",
+            login_methods=[_email_method("old", "a@x.com"), _email_method("target", "b@x.com")],
+        ),
+    )
+
+    result = impl.classify_email_credential(
+        user,
+        {
+            "rownd_email_recipe_user_ids": {"public": "target"},
+            "rownd_pending_verification": [plan],
+        },
+        "public",
+        "b@x.com",
+    )
+
+    assert result.state is EmailCredentialState.MALFORMED
+
+
+def test_strict_parser_ignores_malformed_pending_for_unrelated_tenant():
+    parsed = impl.parse_tenant_pending_email_verifications(
+        {
+            "rownd_pending_verification": [
+                {"tenantId": "other", "status": "COMMITTING", "targetCanonicalRecipeUserId": []}
+            ]
+        },
+        "public",
+    )
+
+    assert parsed == ()
+
+
+def test_strict_parser_ignores_same_tenant_non_email_pending_record():
+    parsed = impl.parse_tenant_pending_email_verifications(
+        {"rownd_pending_verification": [{"tenantId": "public", "field": "phone"}]},
+        "public",
+    )
+
+    assert parsed == ()
+
+
+@pytest.mark.parametrize("tenant_id", ["", " public ", 1, [], {}])
+def test_strict_parser_rejects_malformed_explicit_tenant_id(tenant_id: JsonValue):
+    parsed = impl.parse_tenant_pending_email_verifications(
+        {"rownd_pending_verification": [{"tenantId": tenant_id, "field": "phone"}]},
+        "public",
+    )
+
+    assert isinstance(parsed, EmailCredentialAuthorization)
+    assert parsed.state is EmailCredentialState.MALFORMED
+
+
+def test_strict_classifier_rejects_multiple_committing_plans():
+    user = cast(
+        Any,
+        SimpleNamespace(
+            id="owner",
+            login_methods=[_email_method("old", "a@x.com"), _email_method("target", "b@x.com")],
+        ),
+    )
+    plan: JsonDict = {
+        "schemaVersion": 2,
+        "id": "operation",
+        "field": "email",
+        "created_at": "2026-01-01T00:00:00Z",
+        "normalizedEmail": "b@x.com",
+        "tenantId": "public",
+        "purpose": "UPDATE_PASSWORDLESS",
+        "initiatingSessionHandle": "session",
+        "initiatingRecipeUserId": "old",
+        "verificationRecipeUserId": "old",
+        "status": "COMMITTING",
+        "targetCanonicalRecipeUserId": "target",
+        "retiredMethods": [{"recipeUserId": "old", "normalizedEmail": "a@x.com"}],
+    }
+
+    result = impl.classify_email_credential(
+        user,
+        {
+            "rownd_email_recipe_user_ids": {"public": "target"},
+            "rownd_pending_verification": [plan, {**plan, "id": "second"}],
+        },
+        "public",
+        "b@x.com",
+    )
+
+    assert result.state is EmailCredentialState.AMBIGUOUS
+
+
+@pytest.mark.parametrize(
+    "canonical_metadata",
+    [
+        {},
+        {"rownd_email_recipe_user_ids": []},
+        {"rownd_email_recipe_user_ids": {"public": "old"}},
+    ],
+)
+def test_strict_committing_requires_canonical_marker_for_target(
+    canonical_metadata: JsonDict,
+):
+    user = cast(
+        Any,
+        SimpleNamespace(
+            id="owner",
+            login_methods=[_email_method("old", "a@x.com"), _email_method("target", "b@x.com")],
+        ),
+    )
+    plan: JsonDict = {
+        "schemaVersion": 2,
+        "id": "operation",
+        "field": "email",
+        "created_at": "2026-01-01T00:00:00Z",
+        "normalizedEmail": "b@x.com",
+        "tenantId": "public",
+        "purpose": "UPDATE_PASSWORDLESS",
+        "initiatingSessionHandle": "session",
+        "initiatingRecipeUserId": "old",
+        "verificationRecipeUserId": "old",
+        "status": "COMMITTING",
+        "targetCanonicalRecipeUserId": "target",
+        "retiredMethods": [{"recipeUserId": "old", "normalizedEmail": "a@x.com"}],
+    }
+
+    result = impl.classify_email_credential(
+        user,
+        {**canonical_metadata, "rownd_pending_verification": [plan]},
+        "public",
+        "b@x.com",
+    )
+
+    assert result.state is EmailCredentialState.MALFORMED
+
+
+def test_strict_committing_add_passwordless_requires_real_initiating_method():
+    thirdparty = SimpleNamespace(
+        recipe_id="thirdparty",
+        recipe_user_id=SimpleNamespace(get_as_string=lambda: "google-method"),
+        tenant_ids=["public"],
+        third_party=SimpleNamespace(id="google", user_id="google-user"),
+    )
+    user = cast(
+        Any,
+        SimpleNamespace(
+            id="owner",
+            login_methods=[thirdparty, _email_method("target", "new@x.com")],
+        ),
+    )
+    plan: JsonDict = {
+        "schemaVersion": 2,
+        "id": "operation",
+        "field": "email",
+        "created_at": "2026-01-01T00:00:00Z",
+        "normalizedEmail": "new@x.com",
+        "tenantId": "public",
+        "purpose": "ADD_PASSWORDLESS",
+        "initiatingSessionHandle": "session",
+        "initiatingRecipeUserId": "google-method",
+        "verificationRecipeUserId": "google-method",
+        "status": "COMMITTING",
+        "targetCanonicalRecipeUserId": "target",
+        "retiredMethods": [],
+    }
+
+    allowed = impl.classify_email_credential(
+        user,
+        {
+            "rownd_email_recipe_user_ids": {"public": "target"},
+            "rownd_pending_verification": [plan],
+        },
+        "public",
+        "new@x.com",
+    )
+    fabricated = impl.classify_email_credential(
+        user,
+        {
+            "rownd_email_recipe_user_ids": {"public": "target"},
+            "rownd_pending_verification": [
+                {
+                    **plan,
+                    "initiatingRecipeUserId": "unknown",
+                    "verificationRecipeUserId": "unknown",
+                }
+            ],
+        },
+        "public",
+        "new@x.com",
+    )
+
+    assert allowed.state is EmailCredentialState.TARGET_COMMITTING
+    assert fabricated.state is EmailCredentialState.MALFORMED
+
+
+def test_strict_parser_accepts_current_legacy_pending_record():
+    parsed = impl.parse_tenant_pending_email_verifications(
+        {
+            "rownd_pending_verification": [
+                {
+                    "id": "operation",
+                    "field": "email",
+                    "value": " New@Example.com ",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "tenantId": "public",
+                    "purpose": "UPDATE_PASSWORDLESS",
+                    "initiatingSessionHandle": "session",
+                    "verificationRecipeUserId": "method",
+                    "status": "PENDING",
+                }
+            ]
+        },
+        "public",
+    )
+
+    assert not isinstance(parsed, EmailCredentialAuthorization)
+    assert parsed[0].normalized_email == "new@example.com"
+
+
+def test_strict_classifier_rejects_duplicate_same_email_methods():
+    user = cast(
+        Any,
+        SimpleNamespace(
+            id="owner",
+            login_methods=[
+                _email_method("canonical", "same@example.com"),
+                _email_method("duplicate", "same@example.com"),
+            ],
+        ),
+    )
+
+    result = impl.classify_email_credential(
+        user,
+        {"rownd_email_recipe_user_ids": {"public": "canonical"}},
+        "public",
+        "same@example.com",
+        "duplicate",
+    )
+
+    assert result.state is EmailCredentialState.MALFORMED
+
+
+async def test_email_authorization_enforces_expected_primary_owner(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    owner = cast(
+        Any,
+        SimpleNamespace(
+            id="owner-primary",
+            login_methods=[_email_method("canonical", "owner@example.com")],
+        ),
+    )
+
+    async def list_owners(*_args: Any, **_kwargs: Any):
+        return [owner]
+
+    async def inspect(*_args: Any, **_kwargs: Any):
+        return {
+            "user": owner,
+            "primary_user_id": "owner-primary",
+            "primary_metadata": {},
+        }
+
+    async def mapping(user_id: str, *_args: Any, **_kwargs: Any):
+        if user_id == "owner-external":
+            return GetUserIdMappingOkResult("owner-primary", "owner-external")
+        return None
+
+    monkeypatch.setattr(impl, "list_users_by_account_info", list_owners)
+    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
+    monkeypatch.setattr(impl, "get_primary_user_mapping", mapping)
+
+    matching = await impl.authorize_passwordless_email(
+        "public", "owner@example.com", {}, expected_owner_user_id="owner-primary"
+    )
+    foreign = await impl.authorize_passwordless_email(
+        "public", "owner@example.com", {}, expected_owner_user_id="foreign-primary"
+    )
+    mapped = await impl.authorize_passwordless_email(
+        "public", "owner@example.com", {}, expected_owner_user_id="owner-external"
+    )
+
+    assert matching.state is EmailCredentialState.ALLOW
+    assert mapped.state is EmailCredentialState.ALLOW
+    assert foreign.state is EmailCredentialState.MALFORMED
 
 
 def test_throws_when_payload_has_no_data_object():

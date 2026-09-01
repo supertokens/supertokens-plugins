@@ -4,7 +4,7 @@ import math
 import re
 import warnings
 from collections.abc import Callable
-from typing import Any, Generic, Optional, TypeVar, cast
+from typing import Any, Generic, NamedTuple, Optional, TypeVar, cast
 from typing_extensions import Unpack
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
@@ -43,6 +43,11 @@ from supertokens_python.recipe.oauth2provider.interfaces import (
 from supertokens_python.recipe.passwordless.interfaces import (
     APIInterface as PasswordlessAPIInterface,
     APIOptions as PasswordlessAPIOptions,
+    ConsumeCodeOkResult,
+    ConsumeCodePostRestartFlowError,
+    ConsumeCodeRestartFlowError,
+    RecipeInterface as PasswordlessRecipeInterface,
+    ResendCodePostRestartFlowError,
 )
 from supertokens_python.recipe.passwordless import asyncio as passwordless_asyncio
 from supertokens_python.recipe.passwordless.types import (
@@ -53,6 +58,7 @@ from supertokens_python.recipe.passwordless.utils import PasswordlessOverrideabl
 from supertokens_python.recipe.session import SessionContainer
 from supertokens_python.recipe.session import asyncio as session_asyncio
 from supertokens_python.recipe.session.claims import BooleanClaim
+from supertokens_python.recipe.session.cookie_and_header import clear_session_response_mutator
 from supertokens_python.recipe.session.interfaces import RecipeInterface as SessionRecipeInterface
 from supertokens_python.recipe.thirdparty.interfaces import (
     APIInterface as ThirdPartyAPIInterface,
@@ -65,6 +71,7 @@ from supertokens_python.types.recipe import BaseAPIInterface, BaseRecipeInterfac
 from supertokens_python.types.response import GeneralErrorResponse
 
 from . import config as rownd_config
+from . import supertokens_repository
 from . import utils
 from .constants import (
     GUEST_AUTH_METHOD_ID,
@@ -84,6 +91,7 @@ from .config import (
     set_active_rownd_config,
 )
 from .errors import RowndEmailChangeError, RowndPluginError
+from .logger import log_warning
 from .plugin_implementation import (
     handle_app_config,
     handle_delete_user,
@@ -135,6 +143,34 @@ from .utils import (
 TemplateVarsT = TypeVar("TemplateVarsT")
 
 
+class _PasswordlessConsumePostcheck(NamedTuple):
+    owner_user_id: str
+    recipe_user_id: str
+
+
+def _log_passwordless_authorization_diagnostic(
+    config: RowndPluginConfig,
+    operation: str,
+    authorization: Optional[Any] = None,
+    failure_code: Optional[str] = None,
+) -> None:
+    if config.email_change.get("retirement_mode", "observe") != "observe":
+        return
+    if failure_code is not None:
+        log_warning(
+            config,
+            "Passwordless email authorization: operation=%s code=%s"
+            % (operation, failure_code),
+        )
+    elif authorization is not None and not authorization.allowed:
+        log_warning(
+            config,
+            "Passwordless email authorization: operation=%s code=classification_rejected "
+            "state=%s reason=%s"
+            % (operation, authorization.state.value, authorization.reason.value),
+        )
+
+
 async def create_magic_link_with_confirmation_bypass(
     email: Optional[str] = None,
     phone_number: Optional[str] = None,
@@ -169,6 +205,27 @@ async def create_magic_link_with_confirmation_bypass(
             "rowndAppVariantId": app_variant_id,
         },
     )
+    if has_email:
+        try:
+            authorization = await supertokens_repository.authorize_passwordless_email(
+                tenant_id,
+                cast(str, email),
+                context,
+                expected_owner_user_id=(
+                    session.get_user_id(context) if session is not None else None
+                ),
+            )
+        except Exception:
+            authorization = None
+            _log_passwordless_authorization_diagnostic(
+                config, "create", failure_code="classification_exception"
+            )
+        else:
+            _log_passwordless_authorization_diagnostic(config, "create", authorization)
+        if config.email_change.get("retirement_mode", "observe") == "guard" and (
+            authorization is None or not authorization.allowed
+        ):
+            raise RowndPluginError("Passwordless request could not be completed")
     code_info = await passwordless_asyncio.create_code(
         tenant_id,
         email=email if has_email else None,
@@ -278,6 +335,46 @@ async def _refresh_rownd_session_claims_or_revoke(
             except Exception:
                 pass
         raise
+
+
+def _append_clear_session_response_mutator(returned_session: Any) -> bool:
+    req_res_info = getattr(returned_session, "req_res_info", None)
+    response_mutators = getattr(returned_session, "response_mutators", None)
+    config = getattr(returned_session, "config", None)
+    if req_res_info is None or not isinstance(response_mutators, list) or config is None:
+        return False
+    try:
+        response_mutators.append(
+            clear_session_response_mutator(
+                config,
+                req_res_info.transfer_method,
+                req_res_info.request,
+            )
+        )
+    except Exception:
+        return False
+    return True
+
+
+async def _revoke_and_clear_returned_session(
+    returned_session: Any, user_context: UserContext
+) -> bool:
+    response_mutators = getattr(returned_session, "response_mutators", None)
+    mutator_count = len(response_mutators) if isinstance(response_mutators, list) else None
+    revoke_succeeded = False
+    try:
+        await returned_session.revoke_session(user_context)
+        revoke_succeeded = True
+    except Exception:
+        pass
+    clear_succeeded = (
+        mutator_count is not None
+        and isinstance(response_mutators, list)
+        and len(response_mutators) > mutator_count
+    )
+    if not clear_succeeded:
+        clear_succeeded = _append_clear_session_response_mutator(returned_session)
+    return revoke_succeeded and clear_succeeded
 
 
 class RowndEmailDeliveryOverride(Generic[TemplateVarsT], EmailDeliveryInterface[TemplateVarsT]):
@@ -486,6 +583,10 @@ def init(
     passwordless_override.config = _passwordless_config_override(config)
     passwordless_override.apis = cast(
         Callable[[BaseAPIInterface], BaseAPIInterface], _passwordless_api_override(config)
+    )
+    passwordless_override.functions = cast(
+        Callable[[BaseRecipeInterface], BaseRecipeInterface],
+        _passwordless_function_override(config),
     )
 
     thirdparty_override = RecipePluginOverride()
@@ -852,6 +953,28 @@ def _passwordless_api_override(config: RowndPluginConfig):
             api_options: PasswordlessAPIOptions,
             user_context: UserContext,
         ):
+            context = apply_rownd_passwordless_request_context(api_options, user_context)
+            if email is not None:
+                try:
+                    authorization = await supertokens_repository.authorize_passwordless_email(
+                        tenant_id,
+                        email,
+                        context,
+                        expected_owner_user_id=(
+                            session.get_user_id(context) if session is not None else None
+                        ),
+                    )
+                except Exception:
+                    authorization = None
+                    _log_passwordless_authorization_diagnostic(
+                        config, "create", failure_code="classification_exception"
+                    )
+                else:
+                    _log_passwordless_authorization_diagnostic(config, "create", authorization)
+                if config.email_change.get("retirement_mode", "observe") == "guard" and (
+                    authorization is None or not authorization.allowed
+                ):
+                    return GeneralErrorResponse("Passwordless request could not be completed")
             return await original_create_code_post(
                 email,
                 phone_number,
@@ -859,7 +982,7 @@ def _passwordless_api_override(config: RowndPluginConfig):
                 should_try_linking_with_session_user,
                 tenant_id,
                 api_options,
-                apply_rownd_passwordless_request_context(api_options, user_context),
+                context,
             )
 
         async def resend_code_post(
@@ -873,6 +996,50 @@ def _passwordless_api_override(config: RowndPluginConfig):
         ):
             if original_resend_code_post is None:
                 raise RuntimeError("Passwordless resend_code_post is unavailable")
+            context = apply_rownd_passwordless_request_context(api_options, user_context)
+            try:
+                stored_email = await supertokens_repository.resolve_passwordless_device_email(
+                    tenant_id, pre_auth_session_id, context, device_id
+                )
+            except Exception:
+                stored_email = None
+                _log_passwordless_authorization_diagnostic(
+                    config, "resend", failure_code="email_resolution_exception"
+                )
+            else:
+                if stored_email is None:
+                    _log_passwordless_authorization_diagnostic(
+                        config, "resend", failure_code="email_resolution_failed"
+                    )
+            guard_mode = config.email_change.get("retirement_mode", "observe") == "guard"
+            if guard_mode and stored_email is None:
+                return ResendCodePostRestartFlowError()
+            if stored_email:
+                try:
+                    authorization = await supertokens_repository.authorize_passwordless_email(
+                        tenant_id,
+                        stored_email,
+                        context,
+                        expected_owner_user_id=(
+                            session.get_user_id(context) if session is not None else None
+                        ),
+                    )
+                except Exception:
+                    authorization = None
+                    _log_passwordless_authorization_diagnostic(
+                        config, "resend", failure_code="classification_exception"
+                    )
+                else:
+                    _log_passwordless_authorization_diagnostic(config, "resend", authorization)
+                if guard_mode and (authorization is None or not authorization.allowed):
+                    if authorization is not None and authorization.state.value == "RETIRED":
+                        try:
+                            await passwordless_asyncio.revoke_all_codes(
+                                tenant_id, email=stored_email, user_context=context
+                            )
+                        except Exception:
+                            pass
+                    return ResendCodePostRestartFlowError()
             return await original_resend_code_post(
                 device_id,
                 pre_auth_session_id,
@@ -880,7 +1047,7 @@ def _passwordless_api_override(config: RowndPluginConfig):
                 should_try_linking_with_session_user,
                 tenant_id,
                 api_options,
-                apply_rownd_passwordless_request_context(api_options, user_context),
+                context,
             )
 
         async def consume_code_post(
@@ -899,6 +1066,7 @@ def _passwordless_api_override(config: RowndPluginConfig):
             context = create_derived_user_context(
                 user_context, {"rowndAppVariantId": app_variant_id}
             )
+            context.pop("rowndPasswordlessConsumePostcheck", None)
             result = await original_consume_code_post(
                 pre_auth_session_id,
                 user_input_code,
@@ -912,11 +1080,71 @@ def _passwordless_api_override(config: RowndPluginConfig):
             )
             if getattr(result, "status", None) == "OK":
                 user_id = getattr(getattr(result, "user", None), "id", None)
+                returned_session = getattr(result, "session", None)
+                if config.email_change.get("retirement_mode", "observe") == "guard":
+                    marker = context.get("rowndPasswordlessConsumePostcheck")
+                    marker_valid = (
+                        isinstance(user_id, str)
+                        and isinstance(returned_session, SessionContainer)
+                        and isinstance(marker, _PasswordlessConsumePostcheck)
+                        and bool(marker.owner_user_id)
+                        and bool(marker.recipe_user_id)
+                    )
+                    if marker_valid:
+                        checked_marker = cast(_PasswordlessConsumePostcheck, marker)
+                        checked_session = cast(SessionContainer, returned_session)
+                        checked_user_id = cast(str, user_id)
+                        try:
+                            marker_valid = (
+                                checked_session.get_recipe_user_id(context).get_as_string()
+                                == checked_marker.recipe_user_id
+                                and await supertokens_repository.sdk_user_id_matches_internal_target(
+                                    checked_user_id, checked_marker.owner_user_id, context
+                                )
+                            )
+                        except Exception:
+                            marker_valid = False
+                    if not marker_valid:
+                        response_mutators = getattr(returned_session, "response_mutators", None)
+                        mutator_count = (
+                            len(response_mutators) if isinstance(response_mutators, list) else 0
+                        )
+                        targeted_revoked = (
+                            await _revoke_and_clear_returned_session(returned_session, context)
+                            if returned_session is not None
+                            else False
+                        )
+                        if not targeted_revoked:
+                            if isinstance(user_id, str):
+                                try:
+                                    await session_asyncio.revoke_all_sessions_for_user(
+                                        user_id, True, tenant_id, context
+                                    )
+                                except Exception:
+                                    log_warning(
+                                        config,
+                                        "Passwordless consume session cleanup: "
+                                        "code=account_revoke_failed",
+                                    )
+                            else:
+                                log_warning(
+                                    config,
+                                    "Passwordless consume session cleanup: "
+                                    "code=account_revoke_unavailable",
+                                )
+                        clear_queued = (
+                            isinstance(response_mutators, list)
+                            and len(response_mutators) > mutator_count
+                        )
+                        if mutator_count > 0 and not clear_queued:
+                            raise RuntimeError(
+                                "Passwordless consume session cleanup failed"
+                            ) from None
+                        return ConsumeCodePostRestartFlowError()
                 if isinstance(user_id, str):
                     await record_rownd_app_variant_for_user(
                         config, user_id, app_variant_id, context
                     )
-                    returned_session = getattr(result, "session", None)
                     if returned_session is not None:
                         await _refresh_rownd_session_claims_or_revoke(
                             config, returned_session, user_id, app_variant_id, context
@@ -926,6 +1154,136 @@ def _passwordless_api_override(config: RowndPluginConfig):
         original.create_code_post = create_code_post
         original.resend_code_post = resend_code_post
         original.consume_code_post = consume_code_post
+        return original
+
+    return override
+
+
+def _passwordless_function_override(config: RowndPluginConfig):
+    def override(original: PasswordlessRecipeInterface) -> PasswordlessRecipeInterface:
+        original_consume_code = original.consume_code
+
+        async def consume_code(
+            pre_auth_session_id: str,
+            user_input_code: Optional[str],
+            device_id: Optional[str],
+            link_code: Optional[str],
+            session: Optional[SessionContainer],
+            should_try_linking_with_session_user: Optional[bool],
+            tenant_id: str,
+            user_context: UserContext,
+        ):
+            guard_mode = config.email_change.get("retirement_mode", "observe") == "guard"
+            user_context.pop("rowndPasswordlessConsumePostcheck", None)
+            try:
+                stored_email = await supertokens_repository.resolve_passwordless_device_email(
+                    tenant_id, pre_auth_session_id, user_context, device_id
+                )
+            except Exception:
+                _log_passwordless_authorization_diagnostic(
+                    config, "consume", failure_code="email_resolution_exception"
+                )
+                if guard_mode:
+                    return ConsumeCodeRestartFlowError()
+                return await original_consume_code(
+                    pre_auth_session_id,
+                    user_input_code,
+                    device_id,
+                    link_code,
+                    session,
+                    should_try_linking_with_session_user,
+                    tenant_id,
+                    user_context,
+                )
+            if not guard_mode:
+                if stored_email is None:
+                    _log_passwordless_authorization_diagnostic(
+                        config, "consume", failure_code="email_resolution_failed"
+                    )
+                if stored_email:
+                    try:
+                        authorization = await supertokens_repository.authorize_passwordless_email(
+                            tenant_id, stored_email, user_context
+                        )
+                    except Exception:
+                        _log_passwordless_authorization_diagnostic(
+                            config, "consume", failure_code="classification_exception"
+                        )
+                    else:
+                        _log_passwordless_authorization_diagnostic(
+                            config, "consume", authorization
+                        )
+                return await original_consume_code(
+                    pre_auth_session_id,
+                    user_input_code,
+                    device_id,
+                    link_code,
+                    session,
+                    should_try_linking_with_session_user,
+                    tenant_id,
+                    user_context,
+                )
+            if stored_email is None:
+                return ConsumeCodeRestartFlowError()
+            if not stored_email:
+                result = await original_consume_code(
+                    pre_auth_session_id,
+                    user_input_code,
+                    device_id,
+                    link_code,
+                    session,
+                    should_try_linking_with_session_user,
+                    tenant_id,
+                    user_context,
+                )
+                if isinstance(result, ConsumeCodeOkResult):
+                    user_context["rowndPasswordlessConsumePostcheck"] = (
+                        _PasswordlessConsumePostcheck(
+                            result.user.id, result.recipe_user_id.get_as_string()
+                        )
+                    )
+                return result
+            try:
+                before = await supertokens_repository.authorize_passwordless_email(
+                    tenant_id, stored_email, user_context
+                )
+            except Exception:
+                return ConsumeCodeRestartFlowError()
+            if not before.allowed:
+                return ConsumeCodeRestartFlowError()
+            try:
+                result = await original_consume_code(
+                    pre_auth_session_id,
+                    user_input_code,
+                    device_id,
+                    link_code,
+                    session,
+                    should_try_linking_with_session_user,
+                    tenant_id,
+                    user_context,
+                )
+            except Exception:
+                raise
+            if not isinstance(result, ConsumeCodeOkResult):
+                return result
+            try:
+                after = await supertokens_repository.authorize_passwordless_email(
+                    tenant_id,
+                    stored_email,
+                    user_context,
+                    result.recipe_user_id.get_as_string(),
+                    before.owner_user_id,
+                )
+            except Exception:
+                return ConsumeCodeRestartFlowError()
+            if not after.allowed:
+                return ConsumeCodeRestartFlowError()
+            user_context["rowndPasswordlessConsumePostcheck"] = _PasswordlessConsumePostcheck(
+                cast(str, after.owner_user_id), result.recipe_user_id.get_as_string()
+            )
+            return result
+
+        original.consume_code = consume_code
         return original
 
     return override
@@ -1067,6 +1425,16 @@ def _emailverification_api_override():
                 return GeneralErrorResponse(
                     "email change verification requires the initiating session"
                 )
+            if (
+                pending_token["status"] == "OK"
+                and rownd_config.get_active_rownd_config().email_change.get(
+                    "retirement_mode", "observe"
+                )
+                == "guard"
+            ):
+                return GeneralErrorResponse(
+                    "email changes are disabled while email credential retirement guard mode is active"
+                )
             result = await original_email_verify_post(
                 cast(str, pending_token.get("core_token", token)),
                 session,
@@ -1101,6 +1469,16 @@ def _emailverification_api_override():
                             verified_recipe_user_id = cast(
                                 RecipeUserId, verification_result["recipe_user_id"]
                             )
+                            try:
+                                await supertokens_repository.authorize_passwordless_email(
+                                    tenant_id,
+                                    email,
+                                    user_context,
+                                    verified_recipe_user_id.get_as_string(),
+                                    cast(str, verification_result["user_id"]),
+                                )
+                            except Exception:
+                                pass
                             try:
                                 cast(
                                     Any, result
@@ -1216,6 +1594,10 @@ def _validate_config(config: RowndPluginConfig) -> None:
     ):
         raise ValueError("email_change.max_session_age_seconds must be a positive number")
     config.email_change["max_session_age_seconds"] = max_session_age
+    retirement_mode = config.email_change.get("retirement_mode", "observe")
+    if retirement_mode not in {"observe", "guard"}:
+        raise ValueError("email_change.retirement_mode must be 'observe' or 'guard'")
+    config.email_change["retirement_mode"] = retirement_mode
 
     for key, value in config.client_domains.items():
         parsed = urlparse(value) if isinstance(value, str) else None

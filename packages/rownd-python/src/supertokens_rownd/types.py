@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Callable, Dict, List, Literal, Optional, Protocol, Union
 from typing_extensions import NotRequired, TypedDict
 
@@ -60,6 +61,7 @@ class RowndCrossDeviceConfirmationBypassConfig(TypedDict):
 
 class RowndEmailChangeConfig(TypedDict, total=False):
     max_session_age_seconds: float
+    retirement_mode: Literal["observe", "guard"]
 
 
 class RowndEmailChangeRequestContext(TypedDict):
@@ -78,6 +80,58 @@ class RowndPendingVerification(TypedDict, total=False):
     initiatingSessionHandle: str
     verificationRecipeUserId: str
     status: Literal["PENDING", "COMMITTING"]
+
+
+class EmailCredentialState(str, Enum):
+    ALLOW = "ALLOW"
+    TARGET_COMMITTING = "TARGET_COMMITTING"
+    RETIRED = "RETIRED"
+    AMBIGUOUS = "AMBIGUOUS"
+    MALFORMED = "MALFORMED"
+
+
+class EmailCredentialReason(str, Enum):
+    NO_OWNER = "no_owner"
+    CANONICAL = "canonical"
+    COMMITTING_TARGET = "committing_target"
+    NONCANONICAL = "noncanonical"
+    MULTIPLE_OWNERS = "multiple_owners"
+    OWNER_CHANGED = "owner_changed"
+    METHOD_MISMATCH = "method_mismatch"
+    CANONICAL_TOPOLOGY = "canonical_topology"
+    SECURITY_METADATA = "security_metadata"
+
+
+@dataclass(frozen=True)
+class ParsedPendingEmailVerification:
+    operation_id: str
+    tenant_id: str
+    normalized_email: str
+    purpose: Literal["UPDATE_PASSWORDLESS", "ADD_PASSWORDLESS"]
+    verification_recipe_user_id: str
+
+
+@dataclass(frozen=True)
+class ParsedCommittingEmailVerification(ParsedPendingEmailVerification):
+    initiating_recipe_user_id: str
+    initiating_session_handle: str
+    target_canonical_recipe_user_id: str
+    retired_methods: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class EmailCredentialAuthorization:
+    state: EmailCredentialState
+    reason: EmailCredentialReason
+    owner_user_id: Optional[str] = None
+    recipe_user_id: Optional[str] = None
+
+    @property
+    def allowed(self) -> bool:
+        return self.state in {
+            EmailCredentialState.ALLOW,
+            EmailCredentialState.TARGET_COMMITTING,
+        }
 
 
 @dataclass
@@ -102,5 +156,5 @@ class RowndPluginConfig:
     cross_device_confirmation_bypass: Optional[RowndCrossDeviceConfirmationBypassConfig] = None
     rownd_client: Optional[RowndClientProtocol] = None
     email_change: RowndEmailChangeConfig = field(
-        default_factory=lambda: {"max_session_age_seconds": 600}
+        default_factory=lambda: {"max_session_age_seconds": 600, "retirement_mode": "observe"}
     )

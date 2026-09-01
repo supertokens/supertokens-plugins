@@ -82,6 +82,10 @@ init(
                 # Should match InputAppInfo.website_domain when using passwordless confirmation bypass.
                 website_domain="https://example.com",
                 app_name="My App",
+                email_change={
+                    "max_session_age_seconds": 600,
+                    "retirement_mode": "observe",
+                },
                 app_config={
                     "auth": {
                         "enforceSameDevicePasswordlessSignIn": True,
@@ -119,6 +123,7 @@ migration.
 After all Rownd users have migrated, retain the compatibility routes without Rownd credentials by configuring `disable_rownd_user_migration=True`. This removes both migration routes; when no app key is configured, it uses an internal app key for passwordless and verification-link rewriting.
 
 Passwordless resend requests preserve Rownd display, redirect, client-domain, app-variant, and OAuth context. Combined OTP and magic-link deliveries add the Hub `passwordlessFlowType=USER_INPUT_CODE_AND_MAGIC_LINK` parameter; OTP-only deliveries are left unchanged.
+
 - `GET /plugin/rownd/user`
 - `PUT /plugin/rownd/user`
 - `DELETE /plugin/rownd/user`
@@ -142,31 +147,59 @@ The plugin exposes Rownd-compatible user/session behavior for migrated and new S
 
 ### Email Changes
 
-When email sign-in is configured, changing the profile email starts a verified
-Passwordless email change for the initiating tenant. After verification, the plugin
-creates a Passwordless email method or reuses one already linked to the same primary
-user in that tenant. Existing Passwordless email and phone methods remain unchanged,
-so previous email addresses continue to work as login aliases. For accounts containing
+Email credential retirement has two rollout modes:
+
+- `observe` is the default. It classifies Passwordless email state but preserves legacy authentication and profile email-change behavior. Legacy completion creates or reuses a Passwordless target and retains previous Passwordless email methods as login aliases. This flow is not distributed-safe: metadata publication has no compare-and-swap or fencing support.
+- `guard` rejects retired or malformed Passwordless email create, resend, helper, and consume attempts. Phone Passwordless flows are unaffected. Because safe completion requires metadata compare-and-swap, guard mode also disables starting and completing profile email changes.
+
+Guard enforcement covers the plugin-owned Passwordless HTTP APIs and exported helpers. Calls made directly to the SuperTokens SDK outside those paths are not guarded.
+
+The `supertokens_rownd` logger emits stable warning diagnostics without emails,
+codes, tokens, session handles, or exception text. Observe-mode classification
+rejections include `operation`, `code=classification_rejected`, `state`, and
+`reason`; classification failures include `operation` and
+`code=classification_exception`. If defensive consume cleanup cannot revoke the
+returned session or complete tenant-scoped linked-account revocation, it emits
+`code=account_revoke_failed`. These warnings are independent of
+`enable_debug_logs`.
+
+When email sign-in is configured in observe mode, changing the profile email starts a
+verified Passwordless email change for the initiating tenant. For accounts containing
 only real third-party methods, the plugin creates and links the first Passwordless
 method after verification. Guest/instant-only accounts and unsupported mixed-account
-topologies are rejected. Configure the maximum age of the initiating SuperTokens
-session:
+topologies are rejected. Configure the mode and maximum initiating-session age:
 
 ```python
 RowndMigrationPlugin(
     rownd_app_key="rownd_app_key",
     rownd_app_secret="rownd_app_secret",
     app_config={"signInMethods": [{"method": "email"}]},
-    email_change={"max_session_age_seconds": 600},
+    email_change={
+        "max_session_age_seconds": 600,
+        "retirement_mode": "observe",
+    },
 )
 ```
+
+Before enabling `guard`, stop new email changes and drain or manually resolve all
+pending changes. Inventory malformed or ambiguous canonical metadata and repair only
+state that an operator has reviewed; the plugin does not guess or automatically repair
+security metadata. Inspect metadata on the primary user, specifically
+`rownd_pending_verification`, `rownd_email_recipe_user_id`, and
+`rownd_email_recipe_user_ids`, to locate pending operations and canonical security
+state. Upgrade every worker before changing the mode; mixed observe/guard workers do
+not provide a safe rollout boundary. Guard mode protects retirement state published by
+prior completed changes, but new email changes must remain disabled until Core and the
+Python SDK expose metadata compare-and-swap/revision fencing.
 
 The flow requires Passwordless, EmailVerification, and AccountLinking. It rejects
 stale sessions, checks target ownership across all tenants, and binds pending
 verification metadata to the initiating user, session, tenant, purpose, and status
-before consuming the Core token. Completion revokes all account sessions and returns
-a replacement session. The tenant's canonical email method is tracked separately from
-its login aliases. Existing metadata using `rownd_email_recipe_user_id` remains
+before consuming the Core token. In observe mode, completion revokes all account
+sessions and returns a replacement session for the new canonical method, but concurrent
+completion claims are local compatibility behavior rather than a distributed guarantee.
+The tenant's canonical email method is tracked separately from its login aliases.
+Existing metadata using `rownd_email_recipe_user_id` remains
 supported; new updates also maintain the tenant-scoped `rownd_email_recipe_user_ids`
 map.
 
@@ -187,8 +220,10 @@ The marker selects the profile-change flow and requires the initiating session.
 Unmarked verification remains ordinary SuperTokens verification and is
 session-optional; removing the marker can therefore consume the raw token without
 completing the credential change. Concurrent duplicate consumption allows at most
-one completion. Failed completion and replacement-session creation are compensated;
-rollback failures require account reconciliation.
+one completion within the behavior covered by the current Core calls; without metadata
+compare-and-swap this is not a cross-process guarantee. Failed completion and
+replacement-session creation are compensated; rollback failures require account
+reconciliation.
 
 ### Passwordless Confirmation Bypass
 
@@ -230,7 +265,7 @@ magic_link = await create_magic_link_with_confirmation_bypass(
 
 `client_domain` must be a configured `client_domains` key, not a raw domain. Omit it to use `website_domain`.
 
-Pass exactly one of `email` or `phone_number`. The helper returns the rewritten magic link with `bypassDeviceConfirmation=true`.
+Pass exactly one of `email` or `phone_number`. The helper returns the rewritten magic link with `bypassDeviceConfirmation=true`. In retirement guard mode, email helper calls enforce canonical credential state; phone helper calls remain unchanged.
 
 Before skipping the cross-device confirmation prompt, the frontend should validate the callback against the plugin:
 

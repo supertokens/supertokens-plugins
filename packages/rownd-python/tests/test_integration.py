@@ -41,7 +41,12 @@ from supertokens_rownd.supertokens_repository import (
 from supertokens_rownd.rownd_compatibility import map_rownd_user_to_supertokens
 from supertokens_rownd import create_magic_link_with_confirmation_bypass
 from supertokens_rownd.errors import RowndEmailChangeError, RowndPluginError
-from supertokens_rownd.types import RowndPluginConfig
+from supertokens_rownd.types import (
+    EmailCredentialAuthorization,
+    EmailCredentialReason,
+    EmailCredentialState,
+    RowndPluginConfig,
+)
 
 from conftest import MockRowndClient, auth_headers, make_client, session_headers
 
@@ -2713,6 +2718,287 @@ async def test_user_email_update_stores_pending_verification(
     assert metadata.metadata["rownd_pending_verification"] == []
 
 
+async def test_completed_email_change_guards_old_passwordless_credential(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(
+        core_url,
+        rownd_client,
+        enable_email_verification=True,
+        plugin_config={
+            "website_domain": "http://website.example.com",
+            "cross_device_confirmation_bypass": {"allowed_redirect_paths": ["/profile"]},
+        },
+    )
+    old_email = "retirement-old@example.com"
+    new_email = "retirement-new@example.com"
+    old_consume_code = await passwordless_asyncio.create_code("public", email=old_email)
+    old_resend_code = await passwordless_asyncio.create_code("public", email=old_email)
+    sign_in = await passwordless_asyncio.signinup("public", old_email, None, None, {})
+    st_session = await session_asyncio.create_new_session_without_request_response(
+        "public", sign_in.recipe_user_id, {}, {}, True
+    )
+    update = client.put(
+        "/auth/plugin/rownd/user",
+        headers={**auth_headers(st_session.get_access_token()), "Content-Type": "application/json"},
+        json={"data": {"email": new_email}},
+    )
+    assert update.status_code == 200
+    completion = await complete_pending_email_verification(
+        sign_in.recipe_user_id,
+        new_email,
+        {},
+        "public",
+        st_session.get_handle(),
+    )
+    assert completion is not None
+    linked_user = await get_user(sign_in.user.id)
+    assert linked_user is not None
+    canonical_method = next(method for method in linked_user.login_methods if method.email == new_email)
+    assert cast(Any, completion["recipe_user_id"]).get_as_string() == (
+        canonical_method.recipe_user_id.get_as_string()
+    )
+    rownd_plugin.rownd_config.get_active_rownd_config().email_change["retirement_mode"] = "guard"
+
+    old_create = client.post(
+        "/auth/signinup/code",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={"email": old_email},
+    )
+    new_create = client.post(
+        "/auth/signinup/code",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={"email": new_email},
+    )
+    old_consume = client.post(
+        "/auth/signinup/code/consume",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={
+            "preAuthSessionId": old_consume_code.pre_auth_session_id,
+            "linkCode": old_consume_code.link_code,
+        },
+    )
+    old_resend = client.post(
+        "/auth/signinup/code/resend",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={
+            "deviceId": old_resend_code.device_id,
+            "preAuthSessionId": old_resend_code.pre_auth_session_id,
+        },
+    )
+    canonical_code = await passwordless_asyncio.create_code("public", email=new_email)
+    canonical_consume = client.post(
+        "/auth/signinup/code/consume",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={
+            "preAuthSessionId": canonical_code.pre_auth_session_id,
+            "linkCode": canonical_code.link_code,
+        },
+    )
+    first_time_code = await passwordless_asyncio.create_code(
+        "public", email="retirement-first-time@example.com"
+    )
+    first_time_consume = client.post(
+        "/auth/signinup/code/consume",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={
+            "preAuthSessionId": first_time_code.pre_auth_session_id,
+            "linkCode": first_time_code.link_code,
+        },
+    )
+
+    assert old_create.json()["status"] == "GENERAL_ERROR"
+    assert new_create.json()["status"] == "OK"
+    assert old_resend.json()["status"] == "RESTART_FLOW_ERROR"
+    assert old_consume.json() == {"status": "RESTART_FLOW_ERROR"}
+    assert "st-access-token" not in old_consume.headers
+    assert canonical_consume.json()["status"] == "OK"
+    assert canonical_consume.headers.get("st-access-token")
+    assert first_time_consume.json()["status"] == "OK"
+    assert first_time_consume.headers.get("st-access-token")
+    with pytest.raises(RowndPluginError, match="could not be completed"):
+        await create_magic_link_with_confirmation_bypass(
+            email=old_email, redirect_to_path="/profile"
+        )
+
+
+async def test_guard_mode_blocks_email_change_start(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(
+        core_url,
+        rownd_client,
+        enable_email_verification=True,
+        plugin_config={"email_change": {"retirement_mode": "guard"}},
+    )
+    sign_in = await passwordless_asyncio.signinup(
+        "public", "guard-start-current@example.com", None, None, {}
+    )
+    st_session = await session_asyncio.create_new_session_without_request_response(
+        "public", sign_in.recipe_user_id, {}, {}, True
+    )
+
+    response = client.put(
+        "/auth/plugin/rownd/user",
+        headers={**auth_headers(st_session.get_access_token()), "Content-Type": "application/json"},
+        json={"data": {"email": "guard-start-target@example.com"}},
+    )
+
+    assert response.status_code == 409
+    metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
+    assert "rownd_pending_verification" not in metadata.metadata
+
+
+async def test_guard_http_consume_denies_after_core_postcheck_without_session(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = make_client(
+        core_url,
+        rownd_client,
+        plugin_config={"email_change": {"retirement_mode": "guard"}},
+    )
+    email = "guard-postcheck-denied@example.com"
+    code = await passwordless_asyncio.create_code("public", email=email)
+    authorization_count = 0
+
+    async def authorize(*_args: Any, **_kwargs: Any):
+        nonlocal authorization_count
+        authorization_count += 1
+        if authorization_count == 1:
+            return EmailCredentialAuthorization(
+                EmailCredentialState.ALLOW,
+                EmailCredentialReason.NO_OWNER,
+            )
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED,
+            EmailCredentialReason.OWNER_CHANGED,
+        )
+
+    monkeypatch.setattr(impl, "authorize_passwordless_email", authorize)
+
+    response = client.post(
+        "/auth/signinup/code/consume",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={
+            "preAuthSessionId": code.pre_auth_session_id,
+            "linkCode": code.link_code,
+        },
+    )
+
+    assert response.json() == {"status": "RESTART_FLOW_ERROR"}
+    assert "st-access-token" not in response.headers
+    assert authorization_count == 2
+    owners = await supertokens_list_users_by_account_info(
+        "public", AccountInfoInput(email=email), False, {}
+    )
+    assert len(owners) == 1
+    assert await session_asyncio.get_all_session_handles_for_user(
+        owners[0].id, True, "public", {}
+    ) == []
+
+
+async def test_guard_http_api_postcheck_revokes_real_returned_session_and_clears_response(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = make_client(
+        core_url,
+        rownd_client,
+        plugin_config={"email_change": {"retirement_mode": "guard"}},
+    )
+    email = "guard-api-postcheck-denied@example.com"
+    code = await passwordless_asyncio.create_code("public", email=email)
+    marker_checks: list[tuple[str, str]] = []
+
+    async def reject_api_marker(
+        sdk_user_id: str,
+        expected_internal_user_id: str,
+        _user_context: Any,
+    ) -> bool:
+        marker_checks.append((sdk_user_id, expected_internal_user_id))
+        return False
+
+    monkeypatch.setattr(
+        impl,
+        "sdk_user_id_matches_internal_target",
+        reject_api_marker,
+    )
+
+    response = client.post(
+        "/auth/signinup/code/consume",
+        headers={
+            "rid": "passwordless",
+            "Content-Type": "application/json",
+            "st-auth-mode": "header",
+        },
+        json={
+            "preAuthSessionId": code.pre_auth_session_id,
+            "linkCode": code.link_code,
+        },
+    )
+
+    assert response.json() == {"status": "RESTART_FLOW_ERROR"}
+    assert response.headers.get("st-access-token") in {None, "", "remove"}
+    assert not response.cookies.get("sAccessToken")
+    assert not response.cookies.get("sRefreshToken")
+    assert len(marker_checks) == 1
+    owners = await supertokens_list_users_by_account_info(
+        "public", AccountInfoInput(email=email), False, {}
+    )
+    assert len(owners) == 1
+    assert await session_asyncio.get_all_session_handles_for_user(
+        owners[0].id, True, "public", {}
+    ) == []
+
+
+async def test_guard_mode_blocks_pending_completion_before_token_consumption(
+    core_url: str, rownd_client: MockRowndClient
+):
+    delivery_links: list[str] = []
+    client = make_client(
+        core_url,
+        rownd_client,
+        enable_email_verification=True,
+        email_verification_links=delivery_links,
+    )
+    sign_in, st_session = await start_native_email_change(
+        client,
+        "guard-complete-current@example.com",
+        "guard-complete-target@example.com",
+    )
+    query = parse_qs(urlparse(delivery_links[0]).query)
+    verify_path = "/auth/user/email/verify?rowndPendingVerificationId=%s" % (
+        query["rowndPendingVerificationId"][0]
+    )
+    headers = {
+        **auth_headers(st_session.get_access_token()),
+        "Content-Type": "application/json",
+        "rid": "emailverification",
+    }
+    rownd_plugin.rownd_config.get_active_rownd_config().email_change["retirement_mode"] = "guard"
+
+    blocked = client.post(
+        verify_path,
+        headers=headers,
+        json={"method": "token", "token": query["token"][0]},
+    )
+    rownd_plugin.rownd_config.get_active_rownd_config().email_change["retirement_mode"] = "observe"
+    retry = client.post(
+        verify_path,
+        headers=headers,
+        json={"method": "token", "token": query["token"][0]},
+    )
+
+    assert blocked.json()["status"] == "GENERAL_ERROR"
+    assert retry.json()["status"] == "OK"
+    user = await get_user(sign_in.user.id)
+    assert user is not None
+    assert any(method.email == "guard-complete-target@example.com" for method in user.login_methods)
+
+
 async def test_fresh_migrated_session_can_start_email_change(
     core_url: str, rownd_client: MockRowndClient
 ):
@@ -3401,6 +3687,16 @@ async def test_email_verify_route_completes_pending_verification(
         method for method in linked_user.login_methods if method.email == "route-verified@example.com"
     )
     assert metadata.metadata["rownd_email_recipe_user_id"] == (
+        canonical_method.recipe_user_id.get_as_string()
+    )
+    replacement_payload = jwt.decode(
+        replacement_access_token, options={"verify_signature": False}
+    )
+    replacement_session = await session_asyncio.get_session_information(
+        replacement_payload["sessionHandle"]
+    )
+    assert replacement_session is not None
+    assert replacement_session.recipe_user_id.get_as_string() == (
         canonical_method.recipe_user_id.get_as_string()
     )
 

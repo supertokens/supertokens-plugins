@@ -8,7 +8,7 @@ class RowndPluginError(Exception):
 class RowndEmailChangeError(Exception):
     def __init__(
         self,
-        code: Literal["CONFLICT", "AMBIGUOUS", "INVALID_EMAIL"],
+        code: Literal["CONFLICT", "AMBIGUOUS", "INVALID_EMAIL", "EMAIL_CHANGE_DISABLED"],
         http_status: int,
         message: str,
     ):

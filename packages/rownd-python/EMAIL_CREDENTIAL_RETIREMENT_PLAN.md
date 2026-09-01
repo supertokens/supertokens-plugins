@@ -6,6 +6,12 @@ After a verified email change from `A` to `B`, only `B` may authenticate the acc
 
 This plan ports the security outcome of the Node plugin without copying unsafe assumptions into Python. The Python SDK currently has no compare-and-swap metadata update, authoritative consumed recipe-user ID at the API override layer, or conditional recipe-user deletion. Those gaps are explicit implementation gates.
 
+## Implementation Status
+
+The safely feasible portions of phases 1 and 2 are implemented: strict tenant-local readers and Passwordless create, resend, helper, and recipe-level consume guards. `supertokens-python` 0.31.3 supplies the authoritative consumed recipe-user ID before API session creation. `email_change.retirement_mode` defaults to `observe`, which classifies without changing authentication behavior. `guard` enforces retirement and disables both starting and completing profile email changes.
+
+Phases 3 and 4 remain blocked because neither the SDK nor current Core exposes metadata compare-and-swap, revisions, or fencing. Durable completion, physical deletion/disassociation, completion-time code revocation, distributed coordination, and durable revocation retry markers are not implemented. Legacy completion remains available only in `observe`; it does not provide cross-process safety. Before enabling `guard`, operators must stop new email changes and drain or manually resolve every pending change because guard mode will not complete them. The full acceptance criteria are therefore not met.
+
 ## Invariants
 
 - When tenant-local Passwordless email methods exist, exactly one is canonical. Third-party-only accounts may have none before `ADD_PASSWORDLESS` completes.
@@ -39,11 +45,11 @@ Before implementation:
 4. Establish and document the minimum Core and `supertokens-python` versions that expose the capability.
 5. Do not ship multi-process completion if this capability is unavailable.
 
-An in-process lock may reduce contention but is not a correctness boundary. Without compare-and-swap, only Commit 1 classification and non-mutating guard groundwork may ship; durable completion and its security claims remain blocked.
+An in-process lock may reduce contention but is not a correctness boundary. Without compare-and-swap, observe/classification may ship by default. The opt-in guard is safe only while profile email-change start and completion are disabled; durable completion and its security claims remain blocked.
 
 ### Authoritative Consumed Identity
 
-The current Passwordless API override returns a user and session, not proof of the exact recipe-user ID consumed. Before consume enforcement:
+The Passwordless API override returns a user and session, but the 0.31.3 recipe-function override exposes the exact consumed recipe-user ID before API session creation. Consume enforcement uses that recipe hook rather than API-layer inference:
 
 1. Verify that the installed Python SDK exposes a Passwordless recipe-function override with the authoritative consumed recipe-user ID and can reject before the API creates a session.
 2. Add a characterization test proving duplicate same-email methods cannot be confused and denied consumption creates no session.
@@ -91,7 +97,7 @@ Files:
 
 - `src/supertokens_rownd/types.py`
 - `src/supertokens_rownd/constants.py`
-- `src/supertokens_rownd/plugin_implementation.py`
+- `src/supertokens_rownd/supertokens_repository.py`
 - `tests/test_mapping.py`
 
 Tasks:
@@ -124,7 +130,7 @@ Review gates:
 Files:
 
 - `src/supertokens_rownd/plugin.py`
-- `src/supertokens_rownd/plugin_implementation.py`
+- `src/supertokens_rownd/supertokens_repository.py`
 - `tests/test_overrides.py`
 - `tests/test_integration.py`
 
@@ -150,8 +156,8 @@ Consume guard:
 2. Resolve and classify the stored email before Core consumption.
 3. After success, validate that authoritative recipe-user ID against owner, tenant, recipe, normalized email, and canonical/committing state.
 4. Return a denied recipe result before session creation on rejection or validation exception.
-5. Keep API-layer postcondition validation as defense in depth. If an unexpected session exists, attempt targeted revocation, then account-wide revocation, clear response session state, emit a critical diagnostic on total failure, and never return a successful authentication response.
-6. Persist a reconciliation marker for any unexpected total revocation failure and retry account-wide revocation from guarded account activity and operator reconciliation.
+5. Keep API-layer postcondition validation as defense in depth. If an unexpected session exists, attempt targeted revocation, then tenant-scoped linked-account revocation, and never return a successful authentication response.
+6. Do not persist a fake reconciliation marker without metadata compare-and-swap. Durable revocation retry remains blocked.
 7. Do not synchronously delete newly created rejected users; leave them for offline cleanup.
 
 Tests:
@@ -162,7 +168,7 @@ Tests:
 - State changes between precheck and consumption.
 - Exact consumed method ambiguity.
 - Recipe denial creates no session.
-- Defensive targeted revocation, account-wide fallback, durable retry marker, and total revocation failure.
+- Defensive targeted revocation, tenant-scoped linked-account fallback, and total revocation failure.
 - Exported magic-link helper rejects retired email while preserving phone behavior.
 - Phone behavior unchanged.
 - Existing mapped owner conflict remains fail closed.
@@ -177,7 +183,7 @@ Review gates:
 
 Files:
 
-- `src/supertokens_rownd/plugin_implementation.py`
+- `src/supertokens_rownd/supertokens_repository.py`
 - `src/supertokens_rownd/plugin.py`
 - `tests/test_integration.py`
 - `tests/test_mapping.py`
@@ -227,7 +233,7 @@ Tasks:
 1. Run two plugin processes against one Core with compare-and-swap enabled.
 2. Add revision conflict, Core timeout, and ambiguous-write tests.
 3. Add deterministic concurrent completion, stale-writer, and `A -> B -> A` races.
-4. Add observe, guard, and enforce rollout modes.
+4. Retain the two public rollout modes, `observe` and `guard`; do not add a third enforcement mode.
 5. Add reconciliation diagnostics and operator runbook.
 6. Raise the `supertokens-python` lower bound and `PLUGIN_SDK_VERSION`, regenerate `uv.lock`, and document the minimum compatible Core version.
 7. Test the minimum and latest supported SDK/Core combinations.
@@ -259,7 +265,16 @@ For every retired method, retry code revocation. Retry durable session-revocatio
 
 ## Observability
 
-Emit stable reason codes without raw emails, codes, tokens, or session handles:
+The current implementation emits warnings through the `supertokens_rownd` logger
+without emails, codes, tokens, session handles, or exception text. These warnings are
+independent of `enable_debug_logs`:
+
+- `classification_rejected` with `operation`, `state`, and `reason` during observe-mode classification.
+- `classification_exception` with `operation` when observe-mode classification fails.
+- `account_revoke_failed` when defensive consume cleanup cannot revoke the returned session or complete tenant-scoped linked-account revocation.
+
+Future durable completion and reconciliation phases should add these planned stable
+events; they are not emitted by the current implementation:
 
 - `email_change_plan_published`
 - `email_change_reconcile_completed`
@@ -278,16 +293,16 @@ Alert on malformed state, repeated reconciliation failures, identity mismatch, s
 
 ## Rollout
 
-1. Deploy strict readers in observe mode.
+1. Deploy strict readers with `email_change.retirement_mode: observe`.
 2. Inventory malformed canonical and pending state.
 3. Repair reviewed accounts manually; never guess malformed cleanup targets.
-4. Deploy and validate the Core/SDK compare-and-swap capability everywhere.
-5. Enable create/resend/consume guards.
-6. Enable durable completion for a small tenant cohort.
-7. Expand while monitoring stale alias attempts and reconciliation age.
-8. During rollback, disable new email changes but keep retirement guards active.
+4. Stop new profile email changes and drain or manually resolve all pending changes.
+5. Set `email_change.retirement_mode: guard` only after every worker is upgraded and pending changes are drained. Guard mode disables profile email-change start and completion while enforcing existing retirement metadata.
+6. Deploy and validate a future Core/SDK compare-and-swap capability everywhere before implementing durable completion.
+7. Enable future durable completion for a small tenant cohort, then expand while monitoring stale alias attempts and reconciliation age.
+8. During rollback, do not re-enable unsafe completion while workers disagree on enforcement mode.
 
-All workers must run the guarded version before completion enforcement begins.
+All workers must run the same guarded version before guard mode is enabled.
 
 ## Acceptance Criteria
 
@@ -297,9 +312,9 @@ All workers must run the guarded version before completion enforcement begins.
 - Exact consumed identity is validated after Core success.
 - Malformed or ambiguous state fails closed without mutation.
 - Stale cross-process writers cannot overwrite newer canonical state.
-- Rejected consumption is denied before session creation. Defensive API handling uses account-wide revocation when targeted revocation fails and never returns a successful authentication response.
+- Rejected consumption is denied before session creation. Defensive API handling uses tenant-scoped linked-account revocation when targeted revocation fails and never returns a successful authentication response.
 - Post-publication failures remain recoverable and never restore the old credential.
-- Other tenants' methods and metadata remain intact; account-wide session sign-out is documented when tenant-scoped revocation is unavailable.
+- Other tenants' methods and metadata remain intact. Future durable completion may require documented account-wide session sign-out when tenant-scoped revocation is unavailable; the current API postcheck fallback remains tenant-scoped.
 - No request path deletes or disassociates retired methods.
 - The exported magic-link helper enforces the same email guard as the HTTP create-code path.
 - Each implementation commit has focused tests, full-suite verification, code review, and security review.

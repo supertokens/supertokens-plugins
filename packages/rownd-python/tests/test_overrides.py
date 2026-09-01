@@ -24,6 +24,11 @@ from supertokens_rownd.constants import (
     ROWND_JWT_CLAIMS,
 )
 from supertokens_rownd.types import RowndPluginConfig
+from supertokens_rownd.types import (
+    EmailCredentialAuthorization,
+    EmailCredentialReason,
+    EmailCredentialState,
+)
 
 
 pytestmark = pytest.mark.asyncio
@@ -88,6 +93,14 @@ class RefreshSession:
 
 def make_config() -> RowndPluginConfig:
     return RowndPluginConfig(rownd_app_key="app-key", rownd_app_secret="secret")
+
+
+def make_guard_config() -> RowndPluginConfig:
+    return RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        email_change={"retirement_mode": "guard"},
+    )
 
 
 class CapturingDelivery:
@@ -274,7 +287,7 @@ async def test_emailverification_delivery_uses_explicit_client_domain_key():
     )
 
 
-async def test_passwordless_create_code_adds_rownd_context():
+async def test_passwordless_create_code_adds_rownd_context(monkeypatch: pytest.MonkeyPatch):
     captured_context: Dict[str, Any] = {}
 
     async def create_code_post(
@@ -289,6 +302,10 @@ async def test_passwordless_create_code_adds_rownd_context():
         captured_context.update(user_context)
         return SimpleNamespace(status="OK")
 
+    async def authorize(*_args: Any, **_kwargs: Any):
+        return EmailCredentialAuthorization(EmailCredentialState.ALLOW, EmailCredentialReason.NO_OWNER)
+
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", authorize)
     original = SimpleNamespace(create_code_post=create_code_post, consume_code_post=None)
     overridden = plugin._passwordless_api_override(make_config())(cast(Any, original))
 
@@ -326,7 +343,7 @@ async def test_passwordless_create_code_adds_rownd_context():
     }
 
 
-async def test_passwordless_resend_code_adds_rownd_context():
+async def test_passwordless_resend_code_adds_rownd_context(monkeypatch: pytest.MonkeyPatch):
     captured_context: Dict[str, Any] = {}
 
     async def resend_code_post(
@@ -343,6 +360,11 @@ async def test_passwordless_resend_code_adds_rownd_context():
 
     original = SimpleNamespace(
         create_code_post=None, consume_code_post=None, resend_code_post=resend_code_post
+    )
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=""),
     )
     overridden = plugin._passwordless_api_override(make_config())(cast(Any, original))
 
@@ -452,6 +474,16 @@ async def test_confirmation_bypass_helper_resolves_policy_from_owning_modules(
         lambda *_args: calls.append("rewrite") or "https://app.example.com/account/login",
     )
     monkeypatch.setattr(plugin.passwordless_asyncio, "create_code", create_code)
+    monkeypatch.setattr(
+        supertokens_repository,
+        "authorize_passwordless_email",
+        lambda *_args, **_kwargs: asyncio.sleep(
+            0,
+            result=EmailCredentialAuthorization(
+                EmailCredentialState.ALLOW, EmailCredentialReason.NO_OWNER
+            ),
+        ),
+    )
 
     link = await plugin.create_magic_link_with_confirmation_bypass(
         email="user@example.com", redirect_to_path="/profile"
@@ -467,6 +499,1107 @@ async def test_confirmation_bypass_helper_resolves_policy_from_owning_modules(
         "rewrite",
     ]
     assert link == "https://app.example.com/account/login?bypassDeviceConfirmation=true"
+
+
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    [
+        (EmailCredentialState.RETIRED, EmailCredentialReason.NONCANONICAL),
+        (EmailCredentialState.MALFORMED, EmailCredentialReason.SECURITY_METADATA),
+    ],
+)
+async def test_passwordless_create_rejects_unauthorized_email_before_original(
+    monkeypatch: pytest.MonkeyPatch,
+    state: EmailCredentialState,
+    reason: EmailCredentialReason,
+):
+    called = False
+
+    async def original_create(*_args: Any, **_kwargs: Any):
+        nonlocal called
+        called = True
+
+    async def unauthorized(*_args: Any, **_kwargs: Any):
+        return EmailCredentialAuthorization(state, reason, "owner", "old")
+
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", unauthorized)
+    original = SimpleNamespace(create_code_post=original_create, consume_code_post=None)
+    overridden = plugin._passwordless_api_override(make_guard_config())(cast(Any, original))
+
+    result = await overridden.create_code_post(
+        "old@example.com",
+        None,
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert result.status == "GENERAL_ERROR"
+    assert called is False
+
+
+async def test_passwordless_create_observe_mode_does_not_enforce(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def retired(*_args: Any, **_kwargs: Any):
+        return EmailCredentialAuthorization(
+            EmailCredentialState.RETIRED, EmailCredentialReason.NONCANONICAL
+        )
+
+    async def original_create(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(status="OK")
+
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", retired)
+    overridden = plugin._passwordless_api_override(make_config())(
+        cast(Any, SimpleNamespace(create_code_post=original_create, consume_code_post=None))
+    )
+
+    result = await overridden.create_code_post(
+        "old@example.com",
+        None,
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert result.status == "OK"
+
+
+async def test_passwordless_create_guard_rejects_foreign_owner_from_session(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    expected_owners: list[Optional[str]] = []
+    original_called = False
+
+    async def foreign_owner(*_args: Any, **kwargs: Any):
+        expected_owners.append(kwargs.get("expected_owner_user_id"))
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED,
+            EmailCredentialReason.OWNER_CHANGED,
+            "owner-b",
+        )
+
+    async def original_create(*_args: Any, **_kwargs: Any):
+        nonlocal original_called
+        original_called = True
+
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", foreign_owner)
+    overridden = plugin._passwordless_api_override(make_guard_config())(
+        cast(Any, SimpleNamespace(create_code_post=original_create, consume_code_post=None))
+    )
+
+    result = await overridden.create_code_post(
+        "owned-by-b@example.com",
+        None,
+        cast(Any, FakeSession("owner-a")),
+        True,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert result.status == "GENERAL_ERROR"
+    assert expected_owners == ["owner-a"]
+    assert original_called is False
+
+
+async def test_passwordless_create_phone_is_unchanged(monkeypatch: pytest.MonkeyPatch):
+    authorization_calls = 0
+
+    async def authorize(*_args: Any, **_kwargs: Any):
+        nonlocal authorization_calls
+        authorization_calls += 1
+
+    async def original_create(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(status="OK")
+
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", authorize)
+    original = SimpleNamespace(create_code_post=original_create, consume_code_post=None)
+    overridden = plugin._passwordless_api_override(make_config())(cast(Any, original))
+
+    result = await overridden.create_code_post(
+        None,
+        "+15555550123",
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert result.status == "OK"
+    assert authorization_calls == 0
+
+
+async def test_confirmation_bypass_helper_rejects_retired_email(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = make_guard_config()
+    config.website_domain = "https://app.example.com"
+    config.cross_device_confirmation_bypass = {"allowed_redirect_paths": ["/"]}
+    created = False
+
+    async def retired(*_args: Any, **_kwargs: Any):
+        return EmailCredentialAuthorization(
+            EmailCredentialState.RETIRED, EmailCredentialReason.NONCANONICAL
+        )
+
+    async def create_code(*_args: Any, **_kwargs: Any):
+        nonlocal created
+        created = True
+
+    monkeypatch.setattr(rownd_config, "get_active_rownd_config", lambda: config)
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", retired)
+    monkeypatch.setattr(plugin.passwordless_asyncio, "create_code", create_code)
+
+    with pytest.raises(Exception, match="could not be completed"):
+        await plugin.create_magic_link_with_confirmation_bypass(
+            email="old@example.com", redirect_to_path="/"
+        )
+    assert created is False
+
+
+async def test_confirmation_bypass_helper_phone_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = make_config()
+    config.website_domain = "https://app.example.com"
+    config.cross_device_confirmation_bypass = {"allowed_redirect_paths": ["/profile"]}
+    authorization_calls = 0
+
+    async def authorize(*_args: Any, **_kwargs: Any):
+        nonlocal authorization_calls
+        authorization_calls += 1
+
+    async def create_code(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(pre_auth_session_id="pre-auth", link_code="link-code")
+
+    monkeypatch.setattr(rownd_config, "get_active_rownd_config", lambda: config)
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", authorize)
+    monkeypatch.setattr(plugin.passwordless_asyncio, "create_code", create_code)
+
+    link = await plugin.create_magic_link_with_confirmation_bypass(
+        phone_number="+15555550123", redirect_to_path="/profile"
+    )
+
+    assert "preAuthSessionId=pre-auth" in link
+    assert authorization_calls == 0
+
+
+async def test_confirmation_bypass_helper_guard_rejects_foreign_owner_from_session(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = make_guard_config()
+    config.website_domain = "https://app.example.com"
+    config.cross_device_confirmation_bypass = {"allowed_redirect_paths": ["/profile"]}
+    expected_owners: list[Optional[str]] = []
+    code_created = False
+
+    async def foreign_owner(*_args: Any, **kwargs: Any):
+        expected_owners.append(kwargs.get("expected_owner_user_id"))
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED,
+            EmailCredentialReason.OWNER_CHANGED,
+            "owner-b",
+        )
+
+    async def create_code(*_args: Any, **_kwargs: Any):
+        nonlocal code_created
+        code_created = True
+
+    monkeypatch.setattr(rownd_config, "get_active_rownd_config", lambda: config)
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", foreign_owner)
+    monkeypatch.setattr(plugin.passwordless_asyncio, "create_code", create_code)
+
+    with pytest.raises(Exception, match="could not be completed"):
+        await plugin.create_magic_link_with_confirmation_bypass(
+            email="owned-by-b@example.com",
+            session=cast(Any, FakeSession("owner-a")),
+            redirect_to_path="/profile",
+        )
+
+    assert expected_owners == ["owner-a"]
+    assert code_created is False
+
+
+async def test_confirmation_bypass_helper_observe_mode_does_not_enforce(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = make_config()
+    config.website_domain = "https://app.example.com"
+    config.cross_device_confirmation_bypass = {"allowed_redirect_paths": ["/profile"]}
+
+    async def fail(*_args: Any, **_kwargs: Any):
+        raise RuntimeError("classification unavailable")
+
+    async def create_code(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(pre_auth_session_id="pre-auth", link_code="link-code")
+
+    monkeypatch.setattr(rownd_config, "get_active_rownd_config", lambda: config)
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", fail)
+    monkeypatch.setattr(plugin.passwordless_asyncio, "create_code", create_code)
+
+    link = await plugin.create_magic_link_with_confirmation_bypass(
+        email="old@example.com", redirect_to_path="/profile"
+    )
+
+    assert "preAuthSessionId=pre-auth" in link
+
+
+async def test_passwordless_resend_rejects_device_mismatch(monkeypatch: pytest.MonkeyPatch):
+    called = False
+
+    async def original_resend(*_args: Any, **_kwargs: Any):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=None),
+    )
+    original = SimpleNamespace(
+        create_code_post=None, consume_code_post=None, resend_code_post=original_resend
+    )
+    overridden = plugin._passwordless_api_override(make_guard_config())(cast(Any, original))
+
+    result = await overridden.resend_code_post(
+        "device-a",
+        "pre-auth-b",
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert isinstance(result, plugin.ResendCodePostRestartFlowError)
+    assert called is False
+
+
+async def test_passwordless_resend_revokes_retired_email_codes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    revoked: list[str] = []
+
+    async def retired(*_args: Any, **_kwargs: Any):
+        return EmailCredentialAuthorization(
+            EmailCredentialState.RETIRED, EmailCredentialReason.NONCANONICAL
+        )
+
+    async def revoke(_tenant: str, email: str, user_context: Any):
+        revoked.append(email)
+
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result="old@example.com"),
+    )
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", retired)
+    monkeypatch.setattr(plugin.passwordless_asyncio, "revoke_all_codes", revoke)
+    original = SimpleNamespace(
+        create_code_post=None, consume_code_post=None, resend_code_post=lambda *_args: None
+    )
+    overridden = plugin._passwordless_api_override(make_guard_config())(cast(Any, original))
+
+    result = await overridden.resend_code_post(
+        "device",
+        "pre-auth",
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert isinstance(result, plugin.ResendCodePostRestartFlowError)
+    assert revoked == ["old@example.com"]
+
+
+async def test_passwordless_resend_guard_rejects_foreign_owner_from_session(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    expected_owners: list[Optional[str]] = []
+    original_called = False
+
+    async def foreign_owner(*_args: Any, **kwargs: Any):
+        expected_owners.append(kwargs.get("expected_owner_user_id"))
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED,
+            EmailCredentialReason.OWNER_CHANGED,
+            "owner-b",
+        )
+
+    async def original_resend(*_args: Any, **_kwargs: Any):
+        nonlocal original_called
+        original_called = True
+
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result="owned-by-b@example.com"),
+    )
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", foreign_owner)
+    overridden = plugin._passwordless_api_override(make_guard_config())(
+        cast(
+            Any,
+            SimpleNamespace(
+                create_code_post=None,
+                consume_code_post=None,
+                resend_code_post=original_resend,
+            ),
+        )
+    )
+
+    result = await overridden.resend_code_post(
+        "device",
+        "pre-auth",
+        cast(Any, FakeSession("owner-a")),
+        True,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert isinstance(result, plugin.ResendCodePostRestartFlowError)
+    assert expected_owners == ["owner-a"]
+    assert original_called is False
+
+
+@pytest.mark.parametrize("stored_email", ["canonical@example.com", ""])
+async def test_passwordless_resend_allows_canonical_email_and_phone(
+    monkeypatch: pytest.MonkeyPatch, stored_email: str
+):
+    called = False
+
+    async def allow(*_args: Any, **_kwargs: Any):
+        return EmailCredentialAuthorization(
+            EmailCredentialState.ALLOW, EmailCredentialReason.CANONICAL
+        )
+
+    async def original_resend(*_args: Any, **_kwargs: Any):
+        nonlocal called
+        called = True
+        return SimpleNamespace(status="OK")
+
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=stored_email),
+    )
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", allow)
+    overridden = plugin._passwordless_api_override(make_guard_config())(
+        cast(
+            Any,
+            SimpleNamespace(
+                create_code_post=None,
+                consume_code_post=None,
+                resend_code_post=original_resend,
+            ),
+        )
+    )
+
+    result = await overridden.resend_code_post(
+        "device",
+        "pre-auth",
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert result.status == "OK"
+    assert called is True
+
+
+async def test_passwordless_resend_observe_mode_ignores_resolver_exception(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fail(*_args: Any, **_kwargs: Any):
+        raise RuntimeError("resolver unavailable")
+
+    async def original_resend(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(status="OK")
+
+    monkeypatch.setattr(supertokens_repository, "resolve_passwordless_device_email", fail)
+    overridden = plugin._passwordless_api_override(make_config())(
+        cast(
+            Any,
+            SimpleNamespace(
+                create_code_post=None,
+                consume_code_post=None,
+                resend_code_post=original_resend,
+            ),
+        )
+    )
+
+    result = await overridden.resend_code_post(
+        "device",
+        "pre-auth",
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert result.status == "OK"
+
+
+async def test_passwordless_recipe_consume_validates_authoritative_recipe_user_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeOk:
+        def __init__(self, recipe_user_id: str):
+            self.recipe_user_id = SimpleNamespace(get_as_string=lambda: recipe_user_id)
+            self.user = SimpleNamespace(id="owner")
+
+    calls: list[tuple[Optional[str], Optional[str]]] = []
+
+    async def authorize(*_args: Any, **kwargs: Any):
+        consumed_id = kwargs.get("consumed_recipe_user_id")
+        if consumed_id is None and len(_args) > 3:
+            consumed_id = _args[3]
+        expected_owner = _args[4] if len(_args) > 4 else kwargs.get("expected_owner_user_id")
+        calls.append((consumed_id, expected_owner))
+        return EmailCredentialAuthorization(
+            EmailCredentialState.ALLOW,
+            EmailCredentialReason.CANONICAL,
+            "owner",
+            consumed_id or "canonical",
+        )
+
+    async def original_consume(*_args: Any, **_kwargs: Any):
+        return FakeOk("canonical")
+
+    monkeypatch.setattr(plugin, "ConsumeCodeOkResult", FakeOk)
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result="user@example.com"),
+    )
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", authorize)
+    original = SimpleNamespace(consume_code=original_consume)
+    overridden = plugin._passwordless_function_override(make_guard_config())(cast(Any, original))
+
+    result = await overridden.consume_code(
+        "pre",
+        None,
+        None,
+        "link",
+        None,
+        None,
+        "public",
+        {},
+    )
+
+    assert isinstance(result, FakeOk)
+    assert calls == [(None, None), ("canonical", "owner")]
+
+
+async def test_passwordless_recipe_consume_mismatched_authoritative_id_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeOk:
+        recipe_user_id = SimpleNamespace(get_as_string=lambda: "duplicate")
+        user = SimpleNamespace(id="owner")
+
+    original_called = False
+    authorization_count = 0
+
+    async def authorize(*_args: Any, **_kwargs: Any):
+        nonlocal authorization_count
+        authorization_count += 1
+        if authorization_count == 1:
+            return EmailCredentialAuthorization(
+                EmailCredentialState.ALLOW, EmailCredentialReason.CANONICAL, "owner", "canonical"
+            )
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED, EmailCredentialReason.METHOD_MISMATCH, "owner"
+        )
+
+    async def original_consume(*_args: Any, **_kwargs: Any):
+        nonlocal original_called
+        original_called = True
+        return FakeOk()
+
+    monkeypatch.setattr(plugin, "ConsumeCodeOkResult", FakeOk)
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result="user@example.com"),
+    )
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", authorize)
+    overridden = plugin._passwordless_function_override(make_guard_config())(
+        cast(Any, SimpleNamespace(consume_code=original_consume))
+    )
+
+    result = await overridden.consume_code(
+        "pre",
+        None,
+        None,
+        "link",
+        None,
+        None,
+        "public",
+        {},
+    )
+
+    assert original_called is True
+    assert isinstance(result, plugin.ConsumeCodeRestartFlowError)
+
+
+async def test_passwordless_recipe_consume_rejects_malformed_state_before_core(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    original_called = False
+
+    async def malformed(*_args: Any, **_kwargs: Any):
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED, EmailCredentialReason.SECURITY_METADATA
+        )
+
+    async def original_consume(*_args: Any, **_kwargs: Any):
+        nonlocal original_called
+        original_called = True
+
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result="user@example.com"),
+    )
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", malformed)
+    overridden = plugin._passwordless_function_override(make_guard_config())(
+        cast(Any, SimpleNamespace(consume_code=original_consume))
+    )
+
+    result = await overridden.consume_code(
+        "pre",
+        None,
+        None,
+        "link",
+        None,
+        None,
+        "public",
+        {},
+    )
+
+    assert isinstance(result, plugin.ConsumeCodeRestartFlowError)
+    assert original_called is False
+
+
+async def test_passwordless_recipe_consume_phone_sets_postcheck_without_email_auth(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeOk:
+        user = SimpleNamespace(id="phone-owner")
+        recipe_user_id = SimpleNamespace(get_as_string=lambda: "phone-method")
+
+    authorization_calls = 0
+
+    async def authorize(*_args: Any, **_kwargs: Any):
+        nonlocal authorization_calls
+        authorization_calls += 1
+
+    async def original_consume(*_args: Any, **_kwargs: Any):
+        return FakeOk()
+
+    monkeypatch.setattr(plugin, "ConsumeCodeOkResult", FakeOk)
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=""),
+    )
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", authorize)
+    context: Dict[str, Any] = {}
+    overridden = plugin._passwordless_function_override(make_guard_config())(
+        cast(Any, SimpleNamespace(consume_code=original_consume))
+    )
+
+    result = await overridden.consume_code(
+        "pre", None, None, "link", None, None, "public", context
+    )
+
+    assert isinstance(result, FakeOk)
+    assert isinstance(context["rowndPasswordlessConsumePostcheck"], tuple)
+    assert authorization_calls == 0
+
+
+async def test_passwordless_recipe_consume_guard_catches_authorization_exception(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fail(*_args: Any, **_kwargs: Any):
+        raise RuntimeError("lookup failed")
+
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result="user@example.com"),
+    )
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", fail)
+    overridden = plugin._passwordless_function_override(make_guard_config())(
+        cast(Any, SimpleNamespace(consume_code=fail))
+    )
+
+    result = await overridden.consume_code("pre", None, None, "link", None, None, "public", {})
+
+    assert isinstance(result, plugin.ConsumeCodeRestartFlowError)
+
+
+async def test_passwordless_recipe_consume_catches_post_core_authorization_exception(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeOk:
+        user = SimpleNamespace(id="owner")
+        recipe_user_id = SimpleNamespace(get_as_string=lambda: "canonical")
+
+    authorization_count = 0
+
+    async def authorize(*_args: Any, **_kwargs: Any):
+        nonlocal authorization_count
+        authorization_count += 1
+        if authorization_count == 1:
+            return EmailCredentialAuthorization(
+                EmailCredentialState.ALLOW,
+                EmailCredentialReason.CANONICAL,
+                "owner",
+                "canonical",
+            )
+        raise RuntimeError("postcheck failed")
+
+    async def original_consume(*_args: Any, **_kwargs: Any):
+        return FakeOk()
+
+    monkeypatch.setattr(plugin, "ConsumeCodeOkResult", FakeOk)
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result="user@example.com"),
+    )
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", authorize)
+    overridden = plugin._passwordless_function_override(make_guard_config())(
+        cast(Any, SimpleNamespace(consume_code=original_consume))
+    )
+
+    result = await overridden.consume_code("pre", None, None, "link", None, None, "public", {})
+
+    assert isinstance(result, plugin.ConsumeCodeRestartFlowError)
+    assert authorization_count == 2
+
+
+@pytest.mark.parametrize("failure", ["resolver", "authorization"])
+async def test_passwordless_recipe_consume_observe_mode_ignores_classification_failures(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+):
+    async def fail(*_args: Any, **_kwargs: Any):
+        raise RuntimeError("classification unavailable")
+
+    async def resolve(*_args: Any, **_kwargs: Any):
+        return "user@example.com"
+
+    async def original_consume(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(status="ORIGINAL")
+
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        fail if failure == "resolver" else resolve,
+    )
+    monkeypatch.setattr(
+        supertokens_repository,
+        "authorize_passwordless_email",
+        fail,
+    )
+    overridden = plugin._passwordless_function_override(make_config())(
+        cast(Any, SimpleNamespace(consume_code=original_consume))
+    )
+
+    result = await overridden.consume_code("pre", None, None, "link", None, None, "public", {})
+
+    assert cast(Any, result).status == "ORIGINAL"
+
+
+async def test_passwordless_consume_api_missing_postcheck_revokes_and_denies(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    revoked_all: list[tuple[str, Optional[str]]] = []
+    diagnostics: list[str] = []
+
+    class FakeReturnedSession:
+        def __init__(self):
+            self.req_res_info = SimpleNamespace(
+                transfer_method="header", request=SimpleNamespace()
+            )
+            self.response_mutators: list[Any] = []
+            self.config = SimpleNamespace()
+
+        async def revoke_session(self, _context: Any):
+            raise RuntimeError("targeted revoke failed")
+
+        def get_recipe_user_id(self, _context: Any):
+            return SimpleNamespace(get_as_string=lambda: "recipe-user")
+
+    returned_session = FakeReturnedSession()
+
+    async def consume_api(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(
+            status="OK", user=SimpleNamespace(id="owner"), session=returned_session
+        )
+
+    async def revoke_all(user_id: str, _linked: bool, tenant_id: Optional[str], _context: Any):
+        revoked_all.append((user_id, tenant_id))
+        raise RuntimeError("fallback revoke failed")
+
+    monkeypatch.setattr(plugin, "SessionContainer", FakeReturnedSession)
+    monkeypatch.setattr(
+        plugin,
+        "clear_session_response_mutator",
+        lambda *_args: SimpleNamespace(type="clear-session"),
+    )
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+
+    diagnostic_configs: list[RowndPluginConfig] = []
+
+    def capture_warning(warning_config: RowndPluginConfig, message: str):
+        diagnostic_configs.append(warning_config)
+        diagnostics.append(message)
+
+    monkeypatch.setattr(plugin, "log_warning", capture_warning)
+    config = make_guard_config()
+    config.enable_debug_logs = False
+    overridden = plugin._passwordless_api_override(config)(
+        cast(Any, SimpleNamespace(create_code_post=None, consume_code_post=consume_api))
+    )
+
+    result = await overridden.consume_code_post(
+        "pre",
+        None,
+        None,
+        "link",
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
+    assert revoked_all == [("owner", "public")]
+    assert [mutator.type for mutator in returned_session.response_mutators] == ["clear-session"]
+    assert any("code=account_revoke_failed" in diagnostic for diagnostic in diagnostics)
+    assert diagnostic_configs == [config]
+    assert config.enable_debug_logs is False
+    assert all("targeted revoke failed" not in diagnostic for diagnostic in diagnostics)
+    assert all("fallback revoke failed" not in diagnostic for diagnostic in diagnostics)
+
+
+async def test_passwordless_consume_api_without_queued_credentials_denies_when_clear_mutator_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    revoked_all: list[tuple[str, Optional[str]]] = []
+
+    class FakeReturnedSession:
+        def __init__(self):
+            self.req_res_info = SimpleNamespace(
+                transfer_method="header", request=SimpleNamespace()
+            )
+            self.response_mutators: list[Any] = []
+            self.config = SimpleNamespace()
+
+        async def revoke_session(self, _context: Any):
+            return None
+
+        def get_recipe_user_id(self, _context: Any):
+            return SimpleNamespace(get_as_string=lambda: "recipe-user")
+
+    returned_session = FakeReturnedSession()
+
+    async def consume_api(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(
+            status="OK", user=SimpleNamespace(id="owner"), session=returned_session
+        )
+
+    async def revoke_all(user_id: str, _linked: bool, tenant_id: Optional[str], _context: Any):
+        revoked_all.append((user_id, tenant_id))
+
+    def fail_clear_mutator(*_args: Any):
+        raise RuntimeError("cannot construct clear mutator")
+
+    monkeypatch.setattr(plugin, "SessionContainer", FakeReturnedSession)
+    monkeypatch.setattr(plugin, "clear_session_response_mutator", fail_clear_mutator)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+    overridden = plugin._passwordless_api_override(make_guard_config())(
+        cast(Any, SimpleNamespace(create_code_post=None, consume_code_post=consume_api))
+    )
+
+    result = await overridden.consume_code_post(
+        "pre",
+        None,
+        None,
+        "link",
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
+    assert revoked_all == [("owner", "public")]
+    assert returned_session.response_mutators == []
+
+
+async def test_passwordless_consume_api_with_queued_credentials_raises_when_clear_mutator_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    revoked_all: list[tuple[str, Optional[str]]] = []
+    queued_access_token = SimpleNamespace(type="access-token")
+
+    class FakeReturnedSession:
+        def __init__(self):
+            self.req_res_info = SimpleNamespace(
+                transfer_method="header", request=SimpleNamespace()
+            )
+            self.response_mutators: list[Any] = [queued_access_token]
+            self.config = SimpleNamespace()
+
+        async def revoke_session(self, _context: Any):
+            return None
+
+        def get_recipe_user_id(self, _context: Any):
+            return SimpleNamespace(get_as_string=lambda: "recipe-user")
+
+    returned_session = FakeReturnedSession()
+
+    async def consume_api(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(
+            status="OK", user=SimpleNamespace(id="owner"), session=returned_session
+        )
+
+    async def revoke_all(user_id: str, _linked: bool, tenant_id: Optional[str], _context: Any):
+        revoked_all.append((user_id, tenant_id))
+
+    def fail_clear_mutator(*_args: Any):
+        raise RuntimeError("sensitive clear-mutator failure")
+
+    monkeypatch.setattr(plugin, "SessionContainer", FakeReturnedSession)
+    monkeypatch.setattr(plugin, "clear_session_response_mutator", fail_clear_mutator)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+    overridden = plugin._passwordless_api_override(make_guard_config())(
+        cast(Any, SimpleNamespace(create_code_post=None, consume_code_post=consume_api))
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await overridden.consume_code_post(
+            "pre",
+            None,
+            None,
+            "link",
+            None,
+            None,
+            "public",
+            cast(Any, SimpleNamespace(request=FakeRequest())),
+            {},
+        )
+
+    assert "sensitive clear-mutator failure" not in str(exc_info.value)
+    assert revoked_all == [("owner", "public")]
+    assert returned_session.response_mutators == [queued_access_token]
+
+
+async def test_passwordless_consume_api_rejects_marker_recipe_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeReturnedSession:
+        req_res_info = None
+        response_mutators: list[Any] = []
+        config = SimpleNamespace()
+        revoked = False
+
+        async def revoke_session(self, _context: Any):
+            self.revoked = True
+
+        def get_recipe_user_id(self, _context: Any):
+            return SimpleNamespace(get_as_string=lambda: "returned-recipe")
+
+    returned_session = FakeReturnedSession()
+
+    async def consume_api(*args: Any, **_kwargs: Any):
+        context = cast(Dict[str, Any], args[-1])
+        context["rowndPasswordlessConsumePostcheck"] = plugin._PasswordlessConsumePostcheck(
+            "owner", "different-recipe"
+        )
+        return SimpleNamespace(
+            status="OK", user=SimpleNamespace(id="owner"), session=returned_session
+        )
+
+    monkeypatch.setattr(plugin, "SessionContainer", FakeReturnedSession)
+    monkeypatch.setattr(
+        supertokens_repository,
+        "sdk_user_id_matches_internal_target",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=True),
+    )
+    overridden = plugin._passwordless_api_override(make_guard_config())(
+        cast(Any, SimpleNamespace(create_code_post=None, consume_code_post=consume_api))
+    )
+
+    result = await overridden.consume_code_post(
+        "pre",
+        None,
+        None,
+        "link",
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
+    assert returned_session.revoked is True
+
+
+@pytest.mark.parametrize(
+    ("user", "session"),
+    [(SimpleNamespace(id=None), SimpleNamespace()), (SimpleNamespace(id="owner"), None)],
+)
+async def test_passwordless_consume_api_rejects_malformed_ok_result(
+    user: Any, session: Any
+):
+    async def consume_api(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(status="OK", user=user, session=session)
+
+    overridden = plugin._passwordless_api_override(make_guard_config())(
+        cast(Any, SimpleNamespace(create_code_post=None, consume_code_post=consume_api))
+    )
+
+    result = await overridden.consume_code_post(
+        "pre",
+        None,
+        None,
+        "link",
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
+
+
+async def test_device_email_resolver_requires_matching_device_records(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    pre_auth = SimpleNamespace(
+        pre_auth_session_id="pre-a", email="user@example.com", phone_number=None
+    )
+
+    async def by_pre_auth(*_args: Any, **_kwargs: Any):
+        return pre_auth
+
+    monkeypatch.setattr(
+        supertokens_repository.passwordless_asyncio,
+        "list_codes_by_pre_auth_session_id",
+        by_pre_auth,
+    )
+    for device in [
+        None,
+        SimpleNamespace(pre_auth_session_id="pre-b", email="user@example.com", phone_number=None),
+        SimpleNamespace(pre_auth_session_id="pre-a", email="other@example.com", phone_number=None),
+    ]:
+        async def by_device(*_args: Any, _device: Any = device, **_kwargs: Any):
+            return _device
+
+        monkeypatch.setattr(
+            supertokens_repository.passwordless_asyncio,
+            "list_codes_by_device_id",
+            by_device,
+        )
+        assert (
+            await supertokens_repository.resolve_passwordless_device_email(
+                "public", "pre-a", {}, "device"
+            )
+            is None
+        )
+
+
+@pytest.mark.parametrize(
+    ("email", "phone", "expected"),
+    [
+        (None, None, None),
+        ("user@example.com", "+15555550123", None),
+        ("user@example.com", None, "user@example.com"),
+        (None, "+15555550123", ""),
+    ],
+)
+async def test_device_email_resolver_validates_contact_channel(
+    monkeypatch: pytest.MonkeyPatch,
+    email: Optional[str],
+    phone: Optional[str],
+    expected: Optional[str],
+):
+    device = SimpleNamespace(
+        pre_auth_session_id="pre-auth", email=email, phone_number=phone
+    )
+
+    async def lookup(*_args: Any, **_kwargs: Any):
+        return device
+
+    monkeypatch.setattr(
+        supertokens_repository.passwordless_asyncio,
+        "list_codes_by_pre_auth_session_id",
+        lookup,
+    )
+    monkeypatch.setattr(
+        supertokens_repository.passwordless_asyncio,
+        "list_codes_by_device_id",
+        lookup,
+    )
+
+    assert (
+        await supertokens_repository.resolve_passwordless_device_email(
+            "public", "pre-auth", {}, "device"
+        )
+        == expected
+    )
+
+
+async def test_device_email_resolver_rejects_phone_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def by_pre_auth(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(
+            pre_auth_session_id="pre-auth", email=None, phone_number="+15555550123"
+        )
+
+    async def by_device(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(
+            pre_auth_session_id="pre-auth", email=None, phone_number="+15555550124"
+        )
+
+    monkeypatch.setattr(
+        supertokens_repository.passwordless_asyncio,
+        "list_codes_by_pre_auth_session_id",
+        by_pre_auth,
+    )
+    monkeypatch.setattr(
+        supertokens_repository.passwordless_asyncio,
+        "list_codes_by_device_id",
+        by_device,
+    )
+
+    assert (
+        await supertokens_repository.resolve_passwordless_device_email(
+            "public", "pre-auth", {}, "device"
+        )
+        is None
+    )
 
 
 async def test_confirmation_bypass_route_uses_post_import_validation_patch(
@@ -872,6 +2005,23 @@ async def test_init_rejects_non_positive_email_change_session_age():
                 email_change={"max_session_age_seconds": 0},
             )
         )
+
+
+async def test_init_validates_email_retirement_mode():
+    with pytest.raises(
+        ValueError, match="email_change.retirement_mode must be 'observe' or 'guard'"
+    ):
+        plugin.init(
+            RowndPluginConfig(
+                rownd_app_key="app-key",
+                rownd_app_secret="secret",
+                email_change=cast(Any, {"retirement_mode": "invalid"}),
+            )
+        )
+
+    config = make_config()
+    plugin.init(config)
+    assert config.email_change.get("retirement_mode") == "observe"
 
 
 async def test_disabled_migration_omits_migration_routes():
@@ -1816,6 +2966,7 @@ async def test_replacement_session_failure_runs_email_change_rollback(
             rolled_back = True
 
         return {
+            "user_id": "user-id",
             "recipe_user_id": SimpleNamespace(get_as_string=lambda: "recipe-user"),
             "initiating_session_handle": "session-handle",
             "rollback_on_session_replacement_failure": rollback,
@@ -1839,6 +2990,19 @@ async def test_replacement_session_failure_runs_email_change_rollback(
     )
     monkeypatch.setattr(plugin, "resolve_pending_email_verification_token", resolve_pending)
     monkeypatch.setattr(plugin, "complete_pending_email_verification", complete_pending)
+    monkeypatch.setattr(
+        supertokens_repository,
+        "authorize_passwordless_email",
+        lambda *_args, **_kwargs: asyncio.sleep(
+            0,
+            result=EmailCredentialAuthorization(
+                EmailCredentialState.ALLOW,
+                EmailCredentialReason.CANONICAL,
+                "user-id",
+                "recipe-user",
+            ),
+        ),
+    )
     monkeypatch.setattr(plugin.session_asyncio, "create_new_session", create_new_session)
     overridden = plugin._emailverification_api_override()(
         cast(Any, SimpleNamespace(email_verify_post=email_verify_post))
@@ -2112,7 +3276,9 @@ async def test_derived_context_reproduces_querier_default_replacement():
     assert dict(first)["_default"] is stable_default
 
 
-async def test_passwordless_request_contexts_are_isolated_during_overlap():
+async def test_passwordless_request_contexts_are_isolated_during_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+):
     entered = 0
     both_entered = asyncio.Event()
     captured: list[Dict[str, Any]] = []
@@ -2127,6 +3293,12 @@ async def test_passwordless_request_contexts_are_isolated_during_overlap():
         await both_entered.wait()
         return SimpleNamespace(status="OK")
 
+    async def authorize(*_args: Any, **_kwargs: Any):
+        return EmailCredentialAuthorization(
+            EmailCredentialState.ALLOW, EmailCredentialReason.NO_OWNER
+        )
+
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", authorize)
     original = SimpleNamespace(create_code_post=create_code_post, consume_code_post=None)
     overridden = plugin._passwordless_api_override(make_config())(cast(Any, original))
     parent: Dict[str, Any] = {
@@ -2310,3 +3482,133 @@ async def test_app_variant_uses_fresh_raw_metadata_before_write(
         "preserved": True,
         "rownd:app_variants": ["variant_123"],
     }
+
+
+async def _invoke_observe_passwordless_operation(
+    operation: str, original: Any, config: RowndPluginConfig
+):
+    if operation == "consume":
+        overridden = plugin._passwordless_function_override(config)(
+            cast(Any, SimpleNamespace(consume_code=original))
+        )
+        return await overridden.consume_code(
+            "pre", None, None, "link", None, None, "public", {}
+        )
+
+    overridden = plugin._passwordless_api_override(config)(
+        cast(
+            Any,
+            SimpleNamespace(
+                create_code_post=original,
+                consume_code_post=None,
+                resend_code_post=original,
+            ),
+        )
+    )
+    if operation == "create":
+        return await overridden.create_code_post(
+            "user@example.com",
+            None,
+            None,
+            None,
+            "public",
+            cast(Any, SimpleNamespace(request=FakeRequest())),
+            {},
+        )
+    return await overridden.resend_code_post(
+        "device",
+        "pre",
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+
+@pytest.mark.parametrize("operation", ["create", "resend", "consume"])
+@pytest.mark.parametrize(
+    ("authorization", "diagnostic_code", "reason_code"),
+    [
+        (
+            EmailCredentialAuthorization(
+                EmailCredentialState.RETIRED, EmailCredentialReason.NONCANONICAL
+            ),
+            "classification_rejected",
+            "noncanonical",
+        ),
+        (
+            EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED, EmailCredentialReason.SECURITY_METADATA
+            ),
+            "classification_rejected",
+            "security_metadata",
+        ),
+        (
+            EmailCredentialAuthorization(
+                EmailCredentialState.AMBIGUOUS, EmailCredentialReason.MULTIPLE_OWNERS
+            ),
+            "classification_rejected",
+            "multiple_owners",
+        ),
+        (None, "classification_exception", None),
+        (
+            EmailCredentialAuthorization(
+                EmailCredentialState.ALLOW, EmailCredentialReason.CANONICAL
+            ),
+            None,
+            None,
+        ),
+    ],
+)
+async def test_passwordless_observe_mode_diagnostics_preserve_original_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    authorization: Optional[EmailCredentialAuthorization],
+    diagnostic_code: Optional[str],
+    reason_code: Optional[str],
+):
+    calls: list[str] = []
+    diagnostics: list[str] = []
+    diagnostic_configs: list[RowndPluginConfig] = []
+    config = make_config()
+    config.enable_debug_logs = False
+
+    async def authorize(*_args: Any, **_kwargs: Any):
+        if authorization is None:
+            raise RuntimeError("sensitive classifier failure")
+        return authorization
+
+    async def original(*_args: Any, **_kwargs: Any):
+        calls.append(operation)
+        return SimpleNamespace(status="ORIGINAL")
+
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", authorize)
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result="user@example.com"),
+    )
+    def capture_warning(warning_config: RowndPluginConfig, message: str):
+        diagnostic_configs.append(warning_config)
+        diagnostics.append(message)
+
+    monkeypatch.setattr(plugin, "log_warning", capture_warning)
+
+    result = await _invoke_observe_passwordless_operation(operation, original, config)
+
+    assert cast(Any, result).status == "ORIGINAL"
+    assert calls == [operation]
+    if diagnostic_code is None:
+        assert diagnostics == []
+        assert diagnostic_configs == []
+    else:
+        assert any(
+            f"operation={operation}" in diagnostic
+            and f"code={diagnostic_code}" in diagnostic
+            and (reason_code is None or f"reason={reason_code}" in diagnostic)
+            for diagnostic in diagnostics
+        )
+        assert diagnostic_configs == [config]
+        assert all("sensitive classifier failure" not in diagnostic for diagnostic in diagnostics)
+    assert config.enable_debug_logs is False
