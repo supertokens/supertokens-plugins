@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "supertokens-rownd"
+version = "0.2.0"
+description = "Rownd migration plugin for SuperTokens Python"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+authors = [{ name = "SuperTokens", email = "team@supertokens.com" }]
+keywords = ["supertokens", "rownd", "migration", "plugin"]
+dependencies = [
+  "supertokens_python>=0.31.3",
+  "httpx>=0.15.0,<1.0.0",
+  "PyJWT[crypto]>=2.0.0",
+  "typing_extensions>=4.1.1,<5.0.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/supertokens/supertokens-plugins"
+Repository = "https://github.com/supertokens/supertokens-plugins"
+Issues = "https://github.com/supertokens/supertokens-plugins/issues"
+
+[dependency-groups]
+dev = [
+  "build",
+  "fastapi",
+  "pytest",
+  "pytest-asyncio",
+  "testcontainers",
+  "uvicorn",
+  "ruff",
+  "pyright"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+supertokens_rownd = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.pyright]
+include = ["src", "tests"]
+typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

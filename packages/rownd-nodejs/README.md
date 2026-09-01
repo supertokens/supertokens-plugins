@@ -44,6 +44,42 @@ SuperTokens.init({
 });
 ```
 
+### Session Claim Fields
+
+Schema fields can be copied into the SuperTokens access-token payload by setting `include_in_session_claims: true`. Use `session_claim_name` when the claim name should differ from the Rownd data field name.
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  schema: {
+    employee_id: {
+      display_name: "Employee ID",
+      type: "string",
+      user_visible: false,
+      include_in_session_claims: true,
+      session_claim_name: "employee_id_claim",
+    },
+  },
+});
+```
+
+### Client Link Domains
+
+Set `clientDomains` to rewrite account links to different frontend URL bases. Values must be absolute URL bases, including custom schemes for native deep links. The plugin selects `mobile` for `mobile_app` display context and `browser` otherwise. Consumers can pass `rownd_client_domain` to select any custom key.
+
+```typescript
+RowndMigrationPlugin.init({
+  rowndAppKey: process.env.ROWND_APP_KEY,
+  rowndAppSecret: process.env.ROWND_APP_SECRET,
+  clientDomains: {
+    browser: "https://app.example.com",
+    mobile: "customDomain://",
+    browser_local: "http://localhost:3000",
+  },
+});
+```
+
 ## API Endpoint
 
 The plugin exposes a single endpoint:

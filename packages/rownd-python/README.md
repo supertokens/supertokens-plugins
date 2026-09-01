@@ -1,0 +1,302 @@
+# SuperTokens Rownd Python Plugin
+
+Rownd migration plugin for `supertokens_python`.
+
+This package is managed by Turborepo through `package.json`, but published as a Python package named `supertokens-rownd`.
+
+## Installation
+
+Install from PyPI:
+
+```bash
+pip install supertokens-rownd
+```
+
+With `uv`:
+
+```bash
+uv add supertokens-rownd
+```
+
+For local development, install from this repository checkout with `uv sync --dev`.
+
+## Local Development
+
+```bash
+cd packages/rownd-python
+uv sync --dev
+uv run python -m build
+uv run pytest
+```
+
+From the repository root, Turborepo can run the Python package tasks because this directory has a `package.json` workspace adapter:
+
+```bash
+npm run build -- --filter=@supertokens-plugins/rownd-python
+npm run test -- --filter=@supertokens-plugins/rownd-python
+```
+
+## Usage
+
+```python
+from supertokens_python import (
+    InputAppInfo,
+    SupertokensConfig,
+    SupertokensExperimentalConfig,
+    init,
+)
+from supertokens_python.recipe import accountlinking, emailverification, passwordless, session, thirdparty, usermetadata
+from supertokens_rownd import init as RowndMigrationPlugin
+
+init(
+    app_info=InputAppInfo(
+        app_name="My App",
+        api_domain="https://api.example.com",
+        website_domain="https://example.com",
+        api_base_path="/auth",
+    ),
+    framework="fastapi",
+    supertokens_config=SupertokensConfig(
+        connection_uri="https://try.supertokens.com",
+    ),
+    recipe_list=[
+        accountlinking.init(),
+        session.init(),
+        usermetadata.init(),
+        passwordless.init(
+            contact_config=passwordless.ContactEmailOrPhoneConfig(),
+            flow_type="MAGIC_LINK",
+        ),
+        emailverification.init(mode="OPTIONAL"),
+        thirdparty.init(sign_in_and_up_feature=thirdparty.SignInAndUpFeature(providers=[])),
+    ],
+    experimental=SupertokensExperimentalConfig(
+        plugins=[
+            RowndMigrationPlugin(
+                rownd_app_key="rownd_app_key",
+                rownd_app_secret="rownd_app_secret",
+                # Must match InputAppInfo.api_base_path.
+                api_base_path="/auth",
+                # Should match InputAppInfo.api_domain.
+                api_domain="https://api.example.com",
+                # Should match InputAppInfo.website_domain when using passwordless confirmation bypass.
+                website_domain="https://example.com",
+                app_name="My App",
+                email_change={
+                    "max_session_age_seconds": 600,
+                    "retirement_mode": "observe",
+                },
+                app_config={
+                    "auth": {
+                        "enforceSameDevicePasswordlessSignIn": True,
+                    }
+                },
+            )
+        ]
+    ),
+)
+```
+
+`app_config.auth.enforceSameDevicePasswordlessSignIn` controls the Hub UI policy for
+passwordless flows originating from `mobile_app`. It does not enforce server-side device binding.
+
+## Routes
+
+The plugin registers these routes below `api_base_path`:
+
+- `GET /plugin/rownd/app-config`
+- `POST /plugin/rownd/guest`
+- `POST /plugin/rownd/migrate`
+- `POST /plugin/migrate-session`
+- `POST /plugin/passwordless-cross-device-confirmation/validate`
+- `POST /plugin/rownd/signout`
+
+Migration and guest routes accept an optional `tenantId` query parameter and default to `public`. Compatibility user views, sessions, and pending email verification are scoped to that tenant; user metadata remains shared across tenant memberships.
+
+Rownd passwordless identifiers are authoritative during migration. When an exact
+third-party identity and an existing Passwordless email belong to separate users, the
+plugin links the Passwordless method only if Rownd verifies that email, its owner is not
+already primary, and it is not mapped to another Rownd user. `verified_data.email` must
+be `true` or match `data.email` case-insensitively. Other ownership conflicts still fail
+migration.
+
+After all Rownd users have migrated, retain the compatibility routes without Rownd credentials by configuring `disable_rownd_user_migration=True`. This removes both migration routes; when no app key is configured, it uses an internal app key for passwordless and verification-link rewriting.
+
+Passwordless resend requests preserve Rownd display, redirect, client-domain, app-variant, and OAuth context. Combined OTP and magic-link deliveries add the Hub `passwordlessFlowType=USER_INPUT_CODE_AND_MAGIC_LINK` parameter; OTP-only deliveries are left unchanged.
+
+- `GET /plugin/rownd/user`
+- `PUT /plugin/rownd/user`
+- `DELETE /plugin/rownd/user`
+- `GET /plugin/rownd/user/meta`
+- `PUT /plugin/rownd/user/meta`
+- `GET /plugin/rownd/user/field`
+- `PUT /plugin/rownd/user/field`
+
+## Rownd Compatibility
+
+The plugin exposes Rownd-compatible user/session behavior for migrated and new SuperTokens users:
+
+- Guest sessions use the `guest` third-party provider.
+- Instant sessions use the `instant` third-party provider and preserve `auth_level: "instant"`.
+- Passwordless and third-party sign-in refresh Rownd session claims after account linking while preserving the linked guest's `anonymous_id`.
+- Compatibility reads combine metadata from the primary and linked recipe users. Profile and metadata writes target the primary user without relocating linked Rownd metadata.
+- Google and Apple third-party login methods are exposed as `google_id` and `apple_id` in Rownd-compatible user payloads.
+- OAuth2 Provider tokens and userinfo responses include Rownd claims plus standard `email`, `phone`, and `profile` claims when those scopes are requested.
+- OAuth2 `resource=app:*` requests are translated to SuperTokens `audience=app:*` for Rownd-compatible OAuth clients.
+- Rownd compatibility user routes ignore the global email verification claim validator for profile access; secure email changes apply their own checks.
+
+### Email Changes
+
+Email credential retirement has two rollout modes:
+
+- `observe` is the default. It classifies Passwordless email state but preserves legacy authentication and profile email-change behavior. Legacy completion creates or reuses a Passwordless target and retains previous Passwordless email methods as login aliases. This flow is not distributed-safe: metadata publication has no compare-and-swap or fencing support.
+- `guard` rejects retired or malformed Passwordless email create, resend, helper, and consume attempts. Phone Passwordless flows are unaffected. Because safe completion requires metadata compare-and-swap, guard mode also disables starting and completing profile email changes.
+
+Guard enforcement covers the plugin-owned Passwordless HTTP APIs and exported helpers. Calls made directly to the SuperTokens SDK outside those paths are not guarded.
+
+The `supertokens_rownd` logger emits stable warning diagnostics without emails,
+codes, tokens, session handles, or exception text. Observe-mode classification
+rejections include `operation`, `code=classification_rejected`, `state`, and
+`reason`; classification failures include `operation` and
+`code=classification_exception`. If defensive consume cleanup cannot revoke the
+returned session or complete tenant-scoped linked-account revocation, it emits
+`code=account_revoke_failed`. These warnings are independent of
+`enable_debug_logs`.
+
+When email sign-in is configured in observe mode, changing the profile email starts a
+verified Passwordless email change for the initiating tenant. For accounts containing
+only real third-party methods, the plugin creates and links the first Passwordless
+method after verification. Guest/instant-only accounts and unsupported mixed-account
+topologies are rejected. Configure the mode and maximum initiating-session age:
+
+```python
+RowndMigrationPlugin(
+    rownd_app_key="rownd_app_key",
+    rownd_app_secret="rownd_app_secret",
+    app_config={"signInMethods": [{"method": "email"}]},
+    email_change={
+        "max_session_age_seconds": 600,
+        "retirement_mode": "observe",
+    },
+)
+```
+
+Before enabling `guard`, stop new email changes and drain or manually resolve all
+pending changes. Inventory malformed or ambiguous canonical metadata and repair only
+state that an operator has reviewed; the plugin does not guess or automatically repair
+security metadata. Inspect metadata on the primary user, specifically
+`rownd_pending_verification`, `rownd_email_recipe_user_id`, and
+`rownd_email_recipe_user_ids`, to locate pending operations and canonical security
+state. Upgrade every worker before changing the mode; mixed observe/guard workers do
+not provide a safe rollout boundary. Guard mode protects retirement state published by
+prior completed changes, but new email changes must remain disabled until Core and the
+Python SDK expose metadata compare-and-swap/revision fencing.
+
+The flow requires Passwordless, EmailVerification, and AccountLinking. It rejects
+stale sessions, checks target ownership across all tenants, and binds pending
+verification metadata to the initiating user, session, tenant, purpose, and status
+before consuming the Core token. In observe mode, completion revokes all account
+sessions and returns a replacement session for the new canonical method, but concurrent
+completion claims are local compatibility behavior rather than a distributed guarantee.
+The tenant's canonical email method is tracked separately from its login aliases.
+Existing metadata using `rownd_email_recipe_user_id` remains
+supported; new updates also maintain the tenant-scoped `rownd_email_recipe_user_ids`
+map.
+
+Successful profile or field updates that start verification return
+`email_verification_pending: true`. Until verification completes, the returned profile
+continues to expose the current canonical email.
+
+Native clients using `rowndDisplayContext: "mobile_app"` must send
+`rowndNativeEmailVerification: true` in the request `context`. Older clients receive
+HTTP 426 before metadata or email-delivery side effects. Only validated display,
+client-domain, and native-capability values are propagated; request-provided redirect
+paths are ignored. This applies to both `PUT /plugin/rownd/user` and
+`PUT /plugin/rownd/user/field`.
+
+Pending email-change links retain the raw SuperTokens `token` and add
+`rowndPendingVerificationId`. Custom email delivery must preserve both parameters.
+The marker selects the profile-change flow and requires the initiating session.
+Unmarked verification remains ordinary SuperTokens verification and is
+session-optional; removing the marker can therefore consume the raw token without
+completing the credential change. Concurrent duplicate consumption allows at most
+one completion within the behavior covered by the current Core calls; without metadata
+compare-and-swap this is not a cross-process guarantee. Failed completion and
+replacement-session creation are compensated; rollback failures require account
+reconciliation.
+
+### Passwordless Confirmation Bypass
+
+Use `create_magic_link_with_confirmation_bypass` when your backend needs to create a passwordless magic link that can be opened on a different device without showing the SuperTokens cross-device confirmation prompt.
+This is intended for trusted server-side flows only.
+
+First, configure the exact post-login paths that may use the bypass:
+
+```python
+from supertokens_rownd import RowndPluginConfig
+
+rownd_plugin_config = RowndPluginConfig(
+    rownd_app_key="rownd_app_key",
+    rownd_app_secret="rownd_app_secret",
+    api_base_path="/auth",
+    api_domain="https://api.example.com",
+    website_domain="https://example.com",
+    client_domains={"browser": "https://app.example.com"},
+    cross_device_confirmation_bypass={
+        "allowed_redirect_paths": ["/profile", "/settings/security"],
+    },
+)
+```
+
+Then call the helper from your backend after SuperTokens has been initialized with the Rownd plugin:
+
+```python
+from supertokens_rownd import create_magic_link_with_confirmation_bypass
+
+magic_link = await create_magic_link_with_confirmation_bypass(
+    email="user@example.com",
+    client_domain="browser",
+    redirect_to_path="/profile",
+    display_context="browser",
+)
+```
+
+`redirect_to_path` is required and must match `cross_device_confirmation_bypass.allowed_redirect_paths` exactly after normalization. Absolute URLs are accepted only when their origin matches the resolved `client_domain`; they are normalized back to a relative path before being added to the magic link.
+
+`client_domain` must be a configured `client_domains` key, not a raw domain. Omit it to use `website_domain`.
+
+Pass exactly one of `email` or `phone_number`. The helper returns the rewritten magic link with `bypassDeviceConfirmation=true`. In retirement guard mode, email helper calls enforce canonical credential state; phone helper calls remain unchanged.
+
+Before skipping the cross-device confirmation prompt, the frontend should validate the callback against the plugin:
+
+- **POST** `/plugin/passwordless-cross-device-confirmation/validate`
+- **Body**: `{ "clientDomain": "browser", "redirectToPath": "/profile", "appVariantId": "optional_variant" }`
+- **Success response**: `{ "status": "OK", "bypass": true }`
+
+If validation fails, the frontend should show the normal cross-device confirmation prompt.
+
+Apple sign-in methods may include SuperTokens client type mapping fields:
+
+```python
+"signInMethods": [
+    {
+        "method": "apple",
+        "clientId": "com.example.service",
+        "webClientType": "web",
+        "iosClientType": "ios",
+        "androidClientType": "android",
+    }
+]
+```
+
+See [OAUTH_MIGRATION_TUTORIAL.md](./OAUTH_MIGRATION_TUTORIAL.md) for OAuth/OIDC client migration steps.
+
+## Notes
+
+The Python SDK plugin API does not currently pass `app_info` into plugin route construction. Configure `api_base_path`, `api_domain`, `website_domain`, and `app_name` on the Rownd plugin so it can register routes and rewrite Rownd hub links consistently.
+
+`api_base_path` must match `InputAppInfo.api_base_path`. If these differ, Rownd plugin routes are mounted at the Rownd plugin value, not the SuperTokens app value.
+
+`api_domain` should match `InputAppInfo.api_domain`. This value is added to rewritten Rownd hub links so browser and mobile flows can call back to the correct API domain.
+
+`website_domain` should match `InputAppInfo.website_domain`. It is required when `create_magic_link_with_confirmation_bypass` is called without `client_domain`.
