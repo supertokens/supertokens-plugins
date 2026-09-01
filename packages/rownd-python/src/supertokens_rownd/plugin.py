@@ -6,7 +6,7 @@ import warnings
 from collections.abc import Callable
 from typing import Any, Generic, Optional, TypeVar, cast
 from typing_extensions import Unpack
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 from supertokens_python.framework.request import BaseRequest
 from supertokens_python.framework.response import BaseResponse
@@ -44,6 +44,7 @@ from supertokens_python.recipe.passwordless.interfaces import (
     APIInterface as PasswordlessAPIInterface,
     APIOptions as PasswordlessAPIOptions,
 )
+from supertokens_python.recipe.passwordless import asyncio as passwordless_asyncio
 from supertokens_python.recipe.passwordless.types import (
     PasswordlessLoginEmailTemplateVars,
     PasswordlessLoginSMSTemplateVars,
@@ -63,35 +64,27 @@ from supertokens_python.types.base import AccountInfoInput, UserContext
 from supertokens_python.types.recipe import BaseAPIInterface, BaseRecipeInterface
 from supertokens_python.types.response import GeneralErrorResponse
 
+from . import config as rownd_config
+from . import utils
 from .constants import (
     GUEST_AUTH_METHOD_ID,
     HANDLE_BASE_PATH,
     INSTANT_AUTH_METHOD_ID,
+    PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM,
     PENDING_EMAIL_VERIFICATION_QUERY_PARAM,
     PLUGIN_ID,
     PLUGIN_SDK_VERSION,
     PLUGIN_VERSION,
+    PUBLIC_TENANT_ID,
     ROWND_JWT_CLAIMS,
     RESERVED_SESSION_CLAIMS,
 )
-from .plugin_implementation import (
-    add_hub_bootstrap_params,
-    add_pending_email_verification_marker,
-    apply_rownd_oauth_resource_params,
+from .config import (
     assert_app_variant_is_configured,
-    build_rownd_oauth_payload,
-    build_rownd_oauth_user_info,
-    build_rownd_session_and_anonymous_claims,
-    complete_pending_email_verification,
-    create_derived_user_context,
-    does_account_info_match_auth_method,
-    get_effective_auth_level,
-    get_requested_app_variant_id_from_request,
-    get_requested_client_domain_from_request,
-    get_requested_display_context_from_request,
-    get_requested_oauth_login_challenge_from_request,
-    get_requested_redirect_to_path_from_request,
-    get_pending_email_verification_id_from_user_context,
+    set_active_rownd_config,
+)
+from .errors import RowndEmailChangeError, RowndPluginError
+from .plugin_implementation import (
     handle_app_config,
     handle_delete_user,
     handle_get_user,
@@ -104,21 +97,114 @@ from .plugin_implementation import (
     handle_update_user_field,
     handle_update_user_meta,
     handle_validate_passwordless_confirmation_bypass,
-    has_verified_matching_email_login_method,
+)
+from .rownd_compatibility import (
+    apply_rownd_oauth_resource_params,
+    does_account_info_match_auth_method,
+    get_effective_auth_level,
     has_only_guest_login_methods,
+    has_verified_matching_email_login_method,
     is_guest_account_info,
     normalize_rownd_oauth_scopes,
-    record_rownd_app_variant_for_user,
     resolve_session_claim_name,
-    resolve_pending_email_verification_token,
-    set_active_rownd_config,
 )
-from .rownd_client import RowndClient
-from .telemetry import create_telemetry_client
-from .types import RowndClientProtocol, RowndEmailChangeError, RowndPluginConfig, RowndPluginKwargs
+from .rownd_repository import RowndClient
+from .supertokens_repository import (
+    build_rownd_oauth_payload,
+    build_rownd_oauth_user_info,
+    build_rownd_session_and_anonymous_claims,
+    complete_pending_email_verification,
+    record_rownd_app_variant_for_user,
+    resolve_pending_email_verification_token,
+)
+from .telemetry.create_telemetry_client import create_telemetry_client
+from .types import RowndClientProtocol, RowndPluginConfig, RowndPluginKwargs
+from .utils import (
+    add_hub_bootstrap_params,
+    add_pending_email_verification_marker,
+    create_derived_user_context,
+    get_pending_email_verification_id_from_user_context,
+    get_requested_app_variant_id_from_request,
+    get_requested_client_domain_from_request,
+    get_requested_display_context_from_request,
+    get_requested_oauth_login_challenge_from_request,
+    get_requested_redirect_to_path_from_request,
+)
 
 
 TemplateVarsT = TypeVar("TemplateVarsT")
+
+
+async def create_magic_link_with_confirmation_bypass(
+    email: Optional[str] = None,
+    phone_number: Optional[str] = None,
+    tenant_id: str = PUBLIC_TENANT_ID,
+    session: Optional[SessionContainer] = None,
+    user_context: Optional[UserContext] = None,
+    redirect_to_path: Optional[str] = None,
+    client_domain: Optional[str] = None,
+    display_context: Optional[str] = None,
+    app_variant_id: Optional[str] = None,
+) -> str:
+    has_email = isinstance(email, str) and len(email) > 0
+    has_phone_number = isinstance(phone_number, str) and len(phone_number) > 0
+    if has_email == has_phone_number:
+        raise RowndPluginError("Exactly one of email or phone_number is required")
+
+    config = rownd_config.get_active_rownd_config()
+    rownd_config.assert_app_variant_is_configured(config, app_variant_id)
+    resolved_client_domain = utils.resolve_allowed_client_domain(
+        config, config.website_domain or None, client_domain
+    )
+    normalized_redirect_to_path = utils.normalize_redirect_to_path_for_client_domain(
+        redirect_to_path, resolved_client_domain
+    )
+    utils.assert_allowed_bypass_redirect_path(config, normalized_redirect_to_path)
+    context = utils.create_derived_user_context(
+        user_context if user_context is not None else {},
+        {
+            "rowndDisplayContext": display_context,
+            "rowndRedirectToPath": normalized_redirect_to_path,
+            "rowndClientDomain": client_domain,
+            "rowndAppVariantId": app_variant_id,
+        },
+    )
+    code_info = await passwordless_asyncio.create_code(
+        tenant_id,
+        email=email if has_email else None,
+        phone_number=phone_number if has_phone_number else None,
+        session=session,
+        user_context=context,
+    )
+    website_domain = (config.website_domain or resolved_client_domain).rstrip("/")
+    magic_link = "%s%s/verify?preAuthSessionId=%s&tenantId=%s#%s" % (
+        website_domain,
+        config.api_base_path,
+        quote(code_info.pre_auth_session_id, safe=""),
+        quote(tenant_id, safe=""),
+        quote(code_info.link_code, safe=""),
+    )
+    rewritten_url = urlparse(
+        utils.rewrite_magic_link(
+            magic_link,
+            resolved_client_domain,
+            utils.get_magic_link_bootstrap_params(
+                config,
+                app_variant_id=app_variant_id,
+                display_context=display_context,
+                redirect_to_path=normalized_redirect_to_path,
+                client_domain_key=client_domain,
+                oauth_login_challenge=(
+                    context["rowndOAuthLoginChallenge"]
+                    if isinstance(context.get("rowndOAuthLoginChallenge"), str)
+                    else None
+                ),
+            ),
+        )
+    )
+    query = dict(parse_qsl(rewritten_url.query, keep_blank_values=True))
+    query[PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM] = "true"
+    return urlunparse(rewritten_url._replace(query=urlencode(query)))
 
 
 async def _fetch_is_anonymous_claim(

@@ -13,7 +13,11 @@ from supertokens_python.recipe.thirdparty.types import ThirdPartyInfo
 from supertokens_python.types import LoginMethod, User
 
 from supertokens_rownd import plugin
+import supertokens_rownd.config as rownd_config
 import supertokens_rownd.plugin_implementation as impl
+import supertokens_rownd.rownd_compatibility as compatibility
+import supertokens_rownd.supertokens_repository as supertokens_repository
+import supertokens_rownd.utils as utils
 from supertokens_rownd.constants import (
     RESERVED_OAUTH_CLAIMS,
     RESERVED_SESSION_CLAIMS,
@@ -31,6 +35,27 @@ class FakeRequest:
 
     def get_query_param(self, key: str) -> Optional[str]:
         return self.query.get(key)
+
+
+class FakeRouteRequest(FakeRequest):
+    def __init__(self, body: Dict[str, Any], query: Optional[Dict[str, str]] = None):
+        super().__init__(query)
+        self.body = body
+
+    async def json(self) -> Dict[str, Any]:
+        return self.body
+
+
+class FakeResponse:
+    def __init__(self) -> None:
+        self.status_code: Optional[int] = None
+        self.body: Optional[Dict[str, Any]] = None
+
+    def set_status_code(self, status_code: int) -> None:
+        self.status_code = status_code
+
+    def set_json_content(self, body: Dict[str, Any]) -> None:
+        self.body = body
 
 
 class FakeSession:
@@ -381,6 +406,122 @@ async def test_passwordless_delivery_marks_combined_code_and_link_flow():
     )
 
 
+async def test_confirmation_bypass_helper_resolves_policy_from_owning_modules(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = make_config()
+    calls: list[str] = []
+
+    async def create_code(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(pre_auth_session_id="pre-auth", link_code="link-code")
+
+    monkeypatch.setattr(rownd_config, "get_active_rownd_config", lambda: config)
+    monkeypatch.setattr(
+        rownd_config,
+        "assert_app_variant_is_configured",
+        lambda *_args: calls.append("app-variant"),
+    )
+    monkeypatch.setattr(
+        utils,
+        "resolve_allowed_client_domain",
+        lambda *_args: calls.append("client-domain") or "https://app.example.com",
+    )
+    monkeypatch.setattr(
+        utils,
+        "normalize_redirect_to_path_for_client_domain",
+        lambda *_args: calls.append("redirect") or "/profile",
+    )
+    monkeypatch.setattr(
+        utils,
+        "assert_allowed_bypass_redirect_path",
+        lambda *_args: calls.append("bypass"),
+    )
+    monkeypatch.setattr(
+        utils,
+        "create_derived_user_context",
+        lambda *_args: calls.append("context") or {},
+    )
+    monkeypatch.setattr(
+        utils,
+        "get_magic_link_bootstrap_params",
+        lambda *_args, **_kwargs: calls.append("bootstrap") or {},
+    )
+    monkeypatch.setattr(
+        utils,
+        "rewrite_magic_link",
+        lambda *_args: calls.append("rewrite") or "https://app.example.com/account/login",
+    )
+    monkeypatch.setattr(plugin.passwordless_asyncio, "create_code", create_code)
+
+    link = await plugin.create_magic_link_with_confirmation_bypass(
+        email="user@example.com", redirect_to_path="/profile"
+    )
+
+    assert calls == [
+        "app-variant",
+        "client-domain",
+        "redirect",
+        "bypass",
+        "context",
+        "bootstrap",
+        "rewrite",
+    ]
+    assert link == "https://app.example.com/account/login?bypassDeviceConfirmation=true"
+
+
+async def test_confirmation_bypass_route_uses_post_import_validation_patch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = make_config()
+    config.website_domain = "https://app.example.com"
+    config.cross_device_confirmation_bypass = {"allowed_redirect_paths": ["/profile"]}
+    calls: list[Optional[str]] = []
+
+    def reject_confirmation_bypass(
+        _config: RowndPluginConfig, redirect_to_path: Optional[str]
+    ) -> None:
+        calls.append(redirect_to_path)
+        raise RuntimeError("patched confirmation policy")
+
+    monkeypatch.setattr(utils, "assert_allowed_bypass_redirect_path", reject_confirmation_bypass)
+    request = FakeRouteRequest({"redirectToPath": "/profile"})
+    response = FakeResponse()
+
+    await impl.handle_validate_passwordless_confirmation_bypass(
+        config, cast(Any, request), cast(Any, response)
+    )
+
+    assert calls == ["/profile"]
+    assert response.body == {"status": "ERROR", "bypass": False}
+
+
+async def test_update_user_field_route_uses_post_import_writable_policy_patch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[list[str]] = []
+    patched_error = {
+        "status": "ERROR",
+        "code": 418,
+        "message": "patched writable policy",
+    }
+
+    def reject_field(_config: RowndPluginConfig, fields: list[str]):
+        calls.append(fields)
+        return patched_error
+
+    monkeypatch.setattr(compatibility, "validate_writable_fields", reject_field)
+    request = FakeRouteRequest({"value": "Ada"}, {"field": "first_name"})
+    response = FakeResponse()
+
+    await impl.handle_update_user_field(
+        make_config(), cast(Any, request), cast(Any, response), cast(Any, object()), {}
+    )
+
+    assert calls == [["first_name"]]
+    assert response.status_code == 418
+    assert response.body == patched_error
+
+
 async def test_init_rejects_invalid_client_domain():
     with pytest.raises(ValueError, match="Invalid client_domains.browser"):
         plugin.init(
@@ -512,7 +653,7 @@ async def test_configured_claim_builder_filters_every_reserved_name(claim_name: 
         }
     }
 
-    assert impl.build_configured_session_claims(config, {"profile_field": "attacker"}) == {}
+    assert compatibility.build_configured_session_claims(config, {"profile_field": "attacker"}) == {}
 
 
 @pytest.mark.parametrize("claim_name", sorted(RESERVED_OAUTH_CLAIMS - RESERVED_SESSION_CLAIMS))
@@ -528,7 +669,7 @@ async def test_configured_claim_builder_filters_every_oauth_only_reserved_name(
     }
 
     assert (
-        impl.build_configured_session_claims(
+        compatibility.build_configured_session_claims(
             config, {"profile_field": "attacker"}, RESERVED_OAUTH_CLAIMS
         )
         == {}
@@ -545,7 +686,7 @@ async def test_normal_session_preserves_custom_oidc_named_claims(claim_name: str
         }
     }
 
-    assert impl.build_configured_session_claims(config, {"profile_field": "preserved"}) == {
+    assert compatibility.build_configured_session_claims(config, {"profile_field": "preserved"}) == {
         claim_name: "preserved"
     }
 
@@ -564,7 +705,7 @@ async def test_configured_claim_builder_filters_reserved_field_name_fallback(
     config = make_config()
     config.schema = cast(Any, {"sub": field_config})
 
-    assert impl.build_configured_session_claims(config, {"sub": "attacker"}) == {}
+    assert compatibility.build_configured_session_claims(config, {"sub": "attacker"}) == {}
 
 
 @pytest.mark.parametrize(
@@ -581,7 +722,7 @@ async def test_configured_claim_builder_uses_field_name_fallback(
     config = make_config()
     config.schema = cast(Any, {"profile_field": field_config})
 
-    assert impl.build_configured_session_claims(config, {"profile_field": "preserved"}) == {
+    assert compatibility.build_configured_session_claims(config, {"profile_field": "preserved"}) == {
         "profile_field": "preserved"
     }
 
@@ -595,7 +736,7 @@ async def test_configured_claim_builder_preserves_valid_custom_claim():
         }
     }
 
-    assert impl.build_configured_session_claims(config, {"profile_field": "preserved"}) == {
+    assert compatibility.build_configured_session_claims(config, {"profile_field": "preserved"}) == {
         "profile_field_claim": "preserved"
     }
 
@@ -613,7 +754,7 @@ async def test_reserved_session_claim_is_allowed_and_ignored_when_excluded():
     )
 
     plugin.init(config)
-    assert impl.build_configured_session_claims(config, {"profile_field": "attacker"}) == {}
+    assert compatibility.build_configured_session_claims(config, {"profile_field": "attacker"}) == {}
 
 
 @pytest.mark.parametrize("claim_name", [[], {}, 1, 0, True, False])
@@ -650,7 +791,7 @@ async def test_post_init_schema_mutation_fails_with_field_path():
     with pytest.raises(
         ValueError, match=r"schema\.profile_field\.session_claim_name must be a string"
     ):
-        impl.build_configured_session_claims(config, {"profile_field": "value"})
+        compatibility.build_configured_session_claims(config, {"profile_field": "value"})
 
 
 async def test_passwordless_create_code_rejects_unknown_app_variant():
@@ -878,9 +1019,9 @@ async def test_rownd_oauth_payload_adds_standard_and_rownd_claims(monkeypatch: p
             "combined_metadata": await get_user_metadata(user_id),
         }
 
-    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
+    monkeypatch.setattr(supertokens_repository, "inspect_linked_user_metadata", inspect)
 
-    payload = await impl.build_rownd_oauth_payload(
+    payload = await supertokens_repository.build_rownd_oauth_payload(
         make_config(),
         user,
         ["email", "profile"],
@@ -970,9 +1111,9 @@ async def test_oauth_payload_preserves_authoritative_reserved_claims(
     async def inspect(*_args: Any, **_kwargs: Any):
         return {"user": user, "combined_metadata": metadata}
 
-    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
+    monkeypatch.setattr(supertokens_repository, "inspect_linked_user_metadata", inspect)
 
-    payload = await impl.build_rownd_oauth_payload(
+    payload = await supertokens_repository.build_rownd_oauth_payload(
         config,
         user,
         ["email", "profile"],
@@ -1005,9 +1146,9 @@ async def test_rownd_oauth_user_info_picks_rownd_claims(monkeypatch: pytest.Monk
     async def inspect(user_id: str, user_context: Any = None, user_override: Any = None):
         return {"user": user_override or user, "combined_metadata": {}}
 
-    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
+    monkeypatch.setattr(supertokens_repository, "inspect_linked_user_metadata", inspect)
 
-    user_info = await impl.build_rownd_oauth_user_info(
+    user_info = await supertokens_repository.build_rownd_oauth_user_info(
         user,
         {
             "app_user_id": "rownd-user",
@@ -1027,6 +1168,26 @@ async def test_rownd_oauth_user_info_picks_rownd_claims(monkeypatch: pytest.Monk
         "auth_level": "verified",
         ROWND_JWT_CLAIMS["is_verified_user"]: True,
     }
+
+
+async def test_repository_resolves_compatibility_policy_from_owning_module(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    user = User("st-user", False, ["public"], [], [], [], cast(Any, []), [], 1000)
+
+    async def inspect(*_args: Any, **_kwargs: Any):
+        return {"user": user, "combined_metadata": {}}
+
+    monkeypatch.setattr(supertokens_repository, "inspect_linked_user_metadata", inspect)
+    monkeypatch.setattr(
+        compatibility,
+        "build_standard_oauth_claims",
+        lambda *_args, **_kwargs: {"policy_owner_patch": True},
+    )
+
+    user_info = await supertokens_repository.build_rownd_oauth_user_info(user, {}, [], {})
+
+    assert user_info["policy_owner_patch"] is True
 
 
 async def test_passwordless_consume_records_app_variant_before_refresh(
@@ -1560,7 +1721,7 @@ async def test_emailverification_delivery_adds_pending_marker():
 
 
 async def test_email_change_context_is_sanitized():
-    context = impl.build_email_change_user_context(
+    context = utils.build_email_change_user_context(
         {"trusted": "value"},
         {
             "rowndDisplayContext": "mobile_app",
@@ -1624,10 +1785,12 @@ async def test_pending_verification_binding_is_checked_before_token_use(
     async def get_user_metadata(*_args: Any, **_kwargs: Any):
         return {"rownd_pending_verification": [pending]}
 
-    monkeypatch.setattr(impl.session_asyncio, "get_session_information", get_session_information)
-    monkeypatch.setattr(impl, "get_raw_user_metadata", get_user_metadata)
+    monkeypatch.setattr(
+        supertokens_repository.session_asyncio, "get_session_information", get_session_information
+    )
+    monkeypatch.setattr(supertokens_repository, "get_raw_user_metadata", get_user_metadata)
 
-    result = await impl.resolve_pending_email_verification_token(
+    result = await supertokens_repository.resolve_pending_email_verification_token(
         "raw-token", "pending-id", "public", cast(Any, session), {}
     )
 
@@ -1884,8 +2047,8 @@ async def test_accountlinking_links_matching_real_session_with_verification(
 async def test_derived_context_forwards_default_replacements_to_parent():
     original_default = {"core_call_cache": {"stale": True}}
     parent = {"_default": original_default, "custom": "value"}
-    first = impl.create_derived_user_context(parent, {"temporary": "first"})
-    second = impl.create_derived_user_context(parent, {"temporary": "second"})
+    first = utils.create_derived_user_context(parent, {"temporary": "first"})
+    second = utils.create_derived_user_context(parent, {"temporary": "second"})
 
     replacement = {"core_call_cache": {"fresh": True}}
     first["_default"] = replacement
@@ -1910,7 +2073,7 @@ async def test_derived_context_forwards_default_replacements_to_parent():
     assert second["added"] is True
 
     empty_parent: Dict[str, Any] = {}
-    derived = impl.create_derived_user_context(empty_parent, {"temporary": True})
+    derived = utils.create_derived_user_context(empty_parent, {"temporary": True})
     created = derived.setdefault("_default", {"ignored": True})
     assert empty_parent["_default"] is created
     assert created == {}
@@ -1935,8 +2098,8 @@ async def test_derived_context_reproduces_querier_default_replacement():
     from supertokens_python.querier import Querier
 
     parent: Dict[str, Any] = {"_default": {"keep_cache_alive": True}}
-    first = impl.create_derived_user_context(parent, {})
-    second = impl.create_derived_user_context(parent, {})
+    first = utils.create_derived_user_context(parent, {})
+    second = utils.create_derived_user_context(parent, {})
     stable_default = parent["_default"]
     querier = object.__new__(Querier)
 
@@ -2022,7 +2185,7 @@ async def test_security_flag_is_operation_local_across_awaits():
     release = asyncio.Event()
 
     async def operation():
-        context = impl.create_derived_user_context(
+        context = utils.create_derived_user_context(
             parent, {"rowndDisableAutomaticAccountLinking": True}
         )
         entered.set()
@@ -2052,7 +2215,7 @@ async def test_normal_user_route_forwards_exact_context(monkeypatch: pytest.Monk
         assert kwargs["user_context"] is parent
         return {"data": {}}
 
-    monkeypatch.setattr(impl, "get_rownd_compat_user", get_compat_user)
+    monkeypatch.setattr(supertokens_repository, "get_rownd_compat_user", get_compat_user)
     response = SimpleNamespace(
         set_status_code=lambda _code: None, set_json_content=lambda _body: None
     )
@@ -2073,9 +2236,9 @@ async def test_session_claims_share_one_inspection_snapshot(monkeypatch: pytest.
         assert user_context is context
         return {"user": user, "combined_metadata": {}}
 
-    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
+    monkeypatch.setattr(supertokens_repository, "inspect_linked_user_metadata", inspect)
 
-    claims, anonymous = await impl.build_rownd_session_and_anonymous_claims(
+    claims, anonymous = await supertokens_repository.build_rownd_session_and_anonymous_claims(
         make_config(), "user", {}, None, context
     )
 
@@ -2096,9 +2259,11 @@ async def test_oauth_claims_share_one_metadata_inspection(monkeypatch: pytest.Mo
         assert user_override is user
         return {"user": user, "combined_metadata": {}}
 
-    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
+    monkeypatch.setattr(supertokens_repository, "inspect_linked_user_metadata", inspect)
 
-    await impl.build_rownd_oauth_payload(make_config(), user, ["email"], {}, context)
+    await supertokens_repository.build_rownd_oauth_payload(
+        make_config(), user, ["email"], {}, context
+    )
 
     assert calls == 1
 
@@ -2130,11 +2295,15 @@ async def test_app_variant_uses_fresh_raw_metadata_before_write(
         written.update(metadata)
         return SimpleNamespace(metadata=metadata)
 
-    monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
-    monkeypatch.setattr(impl, "get_raw_user_metadata", get_raw)
-    monkeypatch.setattr(impl.usermetadata_asyncio, "update_user_metadata", update)
+    monkeypatch.setattr(supertokens_repository, "inspect_linked_user_metadata", inspect)
+    monkeypatch.setattr(supertokens_repository, "get_raw_user_metadata", get_raw)
+    monkeypatch.setattr(
+        supertokens_repository.usermetadata_asyncio, "update_user_metadata", update
+    )
 
-    await impl.record_rownd_app_variant_for_user(make_config(), "user", "variant_123", context)
+    await supertokens_repository.record_rownd_app_variant_for_user(
+        make_config(), "user", "variant_123", context
+    )
 
     original = cast(Dict[str, Any], written["original_rownd_user"])
     assert original["attributes"] == {

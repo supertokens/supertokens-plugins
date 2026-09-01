@@ -4,7 +4,8 @@ import httpx
 import jwt
 from typing import Optional
 
-from .types import JsonDict, RowndPluginConfig, RowndPluginError
+from .errors import RowndPluginError
+from .types import JsonDict, RowndPluginConfig
 
 
 class RowndClient:

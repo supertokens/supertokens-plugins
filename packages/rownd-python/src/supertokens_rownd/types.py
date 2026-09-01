@@ -104,19 +104,3 @@ class RowndPluginConfig:
     email_change: RowndEmailChangeConfig = field(
         default_factory=lambda: {"max_session_age_seconds": 600}
     )
-
-
-class RowndPluginError(Exception):
-    pass
-
-
-class RowndEmailChangeError(Exception):
-    def __init__(
-        self,
-        code: Literal["CONFLICT", "AMBIGUOUS", "INVALID_EMAIL"],
-        http_status: int,
-        message: str,
-    ):
-        super().__init__(message)
-        self.code = code
-        self.http_status = http_status

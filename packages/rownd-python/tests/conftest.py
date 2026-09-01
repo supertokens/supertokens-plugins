@@ -47,7 +47,8 @@ from supertokens_python.recipe.userroles import UserRolesRecipe
 from supertokens_python.recipe.webauthn.recipe import WebauthnRecipe
 
 from supertokens_rownd import init as rownd_init
-from supertokens_rownd.types import RowndPluginConfig, RowndPluginError
+from supertokens_rownd.errors import RowndPluginError
+from supertokens_rownd.types import RowndPluginConfig
 
 
 ACCOUNT_LINKING_TEST_LICENSE = (

@@ -30,12 +30,18 @@ from supertokens_python.recipe.thirdparty.types import ThirdPartyInfo
 from supertokens_python.recipe.usermetadata import asyncio as usermetadata_asyncio
 from supertokens_python.types.base import AccountInfoInput
 
-import supertokens_rownd.plugin_implementation as impl
+import supertokens_rownd.supertokens_repository as impl
+import supertokens_rownd.telemetry.create_telemetry_client as telemetry
 import supertokens_rownd.plugin as rownd_plugin
 from supertokens_rownd.constants import ROWND_JWT_CLAIMS
-from supertokens_rownd.plugin_implementation import build_rownd_session_claims, complete_pending_email_verification
+from supertokens_rownd.supertokens_repository import (
+    build_rownd_session_claims,
+    complete_pending_email_verification,
+)
+from supertokens_rownd.rownd_compatibility import map_rownd_user_to_supertokens
 from supertokens_rownd import create_magic_link_with_confirmation_bypass
-from supertokens_rownd.types import RowndEmailChangeError, RowndPluginConfig, RowndPluginError
+from supertokens_rownd.errors import RowndEmailChangeError, RowndPluginError
+from supertokens_rownd.types import RowndPluginConfig
 
 from conftest import MockRowndClient, auth_headers, make_client, session_headers
 
@@ -1210,7 +1216,7 @@ async def test_e006_recovery_rejects_passwordless_owner_mapped_to_another_rownd_
         telemetry_errors.append(error)
 
     monkeypatch.setattr(impl, "import_user", racing_import)
-    monkeypatch.setattr(impl, "record_error", capture_error)
+    monkeypatch.setattr(telemetry, "record_error", capture_error)
 
     res = migrate_rownd_user(
         client,
@@ -1296,7 +1302,7 @@ async def test_concurrent_reconciliation_normalizes_late_passwordless_owner(
     try:
         assert await asyncio.to_thread(parent_paused.wait, 10)
         reconciled = await impl.reconcile_rownd_user_with_existing_login_methods(
-            impl.map_rownd_user_to_supertokens(cast(Any, user_info)),
+            map_rownd_user_to_supertokens(cast(Any, user_info)),
             "public",
             {},
         )

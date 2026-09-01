@@ -9,30 +9,36 @@ from supertokens_python.recipe.accountlinking.interfaces import (
 from supertokens_python.recipe.thirdparty.interfaces import ManuallyCreateOrUpdateUserOkResult
 from supertokens_python.types import RecipeUserId
 
-import supertokens_rownd.plugin_implementation as impl
-from supertokens_rownd.plugin_implementation import (
-    add_hub_bootstrap_params,
-    assert_allowed_bypass_redirect_path,
+import supertokens_rownd.supertokens_repository as impl
+from supertokens_rownd.config import (
     as_json_dict,
     build_app_config,
-    clear_supertokens_core_call_cache,
+)
+from supertokens_rownd.errors import RowndEmailChangeError, RowndPluginError
+from supertokens_rownd.supertokens_repository import (
     combine_linked_metadata,
     find_canonical_passwordless_method,
-    get_canonical_email_recipe_user_id,
-    get_magic_link_bootstrap_params,
     get_rownd_compat_user,
+)
+from supertokens_rownd.rownd_compatibility import (
+    build_supertokens_fake_email,
+    get_canonical_email_recipe_user_id,
     map_rownd_user_to_supertokens,
-    normalize_redirect_to_path_for_client_domain,
-    resolve_allowed_client_domain,
-    resolve_tenant_id,
 )
 from supertokens_rownd.types import (
     JsonDict,
     JsonList,
     JsonValue,
-    RowndEmailChangeError,
     RowndPluginConfig,
-    RowndPluginError,
+)
+from supertokens_rownd.utils import (
+    add_hub_bootstrap_params,
+    assert_allowed_bypass_redirect_path,
+    clear_supertokens_core_call_cache,
+    get_magic_link_bootstrap_params,
+    normalize_redirect_to_path_for_client_domain,
+    resolve_allowed_client_domain,
+    resolve_tenant_id,
 )
 
 
@@ -394,7 +400,7 @@ def test_maps_multiple_rownd_login_methods():
             "recipeId": "thirdparty",
             "thirdPartyId": "google",
             "thirdPartyUserId": "google-existing-plus-phone",
-            "email": impl.build_supertokens_fake_email("google-existing-plus-phone", "google"),
+            "email": build_supertokens_fake_email("google-existing-plus-phone", "google"),
             "isVerified": False,
             "isPrimary": True,
         },
