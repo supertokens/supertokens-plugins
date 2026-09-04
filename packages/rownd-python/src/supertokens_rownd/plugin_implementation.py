@@ -17,9 +17,34 @@ from . import rownd_compatibility as compatibility
 from . import supertokens_repository as repository
 from . import utils
 from .constants import GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID
-from .errors import RowndEmailChangeError, RowndPluginError
+from .errors import MigrationError, MigrationErrorReason, RowndEmailChangeError, RowndPluginError
 from .logger import log_debug
-from .types import JsonDict, RowndClientProtocol, RowndPluginConfig, RowndTelemetryClient
+from .rownd_repository import RowndTokenValidationError, RowndTokenValidationReason
+from .types import JsonDict, MigrationStage, RowndClientProtocol, RowndPluginConfig, RowndTelemetryClient
+
+
+_TOKEN_REASON_MAP = {
+    RowndTokenValidationReason.TOKEN_MALFORMED: MigrationErrorReason.TOKEN_MALFORMED,
+    RowndTokenValidationReason.TOKEN_EXPIRED: MigrationErrorReason.TOKEN_EXPIRED,
+    RowndTokenValidationReason.TOKEN_NOT_ACTIVE: MigrationErrorReason.TOKEN_NOT_ACTIVE,
+    RowndTokenValidationReason.TOKEN_CLAIMS_INVALID: MigrationErrorReason.TOKEN_CLAIMS_INVALID,
+    RowndTokenValidationReason.TOKEN_KID_UNKNOWN: MigrationErrorReason.TOKEN_KID_UNKNOWN,
+    RowndTokenValidationReason.TOKEN_SIGNATURE_INVALID: MigrationErrorReason.TOKEN_SIGNATURE_INVALID,
+    RowndTokenValidationReason.JWKS_FETCH_FAILED: MigrationErrorReason.ROWND_UNAVAILABLE,
+    RowndTokenValidationReason.JWKS_INVALID_RESPONSE: MigrationErrorReason.ROWND_UNAVAILABLE,
+}
+
+
+def migration_error_response(error: MigrationError, operation_id: str) -> JsonDict:
+    return {
+        "status": "ERROR",
+        "code": error.http_status,
+        "reason": error.reason.value,
+        "message": error.public_message,
+        "retryable": error.retryable,
+        "stage": error.stage,
+        "operationId": operation_id,
+    }
 
 
 async def handle_validate_passwordless_confirmation_bypass(
@@ -109,23 +134,47 @@ async def handle_migrate(
     user_context: UserContext,
 ) -> BaseResponse:
     started_at = time.time()
-    tenant_id = utils.resolve_tenant_id(request)
+    operation_id = str(uuid.uuid4())
+    stage: MigrationStage = "request_parse"
+    tenant_id: Optional[str] = None
     rownd_user_id = None
     supertokens_user_id = None
     migration_state: JsonDict = {}
     try:
-        token = utils.parse_authorization_header(request)
+        token = utils.parse_migration_authorization_header(request)
+        stage = "configuration"
+        tenant_id = utils.resolve_tenant_id(request)
         app_variant_id = utils.get_requested_app_variant_id_from_request(request)
         rownd_config.assert_app_variant_is_configured(config, app_variant_id)
-        rownd_user_id = await client.validate_token(token)
-        rownd_user = await client.fetch_optional_user_info(rownd_user_id)
+        stage = "token_validate"
+        try:
+            rownd_user_id = await client.validate_token(token)
+        except RowndTokenValidationError as err:
+            reason = _TOKEN_REASON_MAP.get(err.reason)
+            if reason is None:
+                raise MigrationError(MigrationErrorReason.INTERNAL_ERROR, stage, err) from err
+            raise MigrationError(reason, stage, err) from err
+        if not isinstance(rownd_user_id, str) or not rownd_user_id.strip():
+            raise MigrationError(MigrationErrorReason.TOKEN_CLAIMS_INVALID, stage)
+        stage = "rownd_profile_fetch"
+        try:
+            rownd_user = await client.fetch_optional_user_info(rownd_user_id)
+        except MigrationError:
+            raise
+        except Exception as err:
+            raise MigrationError(MigrationErrorReason.ROWND_UNAVAILABLE, stage, err) from err
         if rownd_user is None:
-            log_debug(
-                config,
-                "Skipping migration because user does not exist in Rownd. tenantId: %s, rowndUserId: %s"
-                % (tenant_id, rownd_user_id),
+            raise MigrationError(
+                MigrationErrorReason.ROWND_USER_NOT_FOUND, "rownd_profile_fetch"
             )
-            return utils.json_response(response, {"status": "OK"})
+        stage = "source_normalize"
+        rownd_user_data = rownd_user.get("data")
+        profile_user_id = (
+            rownd_user_data.get("user_id") if isinstance(rownd_user_data, dict) else None
+        )
+        if profile_user_id != rownd_user_id:
+            raise MigrationError(MigrationErrorReason.ROWND_USER_ID_MISMATCH, stage)
+        stage = "state_inspect"
         supertokens_user_id = await repository.migrate_rownd_user_and_create_session(
             config,
             rownd_user_id,
@@ -142,19 +191,31 @@ async def handle_migrate(
         )
         return utils.json_response(response, {"status": "OK"})
     except Exception as err:
+        migration_error = (
+            err
+            if isinstance(err, MigrationError)
+            else MigrationError(MigrationErrorReason.INTERNAL_ERROR, stage, err)
+        )
         persisted_user_id = migration_state.get("supertokens_user_id")
         if isinstance(persisted_user_id, str):
             supertokens_user_id = persisted_user_id
-        log_debug(config, "Migration failed for Rownd user %s: %s" % (rownd_user_id, err))
+        log_debug(
+            config,
+            "Migration failed. operationId: %s, stage: %s, reason: %s"
+            % (operation_id, migration_error.stage, migration_error.reason.value),
+        )
         await telemetry.record_error(
-            telemetry_client, started_at, err, tenant_id, rownd_user_id, supertokens_user_id
+            telemetry_client,
+            started_at,
+            MigrationError(migration_error.reason, migration_error.stage),
+            tenant_id,
+            rownd_user_id,
+            supertokens_user_id,
         )
         return utils.json_response(
             response,
-            {
-                "status": "ERROR",
-                "message": str(err) if isinstance(err, RowndPluginError) else "Migration failed",
-            },
+            migration_error_response(migration_error, operation_id),
+            migration_error.http_status,
         )
 
 

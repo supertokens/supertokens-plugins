@@ -16,6 +16,8 @@ from .types import JsonDict, RowndPluginConfig
 
 class RowndTokenValidationReason(str, Enum):
     TOKEN_MALFORMED = "TOKEN_MALFORMED"
+    TOKEN_EXPIRED = "TOKEN_EXPIRED"
+    TOKEN_NOT_ACTIVE = "TOKEN_NOT_ACTIVE"
     TOKEN_CLAIMS_INVALID = "TOKEN_CLAIMS_INVALID"
     TOKEN_KID_UNKNOWN = "TOKEN_KID_UNKNOWN"
     TOKEN_SIGNATURE_INVALID = "TOKEN_SIGNATURE_INVALID"
@@ -91,6 +93,10 @@ class RowndClient:
             raise RowndTokenValidationError(
                 RowndTokenValidationReason.TOKEN_SIGNATURE_INVALID
             ) from err
+        except jwt.ExpiredSignatureError as err:
+            raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_EXPIRED) from err
+        except jwt.ImmatureSignatureError as err:
+            raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_NOT_ACTIVE) from err
         except jwt.PyJWTError as err:
             raise RowndTokenValidationError(
                 RowndTokenValidationReason.TOKEN_CLAIMS_INVALID

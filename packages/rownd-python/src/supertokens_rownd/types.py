@@ -12,6 +12,20 @@ JsonValue = Union[JsonPrimitive, "JsonDict", "JsonList"]
 JsonDict = Dict[str, JsonValue]
 JsonList = List[JsonValue]
 RowndSchema = Dict[str, JsonDict]
+MigrationStage = Literal[
+    "configuration",
+    "request_parse",
+    "token_validate",
+    "rownd_profile_fetch",
+    "source_normalize",
+    "state_inspect",
+    "bulk_import",
+    "mapping",
+    "account_link",
+    "tenant_associate",
+    "metadata_finalize",
+    "session_create",
+]
 
 
 class RowndTelemetryClient(Protocol):

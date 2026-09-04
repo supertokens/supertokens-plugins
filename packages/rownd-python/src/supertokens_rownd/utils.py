@@ -15,7 +15,7 @@ from .constants import (
     PUBLIC_TENANT_ID,
     ROWND_OAUTH_LOGIN_CHALLENGE_PARAM,
 )
-from .errors import RowndPluginError
+from .errors import MigrationError, MigrationErrorReason, RowndPluginError
 from .types import JsonDict, RowndPluginConfig
 
 
@@ -107,6 +107,16 @@ def parse_authorization_header(request: BaseRequest) -> str:
     if not token:
         raise RowndPluginError("Invalid token")
     return token
+
+
+def parse_migration_authorization_header(request: BaseRequest) -> str:
+    auth_header = request.get_header("authorization")
+    if auth_header is None or auth_header == "":
+        raise MigrationError(MigrationErrorReason.TOKEN_MISSING, "request_parse")
+    match = re.fullmatch(r"Bearer ([^\s]+)", auth_header, flags=re.IGNORECASE)
+    if match is None:
+        raise MigrationError(MigrationErrorReason.TOKEN_MALFORMED, "request_parse")
+    return match.group(1)
 
 
 def get_requested_app_variant_id_from_request(request: BaseRequest) -> Optional[str]:

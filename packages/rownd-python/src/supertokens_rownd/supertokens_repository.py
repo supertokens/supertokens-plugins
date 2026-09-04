@@ -49,7 +49,12 @@ from .config import (
     assert_app_variant_is_configured,
     get_active_rownd_config,
 )
-from .errors import RowndEmailChangeError, RowndPluginError
+from .errors import (
+    MigrationError,
+    MigrationErrorReason,
+    RowndEmailChangeError,
+    RowndPluginError,
+)
 from .logger import log_debug
 from . import rownd_compatibility
 from .types import (
@@ -225,16 +230,23 @@ async def migrate_rownd_user_and_create_session(
     await sync_imported_email_verification_state(
         recipe_user_id, supertokens_user_id, tenant_id, user_context
     )
-    await session_asyncio.create_new_session(
-        request,
-        tenant_id,
-        recipe_user_id,
-        await build_rownd_session_claims(
-            config, supertokens_user_id, {}, app_variant_id, user_context
-        ),
-        {},
-        create_derived_user_context(user_context, {"rowndAppVariantId": app_variant_id}),
-    )
+    try:
+        await session_asyncio.create_new_session(
+            request,
+            tenant_id,
+            recipe_user_id,
+            await build_rownd_session_claims(
+                config, supertokens_user_id, {}, app_variant_id, user_context
+            ),
+            {},
+            create_derived_user_context(user_context, {"rowndAppVariantId": app_variant_id}),
+        )
+    except MigrationError:
+        raise
+    except Exception as err:
+        raise MigrationError(
+            MigrationErrorReason.SESSION_CREATION_FAILED, "session_create", err
+        ) from err
     return supertokens_user_id
 
 

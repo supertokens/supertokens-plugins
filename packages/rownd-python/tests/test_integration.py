@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -40,11 +41,17 @@ from supertokens_rownd.supertokens_repository import (
 )
 from supertokens_rownd.rownd_compatibility import map_rownd_user_to_supertokens
 from supertokens_rownd import create_magic_link_with_confirmation_bypass
-from supertokens_rownd.errors import RowndEmailChangeError, RowndPluginError
+from supertokens_rownd.errors import (
+    MigrationError,
+    MigrationErrorReason,
+    RowndEmailChangeError,
+    RowndPluginError,
+)
 from supertokens_rownd.types import (
     EmailCredentialAuthorization,
     EmailCredentialReason,
     EmailCredentialState,
+    MigrationStage,
     RowndPluginConfig,
 )
 
@@ -71,6 +78,29 @@ def migrate_rownd_user(client, rownd_client: MockRowndClient, user_id: str, user
         "/auth/plugin/rownd/migrate",
         headers={"Authorization": "Bearer rownd-token", **session_headers()},
     )
+
+
+def assert_migration_error(
+    response: Any,
+    reason: str,
+    status_code: int,
+    retryable: bool,
+    stage: MigrationStage,
+) -> None:
+    assert response.status_code == status_code
+    body = response.json()
+    expected_message = MigrationError(MigrationErrorReason(reason), stage).public_message
+    assert body == {
+        "status": "ERROR",
+        "code": status_code,
+        "reason": reason,
+        "message": expected_message,
+        "retryable": retryable,
+        "stage": stage,
+        "operationId": body["operationId"],
+    }
+    assert isinstance(body["message"], str) and body["message"]
+    uuid.UUID(body["operationId"])
 
 
 async def start_native_email_change(client, current_email: str, target_email: str):
@@ -128,13 +158,35 @@ async def test_migrate_user_successfully(core_url: str, rownd_client: MockRowndC
     assert session is not None
 
 
+async def test_migrate_session_failure_has_stable_retryable_error(
+    core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch
+):
+    rownd_user_id = "py-migrate-session-failure"
+    user_info = {
+        "data": {"user_id": rownd_user_id, "email": "session-failure@example.com"},
+        "verified_data": {"email": True},
+        "meta": {"created": "2026-01-01T00:00:00.000Z"},
+    }
+    client = make_client(core_url, rownd_client)
+    first_response = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
+    assert first_response.status_code == 200
+
+    async def fail_session_creation(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("private session failure")
+
+    monkeypatch.setattr(impl.session_asyncio, "create_new_session", fail_session_creation)
+    response = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
+
+    assert_migration_error(response, "SESSION_CREATION_FAILED", 503, True, "session_create")
+    assert await get_user(rownd_user_id) is not None
+
+
 async def test_migrate_missing_auth_header_returns_error(core_url: str, rownd_client: MockRowndClient):
     client = make_client(core_url, rownd_client)
 
     res = client.post("/auth/plugin/rownd/migrate", headers=session_headers())
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "ERROR", "message": "Missing authorization header"}
+    assert_migration_error(res, "TOKEN_MISSING", 401, False, "request_parse")
 
 
 async def test_migrate_rownd_validation_error_returns_error(
@@ -148,8 +200,7 @@ async def test_migrate_rownd_validation_error_returns_error(
         headers={"Authorization": "Bearer bad-token", **session_headers()},
     )
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "ERROR", "message": "Invalid token"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "token_validate")
 
 
 async def test_migrate_rownd_fetch_error_returns_error(core_url: str, rownd_client: MockRowndClient):
@@ -162,11 +213,10 @@ async def test_migrate_rownd_fetch_error_returns_error(core_url: str, rownd_clie
         headers={"Authorization": "Bearer rownd-token", **session_headers()},
     )
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "ROWND_UNAVAILABLE", 503, True, "rownd_profile_fetch")
 
 
-async def test_migrate_missing_rownd_user_skips_migration(
+async def test_migrate_missing_rownd_user_returns_auth_error(
     core_url: str, rownd_client: MockRowndClient
 ):
     rownd_client.user_id = "py-missing-rownd-user"
@@ -178,8 +228,7 @@ async def test_migrate_missing_rownd_user_skips_migration(
         headers={"Authorization": "Bearer rownd-token", **session_headers()},
     )
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "OK"}
+    assert_migration_error(res, "ROWND_USER_NOT_FOUND", 401, False, "rownd_profile_fetch")
     assert res.headers.get("st-access-token") is None
     assert await get_user("py-missing-rownd-user") is None
 
@@ -206,8 +255,7 @@ async def test_migrate_bulk_import_500_returns_error(
         },
     )
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
 
 
 async def test_migrate_bulk_import_mixed_errors_returns_error(
@@ -238,8 +286,7 @@ async def test_migrate_bulk_import_mixed_errors_returns_error(
         },
     )
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
     assert res.headers.get("st-access-token") is None
 
 
@@ -265,8 +312,7 @@ async def test_migrate_bulk_import_malformed_json_returns_error(
         },
     )
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
 
 
 async def test_migrate_bulk_import_missing_user_returns_error(
@@ -291,8 +337,7 @@ async def test_migrate_bulk_import_missing_user_returns_error(
         },
     )
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
 
 
 async def test_migrate_phone_user_successfully(core_url: str, rownd_client: MockRowndClient):
@@ -578,8 +623,7 @@ async def test_migrate_fails_closed_for_cross_recipe_owner_without_mutual_verifi
         },
     )
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
     assert res.headers.get("st-access-token") is None
     assert (await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})).__class__.__name__ == (
         "UnknownMappingError"
@@ -715,7 +759,7 @@ async def test_migrate_does_not_link_verified_email_owner_mapped_to_another_rown
         },
     )
 
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
     assert res.headers.get("st-access-token") is None
     unchanged_provider = await get_user(provider.user.id)
     unchanged_passwordless = await get_user(existing_rownd_user_id)
@@ -765,7 +809,7 @@ async def test_migrate_does_not_link_provider_to_mismatched_verified_email(
         },
     )
 
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
     unchanged_provider = await get_user(provider.user.id)
     unchanged_passwordless = await get_user(passwordless.user.id)
     assert unchanged_provider is not None
@@ -817,7 +861,7 @@ async def test_migration_finalization_failure_keeps_linked_email_owner_and_mappi
         },
     )
 
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
     retained_user = await get_user(rownd_user_id)
     assert retained_user is not None
     assert len(retained_user.login_methods) == 2
@@ -864,7 +908,7 @@ async def test_migration_preflights_later_collision_before_creating_phone_method
         },
     )
 
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
     unchanged_provider = await get_user(provider.user.id)
     assert unchanged_provider is not None
     assert unchanged_provider.is_primary_user is False
@@ -918,7 +962,7 @@ async def test_migration_finalization_failure_keeps_created_method_and_mapping(
         },
     )
 
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
     retained_user = await get_user(rownd_user_id)
     assert retained_user is not None
     assert len(retained_user.login_methods) == 2
@@ -967,7 +1011,7 @@ async def test_failed_unverification_keeps_linked_methods_without_mapping(
         },
     )
 
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
     user = await get_user(existing.user.id)
     assert user is not None
     assert user.is_primary_user is True
@@ -1024,7 +1068,7 @@ async def test_migrate_does_not_modify_user_mapped_to_another_external_id(
         },
     )
 
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
     unchanged_user = await get_user(existing.user.id)
     assert unchanged_user is not None
     assert unchanged_user.is_primary_user is False
@@ -1069,7 +1113,7 @@ async def test_migrate_checks_external_mapping_before_mutating_target(
         },
     )
 
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
     unchanged_target = await get_user(target.user.id)
     assert unchanged_target is not None
     assert unchanged_target.is_primary_user is False
@@ -1233,13 +1277,12 @@ async def test_e006_recovery_rejects_passwordless_owner_mapped_to_another_rownd_
         },
     )
 
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
     assert res.headers.get("st-access-token") is None
     assert len(telemetry_errors) == 1
-    assert str(telemetry_errors[0]) == (
-        "The SuperTokens user is already mapped to another external user ID"
-    )
-    assert isinstance(telemetry_errors[0].__cause__, impl._BulkImportError)
+    assert isinstance(telemetry_errors[0], MigrationError)
+    assert str(telemetry_errors[0]) == "Migration failed due to an internal error"
+    assert telemetry_errors[0].internal_cause is None
     existing_mapping = await get_user_id_mapping(existing_rownd_user_id, "EXTERNAL", {})
     assert isinstance(existing_mapping, GetUserIdMappingOkResult)
     owner = await get_user(existing_rownd_user_id)
@@ -1413,7 +1456,7 @@ async def test_failed_parent_does_not_rollback_state_finalized_by_sibling(
         release_parent.set()
 
     parent_response = await parent_request
-    assert parent_response.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(parent_response, "INTERNAL_ERROR", 500, True, "state_inspect")
     mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
     assert isinstance(mapping, GetUserIdMappingOkResult)
     user = await get_user(rownd_user_id)
@@ -1491,11 +1534,11 @@ async def test_migrate_records_error_telemetry(core_url: str, rownd_client: Mock
         headers={"Authorization": "Bearer rownd-token", **session_headers()},
     )
 
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "ROWND_UNAVAILABLE", 503, True, "rownd_profile_fetch")
     assert telemetry.events
     assert telemetry.events[-1]["outcome"] == "error"
     assert telemetry.events[-1]["rowndUserId"] == "py-telemetry-error-user"
-    assert telemetry.events[-1]["error"]["message"] == "Fetch failed"
+    assert telemetry.events[-1]["error"]["message"] == "Rownd is temporarily unavailable"
 
 
 async def test_telemetry_failure_does_not_affect_response(
@@ -1612,8 +1655,7 @@ async def test_legacy_session_migration_missing_auth_header_returns_error(
 
     res = client.post("/auth/plugin/migrate-session", headers=session_headers())
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "ERROR", "message": "Missing authorization header"}
+    assert_migration_error(res, "TOKEN_MISSING", 401, False, "request_parse")
 
 
 async def test_legacy_session_migration_validation_error_returns_error(
@@ -1627,8 +1669,7 @@ async def test_legacy_session_migration_validation_error_returns_error(
         headers={"Authorization": "Bearer bad-token", **session_headers()},
     )
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "ERROR", "message": "Invalid token"}
+    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "token_validate")
 
 
 async def test_legacy_session_migration_fetch_error_returns_error(
@@ -1643,8 +1684,7 @@ async def test_legacy_session_migration_fetch_error_returns_error(
         headers={"Authorization": "Bearer rownd-token", **session_headers()},
     )
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "ERROR", "message": "Migration failed"}
+    assert_migration_error(res, "ROWND_UNAVAILABLE", 503, True, "rownd_profile_fetch")
 
 
 async def test_legacy_session_migration_adds_instant_claims(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 from collections import Counter
 from typing import Callable, Optional
 
@@ -38,12 +39,16 @@ def _token(
     private_key: Ed25519PrivateKey,
     *,
     algorithm: str = "EdDSA",
+    claims: Optional[JsonDict] = None,
 ) -> str:
+    payload: JsonDict = {
+        "aud": "app:%s" % APP_ID,
+        "https://auth.rownd.io/app_user_id": USER_ID,
+    }
+    if claims is not None:
+        payload.update(claims)
     token = jwt.encode(
-        {
-            "aud": "app:%s" % APP_ID,
-            "https://auth.rownd.io/app_user_id": USER_ID,
-        },
+        payload,
         private_key,
         algorithm=algorithm,
         headers={"kid": key_id},
@@ -187,6 +192,55 @@ async def test_known_kid_with_invalid_signature_does_not_refresh() -> None:
     assert exc_info.value.reason == RowndTokenValidationReason.TOKEN_SIGNATURE_INVALID
     assert transport.calls["/hub/auth/.well-known/oauth-authorization-server"] == 1
     assert transport.calls["/jwks"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("claims_factory", "reason"),
+    [
+        (lambda: {"exp": int(time.time()) - 120}, RowndTokenValidationReason.TOKEN_EXPIRED),
+        (lambda: {"nbf": int(time.time()) + 120}, RowndTokenValidationReason.TOKEN_NOT_ACTIVE),
+        (lambda: {"aud": "app:other"}, RowndTokenValidationReason.TOKEN_CLAIMS_INVALID),
+        (
+            lambda: {"https://auth.rownd.io/app_user_id": None},
+            RowndTokenValidationReason.TOKEN_CLAIMS_INVALID,
+        ),
+    ],
+)
+async def test_token_claim_failures_have_typed_reasons(
+    claims_factory: Callable[[], JsonDict], reason: RowndTokenValidationReason
+) -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await _client(transport).validate_token(_token("A", key, claims=claims_factory()))
+
+    assert exc_info.value.reason == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_error",
+    [
+        jwt.InvalidIssuerError("invalid issuer"),
+        jwt.MissingRequiredClaimError("sub"),
+    ],
+)
+async def test_pyjwt_issuer_and_required_claim_failures_are_claims_invalid(
+    monkeypatch: pytest.MonkeyPatch, source_error: jwt.PyJWTError
+) -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+
+    def decode(*args: object, **kwargs: object) -> dict[str, object]:
+        raise source_error
+
+    monkeypatch.setattr(jwt, "decode", decode)
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await _client(transport).validate_token(_token("A", key))
+
+    assert exc_info.value.reason == RowndTokenValidationReason.TOKEN_CLAIMS_INVALID
 
 
 @pytest.mark.asyncio
