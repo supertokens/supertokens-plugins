@@ -73,6 +73,14 @@ class CapturingTelemetryClient:
             raise RuntimeError("Telemetry down")
 
 
+async def wait_for_telemetry(client: CapturingTelemetryClient) -> None:
+    for _ in range(100):
+        if client.events:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("Migration telemetry was not delivered")
+
+
 def migrate_rownd_user(client, rownd_client: MockRowndClient, user_id: str, user_info: dict):
     rownd_client.user_id = user_id
     rownd_client.user_info = user_info
@@ -1504,7 +1512,7 @@ async def test_e006_recovery_rejects_passwordless_owner_mapped_to_another_rownd_
     rownd_user_id = "migration-e006-conflicting-owner"
     existing_rownd_user_id = "migration-e006-existing-owner"
     email = "migration-e006-conflicting-owner@example.com"
-    telemetry_errors: list[Exception] = []
+    telemetry_reasons: list[Optional[MigrationErrorReason]] = []
 
     async def racing_import(*args: Any, **kwargs: Any):
         owner = await passwordless_asyncio.signinup("public", email, None, None, {})
@@ -1516,16 +1524,21 @@ async def test_e006_recovery_rejects_passwordless_owner_mapped_to_another_rownd_
         assert getattr(mapping, "status", "OK") == "OK"
         raise impl._BulkImportError(400, '{"errors":["E006: duplicate identity"]}')
 
-    async def capture_error(
+    async def capture_terminal(
         _telemetry_client: Any,
         _started_at: float,
-        error: Exception,
-        *_args: Any,
+        _operation_id: str,
+        _outcome: str,
+        _stage: MigrationStage,
+        _http_status: int,
+        _retryable: bool,
+        _migration_state: dict,
+        reason: Optional[MigrationErrorReason] = None,
     ):
-        telemetry_errors.append(error)
+        telemetry_reasons.append(reason)
 
     monkeypatch.setattr(impl, "import_user", racing_import)
-    monkeypatch.setattr(telemetry, "record_error", capture_error)
+    monkeypatch.setattr(telemetry, "record_migration_terminal", capture_terminal)
 
     res = migrate_rownd_user(
         client,
@@ -1539,10 +1552,7 @@ async def test_e006_recovery_rejects_passwordless_owner_mapped_to_another_rownd_
 
     assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 409, False, "state_inspect")
     assert res.headers.get("st-access-token") is None
-    assert len(telemetry_errors) == 1
-    assert isinstance(telemetry_errors[0], MigrationError)
-    assert str(telemetry_errors[0]) == "The Rownd identity belongs to another user"
-    assert telemetry_errors[0].internal_cause is None
+    assert telemetry_reasons == [MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER]
     existing_mapping = await get_user_id_mapping(existing_rownd_user_id, "EXTERNAL", {})
     assert isinstance(existing_mapping, GetUserIdMappingOkResult)
     owner = await get_user(existing_rownd_user_id)
@@ -1782,12 +1792,16 @@ async def test_migrate_records_success_telemetry(core_url: str, rownd_client: Mo
     )
 
     assert res.json() == {"status": "OK"}
-    assert telemetry.events
-    assert telemetry.events[-1]["outcome"] == "success"
-    assert telemetry.events[-1]["rowndUserId"] == "py-telemetry-success-user"
+    await wait_for_telemetry(telemetry)
+    assert len(telemetry.events) == 1
+    assert telemetry.events[0]["operation"] == "migration"
+    assert telemetry.events[0]["outcome"] == "success"
+    assert telemetry.events[0]["httpStatus"] == 200
+    assert telemetry.events[0]["forcedMappingUsed"] is False
     mapping = await get_user_id_mapping("py-telemetry-success-user", "EXTERNAL", {})
     assert isinstance(mapping, GetUserIdMappingOkResult)
-    assert telemetry.events[-1]["superTokensUserId"] == mapping.supertokens_user_id
+    assert "rowndUserId" not in telemetry.events[0]
+    assert "superTokensUserId" not in telemetry.events[0]
 
 
 async def test_migrate_records_error_telemetry(core_url: str, rownd_client: MockRowndClient):
@@ -1806,10 +1820,13 @@ async def test_migrate_records_error_telemetry(core_url: str, rownd_client: Mock
     )
 
     assert_migration_error(res, "ROWND_UNAVAILABLE", 503, True, "rownd_profile_fetch")
-    assert telemetry.events
-    assert telemetry.events[-1]["outcome"] == "error"
-    assert telemetry.events[-1]["rowndUserId"] == "py-telemetry-error-user"
-    assert telemetry.events[-1]["error"]["message"] == "Rownd is temporarily unavailable"
+    await wait_for_telemetry(telemetry)
+    assert len(telemetry.events) == 1
+    assert telemetry.events[0]["outcome"] == "error"
+    assert telemetry.events[0]["reason"] == "ROWND_UNAVAILABLE"
+    assert telemetry.events[0]["httpStatus"] == 503
+    assert "rowndUserId" not in telemetry.events[0]
+    assert "error" not in telemetry.events[0]
 
 
 async def test_telemetry_failure_does_not_affect_response(
@@ -1836,7 +1853,7 @@ async def test_telemetry_failure_does_not_affect_response(
     )
 
     assert res.json() == {"status": "OK"}
-    assert telemetry.events
+    await wait_for_telemetry(telemetry)
 
 
 async def test_legacy_session_migration_adds_configured_claims(

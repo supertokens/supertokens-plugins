@@ -24,6 +24,7 @@ Reference Node.js commit: `40c7107` (`feat: Add stable migration error contract`
 - [x] Classify expired and not-active tokens as `TOKEN_EXPIRED` and `TOKEN_NOT_ACTIVE`.
 - [x] Return `INTERNAL_ERROR`/500 for unknown failures without exposing internal details.
 - [x] Add equivalent response-contract tests for both migration routes.
+- [x] Classify typed Rownd profile and app-config adapter failures without upstream leakage.
 
 ## Durable State Inspection
 
@@ -74,11 +75,11 @@ Reference Node.js commit: `ec277cf` (`feat: Guard forced migration mapping`).
 
 Reference Node.js commit: `2e9c702` (`feat: Add migration telemetry taxonomy`).
 
-- [ ] Emit exactly one terminal migration event.
-- [ ] Record stable outcome, reason, stage, path, attempt count, target source, and forced-mapping state.
-- [ ] Remove raw identifiers, token data, upstream bodies, URLs, stacks, and exception messages from telemetry.
-- [ ] Keep telemetry failures non-blocking.
-- [ ] Add privacy and terminal-event regression tests for each telemetry backend.
+- [x] Construct exactly one terminal migration event and attempt one submission per request; delivery may be dropped at bounded capacity.
+- [x] Record stable outcome, reason, stage, path, attempt count, target source when available, and forced-mapping state.
+- [x] Remove raw identifiers, token data, upstream bodies, URLs, stacks, and exception messages from migration telemetry.
+- [x] Track application-loop migration telemetry delivery in one process-wide bounded task registry without awaiting it on the request path.
+- [x] Add privacy, cardinality, cancellation, bounded-capacity, and failure-isolation regression tests for the configured telemetry client contract.
 
 ## Email Topology
 
@@ -94,10 +95,11 @@ Reference Node.js commit: `f8e4ded` (`fix: Authorize canonical email topology`).
 Reference Node.js commit: `55d7643` (`fix: Harden Rownd migration reliability`).
 
 - [ ] Fetch fresh Rownd profiles without per-user caching.
-- [ ] Add bounded profile request timeouts, response limits, redirect rejection, and URL validation.
+- [x] Add bounded app-config/profile request deadlines, streamed response limits, and redirect rejection.
+- [ ] Add explicit Rownd API base URL validation.
 - [x] Map profile 404 to `ROWND_USER_NOT_FOUND`/401.
-- [ ] Map invalid server credentials to `PLUGIN_CONFIGURATION_INVALID`.
-- [ ] Map Rownd rate limits, 5xx responses, network errors, and timeouts to `ROWND_UNAVAILABLE`.
+- [x] Map invalid server credentials to `PLUGIN_CONFIGURATION_INVALID`.
+- [x] Map Rownd 408, rate limits, 5xx responses, network errors, and timeouts to `ROWND_UNAVAILABLE`.
 - [ ] Clean up sessions and response credentials after rejected Passwordless authentication.
 - [ ] Add the read-only migration diagnostic command.
 - [ ] Run shared Node.js/Python behavioral scenarios and full package verification.

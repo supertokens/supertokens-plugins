@@ -118,6 +118,37 @@ The plugin registers these routes below `api_base_path`:
 
 Migration and guest routes accept an optional `tenantId` query parameter and default to `public`. Compatibility user views, sessions, and pending email verification are scoped to that tenant; user metadata remains shared across tenant memberships.
 
+Both migration routes return HTTP 200 with `{"status":"OK"}` on success. Failures use a
+non-2xx status and a stable body containing `reason`, `retryable`, `stage`, and
+`operationId`. Callers must branch on the HTTP status and `reason`, not the human-readable
+`message`. Rownd profile 404s, rejected plugin credentials, malformed app configuration or
+profile data, and transient Rownd failures have distinct stable classifications. Authenticated
+app-config and profile 401/403 responses indicate invalid plugin credentials because the
+repository has no structured Rownd error code proving another category. HTTP 408, 429, and
+5xx responses are retryable Rownd unavailability. Authenticated app-config and profile
+requests reject redirects; network and body-read operations use a total request deadline, and
+response bodies are streamed under a 1 MiB limit. JSON parsing is synchronous and cannot be
+preempted by the event-loop deadline, but its work is bounded by that response limit. The plugin
+does not classify disabled Rownd profiles because the current profile response contract in
+this repository does not establish an authoritative disabled-state field and value.
+
+The plugin constructs exactly one terminal telemetry event and attempts one non-blocking
+submission per migration request. Migration events contain stable result and reconciliation
+fields, but no raw Rownd or SuperTokens IDs, tokens, URLs, response bodies, stack traces, or
+exception messages. Delivery uses application-event-loop tasks tracked in a process-wide
+bounded registry. Delivery is best effort and lossy: a new event is dropped when all slots are
+occupied. A hung or cancellation-resistant delivery consumes one slot but does not prevent
+other available slots from delivering independently. In-process custom async telemetry is
+trusted extension code and runs on the application event loop where it was submitted; it must
+not perform synchronous blocking work on that loop. The plugin cannot preempt arbitrary
+blocking Python callback code. Synchronous implementations are rejected, and task exceptions
+and submission failures are contained. Early failures report `attemptCount: 0`; recovery paths
+distinguish retry convergence from final postcondition recovery. Cancelled requests construct
+a terminal `outcome: "cancelled"` event with telemetry-only `httpStatus: 499`, attempt to submit
+it subject to the same bounded-capacity drop policy, do not fabricate an HTTP response, and
+re-raise cancellation. These privacy guarantees apply to migration events. Guest telemetry
+retains its legacy payload and delivery path and is outside this migration contract.
+
 Rownd passwordless identifiers are authoritative during migration. When an exact
 third-party identity and an existing Passwordless email belong to separate users, the
 plugin links the Passwordless method only if Rownd verifies that email, its owner is not

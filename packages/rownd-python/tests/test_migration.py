@@ -2401,3 +2401,68 @@ async def test_final_mapping_repair_preserves_capability_required(
 
     assert raised.value.reason is MigrationErrorReason.CORE_CAPABILITY_REQUIRED
     assert raised.value.stage == "mapping"
+
+
+@pytest.mark.asyncio
+async def test_repository_reports_retry_recovery_truthfully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    target = PinnedMigrationTarget("rownd-1", MigrationTargetSource.MAPPING)
+    complete = MigrationDisposition(MigrationDispositionStatus.COMPLETE, target)
+    reads = 0
+
+    async def read_snapshot(*_args: Any):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise TimeoutError("first inspection failed")
+        return cast(Any, object())
+
+    async def read_source():
+        return fresh
+
+    async def no_op(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def session_method(*_args: Any, **_kwargs: Any) -> RecipeUserId:
+        return RecipeUserId("recipe-user")
+
+    session = SimpleNamespace(
+        get_user_id=lambda _context: "rownd-1",
+        get_recipe_user_id=lambda _context: RecipeUserId("recipe-user"),
+        get_tenant_id=lambda _context: "tenant-a",
+    )
+
+    async def create_session(*_args: Any, **_kwargs: Any):
+        return session
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "classify_migration_snapshot", lambda *_args: complete)
+    monkeypatch.setattr(repository, "record_rownd_app_variant_for_user", no_op)
+    monkeypatch.setattr(repository, "read_fresh_migration_session_method", session_method)
+    monkeypatch.setattr(repository, "build_rownd_session_claims", lambda *_args: no_op())
+    monkeypatch.setattr(repository.session_asyncio, "create_new_session", create_session)
+    migration_state: JsonDict = {}
+
+    result = await repository.migrate_rownd_user_and_create_session(
+        cast(Any, SimpleNamespace()),
+        "rownd-1",
+        fresh,
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        "tenant-a",
+        None,
+        {},
+        migration_state,
+        read_source,
+    )
+
+    assert result == "rownd-1"
+    assert migration_state["attempt_count"] == 2
+    assert migration_state["target_source"] == "mapping"
+    assert migration_state["path"] == "retry_recovery"

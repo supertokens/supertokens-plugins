@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 import uuid
+from types import SimpleNamespace
 from typing import Any, Optional, cast
 
 import pytest
 from supertokens_python import SupertokensConfig
 
 import supertokens_rownd.plugin_implementation as implementation
+import supertokens_rownd.plugin as plugin
 from supertokens_rownd.errors import MigrationError, MigrationErrorReason
 from supertokens_rownd.plugin_implementation import handle_migrate, migration_error_response
 from supertokens_rownd.rownd_repository import (
+    RowndAPIError,
+    RowndAPIErrorReason,
     RowndTokenValidationError,
     RowndTokenValidationReason,
 )
-from supertokens_rownd.types import JsonDict, RowndPluginConfig
+from supertokens_rownd.types import JsonDict, RowndPluginConfig, RowndTelemetryConfig
 from supertokens_rownd.utils import parse_migration_authorization_header
 
 
@@ -116,16 +122,27 @@ class FakeRequest:
     def get_query_param(self, name: str) -> Optional[str]:
         return None
 
+    def get_path(self) -> str:
+        return "/auth/plugin/rownd/migrate"
+
 
 class FakeResponse:
-    def __init__(self) -> None:
+    def __init__(self, fail_json_count: int = 0, cancel_json_count: int = 0) -> None:
         self.status_code: Optional[int] = None
         self.body: Optional[JsonDict] = None
+        self.fail_json_count = fail_json_count
+        self.cancel_json_count = cancel_json_count
 
     def set_status_code(self, status_code: int) -> None:
         self.status_code = status_code
 
     def set_json_content(self, body: JsonDict) -> None:
+        if self.cancel_json_count:
+            self.cancel_json_count -= 1
+            raise asyncio.CancelledError
+        if self.fail_json_count:
+            self.fail_json_count -= 1
+            raise RuntimeError("response adapter private failure")
         self.body = body
 
 
@@ -137,14 +154,22 @@ class CapturingTelemetry:
         self.events.append(event)
 
 
+class CapturingRegistry:
+    def submit(self, client: CapturingTelemetry, event: JsonDict) -> bool:
+        client.events.append(event)
+        return True
+
+
 class FakeRowndClient:
     def __init__(
         self,
         *,
         validation_error: Optional[Exception] = None,
+        fetch_error: Optional[Exception] = None,
         user_info: Optional[JsonDict] = None,
     ) -> None:
         self.validation_error = validation_error
+        self.fetch_error = fetch_error
         self.user_info: Optional[JsonDict] = (
             user_info
             if user_info is not None
@@ -157,6 +182,8 @@ class FakeRowndClient:
         return "rownd-user"
 
     async def fetch_optional_user_info(self, user_id: str) -> Optional[JsonDict]:
+        if self.fetch_error is not None:
+            raise self.fetch_error
         return self.user_info
 
     async def fetch_user_info(self, user_id: str) -> JsonDict:
@@ -171,15 +198,23 @@ async def invoke_migration(
     authorization: Optional[str] = "Bearer token",
     client: Optional[FakeRowndClient] = None,
     repository_error: Optional[Exception] = None,
+    telemetry_client: Optional[CapturingTelemetry] = None,
+    migration_state: Optional[JsonDict] = None,
+    response: Optional[FakeResponse] = None,
+    capture_telemetry: bool = True,
 ) -> tuple[FakeResponse, CapturingTelemetry]:
     async def migrate(*args: Any, **kwargs: Any) -> str:
+        if migration_state is not None:
+            cast(JsonDict, args[9]).update(migration_state)
         if repository_error is not None:
             raise repository_error
         return "supertokens-user"
 
     monkeypatch.setattr(implementation.repository, "migrate_rownd_user_and_create_session", migrate)
-    response = FakeResponse()
-    telemetry = CapturingTelemetry()
+    if capture_telemetry:
+        monkeypatch.setattr(implementation.telemetry, "_migration_tasks", CapturingRegistry())
+    response = response or FakeResponse()
+    telemetry = telemetry_client or CapturingTelemetry()
     await handle_migrate(
         RowndPluginConfig(rownd_app_key="key", rownd_app_secret="secret"),
         client or FakeRowndClient(),
@@ -307,6 +342,19 @@ async def test_missing_profile_is_not_a_successful_no_op(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
+async def test_early_failure_emits_exactly_one_terminal_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response, telemetry_client = await invoke_migration(monkeypatch, authorization=None)
+
+    assert response.status_code == 401
+    assert len(telemetry_client.events) == 1
+    assert telemetry_client.events[0]["reason"] == "TOKEN_MISSING"
+    assert telemetry_client.events[0]["attemptCount"] == 0
+    assert telemetry_client.events[0]["path"] == "not_started"
+
+
+@pytest.mark.asyncio
 async def test_profile_fetch_failure_is_rownd_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     class FailingProfileClient(FakeRowndClient):
         async def fetch_optional_user_info(self, user_id: str) -> Optional[JsonDict]:
@@ -319,6 +367,80 @@ async def test_profile_fetch_failure_is_rownd_unavailable(monkeypatch: pytest.Mo
     assert response.body["reason"] == "ROWND_UNAVAILABLE"
     assert response.body["stage"] == "rownd_profile_fetch"
     assert "private upstream response" not in json.dumps(response.body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "reason", "status", "stage"),
+    [
+        (
+            RowndAPIError(RowndAPIErrorReason.CREDENTIALS_REJECTED),
+            "PLUGIN_CONFIGURATION_INVALID",
+            500,
+            "token_validate",
+        ),
+        (
+            RowndAPIError(RowndAPIErrorReason.APP_CONFIG_INVALID),
+            "PLUGIN_CONFIGURATION_INVALID",
+            500,
+            "token_validate",
+        ),
+        (
+            RowndAPIError(RowndAPIErrorReason.UNAVAILABLE),
+            "ROWND_UNAVAILABLE",
+            503,
+            "token_validate",
+        ),
+    ],
+)
+async def test_token_app_config_adapter_errors_are_classified(
+    monkeypatch: pytest.MonkeyPatch,
+    error: RowndAPIError,
+    reason: str,
+    status: int,
+    stage: str,
+) -> None:
+    response, _ = await invoke_migration(
+        monkeypatch, client=FakeRowndClient(validation_error=error)
+    )
+
+    assert response.status_code == status
+    assert response.body is not None
+    assert response.body["reason"] == reason
+    assert response.body["stage"] == stage
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_reason", "reason", "status", "stage"),
+    [
+        (RowndAPIErrorReason.USER_NOT_FOUND, "ROWND_USER_NOT_FOUND", 401, "rownd_profile_fetch"),
+        (
+            RowndAPIErrorReason.CREDENTIALS_REJECTED,
+            "PLUGIN_CONFIGURATION_INVALID",
+            500,
+            "rownd_profile_fetch",
+        ),
+        (RowndAPIErrorReason.PROFILE_INVALID, "SOURCE_IDENTITY_INVALID", 422, "source_normalize"),
+        (RowndAPIErrorReason.UNAVAILABLE, "ROWND_UNAVAILABLE", 503, "rownd_profile_fetch"),
+    ],
+)
+async def test_profile_adapter_errors_are_classified(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter_reason: RowndAPIErrorReason,
+    reason: str,
+    status: int,
+    stage: str,
+) -> None:
+    response, _ = await invoke_migration(
+        monkeypatch,
+        client=FakeRowndClient(fetch_error=RowndAPIError(adapter_reason)),
+    )
+
+    assert response.status_code == status
+    assert response.body is not None
+    assert response.body["reason"] == reason
+    assert response.body["stage"] == stage
 
 
 @pytest.mark.asyncio
@@ -337,11 +459,118 @@ async def test_profile_user_id_must_match_token_subject(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_malformed_custom_client_profile_is_source_identity_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response, _ = await invoke_migration(
+        monkeypatch, client=FakeRowndClient(user_info={"data": {}})
+    )
+
+    assert response.status_code == 422
+    assert response.body is not None
+    assert response.body["reason"] == "SOURCE_IDENTITY_INVALID"
+    assert response.body["stage"] == "source_normalize"
+
+
+@pytest.mark.asyncio
 async def test_success_body_remains_compatible(monkeypatch: pytest.MonkeyPatch) -> None:
-    response, _ = await invoke_migration(monkeypatch)
+    response, telemetry = await invoke_migration(
+        monkeypatch,
+        migration_state={
+            "attempt_count": 2,
+            "path": "postcondition_recovery",
+            "target_source": "mapping",
+        },
+    )
 
     assert response.status_code == 200
     assert response.body == {"status": "OK"}
+    assert telemetry.events == [
+        {
+            "operationId": telemetry.events[0]["operationId"],
+            "operation": "migration",
+            "outcome": "success",
+            "stage": "session_create",
+            "httpStatus": 200,
+            "retryable": False,
+            "attemptCount": 2,
+            "path": "postcondition_recovery",
+            "forcedMappingUsed": False,
+            "durationMs": telemetry.events[0]["durationMs"],
+            "targetSource": "mapping",
+        }
+    ]
+    uuid.UUID(cast(str, telemetry.events[0]["operationId"]))
+
+
+@pytest.mark.asyncio
+async def test_success_response_adapter_failure_emits_only_terminal_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response, telemetry_client = await invoke_migration(
+        monkeypatch, response=FakeResponse(fail_json_count=1)
+    )
+
+    assert response.status_code == 500
+    assert response.body is not None
+    assert response.body["reason"] == "INTERNAL_ERROR"
+    assert len(telemetry_client.events) == 1
+    assert telemetry_client.events[0]["outcome"] == "error"
+    assert telemetry_client.events[0]["reason"] == "INTERNAL_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_migration_emits_one_cancelled_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingClient(FakeRowndClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+
+        async def validate_token(self, token: str) -> str:
+            self.started.set()
+            await asyncio.sleep(10)
+            return "rownd-user"
+
+    client = BlockingClient()
+    telemetry_client = CapturingTelemetry()
+    task = asyncio.create_task(
+        invoke_migration(monkeypatch, client=client, telemetry_client=telemetry_client)
+    )
+    await client.started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(telemetry_client.events) == 1
+    assert telemetry_client.events[0]["outcome"] == "cancelled"
+    assert telemetry_client.events[0]["stage"] == "token_validate"
+    assert telemetry_client.events[0]["httpStatus"] == 499
+    assert "reason" not in telemetry_client.events[0]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_response_construction_emits_one_cancelled_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telemetry_client = CapturingTelemetry()
+    response = FakeResponse(cancel_json_count=1)
+
+    with pytest.raises(asyncio.CancelledError):
+        await invoke_migration(
+            monkeypatch,
+            telemetry_client=telemetry_client,
+            response=response,
+        )
+
+    assert response.status_code == 200
+    assert response.body is None
+    assert len(telemetry_client.events) == 1
+    assert telemetry_client.events[0]["outcome"] == "cancelled"
+    assert telemetry_client.events[0]["stage"] == "session_create"
+    assert telemetry_client.events[0]["httpStatus"] == 499
 
 
 @pytest.mark.asyncio
@@ -355,3 +584,208 @@ async def test_typed_repository_failure_keeps_its_stage(monkeypatch: pytest.Monk
     assert response.body is not None
     assert response.body["reason"] == "MAPPING_CONFLICT"
     assert response.body["stage"] == "mapping"
+
+
+@pytest.mark.asyncio
+async def test_failure_emits_one_private_terminal_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    hostile = "rownd-user st-user bearer-token https://private.example body stack traceback"
+    response, telemetry = await invoke_migration(
+        monkeypatch,
+        repository_error=MigrationError(
+            MigrationErrorReason.MAPPING_CONFLICT, "mapping", RuntimeError(hostile)
+        ),
+        migration_state={"attempt_count": 2, "path": "mapped_repair", "target_source": "mapping"},
+    )
+
+    assert response.status_code == 409
+    assert len(telemetry.events) == 1
+    event = telemetry.events[0]
+    assert event["operation"] == "migration"
+    assert event["outcome"] == "error"
+    assert event["reason"] == "MAPPING_CONFLICT"
+    assert event["stage"] == "mapping"
+    assert event["httpStatus"] == 409
+    assert event["retryable"] is False
+    assert event["attemptCount"] == 2
+    assert event["path"] == "mapped_repair"
+    assert event["targetSource"] == "mapping"
+    assert event["forcedMappingUsed"] is False
+    assert hostile not in json.dumps(event)
+    assert "rowndUserId" not in event
+    assert "superTokensUserId" not in event
+    assert "error" not in event
+
+
+@pytest.mark.asyncio
+async def test_migration_telemetry_preserves_application_loop_affinity_and_returns_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application_loop = asyncio.get_running_loop()
+    delivered = asyncio.Event()
+
+    class LoopAffineTelemetry:
+        async def record_event(self, event: JsonDict) -> None:
+            assert asyncio.get_running_loop() is application_loop
+            delivered.set()
+
+    registry = implementation.telemetry._MigrationTelemetryTaskRegistry(capacity=2)
+    monkeypatch.setattr(implementation.telemetry, "_migration_tasks", registry)
+    started_at = time.monotonic()
+    response, _ = await invoke_migration(
+        monkeypatch,
+        telemetry_client=cast(Any, LoopAffineTelemetry()),
+        capture_telemetry=False,
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert response.status_code == 200
+    assert elapsed < 0.1
+    await asyncio.wait_for(delivered.wait(), 1)
+
+
+@pytest.mark.asyncio
+async def test_hung_task_occupies_one_bounded_slot_without_blocking_another() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    delivered = asyncio.Event()
+
+    class CancellationResistantTelemetry:
+        async def record_event(self, event: JsonDict) -> None:
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+    class FastTelemetry:
+        async def record_event(self, event: JsonDict) -> None:
+            delivered.set()
+
+    registry = implementation.telemetry._MigrationTelemetryTaskRegistry(capacity=2)
+    assert registry.submit(cast(Any, CancellationResistantTelemetry()), {"sequence": 1}) is True
+    await asyncio.wait_for(started.wait(), 1)
+    hung_task = next(iter(registry._tasks))
+    hung_task.cancel()
+    await asyncio.sleep(0)
+
+    assert registry.submit(cast(Any, FastTelemetry()), {"sequence": 2}) is True
+    assert registry.submit(cast(Any, FastTelemetry()), {"sequence": 3}) is False
+    await asyncio.wait_for(delivered.wait(), 1)
+    release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert not registry._tasks
+
+
+@pytest.mark.asyncio
+async def test_migration_telemetry_task_exception_is_consumed() -> None:
+    called = asyncio.Event()
+    loop_errors: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+
+    class FailingTelemetry:
+        async def record_event(self, event: JsonDict) -> None:
+            called.set()
+            raise RuntimeError("private telemetry failure")
+
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    try:
+        registry = implementation.telemetry._MigrationTelemetryTaskRegistry(capacity=1)
+        assert registry.submit(cast(Any, FailingTelemetry()), {}) is True
+        await asyncio.wait_for(called.wait(), 1)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not registry._tasks
+        assert loop_errors == []
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+
+def test_migration_telemetry_create_task_failure_is_contained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Telemetry:
+        async def record_event(self, event: JsonDict) -> None:
+            return None
+
+    def fail_create_task(coroutine: Any) -> None:
+        raise RuntimeError("task submission failed")
+
+    monkeypatch.setattr(asyncio, "create_task", fail_create_task)
+    registry = implementation.telemetry._MigrationTelemetryTaskRegistry(capacity=1)
+
+    assert registry.submit(cast(Any, Telemetry()), {}) is False
+    assert not registry._tasks
+
+
+@pytest.mark.asyncio
+async def test_migration_telemetry_submission_failure_does_not_change_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingRegistry:
+        def submit(self, client: CapturingTelemetry, event: JsonDict) -> bool:
+            raise RuntimeError("registry failed")
+
+    monkeypatch.setattr(implementation.telemetry, "_migration_tasks", FailingRegistry())
+    response, _ = await invoke_migration(monkeypatch, capture_telemetry=False)
+
+    assert response.status_code == 200
+    assert response.body == {"status": "OK"}
+
+
+def test_custom_sync_telemetry_is_rejected() -> None:
+    class SyncTelemetry:
+        def record_event(self, event: JsonDict) -> None:
+            time.sleep(1)
+
+    config = RowndPluginConfig(
+        telemetry=RowndTelemetryConfig(
+            provider="custom", factory=cast(Any, lambda: SyncTelemetry())
+        )
+    )
+
+    with pytest.raises(ValueError, match="record_event must be async"):
+        implementation.telemetry.create_telemetry_client(config)
+
+
+@pytest.mark.asyncio
+async def test_migration_aliases_invoke_same_error_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telemetry_client = CapturingTelemetry()
+    rownd_plugin = plugin.init(
+        RowndPluginConfig(
+            rownd_app_key="app-key",
+            rownd_app_secret="app-secret",
+            telemetry=RowndTelemetryConfig(
+                provider="custom", factory=lambda: telemetry_client
+            ),
+        )
+    )
+    result = cast(Any, rownd_plugin.route_handlers)(cast(Any, None), [], "0.31.3")
+    handlers = {
+        route.path: route.handler
+        for route in result.route_handlers
+        if route.path in {"/auth/plugin/rownd/migrate", "/auth/plugin/migrate-session"}
+    }
+
+    assert set(handlers) == {"/auth/plugin/rownd/migrate", "/auth/plugin/migrate-session"}
+    assert handlers["/auth/plugin/rownd/migrate"] is handlers["/auth/plugin/migrate-session"]
+    monkeypatch.setattr(implementation.telemetry, "_migration_tasks", CapturingRegistry())
+    monkeypatch.setattr(
+        "supertokens_python.Supertokens.get_instance",
+        lambda: SimpleNamespace(supertokens_config=SupertokensConfig("http://localhost:3567")),
+    )
+
+    bodies = []
+    for handler in handlers.values():
+        response = FakeResponse()
+        await handler(cast(Any, FakeRequest(None)), cast(Any, response), None, {})
+        assert response.status_code == 401
+        assert response.body is not None
+        bodies.append({**response.body, "operationId": "normalized"})
+
+    assert bodies[0] == bodies[1]
+    assert bodies[0]["reason"] == "TOKEN_MISSING"
+    assert len(telemetry_client.events) == 2

@@ -674,17 +674,26 @@ async def migrate_rownd_user_and_create_session(
     capability_error: Optional[MigrationError] = None
     mapping_retry_state = _MappingRetryState()
 
-    for _ in range(2):
+    recovered_after_error = False
+    for attempt_count in range(1, 3):
+        migration_state["attempt_count"] = attempt_count
         try:
             durable = await read_fresh_migration_snapshot(
                 source.snapshot, user_context, pinned_target
             )
         except Exception as error:
             last_error = error
+            recovered_after_error = True
             clear_supertokens_core_call_cache(user_context)
             continue
         disposition = classify_migration_snapshot(durable, pinned_target)
+        if disposition.target is not None:
+            migration_state["target_source"] = disposition.target.source.value
         if disposition.status is MigrationDispositionStatus.COMPLETE:
+            if recovered_after_error:
+                migration_state["path"] = "retry_recovery"
+            elif "path" not in migration_state:
+                migration_state["path"] = "already_complete"
             fresh_source = await read_fresh_source()
             if fresh_source is None:
                 raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
@@ -702,6 +711,14 @@ async def migrate_rownd_user_and_create_session(
         if repair_target is None and disposition.target is not None:
             pinned_target = disposition.target
             repair_target = disposition.target
+        if repair_target is not None:
+            migration_state["target_source"] = repair_target.source.value
+            if repair_target.source.value == "new_import":
+                migration_state["path"] = "fresh_import"
+            elif repair_target.source.value == "mapping":
+                migration_state["path"] = "mapped_repair"
+            else:
+                migration_state["path"] = "identity_reconcile"
         try:
             changed_source = await apply_migration_repairs(
                 disposition,
@@ -716,6 +733,7 @@ async def migrate_rownd_user_and_create_session(
                 source = changed_source
         except Exception as error:
             last_error = error
+            recovered_after_error = True
             if (
                 isinstance(error, MigrationError)
                 and error.reason is MigrationErrorReason.CORE_CAPABILITY_REQUIRED
@@ -733,6 +751,8 @@ async def migrate_rownd_user_and_create_session(
                 source.snapshot, user_context, pinned_target
             )
             final_disposition = classify_migration_snapshot(final_snapshot, pinned_target)
+            if final_disposition.target is not None:
+                migration_state["target_source"] = final_disposition.target.source.value
         except Exception as error:
             reason = (
                 MigrationErrorReason.CORE_UNAVAILABLE
@@ -741,6 +761,7 @@ async def migrate_rownd_user_and_create_session(
             )
             raise MigrationError(reason, "state_inspect", error) from error
         if final_disposition.status is MigrationDispositionStatus.COMPLETE:
+            migration_state["path"] = "postcondition_recovery"
             completed_target = final_disposition.target
         elif final_disposition.status is MigrationDispositionStatus.BLOCKED:
             raise MigrationError(

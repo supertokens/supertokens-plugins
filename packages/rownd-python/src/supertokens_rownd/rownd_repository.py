@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json as json_module
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -31,6 +32,22 @@ class RowndTokenValidationError(RowndPluginError):
         self.reason = reason
 
 
+class RowndAPIErrorReason(str, Enum):
+    USER_NOT_FOUND = "USER_NOT_FOUND"
+    AUTHORIZATION_REJECTED = "AUTHORIZATION_REJECTED"
+    CREDENTIALS_REJECTED = "CREDENTIALS_REJECTED"
+    APP_CONFIG_INVALID = "APP_CONFIG_INVALID"
+    PROFILE_INVALID = "PROFILE_INVALID"
+    UNAVAILABLE = "UNAVAILABLE"
+    INVALID_RESPONSE = "INVALID_RESPONSE"
+
+
+class RowndAPIError(RowndPluginError):
+    def __init__(self, reason: RowndAPIErrorReason):
+        super().__init__("Rownd API request failed")
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class _JwksCache:
     jwks_uri: str
@@ -41,6 +58,8 @@ class _JwksCache:
 
 class RowndClient:
     _JWKS_CACHE_TTL_SECONDS = 300.0
+    _API_REQUEST_DEADLINE_SECONDS: float = 10.0
+    _MAX_API_RESPONSE_BYTES: int = 1024 * 1024
 
     def __init__(
         self,
@@ -73,13 +92,7 @@ class RowndClient:
                         RowndTokenValidationReason.TOKEN_KID_UNKNOWN
                     )
 
-            app_config = await self._request("GET", "/hub/app-config")
-            app = app_config.get("app")
-            app_id = app.get("id") if isinstance(app, dict) else None
-            if not isinstance(app_id, str) or not app_id:
-                raise RowndTokenValidationError(
-                    RowndTokenValidationReason.TOKEN_CLAIMS_INVALID
-                )
+            app_id = await self._fetch_app_id()
 
             data = jwt.decode(
                 token,
@@ -222,46 +235,92 @@ class RowndClient:
         return data
 
     async def fetch_optional_user_info(self, user_id: str) -> Optional[JsonDict]:
-        app_config = await self._request("GET", "/hub/app-config")
-        app = app_config.get("app")
-        app_id = app.get("id") if isinstance(app, dict) else None
-        if not isinstance(app_id, str) or not app_id:
-            raise RowndPluginError("Invalid Rownd app config")
+        app_id = await self._fetch_app_id()
 
         try:
             data = await self._request(
                 "GET",
                 "/applications/%s/users/%s/data" % (app_id, user_id),
             )
-        except httpx.HTTPStatusError as err:
-            if err.response.status_code == 404:
+        except RowndAPIError as err:
+            if err.reason is RowndAPIErrorReason.USER_NOT_FOUND:
                 return None
+            if err.reason is RowndAPIErrorReason.AUTHORIZATION_REJECTED:
+                raise RowndAPIError(RowndAPIErrorReason.CREDENTIALS_REJECTED) from err
+            if err.reason is RowndAPIErrorReason.INVALID_RESPONSE:
+                raise RowndAPIError(RowndAPIErrorReason.PROFILE_INVALID) from err
             raise
-        if not isinstance(data, dict) or not data:
-            return None
+        profile_data = data.get("data")
+        profile_user_id = profile_data.get("user_id") if isinstance(profile_data, dict) else None
+        if (
+            not isinstance(profile_data, dict)
+            or not isinstance(profile_user_id, str)
+            or not profile_user_id.strip()
+            or not isinstance(data.get("verified_data"), dict)
+        ):
+            raise RowndAPIError(RowndAPIErrorReason.PROFILE_INVALID)
         return data
+
+    async def _fetch_app_id(self) -> str:
+        try:
+            app_config = await self._request("GET", "/hub/app-config")
+        except RowndAPIError as err:
+            if err.reason is RowndAPIErrorReason.AUTHORIZATION_REJECTED:
+                raise RowndAPIError(RowndAPIErrorReason.CREDENTIALS_REJECTED) from err
+            if err.reason in {
+                RowndAPIErrorReason.USER_NOT_FOUND,
+                RowndAPIErrorReason.INVALID_RESPONSE,
+            }:
+                raise RowndAPIError(RowndAPIErrorReason.APP_CONFIG_INVALID) from err
+            raise
+        app = app_config.get("app")
+        app_id = app.get("id") if isinstance(app, dict) else None
+        if not isinstance(app_id, str) or not app_id.strip():
+            raise RowndAPIError(RowndAPIErrorReason.APP_CONFIG_INVALID)
+        return app_id
 
     async def _request(self, method: str, path: str, json: Optional[JsonDict] = None) -> JsonDict:
         app_key = self.config.rownd_app_key
         app_secret = self.config.rownd_app_secret
         if app_key is None or app_secret is None:
-            raise RowndPluginError("Rownd credentials are required for Rownd API requests")
+            raise RowndAPIError(RowndAPIErrorReason.CREDENTIALS_REJECTED)
         headers = {
             "x-rownd-app-key": app_key,
             "x-rownd-app-secret": app_secret,
         }
-        async with httpx.AsyncClient(timeout=10.0, transport=self._transport) as client:
-            res = await client.request(
-                method,
-                self.config.rownd_api_base_url.rstrip("/") + path,
-                headers=headers,
-                json=json,
-            )
-            res.raise_for_status()
-            data = res.json()
-            if not isinstance(data, dict):
-                raise RowndPluginError("Invalid Rownd response")
-            return data
+        try:
+            async with asyncio.timeout(self._API_REQUEST_DEADLINE_SECONDS):
+                async with httpx.AsyncClient(timeout=10.0, transport=self._transport) as client:
+                    async with client.stream(
+                        method,
+                        self.config.rownd_api_base_url.rstrip("/") + path,
+                        headers=headers,
+                        json=json,
+                    ) as res:
+                        if not 200 <= res.status_code < 300:
+                            if res.status_code in {401, 403}:
+                                raise RowndAPIError(RowndAPIErrorReason.AUTHORIZATION_REJECTED)
+                            if res.status_code == 404:
+                                raise RowndAPIError(RowndAPIErrorReason.USER_NOT_FOUND)
+                            if res.status_code in {408, 429} or res.status_code >= 500:
+                                raise RowndAPIError(RowndAPIErrorReason.UNAVAILABLE)
+                            raise RowndAPIError(RowndAPIErrorReason.INVALID_RESPONSE)
+                        body = bytearray()
+                        chunk_size = min(64 * 1024, self._MAX_API_RESPONSE_BYTES + 1)
+                        async for chunk in res.aiter_bytes(chunk_size=chunk_size):
+                            if len(body) + len(chunk) > self._MAX_API_RESPONSE_BYTES:
+                                raise RowndAPIError(RowndAPIErrorReason.INVALID_RESPONSE)
+                            body.extend(chunk)
+                data = json_module.loads(body)
+        except RowndAPIError:
+            raise
+        except (TimeoutError, httpx.HTTPError) as err:
+            raise RowndAPIError(RowndAPIErrorReason.UNAVAILABLE) from err
+        except ValueError as err:
+            raise RowndAPIError(RowndAPIErrorReason.INVALID_RESPONSE) from err
+        if not isinstance(data, dict):
+            raise RowndAPIError(RowndAPIErrorReason.INVALID_RESPONSE)
+        return data
 
     async def _request_public(self, path: str) -> JsonDict:
         return await self._request_public_url(self.config.rownd_api_base_url.rstrip("/") + path)

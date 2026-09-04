@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from typing import Optional, cast
@@ -20,7 +21,12 @@ from .constants import GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID
 from .errors import MigrationError, MigrationErrorReason, RowndEmailChangeError, RowndPluginError
 from .logger import log_debug
 from .migration import create_rownd_identity_snapshot
-from .rownd_repository import RowndTokenValidationError, RowndTokenValidationReason
+from .rownd_repository import (
+    RowndAPIError,
+    RowndAPIErrorReason,
+    RowndTokenValidationError,
+    RowndTokenValidationReason,
+)
 from .types import JsonDict, MigrationStage, RowndClientProtocol, RowndPluginConfig, RowndTelemetryClient
 
 
@@ -35,6 +41,16 @@ _TOKEN_REASON_MAP = {
     RowndTokenValidationReason.JWKS_INVALID_RESPONSE: MigrationErrorReason.ROWND_UNAVAILABLE,
 }
 
+_ROWND_API_REASON_MAP = {
+    RowndAPIErrorReason.USER_NOT_FOUND: MigrationErrorReason.ROWND_USER_NOT_FOUND,
+    RowndAPIErrorReason.AUTHORIZATION_REJECTED: MigrationErrorReason.ROWND_UNAVAILABLE,
+    RowndAPIErrorReason.CREDENTIALS_REJECTED: MigrationErrorReason.PLUGIN_CONFIGURATION_INVALID,
+    RowndAPIErrorReason.APP_CONFIG_INVALID: MigrationErrorReason.PLUGIN_CONFIGURATION_INVALID,
+    RowndAPIErrorReason.PROFILE_INVALID: MigrationErrorReason.SOURCE_IDENTITY_INVALID,
+    RowndAPIErrorReason.UNAVAILABLE: MigrationErrorReason.ROWND_UNAVAILABLE,
+    RowndAPIErrorReason.INVALID_RESPONSE: MigrationErrorReason.ROWND_UNAVAILABLE,
+}
+
 
 def migration_error_response(error: MigrationError, operation_id: str) -> JsonDict:
     return {
@@ -46,6 +62,14 @@ def migration_error_response(error: MigrationError, operation_id: str) -> JsonDi
         "stage": error.stage,
         "operationId": operation_id,
     }
+
+
+def _rownd_api_migration_error(error: RowndAPIError, stage: MigrationStage) -> MigrationError:
+    reason = _ROWND_API_REASON_MAP[error.reason]
+    error_stage: MigrationStage = (
+        "source_normalize" if error.reason is RowndAPIErrorReason.PROFILE_INVALID else stage
+    )
+    return MigrationError(reason, error_stage, error)
 
 
 async def handle_validate_passwordless_confirmation_bypass(
@@ -139,8 +163,12 @@ async def handle_migrate(
     stage: MigrationStage = "request_parse"
     tenant_id: Optional[str] = None
     rownd_user_id = None
-    supertokens_user_id = None
     migration_state: JsonDict = {}
+    migration_error: Optional[MigrationError] = None
+    terminal_outcome = "error"
+    terminal_http_status = 500
+    terminal_retryable = True
+    terminal_reason: Optional[MigrationErrorReason] = MigrationErrorReason.INTERNAL_ERROR
     try:
         token = utils.parse_migration_authorization_header(request)
         stage = "configuration"
@@ -155,11 +183,15 @@ async def handle_migrate(
             if reason is None:
                 raise MigrationError(MigrationErrorReason.INTERNAL_ERROR, stage, err) from err
             raise MigrationError(reason, stage, err) from err
+        except RowndAPIError as err:
+            raise _rownd_api_migration_error(err, stage) from err
         if not isinstance(rownd_user_id, str) or not rownd_user_id.strip():
             raise MigrationError(MigrationErrorReason.TOKEN_CLAIMS_INVALID, stage)
         stage = "rownd_profile_fetch"
         try:
             rownd_user = await client.fetch_optional_user_info(rownd_user_id)
+        except RowndAPIError as err:
+            raise _rownd_api_migration_error(err, stage) from err
         except MigrationError:
             raise
         except Exception as err:
@@ -169,20 +201,19 @@ async def handle_migrate(
                 MigrationErrorReason.ROWND_USER_NOT_FOUND, "rownd_profile_fetch"
             )
         stage = "source_normalize"
-        rownd_user_data = rownd_user.get("data")
-        profile_user_id = (
-            rownd_user_data.get("user_id") if isinstance(rownd_user_data, dict) else None
-        )
-        if profile_user_id != rownd_user_id:
+        snapshot = create_rownd_identity_snapshot(rownd_user, tenant_id, app_variant_id, config.schema)
+        if snapshot.rownd_user_id != rownd_user_id:
             raise MigrationError(MigrationErrorReason.ROWND_USER_ID_MISMATCH, stage)
         source = repository.FreshMigrationSource(
             rownd_user,
-            create_rownd_identity_snapshot(rownd_user, tenant_id, app_variant_id, config.schema),
+            snapshot,
         )
 
         async def read_fresh_source() -> Optional[repository.FreshMigrationSource]:
             try:
                 fresh_user = await client.fetch_optional_user_info(cast(str, rownd_user_id))
+            except RowndAPIError as err:
+                raise _rownd_api_migration_error(err, "rownd_profile_fetch") from err
             except MigrationError:
                 raise
             except Exception as err:
@@ -191,21 +222,20 @@ async def handle_migrate(
                 ) from err
             if fresh_user is None:
                 return None
-            fresh_data = fresh_user.get("data")
-            fresh_user_id = fresh_data.get("user_id") if isinstance(fresh_data, dict) else None
-            if fresh_user_id != rownd_user_id:
+            fresh_snapshot = create_rownd_identity_snapshot(
+                fresh_user, tenant_id, app_variant_id, config.schema
+            )
+            if fresh_snapshot.rownd_user_id != rownd_user_id:
                 raise MigrationError(
                     MigrationErrorReason.ROWND_USER_ID_MISMATCH, "source_normalize"
                 )
             return repository.FreshMigrationSource(
                 fresh_user,
-                create_rownd_identity_snapshot(
-                    fresh_user, tenant_id, app_variant_id, config.schema
-                ),
+                fresh_snapshot,
             )
 
         stage = "state_inspect"
-        supertokens_user_id = await repository.migrate_rownd_user_and_create_session(
+        await repository.migrate_rownd_user_and_create_session(
             config,
             rownd_user_id,
             source,
@@ -218,36 +248,56 @@ async def handle_migrate(
             migration_state,
             read_fresh_source,
         )
-        await telemetry.record_success(
-            telemetry_client, started_at, tenant_id, rownd_user_id, supertokens_user_id
-        )
-        return utils.json_response(response, {"status": "OK"})
+        stage = "session_create"
+        result = utils.json_response(response, {"status": "OK"})
+        terminal_outcome = "success"
+        terminal_http_status = 200
+        terminal_retryable = False
+        terminal_reason = None
+        return result
+    except asyncio.CancelledError:
+        terminal_outcome = "cancelled"
+        terminal_http_status = 499
+        terminal_retryable = True
+        terminal_reason = None
+        raise
     except Exception as err:
         migration_error = (
             err
             if isinstance(err, MigrationError)
             else MigrationError(MigrationErrorReason.INTERNAL_ERROR, stage, err)
         )
-        persisted_user_id = migration_state.get("supertokens_user_id")
-        if isinstance(persisted_user_id, str):
-            supertokens_user_id = persisted_user_id
         log_debug(
             config,
             "Migration failed. operationId: %s, stage: %s, reason: %s"
             % (operation_id, migration_error.stage, migration_error.reason.value),
         )
-        await telemetry.record_error(
+        terminal_http_status = migration_error.http_status
+        terminal_retryable = migration_error.retryable
+        terminal_reason = migration_error.reason
+        try:
+            return utils.json_response(
+                response,
+                migration_error_response(migration_error, operation_id),
+                migration_error.http_status,
+            )
+        except asyncio.CancelledError:
+            terminal_outcome = "cancelled"
+            terminal_http_status = 499
+            terminal_retryable = True
+            terminal_reason = None
+            raise
+    finally:
+        await telemetry.record_migration_terminal(
             telemetry_client,
             started_at,
-            MigrationError(migration_error.reason, migration_error.stage),
-            tenant_id,
-            rownd_user_id,
-            supertokens_user_id,
-        )
-        return utils.json_response(
-            response,
-            migration_error_response(migration_error, operation_id),
-            migration_error.http_status,
+            operation_id,
+            terminal_outcome,
+            migration_error.stage if migration_error is not None else stage,
+            terminal_http_status,
+            terminal_retryable,
+            migration_state,
+            terminal_reason,
         )
 
 

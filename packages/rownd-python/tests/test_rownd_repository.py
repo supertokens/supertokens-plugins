@@ -14,6 +14,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from supertokens_rownd.errors import RowndPluginError
 from supertokens_rownd.rownd_repository import (
+    RowndAPIError,
+    RowndAPIErrorReason,
     RowndClient,
     RowndTokenValidationError,
     RowndTokenValidationReason,
@@ -364,3 +366,172 @@ async def test_expired_cache_is_refreshed() -> None:
     now += 1
     assert await client.validate_token(token) == USER_ID
     assert transport.calls["/jwks"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "expected_reason"),
+    [
+        (401, RowndAPIErrorReason.CREDENTIALS_REJECTED),
+        (403, RowndAPIErrorReason.CREDENTIALS_REJECTED),
+        (408, RowndAPIErrorReason.UNAVAILABLE),
+    ],
+)
+async def test_app_config_error_status_is_typed(
+    status_code: int, expected_reason: RowndAPIErrorReason
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code)
+
+    with pytest.raises(RowndAPIError) as exc_info:
+        await _client(httpx.MockTransport(handler)).fetch_optional_user_info(USER_ID)
+
+    assert exc_info.value.reason is expected_reason
+    assert str(exc_info.value) == "Rownd API request failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [301, 302, 307, 308])
+async def test_app_config_redirect_is_rejected_before_parsing(status_code: int) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json={"app": {"id": APP_ID}})
+
+    with pytest.raises(RowndAPIError) as exc_info:
+        await _client(httpx.MockTransport(handler)).fetch_optional_user_info(USER_ID)
+
+    assert exc_info.value.reason is RowndAPIErrorReason.APP_CONFIG_INVALID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "app_config",
+    [{}, {"app": {}}, {"app": {"id": ""}}, {"app": {"id": 1}}],
+)
+async def test_malformed_app_config_is_typed(app_config: JsonDict) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=app_config)
+
+    with pytest.raises(RowndAPIError) as exc_info:
+        await _client(httpx.MockTransport(handler)).fetch_optional_user_info(USER_ID)
+
+    assert exc_info.value.reason is RowndAPIErrorReason.APP_CONFIG_INVALID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "expected_reason"),
+    [
+        (404, RowndAPIErrorReason.USER_NOT_FOUND),
+        (401, RowndAPIErrorReason.CREDENTIALS_REJECTED),
+        (403, RowndAPIErrorReason.CREDENTIALS_REJECTED),
+        (408, RowndAPIErrorReason.UNAVAILABLE),
+        (429, RowndAPIErrorReason.UNAVAILABLE),
+        (500, RowndAPIErrorReason.UNAVAILABLE),
+        (503, RowndAPIErrorReason.UNAVAILABLE),
+    ],
+)
+async def test_profile_status_is_typed(
+    status_code: int, expected_reason: RowndAPIErrorReason
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/hub/app-config":
+            return httpx.Response(200, json={"app": {"id": APP_ID}})
+        return httpx.Response(status_code)
+
+    client = _client(httpx.MockTransport(handler))
+    if expected_reason is RowndAPIErrorReason.USER_NOT_FOUND:
+        assert await client.fetch_optional_user_info(USER_ID) is None
+    else:
+        with pytest.raises(RowndAPIError) as exc_info:
+            await client.fetch_optional_user_info(USER_ID)
+        assert exc_info.value.reason is expected_reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [301, 302, 307, 308])
+async def test_profile_redirect_is_rejected_before_parsing(status_code: int) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/hub/app-config":
+            return httpx.Response(200, json={"app": {"id": APP_ID}})
+        return httpx.Response(
+            status_code,
+            json={"data": {"user_id": USER_ID}, "verified_data": {}},
+        )
+
+    with pytest.raises(RowndAPIError) as exc_info:
+        await _client(httpx.MockTransport(handler)).fetch_optional_user_info(USER_ID)
+
+    assert exc_info.value.reason is RowndAPIErrorReason.PROFILE_INVALID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "profile",
+    [{}, {"data": {}}, {"data": {"user_id": 1}, "verified_data": {}}, {"data": {"user_id": USER_ID}}],
+)
+async def test_malformed_profile_is_typed(profile: JsonDict) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/hub/app-config":
+            return httpx.Response(200, json={"app": {"id": APP_ID}})
+        return httpx.Response(200, json=profile)
+
+    with pytest.raises(RowndAPIError) as exc_info:
+        await _client(httpx.MockTransport(handler)).fetch_optional_user_info(USER_ID)
+
+    assert exc_info.value.reason is RowndAPIErrorReason.PROFILE_INVALID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["network", "timeout"])
+async def test_profile_transport_failure_is_typed(failure: str) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/hub/app-config":
+            return httpx.Response(200, json={"app": {"id": APP_ID}})
+        if failure == "timeout":
+            raise httpx.ReadTimeout("private timeout", request=request)
+        raise httpx.ConnectError("private network error", request=request)
+
+    with pytest.raises(RowndAPIError) as exc_info:
+        await _client(httpx.MockTransport(handler)).fetch_optional_user_info(USER_ID)
+
+    assert exc_info.value.reason is RowndAPIErrorReason.UNAVAILABLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["app_config", "profile"])
+async def test_authenticated_response_size_is_bounded(endpoint: str) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/hub/app-config":
+            if endpoint == "app_config":
+                return httpx.Response(200, content=b'{"app":{"id":"app-id"}}' + b" " * 64)
+            return httpx.Response(200, json={"app": {"id": APP_ID}})
+        return httpx.Response(
+            200,
+            content=b'{"data":{"user_id":"rownd-user-id"},"verified_data":{}}' + b" " * 64,
+        )
+
+    client = _client(httpx.MockTransport(handler))
+    client._MAX_API_RESPONSE_BYTES = 32
+    with pytest.raises(RowndAPIError) as exc_info:
+        await client.fetch_optional_user_info(USER_ID)
+
+    expected = (
+        RowndAPIErrorReason.APP_CONFIG_INVALID
+        if endpoint == "app_config"
+        else RowndAPIErrorReason.PROFILE_INVALID
+    )
+    assert exc_info.value.reason is expected
+
+
+@pytest.mark.asyncio
+async def test_authenticated_request_has_total_deadline() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.1)
+        return httpx.Response(200, json={"app": {"id": APP_ID}})
+
+    client = _client(httpx.MockTransport(handler))
+    client._API_REQUEST_DEADLINE_SECONDS = 0.01
+    with pytest.raises(RowndAPIError) as exc_info:
+        await client.fetch_optional_user_info(USER_ID)
+
+    assert exc_info.value.reason is RowndAPIErrorReason.UNAVAILABLE
