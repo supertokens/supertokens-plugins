@@ -29,13 +29,21 @@ Reference Node.js commit: `40c7107` (`feat: Add stable migration error contract`
 
 Reference Node.js commit: `f9d44eb` (`feat: Inspect durable migration state`).
 
-- [ ] Normalize Rownd identity data into an immutable source snapshot.
+- [x] Normalize Rownd identity data into an immutable source snapshot.
 - [x] Validate the token subject against the Rownd profile user ID before Core access.
-- [ ] Generate deterministic identity fingerprints compatible with Node.js.
-- [ ] Add fresh mapping, identity-owner, tenant, metadata, and canonical-email reads.
-- [ ] Select and pin the canonical target deterministically.
-- [ ] Classify complete, repairable, and blocked migration states.
-- [ ] Add source-validation, mapping-conflict, collision, ambiguity, and metadata tests.
+- [x] Retain only normalized, currently verified identities in the source snapshot.
+- [x] Add fresh mapping, identity-owner, tenant, metadata, and canonical-email reads.
+- [x] Select and pin the canonical target deterministically.
+- [x] Classify complete, repairable, and blocked migration states.
+- [x] Add source-validation, mapping-conflict, collision, ambiguity, and metadata tests.
+- [x] Keep source snapshots free of fingerprints and source versions; compare normalized snapshots directly.
+- [x] Keep completion metadata to `rownd_migration_complete` and existing canonical-email/original-user fields; do not add v2 migration metadata.
+
+Before enabling phase-3 mutations:
+
+- [x] Require Rownd verification authority before treating `google_id` and `apple_id` as expected identities.
+- [ ] Keep `original_rownd_user.data.user_id` as protected historical targeting evidence; require fresh topology inspection and `rownd_migration_complete: true` before session creation.
+- [ ] Re-fetch and normalize the Rownd profile before phase-3 finalization, then compare the new snapshot directly with the attempt snapshot before writing completion metadata.
 
 ## Convergent Reconciliation
 
@@ -77,6 +85,7 @@ Reference Node.js commit: `f8e4ded` (`fix: Authorize canonical email topology`).
 - [ ] Permit a verified canonical Passwordless method beside retained unverified noncanonical methods.
 - [ ] Continue classifying old noncanonical methods as retired and blocking their authentication.
 - [ ] Verify migration-created canonical metadata satisfies guard mode.
+- [ ] Keep old methods during synchronous reconciliation; retire or remove them only through manual/asynchronous tooling.
 
 ## Final Hardening
 

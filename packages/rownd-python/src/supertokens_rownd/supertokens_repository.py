@@ -57,6 +57,24 @@ from .errors import (
 )
 from .logger import log_debug
 from . import rownd_compatibility
+from .migration import (
+    CanonicalEmailPointerState,
+    CanonicalEmailPointerStatus,
+    ExpectedIdentity,
+    IdentityOwner,
+    IdentityReservationOwner,
+    MappingLookup,
+    MappingState,
+    MigrationMetadataState,
+    MigrationSnapshot,
+    MigrationUserState,
+    PinnedMigrationTarget,
+    RawIdInspection,
+    RawIdStatus,
+    RowndIdentitySnapshot,
+    immutable_mapping,
+    validate_migration_metadata,
+)
 from .types import (
     EmailCredentialAuthorization,
     EmailCredentialReason,
@@ -90,6 +108,324 @@ class _BulkImportError(RuntimeError):
         self.status = status
         self.response_text = response_text
         super().__init__("Bulk import failed with status %s: %s" % (status, response_text))
+
+
+def _mapping_lookup(result: object) -> Optional[MappingLookup]:
+    if not isinstance(result, GetUserIdMappingOkResult):
+        return None
+    return MappingLookup(result.external_user_id, result.supertokens_user_id)
+
+
+def _migration_method_matches_identity(method: LoginMethod, identity: ExpectedIdentity) -> bool:
+    if method.recipe_id != identity.recipe_id:
+        return False
+    if identity.recipe_id == "thirdparty":
+        provider_id, provider_user_id = rownd_compatibility.get_third_party_info(method)
+        return provider_id == identity.provider_id and provider_user_id == identity.provider_user_id
+    if identity.identifier_type == "email":
+        return method.has_same_email_as(identity.identifier)
+    return method.has_same_phone_number_as(identity.identifier)
+
+
+def _migration_method_reserves_identity(method: LoginMethod, identity: ExpectedIdentity) -> bool:
+    if identity.recipe_id != "passwordless" or method.recipe_id not in {
+        "thirdparty",
+        "emailpassword",
+    }:
+        return False
+    if identity.identifier_type == "email":
+        return method.has_same_email_as(identity.identifier)
+    return method.has_same_phone_number_as(identity.identifier)
+
+
+async def _get_migration_identity_users(
+    identity: ExpectedIdentity, tenant_id: str, user_context: UserContext
+) -> List[User]:
+    if identity.recipe_id == "thirdparty":
+        account_info = AccountInfoInput(
+            third_party=ThirdPartyInfo(
+                cast(str, identity.provider_user_id), cast(str, identity.provider_id)
+            )
+        )
+    elif identity.identifier_type == "email":
+        account_info = AccountInfoInput(email=identity.identifier)
+    else:
+        account_info = AccountInfoInput(phone_number=identity.identifier)
+    return await list_users_by_account_info(tenant_id, account_info, False, user_context)
+
+
+async def read_fresh_migration_snapshot(
+    source: RowndIdentitySnapshot,
+    user_context: UserContext,
+    pinned_target: Optional[PinnedMigrationTarget] = None,
+) -> MigrationSnapshot:
+    inspection_context = create_derived_user_context(user_context, {})
+    clear_supertokens_core_call_cache(inspection_context)
+    external_result, source_internal_result = await asyncio.gather(
+        get_user_id_mapping(source.rownd_user_id, "EXTERNAL", inspection_context),
+        get_user_id_mapping(source.rownd_user_id, "SUPERTOKENS", inspection_context),
+    )
+    external_lookup = _mapping_lookup(external_result)
+    source_internal_lookup = _mapping_lookup(source_internal_result)
+    raw_user = (
+        None
+        if external_lookup is not None or source_internal_lookup is not None
+        else await get_user(source.rownd_user_id, inspection_context)
+    )
+    identity_users = await asyncio.gather(
+        *(
+            _get_migration_identity_users(identity, source.tenant_id, inspection_context)
+            for identity in source.expected_identities
+        )
+    )
+    owner_entries = [
+        (identity, user, method)
+        for identity, users in zip(source.expected_identities, identity_users)
+        for user in users
+        for method in user.login_methods
+        if _migration_method_matches_identity(method, identity)
+    ]
+    reservation_entries = [
+        (identity, user, method)
+        for identity, users in zip(source.expected_identities, identity_users)
+        for user in users
+        for method in user.login_methods
+        if source.tenant_id in method.tenant_ids
+        and _migration_method_reserves_identity(method, identity)
+    ]
+
+    async def resolved_owner(entry: Tuple[ExpectedIdentity, User, LoginMethod]) -> IdentityOwner:
+        identity, user, method = entry
+        internal_user_id = await resolve_supertokens_user_id(user.id, inspection_context)
+        resolved_user = (
+            user if internal_user_id == user.id else await get_user(internal_user_id, inspection_context)
+        )
+        recipe_user_id = method.recipe_user_id.get_as_string()
+        resolved_method = next(
+            (
+                candidate
+                for candidate in (resolved_user.login_methods if resolved_user else [])
+                if candidate.recipe_user_id.get_as_string() == recipe_user_id
+                and _migration_method_matches_identity(candidate, identity)
+            ),
+            None,
+        )
+        if resolved_user is None or resolved_method is None:
+            raise MigrationError(MigrationErrorReason.MIGRATION_STATE_INVALID, "state_inspect")
+        identifier = (
+            "%s:%s" % (identity.provider_id, identity.provider_user_id)
+            if identity.recipe_id == "thirdparty"
+            else cast(str, identity.identifier)
+        )
+        return IdentityOwner(
+            identity.key,
+            recipe_user_id,
+            internal_user_id,
+            identity.recipe_id,
+            identifier,
+            resolved_method.verified,
+            tuple(sorted(resolved_method.tenant_ids)),
+            resolved_user.is_primary_user,
+        )
+
+    async def resolved_reservation(
+        entry: Tuple[ExpectedIdentity, User, LoginMethod]
+    ) -> IdentityReservationOwner:
+        identity, user, method = entry
+        internal_user_id = await resolve_supertokens_user_id(user.id, inspection_context)
+        resolved_user = (
+            user if internal_user_id == user.id else await get_user(internal_user_id, inspection_context)
+        )
+        recipe_user_id = method.recipe_user_id.get_as_string()
+        resolved_method = next(
+            (
+                candidate
+                for candidate in (resolved_user.login_methods if resolved_user else [])
+                if candidate.recipe_user_id.get_as_string() == recipe_user_id
+                and _migration_method_reserves_identity(candidate, identity)
+            ),
+            None,
+        )
+        if resolved_user is None or resolved_method is None:
+            raise MigrationError(MigrationErrorReason.MIGRATION_STATE_INVALID, "state_inspect")
+        return IdentityReservationOwner(
+            identity.key,
+            recipe_user_id,
+            internal_user_id,
+            resolved_method.recipe_id,
+            resolved_user.is_primary_user,
+        )
+
+    scoped_owners = await asyncio.gather(*(resolved_owner(entry) for entry in owner_entries))
+    scoped_reservations = await asyncio.gather(
+        *(resolved_reservation(entry) for entry in reservation_entries)
+    )
+    candidate_ids = {
+        *([external_lookup.supertokens_user_id] if external_lookup else []),
+        *([raw_user.id] if raw_user else []),
+        *([pinned_target.user_id] if pinned_target else []),
+        *(owner.primary_user_id for owner in scoped_owners),
+        *(owner.primary_user_id for owner in scoped_reservations),
+    }
+
+    async def inspect_candidate(user_id: str):
+        user = raw_user if raw_user and raw_user.id == user_id else await get_user(
+            user_id, inspection_context
+        )
+        mapping_result = (
+            source_internal_result
+            if user_id == source.rownd_user_id
+            else await get_user_id_mapping(user_id, "SUPERTOKENS", inspection_context)
+        )
+        raw_metadata = await get_raw_user_metadata(user_id, inspection_context) if user else {}
+        return (
+            user_id,
+            user,
+            _mapping_lookup(mapping_result),
+            validate_migration_metadata(raw_metadata, source.tenant_id),
+        )
+
+    candidates = await asyncio.gather(*(inspect_candidate(user_id) for user_id in sorted(candidate_ids)))
+    candidate_owner_entries = [
+        (identity, user, method)
+        for _, user, _, _ in candidates
+        if user is not None
+        for identity in source.expected_identities
+        for method in user.login_methods
+        if _migration_method_matches_identity(method, identity)
+    ]
+    candidate_reservation_entries = [
+        (identity, user, method)
+        for _, user, _, _ in candidates
+        if user is not None
+        for identity in source.expected_identities
+        for method in user.login_methods
+        if _migration_method_reserves_identity(method, identity)
+    ]
+    candidate_owners = await asyncio.gather(
+        *(resolved_owner(entry) for entry in candidate_owner_entries)
+    )
+    candidate_reservations = await asyncio.gather(
+        *(resolved_reservation(entry) for entry in candidate_reservation_entries)
+    )
+    owners_by_method: Dict[Tuple[str, str], IdentityOwner] = {}
+    for owner in (*scoped_owners, *candidate_owners):
+        key = (owner.identity_key, owner.recipe_user_id)
+        if key in owners_by_method and owners_by_method[key] != owner:
+            raise MigrationError(MigrationErrorReason.MIGRATION_STATE_INVALID, "state_inspect")
+        owners_by_method[key] = owner
+    reservations_by_method: Dict[Tuple[str, str], IdentityReservationOwner] = {}
+    for owner in (*scoped_reservations, *candidate_reservations):
+        key = (owner.identity_key, owner.recipe_user_id)
+        if key in reservations_by_method and reservations_by_method[key] != owner:
+            raise MigrationError(MigrationErrorReason.MIGRATION_STATE_INVALID, "state_inspect")
+        reservations_by_method[key] = owner
+    owners = tuple(owners_by_method.values())
+    reservations = tuple(reservations_by_method.values())
+    internal_lookups = {user_id: mapping for user_id, _, mapping, _ in candidates}
+    users = {
+        user_id: MigrationUserState(user is not None, user.is_primary_user if user else False)
+        for user_id, user, _, _ in candidates
+    }
+    metadata: Dict[str, MigrationMetadataState] = {
+        user_id: state for user_id, _, _, state in candidates
+    }
+    raw_metadata = metadata.get(raw_user.id) if raw_user else None
+    raw_same_graph = bool(
+        raw_user
+        and (
+            any(owner.primary_user_id == raw_user.id for owner in owners)
+            or (
+                raw_metadata
+                and raw_metadata.valid
+                and raw_metadata.value
+                and raw_metadata.value.legacy_complete is True
+                and raw_metadata.value.original_rownd_user_id == source.rownd_user_id
+            )
+        )
+    )
+
+    async def inspect_pointer(
+        candidate: Tuple[str, Optional[User], Optional[MappingLookup], MigrationMetadataState]
+    ) -> Tuple[str, CanonicalEmailPointerState]:
+        user_id, user, _, metadata_state = candidate
+        recipe_user_id = (
+            metadata_state.value.canonical_email_recipe_user_id
+            if metadata_state.valid and metadata_state.value
+            else None
+        )
+        if not recipe_user_id:
+            return user_id, CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)
+        method = next(
+            (
+                item
+                for item in (user.login_methods if user else [])
+                if item.recipe_user_id.get_as_string() == recipe_user_id
+            ),
+            None,
+        )
+        belongs_to_candidate = method is not None
+        method_owner = user
+        if method is None:
+            method_owner = await get_user(recipe_user_id, inspection_context)
+            method = next(
+                (
+                    item
+                    for item in (method_owner.login_methods if method_owner else [])
+                    if item.recipe_user_id.get_as_string() == recipe_user_id
+                ),
+                None,
+            )
+        reason = None
+        if method_owner is None or method is None:
+            reason = "MISSING_METHOD"
+        elif not belongs_to_candidate:
+            reason = "FOREIGN_OWNER"
+        elif method.recipe_id != "passwordless" or not method.email:
+            reason = "NOT_PASSWORDLESS"
+        elif not method.verified:
+            reason = "NOT_VERIFIED"
+        elif source.tenant_id not in method.tenant_ids:
+            reason = "WRONG_TENANT"
+        return (
+            user_id,
+            CanonicalEmailPointerState(
+                CanonicalEmailPointerStatus.INVALID if reason else CanonicalEmailPointerStatus.VALID,
+                recipe_user_id,
+                reason,
+            ),
+        )
+
+    pointer_entries = await asyncio.gather(*(inspect_pointer(candidate) for candidate in candidates))
+    if source_internal_lookup and (
+        external_lookup is None
+        or external_lookup.supertokens_user_id != source.rownd_user_id
+    ):
+        raw_inspection = RawIdInspection(
+            RawIdStatus.PRESENT, source.rownd_user_id, False
+        )
+    elif external_lookup:
+        raw_inspection = RawIdInspection(RawIdStatus.UNINSPECTABLE)
+    elif raw_user:
+        raw_inspection = RawIdInspection(RawIdStatus.PRESENT, raw_user.id, raw_same_graph)
+    else:
+        raw_inspection = RawIdInspection(RawIdStatus.ABSENT)
+    return MigrationSnapshot(
+        source,
+        tuple(sorted(owners, key=lambda owner: (owner.identity_key, owner.recipe_user_id))),
+        tuple(
+            sorted(reservations, key=lambda owner: (owner.identity_key, owner.recipe_user_id))
+        ),
+        MappingState(
+            external_lookup,
+            source_internal_lookup,
+            immutable_mapping(internal_lookups),
+            raw_inspection,
+        ),
+        immutable_mapping(users),
+        immutable_mapping(metadata),
+        immutable_mapping(dict(pointer_entries)),
+    )
 
 
 def is_bulk_import_duplicate_identity_error(error: object) -> bool:
@@ -206,7 +542,6 @@ async def migrate_rownd_user_and_create_session(
         user = await get_user(rownd_user_id, user_context)
         if user is None:
             raise RowndPluginError("Imported user could not be resolved")
-
     supertokens_user_id = user.id
     migration_state["supertokens_user_id"] = supertokens_user_id
     recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else None
