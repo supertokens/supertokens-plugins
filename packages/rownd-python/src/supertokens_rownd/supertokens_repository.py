@@ -11,6 +11,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Literal,
     NamedTuple,
     NoReturn,
     Optional,
@@ -55,6 +56,7 @@ from supertokens_python.types.base import AccountInfoInput, UserContext
 from supertokens_python.interfaces import (
     CreateUserIdMappingOkResult,
     GetUserIdMappingOkResult,
+    UserIdMappingAlreadyExistsError,
 )
 
 from .constants import (
@@ -146,6 +148,22 @@ class _MigrationSourceChanged(RuntimeError):
     def __init__(self, source: FreshMigrationSource):
         self.source = source
         super().__init__("Rownd migration source changed before account linking")
+
+
+class _MappingRetryState:
+    narrow_retry_attempted: bool
+
+    def __init__(self) -> None:
+        self.narrow_retry_attempted = False
+
+
+class _NonAuthRecipeUserIdReferenceError:
+    status: Literal["NON_AUTH_RECIPE_USER_ID_REFERENCE_ERROR"] = (
+        "NON_AUTH_RECIPE_USER_ID_REFERENCE_ERROR"
+    )
+
+
+_NarrowMappingCapability = Callable[[str, str, UserContext], Awaitable[object]]
 
 
 _SESSION_RESPONSE_HEADERS = (
@@ -653,6 +671,8 @@ async def migrate_rownd_user_and_create_session(
     pinned_target: Optional[PinnedMigrationTarget] = None
     completed_target: Optional[PinnedMigrationTarget] = None
     last_error: Optional[BaseException] = None
+    capability_error: Optional[MigrationError] = None
+    mapping_retry_state = _MappingRetryState()
 
     for _ in range(2):
         try:
@@ -690,11 +710,17 @@ async def migrate_rownd_user_and_create_session(
                 supertokens_config,
                 user_context,
                 read_fresh_source,
+                mapping_retry_state,
             )
             if changed_source is not None:
                 source = changed_source
         except Exception as error:
             last_error = error
+            if (
+                isinstance(error, MigrationError)
+                and error.reason is MigrationErrorReason.CORE_CAPABILITY_REQUIRED
+            ):
+                capability_error = error
             clear_supertokens_core_call_cache(user_context)
 
     if completed_target is None:
@@ -723,6 +749,16 @@ async def migrate_rownd_user_and_create_session(
                 last_error,
             )
         else:
+            capability_required = (
+                capability_error is not None
+                and final_disposition.status is MigrationDispositionStatus.REPAIRABLE
+                and any(
+                    mutation.type == "CREATE_MAPPING"
+                    for mutation in final_disposition.mutations
+                )
+            )
+            if capability_required:
+                raise cast(MigrationError, capability_error)
             reason = (
                 MigrationErrorReason.CORE_UNAVAILABLE
                 if _is_recognizable_core_outage(last_error)
@@ -1539,7 +1575,7 @@ async def ensure_primary_user(
     raise RuntimeError("A migrated login method belongs to a different primary user")
 
 
-async def create_rownd_user_id_mapping(
+async def create_unforced_rownd_user_id_mapping(
     supertokens_user_id: str,
     rownd_user_id: str,
     user_context: UserContext,
@@ -1573,6 +1609,148 @@ async def create_rownd_user_id_mapping(
         return False
     raise RuntimeError(
         "Failed to map migrated Rownd user ID: %s" % getattr(mapping_result, "status", "ERROR")
+    )
+
+
+async def _read_mapping_postcondition(
+    supertokens_user_id: str,
+    rownd_user_id: str,
+    user_context: UserContext,
+) -> Literal["ABSENT", "EXACT", "CONFLICT"]:
+    clear_supertokens_core_call_cache(user_context)
+    external, internal = await asyncio.gather(
+        get_user_id_mapping(rownd_user_id, "EXTERNAL", user_context),
+        get_user_id_mapping(supertokens_user_id, "SUPERTOKENS", user_context),
+    )
+    external_ok = isinstance(external, GetUserIdMappingOkResult)
+    internal_ok = isinstance(internal, GetUserIdMappingOkResult)
+    if not external_ok and not internal_ok:
+        return "ABSENT"
+    if (
+        external_ok
+        and external.external_user_id == rownd_user_id
+        and external.supertokens_user_id == supertokens_user_id
+        and internal_ok
+        and internal.external_user_id == rownd_user_id
+        and internal.supertokens_user_id == supertokens_user_id
+    ):
+        return "EXACT"
+    return "CONFLICT"
+
+
+async def _create_rownd_user_id_mapping(
+    source: FreshMigrationSource,
+    target: PinnedMigrationTarget,
+    user_context: UserContext,
+    read_fresh_source: Callable[[], Awaitable[Optional[FreshMigrationSource]]],
+    retry_state: _MappingRetryState,
+    narrow_capability: Optional[_NarrowMappingCapability] = None,
+) -> bool:
+    async def preflight() -> Tuple[FreshMigrationSource, bool]:
+        fresh = await read_fresh_source()
+        if fresh is None or fresh.snapshot != source.snapshot:
+            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "mapping")
+        snapshot = await read_fresh_migration_snapshot(
+            fresh.snapshot, user_context, target
+        )
+        external = snapshot.mapping.external_lookup
+        internal = snapshot.mapping.internal_lookups.get(target.user_id)
+        if (
+            external is not None and external.supertokens_user_id != target.user_id
+        ) or (
+            internal is not None and internal.external_user_id != fresh.snapshot.rownd_user_id
+        ):
+            raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "mapping")
+        disposition = classify_migration_snapshot(snapshot, target)
+        if disposition.status is MigrationDispositionStatus.BLOCKED:
+            raise MigrationError(
+                disposition.reason or MigrationErrorReason.MIGRATION_STATE_INVALID,
+                "mapping",
+            )
+        exact = (
+            external is not None
+            and external.external_user_id == fresh.snapshot.rownd_user_id
+            and external.supertokens_user_id == target.user_id
+            and internal is not None
+            and internal.external_user_id == fresh.snapshot.rownd_user_id
+            and internal.supertokens_user_id == target.user_id
+        )
+        if exact:
+            return fresh, True
+        expected_mutation = MigrationMutation("CREATE_MAPPING", target_user_id=target.user_id)
+        if (
+            disposition.status is not MigrationDispositionStatus.REPAIRABLE
+            or expected_mutation not in disposition.mutations
+        ):
+            raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "mapping")
+        return fresh, False
+
+    initial_source, mapping_exists = await preflight()
+    if mapping_exists:
+        return False
+
+    try:
+        result = await create_user_id_mapping(
+            target.user_id,
+            initial_source.snapshot.rownd_user_id,
+            force=False,
+            user_context=user_context,
+        )
+    except Exception as error:
+        postcondition = await _read_mapping_postcondition(
+            target.user_id, initial_source.snapshot.rownd_user_id, user_context
+        )
+        if postcondition == "EXACT":
+            return True
+        if postcondition == "CONFLICT":
+            raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "mapping", error) from error
+        raise
+
+    if (
+        isinstance(result, _NonAuthRecipeUserIdReferenceError)
+        and result.status == "NON_AUTH_RECIPE_USER_ID_REFERENCE_ERROR"
+    ):
+        second_source, mapping_exists = await preflight()
+        if mapping_exists:
+            return False
+        if narrow_capability is None:
+            raise MigrationError(MigrationErrorReason.CORE_CAPABILITY_REQUIRED, "mapping")
+        if retry_state.narrow_retry_attempted:
+            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "mapping")
+        retry_state.narrow_retry_attempted = True
+        try:
+            result = await narrow_capability(
+                target.user_id, second_source.snapshot.rownd_user_id, user_context
+            )
+        except Exception as error:
+            postcondition = await _read_mapping_postcondition(
+                target.user_id, second_source.snapshot.rownd_user_id, user_context
+            )
+            if postcondition == "EXACT":
+                return True
+            if postcondition == "CONFLICT":
+                raise MigrationError(
+                    MigrationErrorReason.MAPPING_CONFLICT, "mapping", error
+                ) from error
+            raise
+
+    if isinstance(result, (CreateUserIdMappingOkResult, UserIdMappingAlreadyExistsError)):
+        postcondition = await _read_mapping_postcondition(
+            target.user_id, initial_source.snapshot.rownd_user_id, user_context
+        )
+        if postcondition != "EXACT":
+            raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "mapping")
+        return isinstance(result, CreateUserIdMappingOkResult)
+
+    postcondition = await _read_mapping_postcondition(
+        target.user_id, initial_source.snapshot.rownd_user_id, user_context
+    )
+    if postcondition == "EXACT":
+        return True
+    if postcondition == "CONFLICT":
+        raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "mapping")
+    raise RuntimeError(
+        "Failed to map migrated Rownd user ID: %s" % getattr(result, "status", "ERROR")
     )
 
 
@@ -1781,7 +1959,10 @@ async def apply_migration_repairs(
     supertokens_config: SupertokensConfig,
     user_context: UserContext,
     read_fresh_source: Callable[[], Awaitable[Optional[FreshMigrationSource]]],
+    mapping_retry_state: Optional[_MappingRetryState] = None,
 ) -> Optional[FreshMigrationSource]:
+    retry_state = mapping_retry_state or _MappingRetryState()
+
     async def read_guarded_disposition(
         mutation: MigrationMutation,
     ) -> Tuple[FreshMigrationSource, Optional[MigrationSnapshot], bool]:
@@ -1825,12 +2006,13 @@ async def apply_migration_repairs(
             raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
         target_user_id = pinned_target.user_id
         if mutation.type == "CREATE_MAPPING":
-            await create_rownd_user_id_mapping(
-                cast(str, mutation.target_user_id),
-                fresh.snapshot.rownd_user_id,
+            await _create_rownd_user_id_mapping(
+                fresh,
+                pinned_target,
                 user_context,
+                read_fresh_source,
+                retry_state,
             )
-            clear_supertokens_core_call_cache(user_context)
             continue
         if mutation.type == "MAKE_PRIMARY":
             user = await get_user(cast(str, mutation.target_user_id), user_context)
@@ -2336,7 +2518,9 @@ async def reconcile_rownd_user_with_existing_login_methods(
             primary_user_id, external_user_id, user_context
         )
         if not mapping_exists:
-            await create_rownd_user_id_mapping(primary_user_id, external_user_id, user_context)
+            await create_unforced_rownd_user_id_mapping(
+                primary_user_id, external_user_id, user_context
+            )
     await usermetadata_asyncio.update_user_metadata(
         primary_user_id,
         as_json_dict(user_import.get("userMetadata")),

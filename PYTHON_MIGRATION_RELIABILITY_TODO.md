@@ -64,11 +64,11 @@ Implemented by commit `6d6722c` (`feat: Converge concurrent Rownd migrations`).
 
 Reference Node.js commit: `ec277cf` (`feat: Guard forced migration mapping`).
 
-- [ ] Add fresh, two-direction mapping and ownership preflight checks.
-- [ ] Verify mapping symmetry after creation or uncertain outcomes.
-- [ ] Never use broad `force=True` as a fallback.
-- [ ] Return `CORE_CAPABILITY_REQUIRED` when the narrow atomic Core capability is unavailable.
-- [ ] Add tests proving conflicts, collisions, and generic Core errors never force mapping.
+- [x] Add fresh, two-direction mapping and ownership preflight checks.
+- [x] Verify mapping symmetry after creation or uncertain outcomes.
+- [x] Never use broad `force=True` as a fallback.
+- [ ] Return `CORE_CAPABILITY_REQUIRED` when the narrow atomic Core capability is unavailable (blocked until the Python SDK exposes the exact Core result and narrow operation).
+- [x] Add tests proving conflicts, collisions, and generic Core errors never force mapping.
 
 ## Telemetry
 

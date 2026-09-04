@@ -5,7 +5,11 @@ from typing import Any, Optional, cast
 
 import httpx
 import pytest
-from supertokens_python.interfaces import GetUserIdMappingOkResult
+from supertokens_python.interfaces import (
+    CreateUserIdMappingOkResult,
+    GetUserIdMappingOkResult,
+    UserIdMappingAlreadyExistsError,
+)
 from supertokens_python.types import RecipeUserId
 
 import supertokens_rownd.supertokens_repository as repository
@@ -1904,3 +1908,496 @@ async def test_metadata_repair_stops_when_refetched_source_snapshot_changed(
 
     assert result == changed
     assert source_reads == 2
+
+
+def mapping_safety_snapshot(
+    fresh: repository.FreshMigrationSource,
+    *,
+    external_target: Optional[str] = None,
+    internal_external: Optional[str] = None,
+    raw_collision: bool = False,
+    target_exists: bool = True,
+) -> MigrationSnapshot:
+    target = "target"
+    users = {target: MigrationUserState(target_exists, True)}
+    if external_target and external_target != target:
+        users[external_target] = MigrationUserState(True, True)
+    return snapshot(
+        identity_source=fresh.snapshot,
+        external_target=external_target,
+        raw_user_id=fresh.snapshot.rownd_user_id if raw_collision else None,
+        users=users,
+        internal={
+            target: MappingLookup(internal_external, target) if internal_external else None,
+            **({fresh.snapshot.rownd_user_id: None} if raw_collision else {}),
+            **(
+                {external_target: MappingLookup(fresh.snapshot.rownd_user_id, external_target)}
+                if external_target and external_target != target
+                else {}
+            ),
+        },
+        metadata={target: valid_metadata(fresh.snapshot)},
+        pointers={target: CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)},
+    )
+
+
+class MappingSafetyArrangement:
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        initially_mapped: bool = False,
+        create_result: object = None,
+        create_error: Optional[Exception] = None,
+        on_create: Optional[Any] = None,
+    ) -> None:
+        rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
+        self.fresh = repository.FreshMigrationSource(
+            rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+        )
+        self.target = PinnedMigrationTarget("target", MigrationTargetSource.THIRD_PARTY)
+        self.mapped = initially_mapped
+        self.internal_external: Optional[str] = None
+        self.external_target: Optional[str] = None
+        self.raw_collision = False
+        self.target_exists = True
+        self.create_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.create_result = create_result
+        self.create_error = create_error
+        self.on_create = on_create
+
+        async def read_source():
+            return self.fresh
+
+        async def read_snapshot(*_args: Any):
+            return mapping_safety_snapshot(
+                self.fresh,
+                external_target=self.external_target or ("target" if self.mapped else None),
+                internal_external=self.internal_external or (
+                    self.fresh.snapshot.rownd_user_id if self.mapped else None
+                ),
+                raw_collision=self.raw_collision,
+                target_exists=self.target_exists,
+            )
+
+        async def get_mapping(user_id: str, mapping_type: str, *_args: Any):
+            if mapping_type == "EXTERNAL" and user_id == self.fresh.snapshot.rownd_user_id:
+                target = self.external_target or ("target" if self.mapped else None)
+                if target:
+                    return GetUserIdMappingOkResult(target, self.fresh.snapshot.rownd_user_id)
+            if mapping_type == "SUPERTOKENS" and user_id == "target":
+                external = self.internal_external or (
+                    self.fresh.snapshot.rownd_user_id if self.mapped else None
+                )
+                if external:
+                    return GetUserIdMappingOkResult("target", external)
+            return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
+
+        async def create_mapping(*args: Any, **kwargs: Any):
+            self.create_calls.append((args, kwargs))
+            if self.on_create:
+                self.on_create()
+            if self.create_error:
+                raise self.create_error
+            if self.create_result is None or isinstance(
+                self.create_result, CreateUserIdMappingOkResult
+            ):
+                self.mapped = True
+            return self.create_result or CreateUserIdMappingOkResult()
+
+        self.read_source = read_source
+        monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+        monkeypatch.setattr(repository, "get_user_id_mapping", get_mapping)
+        monkeypatch.setattr(repository, "create_user_id_mapping", create_mapping)
+
+    async def create(self, narrow_capability=None, retry_state=None) -> bool:
+        return await repository._create_rownd_user_id_mapping(
+            self.fresh,
+            self.target,
+            {},
+            self.read_source,
+            retry_state or repository._MappingRetryState(),
+            narrow_capability,
+        )
+
+    def assert_unforced(self) -> None:
+        assert all(kwargs["force"] is False for _, kwargs in self.create_calls)
+
+
+class StructuralMappingError(RuntimeError):
+    status = "NON_AUTH_RECIPE_USER_ID_REFERENCE_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_mapping_accepts_exact_existing_symmetric_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arranged = MappingSafetyArrangement(monkeypatch, initially_mapped=True)
+
+    assert await arranged.create() is False
+    assert arranged.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_mapping_recovers_sibling_exact_mapping_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arranged: MappingSafetyArrangement
+    arranged = MappingSafetyArrangement(
+        monkeypatch,
+        create_result=UserIdMappingAlreadyExistsError(False, "true"),
+        on_create=lambda: setattr(arranged, "mapped", True),
+    )
+
+    assert await arranged.create() is False
+    arranged.assert_unforced()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (lambda item: setattr(item, "raw_collision", True), MigrationErrorReason.RAW_USER_ID_COLLISION),
+        (lambda item: setattr(item, "external_target", "foreign"), MigrationErrorReason.MAPPING_CONFLICT),
+        (
+            lambda item: setattr(item, "internal_external", "foreign-external"),
+            MigrationErrorReason.MAPPING_CONFLICT,
+        ),
+    ],
+)
+async def test_mapping_preflight_rejects_collisions_without_writing(
+    monkeypatch: pytest.MonkeyPatch, change: Any, reason: MigrationErrorReason
+) -> None:
+    arranged = MappingSafetyArrangement(monkeypatch)
+    change(arranged)
+
+    with pytest.raises(MigrationError) as raised:
+        await arranged.create()
+
+    assert raised.value.reason is reason
+    assert raised.value.stage == "mapping"
+    assert arranged.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_mapping_exact_non_auth_result_uses_one_narrow_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arranged = MappingSafetyArrangement(
+        monkeypatch, create_result=repository._NonAuthRecipeUserIdReferenceError()
+    )
+    narrow_calls = 0
+
+    async def narrow(*_args: Any):
+        nonlocal narrow_calls
+        narrow_calls += 1
+        arranged.mapped = True
+        return CreateUserIdMappingOkResult()
+
+    assert await arranged.create(narrow) is True
+    assert narrow_calls == 1
+    arranged.assert_unforced()
+
+
+@pytest.mark.asyncio
+async def test_mapping_exact_non_auth_result_requires_unavailable_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arranged = MappingSafetyArrangement(
+        monkeypatch, create_result=repository._NonAuthRecipeUserIdReferenceError()
+    )
+
+    with pytest.raises(MigrationError) as raised:
+        await arranged.create()
+
+    assert raised.value.reason is MigrationErrorReason.CORE_CAPABILITY_REQUIRED
+    assert raised.value.stage == "mapping"
+    arranged.assert_unforced()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("generic failure"),
+        KeyError("does_external_user_id_exist"),
+        StructuralMappingError("not a typed SDK result"),
+    ],
+)
+async def test_mapping_thrown_failures_never_authorize_narrow_attempt(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    arranged = MappingSafetyArrangement(monkeypatch, create_error=failure)
+    narrow_calls = 0
+
+    async def narrow(*_args: Any):
+        nonlocal narrow_calls
+        narrow_calls += 1
+
+    with pytest.raises(BaseException) as raised:
+        await arranged.create(narrow)
+
+    assert raised.value is failure
+    assert narrow_calls == 0
+    arranged.assert_unforced()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [
+        SimpleNamespace(status="NON_AUTH_RECIPE_USER_ID_REFERENCE_ERROR"),
+        SimpleNamespace(status="UNKNOWN_SUPERTOKENS_USER_ID_ERROR"),
+    ],
+)
+async def test_mapping_generic_results_never_authorize_narrow_attempt(
+    monkeypatch: pytest.MonkeyPatch, result: object
+) -> None:
+    arranged = MappingSafetyArrangement(monkeypatch, create_result=result)
+    narrow_calls = 0
+
+    async def narrow(*_args: Any):
+        nonlocal narrow_calls
+        narrow_calls += 1
+
+    with pytest.raises(RuntimeError):
+        await arranged.create(narrow)
+
+    assert narrow_calls == 0
+    arranged.assert_unforced()
+
+
+@pytest.mark.asyncio
+async def test_mapping_shares_narrow_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arranged = MappingSafetyArrangement(
+        monkeypatch, create_result=repository._NonAuthRecipeUserIdReferenceError()
+    )
+    retry_state = repository._MappingRetryState()
+    narrow_calls = 0
+
+    async def narrow(*_args: Any):
+        nonlocal narrow_calls
+        narrow_calls += 1
+        return SimpleNamespace(status="UNKNOWN_SUPERTOKENS_USER_ID_ERROR")
+
+    with pytest.raises(RuntimeError):
+        await arranged.create(narrow, retry_state)
+    with pytest.raises(MigrationError) as raised:
+        await arranged.create(narrow, retry_state)
+
+    assert raised.value.reason is MigrationErrorReason.MIGRATION_INCOMPLETE
+    assert narrow_calls == 1
+    arranged.assert_unforced()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("topology_change", ["internal", "target_removed"])
+async def test_mapping_second_preflight_rejects_topology_change(
+    monkeypatch: pytest.MonkeyPatch, topology_change: str
+) -> None:
+    arranged: MappingSafetyArrangement
+
+    def change_topology() -> None:
+        if topology_change == "internal":
+            arranged.internal_external = "foreign-external"
+        else:
+            arranged.target_exists = False
+
+    arranged = MappingSafetyArrangement(
+        monkeypatch,
+        create_result=repository._NonAuthRecipeUserIdReferenceError(),
+        on_create=change_topology,
+    )
+    narrow_calls = 0
+
+    async def narrow(*_args: Any):
+        nonlocal narrow_calls
+        narrow_calls += 1
+
+    with pytest.raises(MigrationError) as raised:
+        await arranged.create(narrow)
+
+    assert raised.value.reason is MigrationErrorReason.MAPPING_CONFLICT
+    assert narrow_calls == 0
+    arranged.assert_unforced()
+
+
+@pytest.mark.asyncio
+async def test_mapping_second_preflight_rejects_reparented_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "google_id": "google-user"},
+            "verified_data": {"google_id": True},
+        },
+    )
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    identity = fresh.snapshot.expected_identities[0]
+    target = PinnedMigrationTarget("target", MigrationTargetSource.THIRD_PARTY)
+    reparented = False
+    create_calls: list[dict[str, Any]] = []
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        owner_id = "foreign" if reparented else "target"
+        return snapshot(
+            identity_source=fresh.snapshot,
+            owners=(
+                owner(
+                    identity.key,
+                    owner_id,
+                    recipe_user_id="google-recipe",
+                    recipe_id="thirdparty",
+                ),
+            ),
+            users={
+                "target": MigrationUserState(True, True),
+                owner_id: MigrationUserState(True, True),
+            },
+            internal={
+                "target": None,
+                **(
+                    {"foreign": MappingLookup("another-external", "foreign")}
+                    if reparented
+                    else {}
+                ),
+            },
+            metadata={
+                "target": valid_metadata(fresh.snapshot),
+                owner_id: valid_metadata(fresh.snapshot),
+            },
+            pointers={
+                "target": CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT),
+                owner_id: CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT),
+            },
+        )
+
+    async def create_mapping(*_args: Any, **kwargs: Any):
+        nonlocal reparented
+        create_calls.append(kwargs)
+        reparented = True
+        return repository._NonAuthRecipeUserIdReferenceError()
+
+    async def no_mapping(*_args: Any):
+        return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
+
+    narrow_calls = 0
+
+    async def narrow(*_args: Any):
+        nonlocal narrow_calls
+        narrow_calls += 1
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "create_user_id_mapping", create_mapping)
+    monkeypatch.setattr(repository, "get_user_id_mapping", no_mapping)
+
+    with pytest.raises(MigrationError) as raised:
+        await repository._create_rownd_user_id_mapping(
+            fresh,
+            target,
+            {},
+            read_source,
+            repository._MappingRetryState(),
+            narrow,
+        )
+
+    assert raised.value.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+    assert narrow_calls == 0
+    assert all(call["force"] is False for call in create_calls)
+
+
+@pytest.mark.asyncio
+async def test_mapping_rejects_asymmetric_postcondition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arranged: MappingSafetyArrangement
+
+    def create_asymmetric_mapping() -> None:
+        arranged.external_target = "target"
+        arranged.internal_external = "foreign-external"
+
+    arranged = MappingSafetyArrangement(monkeypatch, on_create=create_asymmetric_mapping)
+
+    with pytest.raises(MigrationError) as raised:
+        await arranged.create()
+
+    assert raised.value.reason is MigrationErrorReason.MAPPING_CONFLICT
+    arranged.assert_unforced()
+
+
+@pytest.mark.asyncio
+async def test_mapping_recovers_uncertain_committed_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arranged: MappingSafetyArrangement
+    arranged = MappingSafetyArrangement(
+        monkeypatch,
+        create_error=TimeoutError("timed out"),
+        on_create=lambda: setattr(arranged, "mapped", True),
+    )
+
+    assert await arranged.create() is True
+    arranged.assert_unforced()
+
+
+@pytest.mark.asyncio
+async def test_final_mapping_repair_preserves_capability_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    target = PinnedMigrationTarget("target", MigrationTargetSource.THIRD_PARTY)
+    repairable = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE,
+        target,
+        mutations=(MigrationMutation("CREATE_MAPPING", target_user_id="target"),),
+    )
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        return cast(Any, object())
+
+    repair_attempts = 0
+
+    async def fail_capability_then_incidentally(*_args: Any, **_kwargs: Any):
+        nonlocal repair_attempts
+        repair_attempts += 1
+        if repair_attempts == 1:
+            raise MigrationError(MigrationErrorReason.CORE_CAPABILITY_REQUIRED, "mapping")
+        raise RuntimeError("incidental retry failure")
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "classify_migration_snapshot", lambda *_args: repairable)
+    monkeypatch.setattr(
+        repository, "apply_migration_repairs", fail_capability_then_incidentally
+    )
+
+    with pytest.raises(MigrationError) as raised:
+        await repository.migrate_rownd_user_and_create_session(
+            cast(Any, SimpleNamespace()),
+            "rownd-1",
+            fresh,
+            cast(Any, SimpleNamespace()),
+            cast(Any, SimpleNamespace()),
+            cast(Any, SimpleNamespace()),
+            "tenant-a",
+            None,
+            {},
+            {},
+            read_source,
+        )
+
+    assert raised.value.reason is MigrationErrorReason.CORE_CAPABILITY_REQUIRED
+    assert raised.value.stage == "mapping"

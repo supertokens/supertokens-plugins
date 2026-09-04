@@ -2,6 +2,11 @@
 
 Rownd migration plugin for `supertokens_python`.
 
+> [!IMPORTANT]
+> Safe recovery when non-auth recipe data references a Rownd user ID requires an unreleased SuperTokens Core atomic mapping capability and matching Python SDK binding. No released minimum Core/SDK version can currently be declared. Until both are available and wired, the plugin fails closed and never uses broad `force=True`. Do not release forced-mapping support by assigning a minimum version based only on the existing boolean force API.
+
+Releasing forced-mapping recovery requires the non-forced SDK call to expose the exact `NON_AUTH_RECIPE_USER_ID_REFERENCE_ERROR` result and a first-party SDK method for the narrow atomic operation. Application-supplied mapping adapters are not supported.
+
 This package is managed by Turborepo through `package.json`, but published as a Python package named `supertokens-rownd`.
 
 ## Installation

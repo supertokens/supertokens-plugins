@@ -1207,7 +1207,7 @@ async def test_mapping_conflict_parser_error_requires_fresh_normalized_match(
     monkeypatch.setattr(impl, "create_user_id_mapping", create_mapping)
     monkeypatch.setattr(impl, "get_user_id_mapping", get_mapping)
 
-    created = await impl.create_rownd_user_id_mapping(
+    created = await impl.create_unforced_rownd_user_id_mapping(
         "expected-internal-id", "rownd-user-id", cast(Any, user_context)
     )
 
@@ -1224,7 +1224,9 @@ async def test_mapping_creation_does_not_hide_unrelated_error(
     monkeypatch.setattr(impl, "create_user_id_mapping", create_mapping)
 
     with pytest.raises(RuntimeError, match="network failed"):
-        await impl.create_rownd_user_id_mapping("expected-internal-id", "rownd-user-id", {})
+        await impl.create_unforced_rownd_user_id_mapping(
+            "expected-internal-id", "rownd-user-id", {}
+        )
 
 
 async def test_raw_bulk_import_clears_active_context_on_unknown_write_outcome(
