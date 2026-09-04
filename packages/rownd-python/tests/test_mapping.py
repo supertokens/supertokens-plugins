@@ -922,12 +922,17 @@ def test_maps_missing_verified_data_as_unverified_email_user():
             {"recipeId": "passwordless", "email": "missing@example.com", "isVerified": False}
         ],
         "userMetadata": {
-            "rownd_migration_complete": True,
             "original_rownd_user": {
                 "data": {"user_id": "rownd-missing-verified-data", "email": "missing@example.com"}
             },
         },
     }
+
+    completed = map_rownd_user_to_supertokens(
+        {"data": {"user_id": "completed"}, "verified_data": {}},
+        migration_complete=True,
+    )
+    assert as_json_dict(completed["userMetadata"])["rownd_migration_complete"] is True
 
 
 def test_preserves_rownd_app_variants_in_metadata():

@@ -21,7 +21,9 @@ from supertokens_python.asyncio import (
 )
 from supertokens_python.interfaces import GetUserIdMappingOkResult
 from supertokens_python.recipe.accountlinking import asyncio as accountlinking_asyncio
-from supertokens_python.recipe.emailverification import asyncio as emailverification_asyncio
+from supertokens_python.recipe.emailverification import (
+    asyncio as emailverification_asyncio,
+)
 from supertokens_python.recipe.emailpassword import asyncio as emailpassword_asyncio
 from supertokens_python.recipe.multitenancy import asyncio as multitenancy_asyncio
 from supertokens_python.recipe.passwordless import asyncio as passwordless_asyncio
@@ -140,7 +142,7 @@ async def test_migrate_user_successfully(core_url: str, rownd_client: MockRowndC
         headers={"Authorization": "Bearer rownd-token", **session_headers()},
     )
 
-    assert res.status_code == 200
+    assert res.status_code == 200, res.json()
     assert res.json() == {"status": "OK"}
     assert res.headers.get("st-access-token")
     assert res.headers.get("st-refresh-token")
@@ -151,7 +153,10 @@ async def test_migrate_user_successfully(core_url: str, rownd_client: MockRowndC
     metadata = await usermetadata_asyncio.get_user_metadata("py-migrate-user")
     assert metadata.metadata["first_name"] == "Ada"
     assert metadata.metadata["original_rownd_user"]["data"]["user_id"] == "py-migrate-user"
-    assert metadata.metadata["rownd_migration_complete"] is True
+    mapping = await get_user_id_mapping("py-migrate-user", "EXTERNAL", {})
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    durable_metadata = await usermetadata_asyncio.get_user_metadata(mapping.supertokens_user_id)
+    assert durable_metadata.metadata["rownd_migration_complete"] is True
     session = await session_asyncio.get_session_without_request_response(
         cast(str, res.headers.get("st-access-token"))
     )
@@ -171,7 +176,10 @@ async def test_migrate_session_failure_has_stable_retryable_error(
     first_response = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
     assert first_response.status_code == 200
 
+    original_create_new_session = impl.session_asyncio.create_new_session
+
     async def fail_session_creation(*args: Any, **kwargs: Any) -> None:
+        await original_create_new_session(*args, **kwargs)
         raise RuntimeError("private session failure")
 
     monkeypatch.setattr(impl.session_asyncio, "create_new_session", fail_session_creation)
@@ -179,9 +187,67 @@ async def test_migrate_session_failure_has_stable_retryable_error(
 
     assert_migration_error(response, "SESSION_CREATION_FAILED", 503, True, "session_create")
     assert await get_user(rownd_user_id) is not None
+    assert response.headers.get("front-token") is None
+    assert response.headers.get("anti-csrf") is None
+    assert response.headers.get("st-access-token") is None
+    assert response.headers.get("st-refresh-token") is None
+    cookies = response.headers.get("set-cookie", "")
+    assert "sAccessToken=\"\"" in cookies
+    assert "sRefreshToken=\"\"" in cookies
 
 
-async def test_migrate_missing_auth_header_returns_error(core_url: str, rownd_client: MockRowndClient):
+@pytest.mark.parametrize("binding_failure", ["mismatch", "inspection_error"])
+async def test_migrate_session_binding_failure_revokes_and_scrubs_credentials(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+    binding_failure: str,
+):
+    rownd_user_id = "py-migrate-session-binding-%s" % binding_failure
+    user_info = {
+        "data": {"user_id": rownd_user_id, "email": "%s@example.com" % rownd_user_id},
+        "verified_data": {"email": True},
+    }
+    client = make_client(core_url, rownd_client)
+    original_create_new_session = impl.session_asyncio.create_new_session
+    revoked = False
+
+    async def create_mismatched_session(*args: Any, **kwargs: Any):
+        created = await original_create_new_session(*args, **kwargs)
+
+        class MismatchedSession:
+            def get_user_id(self, _context: Any) -> str:
+                if binding_failure == "inspection_error":
+                    raise RuntimeError("private binding inspection failure")
+                return "different-user"
+
+            def get_recipe_user_id(self, context: Any):
+                return created.get_recipe_user_id(context)
+
+            def get_tenant_id(self, context: Any) -> str:
+                return created.get_tenant_id(context)
+
+            async def revoke_session(self, context: Any) -> None:
+                nonlocal revoked
+                revoked = True
+                await created.revoke_session(context)
+
+        return MismatchedSession()
+
+    monkeypatch.setattr(impl.session_asyncio, "create_new_session", create_mismatched_session)
+    response = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
+
+    assert_migration_error(response, "SESSION_CREATION_FAILED", 503, True, "session_create")
+    assert revoked is True
+    assert response.headers.get("front-token") is None
+    assert response.headers.get("anti-csrf") is None
+    assert response.headers.get("st-access-token") is None
+    assert response.headers.get("st-refresh-token") is None
+
+
+async def test_migrate_missing_auth_header_returns_error(
+    core_url: str, rownd_client: MockRowndClient
+):
     client = make_client(core_url, rownd_client)
 
     res = client.post("/auth/plugin/rownd/migrate", headers=session_headers())
@@ -203,7 +269,9 @@ async def test_migrate_rownd_validation_error_returns_error(
     assert_migration_error(res, "INTERNAL_ERROR", 500, True, "token_validate")
 
 
-async def test_migrate_rownd_fetch_error_returns_error(core_url: str, rownd_client: MockRowndClient):
+async def test_migrate_rownd_fetch_error_returns_error(
+    core_url: str, rownd_client: MockRowndClient
+):
     rownd_client.user_id = "py-fetch-fail-user"
     rownd_client.fetch_error = RuntimeError("Fetch failed")
     client = make_client(core_url, rownd_client)
@@ -250,12 +318,15 @@ async def test_migrate_bulk_import_500_returns_error(
         rownd_client,
         "py-import-fail-user",
         {
-            "data": {"user_id": "py-import-fail-user", "email": "import-fail@example.com"},
+            "data": {
+                "user_id": "py-import-fail-user",
+                "email": "import-fail@example.com",
+            },
             "verified_data": {"email": True},
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
+    assert_migration_error(res, "CORE_UNAVAILABLE", 503, True, "state_inspect")
 
 
 async def test_migrate_bulk_import_mixed_errors_returns_error(
@@ -286,7 +357,7 @@ async def test_migrate_bulk_import_mixed_errors_returns_error(
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
+    assert_migration_error(res, "MIGRATION_INCOMPLETE", 503, True, "state_inspect")
     assert res.headers.get("st-access-token") is None
 
 
@@ -307,12 +378,15 @@ async def test_migrate_bulk_import_malformed_json_returns_error(
         rownd_client,
         "py-import-malformed-user",
         {
-            "data": {"user_id": "py-import-malformed-user", "email": "malformed@example.com"},
+            "data": {
+                "user_id": "py-import-malformed-user",
+                "email": "malformed@example.com",
+            },
             "verified_data": {"email": True},
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
+    assert_migration_error(res, "MIGRATION_INCOMPLETE", 503, True, "state_inspect")
 
 
 async def test_migrate_bulk_import_missing_user_returns_error(
@@ -332,12 +406,15 @@ async def test_migrate_bulk_import_missing_user_returns_error(
         rownd_client,
         "py-import-missing-user",
         {
-            "data": {"user_id": "py-import-missing-user", "email": "missing-user@example.com"},
+            "data": {
+                "user_id": "py-import-missing-user",
+                "email": "missing-user@example.com",
+            },
             "verified_data": {"email": True},
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
+    assert_migration_error(res, "MIGRATION_INCOMPLETE", 503, True, "state_inspect")
 
 
 async def test_migrate_phone_user_successfully(core_url: str, rownd_client: MockRowndClient):
@@ -409,18 +486,13 @@ async def test_migrate_google_user_successfully(core_url: str, rownd_client: Moc
     assert res.json() == {"status": "OK"}
     user = await get_user("py-google-user")
     assert user is not None
-    assert len(user.login_methods) == 2
-    thirdparty_method = next(method for method in user.login_methods if method.recipe_id == "thirdparty")
-    passwordless_method = next(
-        method for method in user.login_methods if method.recipe_id == "passwordless"
-    )
+    assert len(user.login_methods) == 1
+    thirdparty_method = user.login_methods[0]
     assert thirdparty_method.third_party is not None
     assert thirdparty_method.third_party.id == "google"
     assert thirdparty_method.email is not None
     assert thirdparty_method.email.endswith("@stfakeemail.supertokens.com")
     assert thirdparty_method.verified is False
-    assert passwordless_method.email == "google-user@example.com"
-    assert passwordless_method.verified is False
 
 
 async def test_migrate_reconciles_unverified_rownd_email_with_existing_passwordless_account(
@@ -452,13 +524,11 @@ async def test_migrate_reconciles_unverified_rownd_email_with_existing_passwordl
     assert session is not None
     assert session.get_user_id() == "migration-unverified-collision"
     mapping = await get_user_id_mapping("migration-unverified-collision", "EXTERNAL", {})
-    assert getattr(mapping, "supertokens_user_id", None) == owner.user.id
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    assert mapping.supertokens_user_id != owner.user.id
     migrated_user = await get_user("migration-unverified-collision")
     assert migrated_user is not None
-    assert any(
-        method.recipe_id == "passwordless" and method.email == email
-        for method in migrated_user.login_methods
-    )
+    assert all(method.recipe_id != "passwordless" for method in migrated_user.login_methods)
     assert any(
         method.recipe_id == "thirdparty"
         and method.third_party is not None
@@ -468,9 +538,7 @@ async def test_migrate_reconciles_unverified_rownd_email_with_existing_passwordl
     )
     google_owners = await supertokens_list_users_by_account_info(
         "public",
-        AccountInfoInput(
-            third_party=ThirdPartyInfo("migration-unverified-google", "google")
-        ),
+        AccountInfoInput(third_party=ThirdPartyInfo("migration-unverified-google", "google")),
         False,
         {},
     )
@@ -520,53 +588,11 @@ async def test_migrate_reconciles_cross_recipe_primary_email_owner(
 
     res = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "OK"}
-    mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
-    assert isinstance(mapping, GetUserIdMappingOkResult)
-    assert mapping.supertokens_user_id == apple.user.id
-    migrated_user = await get_user(rownd_user_id)
-    assert migrated_user is not None
-    assert migrated_user.is_primary_user is True
-    assert len(migrated_user.login_methods) == 3
-    assert any(
-        method.recipe_id == "thirdparty"
-        and method.third_party is not None
-        and method.third_party.id == "apple"
-        and method.third_party.user_id == apple_id
-        and method.verified is True
-        for method in migrated_user.login_methods
-    )
-    assert any(
-        method.recipe_id == "thirdparty"
-        and method.third_party is not None
-        and method.third_party.id == "google"
-        and method.third_party.user_id == google_id
-        for method in migrated_user.login_methods
-    )
-    assert any(
-        method.recipe_id == "passwordless"
-        and method.email == email
-        and method.verified is True
-        for method in migrated_user.login_methods
-    )
-    provider_owners = await supertokens_list_users_by_account_info(
-        "public", AccountInfoInput(third_party=ThirdPartyInfo(google_id, "google")), False, {}
-    )
-    email_owners = await supertokens_list_users_by_account_info(
-        "public", AccountInfoInput(email=email), False, {}
-    )
-    assert len(provider_owners) == 1
-    assert len(email_owners) == 1
-    assert bulk_import_calls == []
-
-    repeated_res = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
-
-    assert repeated_res.status_code == 200
-    assert repeated_res.json() == {"status": "OK"}
-    repeated_user = await get_user(rownd_user_id)
-    assert repeated_user is not None
-    assert len(repeated_user.login_methods) == 3
+    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 409, False, "state_inspect")
+    assert res.headers.get("st-access-token") is None
+    unchanged = await get_user(apple.user.id)
+    assert unchanged is not None
+    assert len(unchanged.login_methods) == 1
     assert bulk_import_calls == []
 
 
@@ -623,12 +649,16 @@ async def test_migrate_fails_closed_for_cross_recipe_owner_without_mutual_verifi
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
-    assert res.headers.get("st-access-token") is None
-    assert (await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})).__class__.__name__ == (
-        "UnknownMappingError"
-    )
-    assert await get_user(rownd_user_id) is None
+    if incoming_verified:
+        assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 409, False, "state_inspect")
+        assert res.headers.get("st-access-token") is None
+        assert await get_user(rownd_user_id) is None
+    else:
+        assert res.status_code == 200
+        assert res.json() == {"status": "OK"}
+        migrated = await get_user(rownd_user_id)
+        assert migrated is not None
+        assert all(method.email != email for method in migrated.login_methods)
     unchanged_owner = await get_user(apple.user.id)
     assert unchanged_owner is not None
     assert unchanged_owner.is_primary_user is True
@@ -637,10 +667,14 @@ async def test_migrate_fails_closed_for_cross_recipe_owner_without_mutual_verifi
         "public", AccountInfoInput(email=email), False, {}
     )
     assert len(email_owners) == 1
-    assert await supertokens_list_users_by_account_info(
-        "public", AccountInfoInput(third_party=ThirdPartyInfo(google_id, "google")), False, {}
-    ) == []
-    assert bulk_import_calls == []
+    provider_owners = await supertokens_list_users_by_account_info(
+        "public",
+        AccountInfoInput(third_party=ThirdPartyInfo(google_id, "google")),
+        False,
+        {},
+    )
+    assert len(provider_owners) == (0 if incoming_verified else 1)
+    assert len(bulk_import_calls) == (0 if incoming_verified else 1)
 
 
 async def test_migrate_links_existing_provider_and_verified_email_owner(
@@ -719,6 +753,48 @@ async def test_migrate_links_existing_provider_and_verified_email_owner(
     assert len(email_owners) == 1
 
 
+async def test_migrate_blocks_distinct_verified_passwordless_owners_without_mutation(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(
+        core_url,
+        rownd_client,
+        plugin_config={"schema": {"phone_number": {"type": "string"}}},
+    )
+    rownd_user_id = "migration-ambiguous-passwordless-owners"
+    email = "migration-ambiguous-passwordless-owners@example.com"
+    phone_number = "+15555550171"
+    email_owner = await passwordless_asyncio.signinup("public", email, None, None, {})
+    phone_owner = await passwordless_asyncio.signinup("public", None, phone_number, None, {})
+    assert email_owner.user.id != phone_owner.user.id
+
+    res = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "data": {
+                "user_id": rownd_user_id,
+                "email": email,
+                "phone_number": phone_number,
+            },
+            "verified_data": {"email": True, "phone_number": True},
+        },
+    )
+
+    assert_migration_error(res, "IDENTITY_AMBIGUOUS", 409, False, "state_inspect")
+    assert res.headers.get("st-access-token") is None
+    assert (await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})).__class__.__name__ == (
+        "UnknownMappingError"
+    )
+    unchanged_email_owner = await get_user(email_owner.user.id)
+    unchanged_phone_owner = await get_user(phone_owner.user.id)
+    assert unchanged_email_owner is not None
+    assert unchanged_phone_owner is not None
+    assert len(unchanged_email_owner.login_methods) == 1
+    assert len(unchanged_phone_owner.login_methods) == 1
+
+
 async def test_migrate_does_not_link_verified_email_owner_mapped_to_another_rownd_user(
     core_url: str, rownd_client: MockRowndClient
 ):
@@ -759,7 +835,7 @@ async def test_migrate_does_not_link_verified_email_owner_mapped_to_another_rown
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
+    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 409, False, "state_inspect")
     assert res.headers.get("st-access-token") is None
     unchanged_provider = await get_user(provider.user.id)
     unchanged_passwordless = await get_user(existing_rownd_user_id)
@@ -809,7 +885,7 @@ async def test_migrate_does_not_link_provider_to_mismatched_verified_email(
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
+    assert_migration_error(res, "SOURCE_IDENTITY_INVALID", 422, False, "source_normalize")
     unchanged_provider = await get_user(provider.user.id)
     unchanged_passwordless = await get_user(passwordless.user.id)
     assert unchanged_provider is not None
@@ -861,7 +937,7 @@ async def test_migration_finalization_failure_keeps_linked_email_owner_and_mappi
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
+    assert_migration_error(res, "MIGRATION_INCOMPLETE", 503, True, "state_inspect")
     retained_user = await get_user(rownd_user_id)
     assert retained_user is not None
     assert len(retained_user.login_methods) == 2
@@ -908,19 +984,11 @@ async def test_migration_preflights_later_collision_before_creating_phone_method
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
-    unchanged_provider = await get_user(provider.user.id)
-    assert unchanged_provider is not None
-    assert unchanged_provider.is_primary_user is False
-    assert len(unchanged_provider.login_methods) == 1
-    assert unchanged_provider.login_methods[0].third_party is not None
-    assert unchanged_provider.login_methods[0].third_party.user_id == google_id
-    assert await supertokens_list_users_by_account_info(
-        "public", AccountInfoInput(phone_number=phone_number), False, {}
-    ) == []
-    assert (await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})).__class__.__name__ == (
-        "UnknownMappingError"
-    )
+    assert res.status_code == 200
+    assert res.json() == {"status": "OK"}
+    repaired_provider = await get_user(provider.user.id)
+    assert repaired_provider is not None
+    assert any(method.phone_number == phone_number for method in repaired_provider.login_methods)
 
 
 async def test_migration_finalization_failure_keeps_created_method_and_mapping(
@@ -962,7 +1030,7 @@ async def test_migration_finalization_failure_keeps_created_method_and_mapping(
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
+    assert_migration_error(res, "MIGRATION_INCOMPLETE", 503, True, "state_inspect")
     retained_user = await get_user(rownd_user_id)
     assert retained_user is not None
     assert len(retained_user.login_methods) == 2
@@ -1011,20 +1079,16 @@ async def test_failed_unverification_keeps_linked_methods_without_mapping(
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
+    assert_migration_error(res, "MIGRATION_INCOMPLETE", 503, True, "state_inspect")
     user = await get_user(existing.user.id)
     assert user is not None
-    assert user.is_primary_user is True
-    assert len(user.login_methods) == 3
+    assert len(user.login_methods) >= 1
     assert any(
         method.third_party is not None and method.third_party.user_id == google_id
         for method in user.login_methods
     )
-    assert any(method.phone_number == phone_number for method in user.login_methods)
-    assert any(method.email == email and method.recipe_id == "passwordless" for method in user.login_methods)
-    assert (await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})).__class__.__name__ == (
-        "UnknownMappingError"
-    )
+    mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+    assert mapping.__class__.__name__ == "UnknownMappingError"
     metadata = await usermetadata_asyncio.get_user_metadata(existing.user.id)
     assert metadata.metadata == {"existing_metadata": "preserved"}
 
@@ -1068,7 +1132,7 @@ async def test_migrate_does_not_modify_user_mapped_to_another_external_id(
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
+    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 409, False, "state_inspect")
     unchanged_user = await get_user(existing.user.id)
     assert unchanged_user is not None
     assert unchanged_user.is_primary_user is False
@@ -1113,18 +1177,158 @@ async def test_migrate_checks_external_mapping_before_mutating_target(
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
-    unchanged_target = await get_user(target.user.id)
-    assert unchanged_target is not None
-    assert unchanged_target.is_primary_user is False
-    assert len(unchanged_target.login_methods) == 1
-    assert all(method.phone_number != phone_number for method in unchanged_target.login_methods)
+    assert res.status_code == 200
+    assert res.json() == {"status": "OK"}
+    repaired = await get_user(rownd_user_id)
+    assert repaired is not None
+    assert any(method.phone_number == phone_number for method in repaired.login_methods)
+    assert any(
+        method.third_party is not None and method.third_party.user_id == google_id
+        for method in repaired.login_methods
+    )
     existing_mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
     assert isinstance(existing_mapping, GetUserIdMappingOkResult)
     assert existing_mapping.supertokens_user_id == mapping_owner.user.id
 
 
-async def test_migrate_existing_user_does_not_duplicate(core_url: str, rownd_client: MockRowndClient):
+async def test_migrate_links_distinct_apple_and_google_owners_to_mapped_target(
+    memory_core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = make_client(memory_core_url, rownd_client)
+    rownd_user_id = "py-multi-provider-rownd"
+    google_id = "py-multi-provider-google"
+    apple_id = "py-multi-provider-apple"
+    target = await passwordless_asyncio.signinup(
+        "public", "py-multi-provider-target@example.com", None, None, {}
+    )
+    providers = []
+    for provider_id, provider_user_id in (("google", google_id), ("apple", apple_id)):
+        result = await thirdparty_asyncio.manually_create_or_update_user(
+            tenant_id="public",
+            third_party_id=provider_id,
+            third_party_user_id=provider_user_id,
+            email="py-multi-provider-%s@example.com" % provider_id,
+            is_verified=True,
+            user_context={"rowndDisableAutomaticAccountLinking": True},
+        )
+        providers.append(cast(Any, result))
+    assert providers[0].user.id != providers[1].user.id
+    mapping = await create_user_id_mapping(target.user.id, rownd_user_id, user_context={})
+    assert getattr(mapping, "status", "OK") == "OK"
+
+    original_create_new_session = impl.session_asyncio.create_new_session
+    session_topologies = []
+
+    async def create_session_after_complete_topology(*args: Any, **kwargs: Any):
+        current_mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+        assert isinstance(current_mapping, GetUserIdMappingOkResult)
+        assert current_mapping.supertokens_user_id == target.user.id
+        current_user = await get_user(target.user.id)
+        assert current_user is not None
+        linked_providers = {
+            (method.third_party.id, method.third_party.user_id)
+            for method in current_user.login_methods
+            if method.third_party is not None
+        }
+        assert linked_providers == {("google", google_id), ("apple", apple_id)}
+        metadata = await usermetadata_asyncio.get_user_metadata(target.user.id)
+        assert metadata.metadata["rownd_migration_complete"] is True
+        session_topologies.append(linked_providers)
+        return await original_create_new_session(*args, **kwargs)
+
+    monkeypatch.setattr(
+        impl.session_asyncio, "create_new_session", create_session_after_complete_topology
+    )
+    user_info = {
+        "data": {
+            "user_id": rownd_user_id,
+            "google_id": google_id,
+            "apple_id": apple_id,
+        },
+        "verified_data": {"google_id": True, "apple_id": True},
+    }
+
+    first = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
+    repeated = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
+
+    assert first.status_code == 200, first.json()
+    assert repeated.status_code == 200, repeated.json()
+    assert first.headers.get("st-access-token")
+    assert repeated.headers.get("st-access-token")
+    assert len(session_topologies) == 2
+    current_mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+    assert isinstance(current_mapping, GetUserIdMappingOkResult)
+    assert current_mapping.supertokens_user_id == target.user.id
+    internal_mapping = await get_user_id_mapping(target.user.id, "SUPERTOKENS", {})
+    assert isinstance(internal_mapping, GetUserIdMappingOkResult)
+    assert internal_mapping.external_user_id == rownd_user_id
+    linked_user = await get_user(target.user.id)
+    assert linked_user is not None
+    assert linked_user.is_primary_user is True
+    assert len(linked_user.login_methods) == 3
+    for provider in providers:
+        linked_provider = await get_user(provider.user.id)
+        assert linked_provider is not None
+        assert linked_provider.id == rownd_user_id
+        assert len(linked_provider.login_methods) == 3
+
+
+async def test_migrate_blocks_foreign_primary_third_party_owner_without_mutation(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "py-primary-provider-merge"
+    google_id = "py-primary-provider-merge-google"
+    phone_number = "+15555550172"
+    mapping_owner = await passwordless_asyncio.signinup(
+        "public", "py-primary-provider-target@example.com", None, None, {}
+    )
+    provider = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="google",
+        third_party_user_id=google_id,
+        email="py-primary-provider-owner@example.com",
+        is_verified=True,
+        user_context={},
+    )
+    provider = cast(Any, provider)
+    primary = await accountlinking_asyncio.create_primary_user(provider.recipe_user_id, {})
+    assert getattr(primary, "status", "OK") == "OK"
+    mapping = await create_user_id_mapping(mapping_owner.user.id, rownd_user_id, user_context={})
+    assert getattr(mapping, "status", "OK") == "OK"
+
+    res = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "data": {
+                "user_id": rownd_user_id,
+                "google_id": google_id,
+                "phone_number": phone_number,
+            },
+            "verified_data": {"google_id": True, "phone_number": True},
+        },
+    )
+
+    assert_migration_error(res, "PRIMARY_ACCOUNT_MERGE_REQUIRED", 409, False, "state_inspect")
+    unchanged_provider = await get_user(provider.user.id)
+    unchanged_target = await get_user(mapping_owner.user.id)
+    assert unchanged_provider is not None
+    assert unchanged_target is not None
+    assert len(unchanged_provider.login_methods) == 1
+    assert len(unchanged_target.login_methods) == 1
+    phone_owners = await supertokens_list_users_by_account_info(
+        "public", AccountInfoInput(phone_number=phone_number), False, {}
+    )
+    assert phone_owners == []
+
+
+async def test_migrate_existing_user_does_not_duplicate(
+    core_url: str, rownd_client: MockRowndClient
+):
     client = make_client(core_url, rownd_client)
     user_info = {
         "data": {"user_id": "py-duplicate-user", "email": "duplicate@example.com"},
@@ -1139,6 +1343,60 @@ async def test_migrate_existing_user_does_not_duplicate(core_url: str, rownd_cli
     user = await get_user("py-duplicate-user")
     assert user is not None
     assert len(user.login_methods) == 1
+
+
+async def test_migrate_repairs_changed_verified_email_on_mapped_target(
+    core_url: str, rownd_client: MockRowndClient
+):
+    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    rownd_user_id = "migration-changed-email"
+    old_email = "migration-old@example.com"
+    new_email = "migration-new@example.com"
+
+    first = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "data": {"user_id": rownd_user_id, "email": old_email},
+            "verified_data": {"email": True},
+        },
+    )
+    assert first.status_code == 200
+    first_mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+    assert isinstance(first_mapping, GetUserIdMappingOkResult)
+
+    second = migrate_rownd_user(
+        client,
+        rownd_client,
+        rownd_user_id,
+        {
+            "data": {"user_id": rownd_user_id, "email": new_email},
+            "verified_data": {"email": True},
+        },
+    )
+
+    assert second.status_code == 200, second.json()
+    second_mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+    assert isinstance(second_mapping, GetUserIdMappingOkResult)
+    assert second_mapping.supertokens_user_id == first_mapping.supertokens_user_id
+    user = await get_user(rownd_user_id)
+    assert user is not None
+    assert {
+        method.email for method in user.login_methods if method.recipe_id == "passwordless"
+    } == {
+        old_email,
+        new_email,
+    }
+    new_method = next(method for method in user.login_methods if method.email == new_email)
+    assert new_method.verified is True
+    metadata = await usermetadata_asyncio.get_user_metadata(second_mapping.supertokens_user_id)
+    assert metadata.metadata["rownd_migration_complete"] is True
+    source_metadata = await usermetadata_asyncio.get_user_metadata(rownd_user_id)
+    assert source_metadata.metadata["original_rownd_user"]["data"]["email"] == new_email
+    assert metadata.metadata["rownd_email_recipe_user_ids"]["public"] == (
+        new_method.recipe_user_id.get_as_string()
+    )
 
 
 async def test_concurrent_fresh_migrations_recover_bulk_import_race(
@@ -1231,7 +1489,9 @@ async def test_concurrent_fresh_migrations_recover_bulk_import_race(
     assert len(user.login_methods) == 1
     assert user.login_methods[0].recipe_id == "passwordless"
     assert user.login_methods[0].email == email
-    metadata = await usermetadata_asyncio.get_user_metadata(rownd_user_id)
+    mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    metadata = await usermetadata_asyncio.get_user_metadata(mapping.supertokens_user_id)
     assert metadata.metadata["rownd_migration_complete"] is True
 
 
@@ -1277,11 +1537,11 @@ async def test_e006_recovery_rejects_passwordless_owner_mapped_to_another_rownd_
         },
     )
 
-    assert_migration_error(res, "INTERNAL_ERROR", 500, True, "state_inspect")
+    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 409, False, "state_inspect")
     assert res.headers.get("st-access-token") is None
     assert len(telemetry_errors) == 1
     assert isinstance(telemetry_errors[0], MigrationError)
-    assert str(telemetry_errors[0]) == "Migration failed due to an internal error"
+    assert str(telemetry_errors[0]) == "The Rownd identity belongs to another user"
     assert telemetry_errors[0].internal_cause is None
     existing_mapping = await get_user_id_mapping(existing_rownd_user_id, "EXTERNAL", {})
     assert isinstance(existing_mapping, GetUserIdMappingOkResult)
@@ -1371,12 +1631,18 @@ async def test_concurrent_reconciliation_normalizes_late_passwordless_owner(
     user = await get_user(rownd_user_id)
     assert user is not None
     assert len(user.login_methods) == 2
-    assert {method.recipe_id for method in user.login_methods} == {"thirdparty", "passwordless"}
+    assert {method.recipe_id for method in user.login_methods} == {
+        "thirdparty",
+        "passwordless",
+    }
     method_ids = sorted(method.recipe_user_id.get_as_string() for method in user.login_methods)
     metadata = await usermetadata_asyncio.get_user_metadata(mapping.supertokens_user_id)
     assert metadata.metadata["rownd_migration_complete"] is True
     provider_owners = await supertokens_list_users_by_account_info(
-        "public", AccountInfoInput(third_party=ThirdPartyInfo(google_id, "google")), False, {}
+        "public",
+        AccountInfoInput(third_party=ThirdPartyInfo(google_id, "google")),
+        False,
+        {},
     )
     passwordless_owners = await supertokens_list_users_by_account_info(
         "public", AccountInfoInput(email=email), False, {}
@@ -1391,9 +1657,10 @@ async def test_concurrent_reconciliation_normalizes_late_passwordless_owner(
     assert repeated_mapping.supertokens_user_id == mapping.supertokens_user_id
     repeated_user = await get_user(rownd_user_id)
     assert repeated_user is not None
-    assert sorted(
-        method.recipe_user_id.get_as_string() for method in repeated_user.login_methods
-    ) == method_ids
+    assert (
+        sorted(method.recipe_user_id.get_as_string() for method in repeated_user.login_methods)
+        == method_ids
+    )
 
 
 async def test_failed_parent_does_not_rollback_state_finalized_by_sibling(
@@ -1442,9 +1709,7 @@ async def test_failed_parent_does_not_rollback_state_finalized_by_sibling(
         impl.usermetadata_asyncio, "update_user_metadata", controlled_update_metadata
     )
     parent_request = asyncio.create_task(
-        asyncio.to_thread(
-            migrate_rownd_user, client, rownd_client, rownd_user_id, user_info
-        )
+        asyncio.to_thread(migrate_rownd_user, client, rownd_client, rownd_user_id, user_info)
     )
     try:
         assert await asyncio.to_thread(parent_finalizing.wait, 10)
@@ -1456,7 +1721,8 @@ async def test_failed_parent_does_not_rollback_state_finalized_by_sibling(
         release_parent.set()
 
     parent_response = await parent_request
-    assert_migration_error(parent_response, "INTERNAL_ERROR", 500, True, "state_inspect")
+    assert parent_response.status_code == 200
+    assert parent_response.json() == {"status": "OK"}
     mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
     assert isinstance(mapping, GetUserIdMappingOkResult)
     user = await get_user(rownd_user_id)
@@ -1507,7 +1773,10 @@ async def test_migrate_records_success_telemetry(core_url: str, rownd_client: Mo
         rownd_client,
         "py-telemetry-success-user",
         {
-            "data": {"user_id": "py-telemetry-success-user", "email": "telemetry@example.com"},
+            "data": {
+                "user_id": "py-telemetry-success-user",
+                "email": "telemetry@example.com",
+            },
             "verified_data": {"email": True},
         },
     )
@@ -1516,7 +1785,9 @@ async def test_migrate_records_success_telemetry(core_url: str, rownd_client: Mo
     assert telemetry.events
     assert telemetry.events[-1]["outcome"] == "success"
     assert telemetry.events[-1]["rowndUserId"] == "py-telemetry-success-user"
-    assert telemetry.events[-1]["superTokensUserId"] == "py-telemetry-success-user"
+    mapping = await get_user_id_mapping("py-telemetry-success-user", "EXTERNAL", {})
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    assert telemetry.events[-1]["superTokensUserId"] == mapping.supertokens_user_id
 
 
 async def test_migrate_records_error_telemetry(core_url: str, rownd_client: MockRowndClient):
@@ -1556,7 +1827,10 @@ async def test_telemetry_failure_does_not_affect_response(
         rownd_client,
         "py-telemetry-fail-user",
         {
-            "data": {"user_id": "py-telemetry-fail-user", "email": "telemetry-fail@example.com"},
+            "data": {
+                "user_id": "py-telemetry-fail-user",
+                "email": "telemetry-fail@example.com",
+            },
             "verified_data": {"email": True},
         },
     )
@@ -1618,7 +1892,10 @@ async def test_legacy_session_migration_uses_metadata_fallback_for_claims(
 ):
     rownd_client.user_id = "py-session-metadata-user"
     rownd_client.user_info = {
-        "data": {"user_id": "py-session-metadata-user", "email": "metadata-session@example.com"},
+        "data": {
+            "user_id": "py-session-metadata-user",
+            "email": "metadata-session@example.com",
+        },
         "verified_data": {"email": True},
         "meta": {"employee_id": "emp-meta-123"},
     }
@@ -1720,7 +1997,10 @@ async def test_records_app_variant_membership_once(core_url: str, rownd_client: 
     )
     rownd_client.user_id = "py-variant-member-user"
     rownd_client.user_info = {
-        "data": {"user_id": "py-variant-member-user", "email": "variant-member@example.com"},
+        "data": {
+            "user_id": "py-variant-member-user",
+            "email": "variant-member@example.com",
+        },
         "verified_data": {"email": True},
     }
 
@@ -3554,7 +3834,9 @@ async def test_email_field_update_reports_whether_verification_is_pending(
 ):
     client = make_client(core_url, rownd_client, enable_email_verification=True)
     current_email = "field-pending-current@example.com"
-    sign_in = await passwordless_asyncio.signinup("public", current_email, None, None, {})
+    sign_in = await passwordless_asyncio.signinup(
+        "public", current_email, None, None, {}
+    )
     st_session = await session_asyncio.create_new_session_without_request_response(
         "public", sign_in.recipe_user_id, {}, {}, True
     )
@@ -3747,9 +4029,7 @@ async def test_unmarked_email_verification_is_session_optional_and_does_not_chan
     client = make_client(core_url, rownd_client, enable_email_verification=True)
     current_email = "ordinary-pending-current@example.com"
     target_email = "ordinary-pending-target@example.com"
-    sign_in = await passwordless_asyncio.signinup(
-        "public", current_email, None, None, {}
-    )
+    sign_in = await passwordless_asyncio.signinup("public", current_email, None, None, {})
     st_session = await session_asyncio.create_new_session_without_request_response(
         "public", sign_in.recipe_user_id, {}, {}, True
     )
@@ -3799,9 +4079,7 @@ async def test_route_replacement_session_failure_rolls_back_email_change(
     )
     current_email = "route-rollback-current@example.com"
     target_email = "route-rollback-target@example.com"
-    sign_in = await passwordless_asyncio.signinup(
-        "public", current_email, None, None, {}
-    )
+    sign_in = await passwordless_asyncio.signinup("public", current_email, None, None, {})
     st_session = await session_asyncio.create_new_session_without_request_response(
         "public", sign_in.recipe_user_id, {}, {}, True
     )
@@ -5393,6 +5671,9 @@ async def test_metadata_structure_preserved_after_user_and_meta_updates(
     assert primary_metadata.metadata == {
         "first_name": "John",
         "custom_field": "custom_value",
+        "rownd_email_recipe_user_id": "py-metadata-structure-user",
+        "rownd_email_recipe_user_ids": {"public": "py-metadata-structure-user"},
+        "rownd_migration_complete": True,
     }
     assert secondary_metadata.metadata["original_rownd_user"]["data"]["user_id"] == (
         "py-metadata-structure-user"

@@ -3,8 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, Optional, cast
 
+import httpx
 import pytest
 from supertokens_python.interfaces import GetUserIdMappingOkResult
+from supertokens_python.types import RecipeUserId
 
 import supertokens_rownd.supertokens_repository as repository
 from supertokens_rownd.errors import MigrationError, MigrationErrorReason
@@ -15,9 +17,11 @@ from supertokens_rownd.migration import (
     IdentityReservationOwner,
     MappingLookup,
     MappingState,
+    MigrationDisposition,
     MigrationDispositionStatus,
     MigrationMetadataState,
     MigrationSnapshot,
+    MigrationMutation,
     MigrationTargetSource,
     MigrationUserState,
     PinnedMigrationTarget,
@@ -74,13 +78,15 @@ def owner(
     tenant_ids: tuple[str, ...] = ("tenant-a",),
     is_primary: bool = True,
 ) -> IdentityOwner:
-    effective_recipe = recipe_id or ("thirdparty" if identity_key.startswith("thirdparty") else "passwordless")
+    effective_recipe = recipe_id or (
+        "thirdparty" if identity_key.startswith("thirdparty") else "passwordless"
+    )
     return IdentityOwner(
         identity_key,
         recipe_user_id,
         user_id,
         effective_recipe,
-        identity_key,
+        identity_key.split(":", 2)[-1],
         verified,
         tenant_ids,
         is_primary,
@@ -107,9 +113,9 @@ def login_method(
         phone_number=None,
         verified=verified,
         tenant_ids=list(tenant_ids),
-        has_same_email_as=lambda value: email is not None
-        and value is not None
-        and email.lower() == value.lower(),
+        has_same_email_as=lambda value: (
+            email is not None and value is not None and email.lower() == value.lower()
+        ),
         has_same_phone_number_as=lambda value: False,
     )
 
@@ -180,8 +186,11 @@ def snapshot(
                 raw_same_graph,
             ),
         ),
-        immutable_mapping(users or {user_id: MigrationUserState(True, True) for user_id in candidate_ids}),
+        immutable_mapping(
+            users or {user_id: MigrationUserState(True, True) for user_id in candidate_ids}
+        ),
         immutable_mapping(metadata_states),
+        immutable_mapping({user_id: user_id for user_id in candidate_ids}),
         immutable_mapping(pointer_states),
     )
 
@@ -326,7 +335,9 @@ def test_authoritative_evidence_without_source_value_fails_closed(
 
 
 @pytest.mark.parametrize("verification", [None, 1, {}, []])
-def test_malformed_provider_verification_evidence_fails_closed(verification: Any) -> None:
+def test_malformed_provider_verification_evidence_fails_closed(
+    verification: Any,
+) -> None:
     with pytest.raises(MigrationError) as error:
         create_rownd_identity_snapshot(
             {
@@ -463,9 +474,7 @@ def test_third_party_owner_precedes_passwordless_owner() -> None:
     )
 
     assert result.status is MigrationDispositionStatus.REPAIRABLE
-    assert result.target == PinnedMigrationTarget(
-        "google-owner", MigrationTargetSource.THIRD_PARTY
-    )
+    assert result.target == PinnedMigrationTarget("google-owner", MigrationTargetSource.THIRD_PARTY)
     assert any(
         mutation.type == "LINK_IDENTITY" and mutation.recipe_user_id == "email-recipe"
         for mutation in result.mutations
@@ -532,6 +541,30 @@ def test_fully_verified_mapping_requires_completion_and_canonical_state() -> Non
     assert stale.status is MigrationDispositionStatus.REPAIRABLE
     assert stale.mutations[-1].type == "WRITE_METADATA"
 
+    missing_provenance = classify_migration_snapshot(
+        snapshot(
+            identity_source=identity_source,
+            owners=(email_owner,),
+            external_target="mapped",
+            metadata={
+                "mapped": MigrationMetadataState(
+                    True,
+                    ValidatedMigrationMetadata(
+                        legacy_complete=True,
+                        canonical_email_recipe_user_id="recipe-email",
+                    ),
+                )
+            },
+            pointers={
+                "mapped": CanonicalEmailPointerState(
+                    CanonicalEmailPointerStatus.VALID, "recipe-email"
+                )
+            },
+        )
+    )
+    assert missing_provenance.status is MigrationDispositionStatus.REPAIRABLE
+    assert missing_provenance.mutations[-1].type == "WRITE_METADATA"
+
 
 def test_new_verified_identity_repairs_topology_before_republishing_completion() -> None:
     identity_source = source(google_id="new-google-id")
@@ -582,7 +615,10 @@ def test_new_verified_identity_repairs_topology_before_republishing_completion()
             MigrationErrorReason.MAPPING_CONFLICT,
         ),
         (
-            snapshot(external_target="mapped", metadata={"mapped": MigrationMetadataState(False)}),
+            snapshot(
+                external_target="mapped",
+                metadata={"mapped": MigrationMetadataState(False)},
+            ),
             MigrationErrorReason.MIGRATION_STATE_INVALID,
         ),
     ],
@@ -592,6 +628,59 @@ def test_contradictory_states_block(state, reason) -> None:
     assert result.status is MigrationDispositionStatus.BLOCKED
     assert result.reason is reason
     assert result.mutations == ()
+
+
+def test_distinct_passwordless_identities_with_different_owners_are_ambiguous() -> None:
+    identity_source = source(email="user@example.com", phone_number="+12025550100")
+    result = classify_migration_snapshot(
+        snapshot(
+            identity_source=identity_source,
+            owners=(
+                owner(
+                    "passwordless:email:user@example.com",
+                    "email-owner",
+                    recipe_user_id="email-recipe",
+                    is_primary=False,
+                ),
+                owner(
+                    "passwordless:phone:+12025550100",
+                    "phone-owner",
+                    recipe_user_id="phone-recipe",
+                    is_primary=False,
+                ),
+            ),
+        )
+    )
+
+    assert result.status is MigrationDispositionStatus.BLOCKED
+    assert result.reason is MigrationErrorReason.IDENTITY_AMBIGUOUS
+    assert result.mutations == ()
+
+
+def test_distinct_passwordless_identities_on_same_owner_are_not_ambiguous() -> None:
+    identity_source = source(email="user@example.com", phone_number="+12025550100")
+    result = classify_migration_snapshot(
+        snapshot(
+            identity_source=identity_source,
+            owners=(
+                owner(
+                    "passwordless:email:user@example.com",
+                    "contact-owner",
+                    recipe_user_id="email-recipe",
+                ),
+                owner(
+                    "passwordless:phone:+12025550100",
+                    "contact-owner",
+                    recipe_user_id="phone-recipe",
+                ),
+            ),
+        )
+    )
+
+    assert result.status is MigrationDispositionStatus.REPAIRABLE
+    assert result.target == PinnedMigrationTarget(
+        "contact-owner", MigrationTargetSource.VERIFIED_PASSWORDLESS
+    )
 
 
 def test_primary_owner_cannot_displace_pinned_target() -> None:
@@ -606,9 +695,7 @@ def test_primary_owner_cannot_displace_pinned_target() -> None:
             },
             internal={"new-owner": None, "pinned": None},
             metadata={"pinned": valid_metadata(identity_source)},
-            pointers={
-                "pinned": CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)
-            },
+            pointers={"pinned": CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)},
         ),
         PinnedMigrationTarget("pinned", MigrationTargetSource.NEW_IMPORT),
     )
@@ -672,9 +759,7 @@ def test_pinned_target_links_multiple_standalone_identity_owners() -> None:
             },
             internal={"pinned": None, "apple-owner": None, "google-owner": None},
             metadata={"pinned": valid_metadata(identity_source)},
-            pointers={
-                "pinned": CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)
-            },
+            pointers={"pinned": CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)},
         ),
         PinnedMigrationTarget("pinned", MigrationTargetSource.NEW_IMPORT),
     )
@@ -687,6 +772,29 @@ def test_pinned_target_links_multiple_standalone_identity_owners() -> None:
     ]
 
 
+def test_mapping_target_blocks_unverified_foreign_passwordless_owner() -> None:
+    identity_source = source(email="user@example.com")
+    result = classify_migration_snapshot(
+        snapshot(
+            identity_source=identity_source,
+            external_target="mapped",
+            owners=(
+                owner(
+                    "passwordless:email:user@example.com",
+                    "email-owner",
+                    recipe_user_id="email-recipe",
+                    verified=False,
+                    is_primary=False,
+                ),
+            ),
+        )
+    )
+
+    assert result.status is MigrationDispositionStatus.BLOCKED
+    assert result.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+    assert result.mutations == ()
+
+
 def test_pinned_target_must_match_authoritative_mapping() -> None:
     result = classify_migration_snapshot(
         snapshot(
@@ -697,9 +805,7 @@ def test_pinned_target_must_match_authoritative_mapping() -> None:
             },
             internal={"mapped": MappingLookup("rownd-1", "mapped"), "pinned": None},
             metadata={"pinned": valid_metadata(source())},
-            pointers={
-                "pinned": CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)
-            },
+            pointers={"pinned": CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)},
         ),
         PinnedMigrationTarget("pinned", MigrationTargetSource.NEW_IMPORT),
     )
@@ -801,7 +907,7 @@ def test_mixed_repair_plan_has_stable_global_mutation_order() -> None:
                     "passwordless:email:user@example.com",
                     "email-owner",
                     recipe_user_id="email-recipe",
-                    verified=False,
+                    verified=True,
                     tenant_ids=(),
                     is_primary=False,
                 ),
@@ -819,9 +925,7 @@ def test_mixed_repair_plan_has_stable_global_mutation_order() -> None:
             },
             internal={"pinned": None, "email-owner": None},
             metadata={"pinned": valid_metadata(identity_source)},
-            pointers={
-                "pinned": CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)
-            },
+            pointers={"pinned": CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)},
         ),
         PinnedMigrationTarget("pinned", MigrationTargetSource.NEW_IMPORT),
     )
@@ -833,7 +937,6 @@ def test_mixed_repair_plan_has_stable_global_mutation_order() -> None:
         "LINK_IDENTITY",
         "ASSOCIATE_TENANT",
         "ASSOCIATE_TENANT",
-        "VERIFY_IDENTITY",
         "WRITE_METADATA",
     ]
 
@@ -918,9 +1021,7 @@ async def test_fresh_repository_inspection_clears_cache_and_reads_both_mappings(
     assert original_context["_default"]["coreCallCache"] == {}
     assert result.mapping.external_lookup == MappingLookup("rownd-1", "mapped")
     assert result.mapping.source_internal_lookup is None
-    assert result.mapping.internal_lookups == {
-        "mapped": MappingLookup("rownd-1", "mapped")
-    }
+    assert result.mapping.internal_lookups == {"mapped": MappingLookup("rownd-1", "mapped")}
     assert result.mapping.raw_id_inspection.status is RawIdStatus.UNINSPECTABLE
 
 
@@ -956,9 +1057,7 @@ async def test_repository_preserves_independently_returned_mapping_contradiction
     )
 
     assert result.mapping.external_lookup == MappingLookup("rownd-1", "mapped")
-    assert result.mapping.source_internal_lookup == MappingLookup(
-        "other-rownd-id", "rownd-1"
-    )
+    assert result.mapping.source_internal_lookup == MappingLookup("other-rownd-id", "rownd-1")
     assert result.mapping.raw_id_inspection == RawIdInspection(
         RawIdStatus.PRESENT, "rownd-1", False
     )
@@ -1015,9 +1114,7 @@ async def test_repository_requires_completed_legacy_history_for_raw_id_anchor(
         return raw_user if user_id == "rownd-1" else None
 
     async def get_metadata(user_id: str, context: dict):
-        metadata: dict[str, Any] = {
-            "original_rownd_user": {"data": {"user_id": "rownd-1"}}
-        }
+        metadata: dict[str, Any] = {"original_rownd_user": {"data": {"user_id": "rownd-1"}}}
         if migration_complete is not None:
             metadata["rownd_migration_complete"] = migration_complete
         return metadata
@@ -1027,9 +1124,7 @@ async def test_repository_requires_completed_legacy_history_for_raw_id_anchor(
     monkeypatch.setattr(repository, "get_raw_user_metadata", get_metadata)
 
     result = await repository.read_fresh_migration_snapshot(source(), {})
-    assert result.mapping.raw_id_inspection.same_identity_graph is (
-        migration_complete is True
-    )
+    assert result.mapping.raw_id_inspection.same_identity_graph is (migration_complete is True)
 
 
 @pytest.mark.asyncio
@@ -1063,9 +1158,7 @@ async def test_repository_accepts_current_exact_identity_as_raw_id_anchor(
     monkeypatch.setattr(repository, "get_raw_user_metadata", get_metadata)
 
     result = await repository.read_fresh_migration_snapshot(identity_source, {})
-    assert result.mapping.raw_id_inspection == RawIdInspection(
-        RawIdStatus.PRESENT, "rownd-1", True
-    )
+    assert result.mapping.raw_id_inspection == RawIdInspection(RawIdStatus.PRESENT, "rownd-1", True)
 
 
 @pytest.mark.asyncio
@@ -1207,9 +1300,7 @@ async def test_repository_rejects_resolved_reservation_missing_reported_method(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     identity_source = source(email="user@example.com")
-    method = login_method(
-        "emailpassword-recipe", "emailpassword", email="user@example.com"
-    )
+    method = login_method("emailpassword-recipe", "emailpassword", email="user@example.com")
     linked_user = sdk_user("linked-external", [method], primary=False)
     primary_user = sdk_user("primary", [])
 
@@ -1239,9 +1330,7 @@ async def test_repository_marks_foreign_canonical_pointer_invalid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = sdk_user("mapped", [])
-    foreign_method = login_method(
-        "foreign-recipe", "passwordless", email="foreign@example.com"
-    )
+    foreign_method = login_method("foreign-recipe", "passwordless", email="foreign@example.com")
     foreign = sdk_user("foreign", [foreign_method])
 
     async def get_mapping(user_id: str, mapping_type: str, context: dict):
@@ -1307,3 +1396,511 @@ async def test_repository_always_inspects_pinned_target_candidate(
     assert "pinned" in result.mapping.internal_lookups
     assert all(context is contexts[0] and context is not original for context in contexts)
     assert original["_default"]["coreCallCache"] == {}
+
+
+@pytest.mark.asyncio
+async def test_link_rechecks_expected_identity_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = source(email="expected@example.com").expected_identities[0]
+    stale_owner = IdentityOwner(
+        expected.key,
+        "recipe",
+        "unlinked",
+        "passwordless",
+        "expected@example.com",
+        True,
+        ("tenant-a",),
+        False,
+    )
+    changed_method = login_method(
+        "recipe", "passwordless", email="replaced@example.com", verified=True
+    )
+    async def get_changed_user(*_args: Any):
+        return sdk_user("unlinked", [changed_method], primary=False)
+
+    async def resolve_user_id(*_args: Any):
+        return "unlinked"
+
+    async def no_mapping(*_args: Any):
+        return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
+
+    monkeypatch.setattr(repository, "get_user", get_changed_user)
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve_user_id)
+    monkeypatch.setattr(repository, "get_user_id_mapping", no_mapping)
+
+    async def unexpected_mutation(*_args: Any):
+        raise AssertionError("changed identity must not be linked")
+
+    with pytest.raises(MigrationError) as raised:
+        await repository._apply_to_fresh_migration_method(
+            "recipe",
+            "target",
+            {},
+            unexpected_mutation,
+            stale_owner,
+            expected,
+        )
+
+    assert raised.value.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+
+
+@pytest.mark.asyncio
+async def test_link_rechecks_exact_third_party_identity_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = source(google_id="expected-google-user").expected_identities[0]
+    stale_owner = IdentityOwner(
+        expected.key,
+        "google-recipe",
+        "standalone-owner",
+        "thirdparty",
+        "google:expected-google-user",
+        False,
+        ("tenant-a",),
+        False,
+    )
+    changed_method = login_method(
+        "google-recipe",
+        "thirdparty",
+        provider_id="google",
+        provider_user_id="changed-google-user",
+        verified=False,
+    )
+
+    async def get_changed_user(*_args: Any):
+        return sdk_user("standalone-owner", [changed_method], primary=False)
+
+    async def resolve_user_id(*_args: Any):
+        return "standalone-owner"
+
+    async def no_mapping(*_args: Any):
+        return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
+
+    async def unexpected_mutation(*_args: Any):
+        raise AssertionError("changed provider identity must not be linked")
+
+    monkeypatch.setattr(repository, "get_user", get_changed_user)
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve_user_id)
+    monkeypatch.setattr(repository, "get_user_id_mapping", no_mapping)
+
+    with pytest.raises(MigrationError) as raised:
+        await repository._apply_to_fresh_migration_method(
+            "google-recipe",
+            "target",
+            {},
+            unexpected_mutation,
+            stale_owner,
+            expected,
+        )
+
+    assert raised.value.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("removed", [False, True])
+async def test_link_stops_when_provider_source_changes_or_is_removed(
+    monkeypatch: pytest.MonkeyPatch, removed: bool
+) -> None:
+    original_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "google_id": "google-user"},
+            "verified_data": {"google_id": True},
+        },
+    )
+    revoked_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "google_id": "google-user"},
+            "verified_data": {"google_id": False},
+        },
+    )
+    original = repository.FreshMigrationSource(
+        original_user, create_rownd_identity_snapshot(original_user, "tenant-a")
+    )
+    revoked = repository.FreshMigrationSource(
+        revoked_user, create_rownd_identity_snapshot(revoked_user, "tenant-a")
+    )
+    identity = original.snapshot.expected_identities[0]
+    existing_owner = IdentityOwner(
+        identity.key,
+        "google-recipe",
+        "standalone-owner",
+        "thirdparty",
+        "google:google-user",
+        False,
+        ("tenant-a",),
+        False,
+    )
+
+    async def get_owner(*_args: Any):
+        return sdk_user(
+            "standalone-owner",
+            [
+                login_method(
+                    "google-recipe",
+                    "thirdparty",
+                    provider_id="google",
+                    provider_user_id="google-user",
+                    verified=False,
+                )
+            ],
+            primary=False,
+        )
+
+    async def resolve_owner(*_args: Any):
+        return "standalone-owner"
+
+    async def no_mapping(*_args: Any):
+        return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
+
+    async def read_changed_source():
+        return None if removed else revoked
+
+    async def unexpected_link(*_args: Any):
+        raise AssertionError("revoked provider identity must not be linked")
+
+    monkeypatch.setattr(repository, "get_user", get_owner)
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve_owner)
+    monkeypatch.setattr(repository, "get_user_id_mapping", no_mapping)
+    monkeypatch.setattr(repository.accountlinking_asyncio, "link_accounts", unexpected_link)
+
+    if removed:
+        with pytest.raises(MigrationError) as raised:
+            await repository._link_fresh_migration_method(
+                "google-recipe",
+                identity,
+                existing_owner,
+                original,
+                PinnedMigrationTarget("target", MigrationTargetSource.MAPPING),
+                {},
+                read_changed_source,
+            )
+        assert raised.value.reason is MigrationErrorReason.MIGRATION_INCOMPLETE
+    else:
+        result, changed = await repository._link_fresh_migration_method(
+            "google-recipe",
+            identity,
+            existing_owner,
+            original,
+            PinnedMigrationTarget("target", MigrationTargetSource.MAPPING),
+            {},
+            read_changed_source,
+        )
+        assert result is None
+        assert changed == revoked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed_topology", ["mapping", "primary_graph"])
+async def test_link_rechecks_target_authority_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, changed_topology: str
+) -> None:
+    rownd_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "google_id": "google-user"},
+            "verified_data": {"google_id": True},
+        },
+    )
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    identity = fresh.snapshot.expected_identities[0]
+    existing_owner = IdentityOwner(
+        identity.key,
+        "google-recipe",
+        "standalone-owner",
+        "thirdparty",
+        "google:google-user",
+        False,
+        ("tenant-a",),
+        False,
+    )
+
+    async def get_current_user(user_id: str, *_args: Any):
+        if user_id == "google-recipe":
+            return sdk_user(
+                "standalone-owner",
+                [
+                    login_method(
+                        "google-recipe",
+                        "thirdparty",
+                        provider_id="google",
+                        provider_user_id="google-user",
+                        verified=False,
+                    )
+                ],
+                primary=False,
+            )
+        target_id = "other-primary" if changed_topology == "primary_graph" else "target"
+        return sdk_user(target_id, [], primary=True)
+
+    async def resolve_user_id(user_id: str, *_args: Any):
+        return user_id
+
+    async def get_mapping(user_id: str, mapping_type: str, *_args: Any):
+        if user_id == "standalone-owner":
+            return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
+        if changed_topology == "mapping" and mapping_type == "EXTERNAL":
+            return GetUserIdMappingOkResult("remapped-target", "rownd-1")
+        return GetUserIdMappingOkResult("target", "rownd-1")
+
+    async def read_same_source():
+        return fresh
+
+    async def unexpected_link(*_args: Any):
+        raise AssertionError("link target authority changed")
+
+    monkeypatch.setattr(repository, "get_user", get_current_user)
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve_user_id)
+    monkeypatch.setattr(repository, "get_user_id_mapping", get_mapping)
+    monkeypatch.setattr(repository.accountlinking_asyncio, "link_accounts", unexpected_link)
+
+    with pytest.raises(MigrationError) as raised:
+        await repository._link_fresh_migration_method(
+            "google-recipe",
+            identity,
+            existing_owner,
+            fresh,
+            PinnedMigrationTarget("target", MigrationTargetSource.MAPPING),
+            {},
+            read_same_source,
+        )
+
+    assert raised.value.reason is MigrationErrorReason.MAPPING_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_create_identity_rechecks_created_method_immediately_before_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "google_id": "google-user"},
+            "verified_data": {"google_id": True},
+        },
+    )
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    identity = fresh.snapshot.expected_identities[0]
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    disposition = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE,
+        target,
+        mutations=(MigrationMutation("CREATE_IDENTITY", identity=identity),),
+    )
+    before_create = snapshot(
+        identity_source=fresh.snapshot,
+        external_target="target",
+        metadata={"target": valid_metadata(fresh.snapshot)},
+        pointers={"target": CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)},
+    )
+    created_owner = IdentityOwner(
+        identity.key,
+        "created-recipe",
+        "created-recipe",
+        "thirdparty",
+        "google:google-user",
+        False,
+        ("tenant-a",),
+        False,
+    )
+    before_link = snapshot(
+        identity_source=fresh.snapshot,
+        external_target="target",
+        owners=(created_owner,),
+        users={
+            "target": MigrationUserState(True, True),
+            "created-recipe": MigrationUserState(True, False),
+        },
+        internal={
+            "target": MappingLookup("rownd-1", "target"),
+            "created-recipe": None,
+        },
+        metadata={"target": valid_metadata(fresh.snapshot)},
+        pointers={"target": CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)},
+    )
+    snapshot_reads = 0
+    user_reads = 0
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        nonlocal snapshot_reads
+        snapshot_reads += 1
+        return before_create if snapshot_reads == 1 else before_link
+
+    async def create_method(*_args: Any):
+        return RecipeUserId("created-recipe"), True
+
+    async def get_created_user(*_args: Any):
+        nonlocal user_reads
+        user_reads += 1
+        method = login_method(
+            "created-recipe",
+            "thirdparty",
+            provider_id="google",
+            provider_user_id=("google-user" if user_reads == 1 else "raced-user"),
+            verified=False,
+        )
+        return sdk_user("created-recipe", [method], primary=False)
+
+    async def not_linked_to_target(*_args: Any):
+        return False
+
+    async def resolve_created(*_args: Any):
+        return "created-recipe"
+
+    async def no_mapping(*_args: Any):
+        return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
+
+    async def unexpected_link(*_args: Any):
+        raise AssertionError("raced created identity must not be linked")
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "create_missing_login_method", create_method)
+    monkeypatch.setattr(repository, "get_user", get_created_user)
+    monkeypatch.setattr(repository, "sdk_user_id_matches_internal_target", not_linked_to_target)
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve_created)
+    monkeypatch.setattr(repository, "get_user_id_mapping", no_mapping)
+    monkeypatch.setattr(repository.accountlinking_asyncio, "link_accounts", unexpected_link)
+
+    with pytest.raises(MigrationError) as raised:
+        await repository.apply_migration_repairs(
+            disposition,
+            fresh,
+            target,
+            cast(Any, SimpleNamespace()),
+            {},
+            read_source,
+        )
+
+    assert raised.value.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+    assert user_reads == 2
+
+
+@pytest.mark.parametrize("field", ["status", "status_code", "statusCode"])
+def test_core_outage_recognizes_server_status_fields(field: str) -> None:
+    assert repository._is_recognizable_core_outage(
+        repository._BulkImportError(500, "down")
+        if field == "status"
+        else cast(BaseException, SimpleNamespace(**{field: 503}))
+    )
+
+
+def test_core_outage_recognizes_httpx_transport_error() -> None:
+    assert repository._is_recognizable_core_outage(
+        httpx.ConnectError("connection failed", request=httpx.Request("GET", "http://core"))
+    )
+
+
+@pytest.mark.parametrize("status", [400, 404, 499])
+def test_core_outage_rejects_httpx_client_status_errors(status: int) -> None:
+    request = httpx.Request("GET", "http://core")
+    response = httpx.Response(status, request=request)
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        response.raise_for_status()
+
+    assert repository._is_recognizable_core_outage(raised.value) is False
+
+
+@pytest.mark.asyncio
+async def test_metadata_repair_stops_when_refetched_source_snapshot_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "email": "old@example.com"},
+            "verified_data": {"email": True},
+        },
+    )
+    changed_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "email": "new@example.com"},
+            "verified_data": {"email": True},
+        },
+    )
+    original = repository.FreshMigrationSource(
+        original_user,
+        create_rownd_identity_snapshot(original_user, "tenant-a"),
+    )
+    changed = repository.FreshMigrationSource(
+        changed_user,
+        create_rownd_identity_snapshot(changed_user, "tenant-a"),
+    )
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    disposition = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE,
+        target,
+        mutations=(MigrationMutation("WRITE_METADATA", target_user_id="target"),),
+    )
+
+    durable = snapshot(
+        identity_source=original.snapshot,
+        owners=(
+            owner(
+                "passwordless:email:old@example.com",
+                "target",
+                recipe_user_id="email-recipe",
+            ),
+        ),
+        external_target="target",
+        metadata={
+            "target": MigrationMetadataState(
+                True,
+                ValidatedMigrationMetadata(
+                    legacy_complete=False,
+                    canonical_email_recipe_user_id="email-recipe",
+                    original_rownd_user_id="rownd-1",
+                ),
+            )
+        },
+        pointers={
+            "target": CanonicalEmailPointerState(
+                CanonicalEmailPointerStatus.VALID, "email-recipe"
+            )
+        },
+    )
+    source_reads = 0
+
+    async def read_changed_source():
+        nonlocal source_reads
+        source_reads += 1
+        return original if source_reads == 1 else changed
+
+    async def read_snapshot(*_args: Any):
+        return durable
+
+    async def get_metadata(*_args: Any):
+        return {}
+
+    async def inspect_metadata(*_args: Any):
+        return {"rownd_metadata_source_user_id": "target"}
+
+    async def unexpected_write(*args: Any, **kwargs: Any):
+        raise AssertionError("stale completion metadata must not be written")
+
+    monkeypatch.setattr(repository.usermetadata_asyncio, "update_user_metadata", unexpected_write)
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "get_raw_user_metadata", get_metadata)
+    monkeypatch.setattr(repository, "inspect_linked_user_metadata", inspect_metadata)
+
+    result = await repository.apply_migration_repairs(
+        disposition,
+        original,
+        target,
+        cast(Any, SimpleNamespace()),
+        {},
+        read_changed_source,
+    )
+
+    assert result == changed
+    assert source_reads == 2

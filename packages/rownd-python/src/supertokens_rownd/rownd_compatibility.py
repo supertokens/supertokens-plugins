@@ -539,7 +539,9 @@ def is_rownd_email_verified(value: object, email: str) -> bool:
 
 
 def map_rownd_user_to_supertokens(
-    rownd_user: JsonDict, tenant_id: Optional[str] = None
+    rownd_user: JsonDict,
+    tenant_id: Optional[str] = None,
+    migration_complete: bool = False,
 ) -> JsonDict:
     login_methods = []
     data = as_json_dict(rownd_user.get("data"))
@@ -610,14 +612,15 @@ def map_rownd_user_to_supertokens(
     return {
         "externalUserId": data["user_id"],
         "loginMethods": login_methods,
-        "userMetadata": build_rownd_user_metadata(rownd_user),
+        "userMetadata": build_rownd_user_metadata(rownd_user, migration_complete),
     }
 
 
-def build_rownd_user_metadata(rownd_user: JsonDict) -> JsonDict:
+def build_rownd_user_metadata(rownd_user: JsonDict, migration_complete: bool = False) -> JsonDict:
     metadata = dict(as_json_dict(rownd_user.get("meta")))
     metadata["original_rownd_user"] = rownd_user
-    metadata["rownd_migration_complete"] = True
+    if migration_complete:
+        metadata["rownd_migration_complete"] = True
     data = as_json_dict(rownd_user.get("data"))
     for key, value in data.items():
         if not is_identity_field(key) and value is not None:

@@ -42,21 +42,21 @@ Reference Node.js commit: `f9d44eb` (`feat: Inspect durable migration state`).
 Before enabling phase-3 mutations:
 
 - [x] Require Rownd verification authority before treating `google_id` and `apple_id` as expected identities.
-- [ ] Keep `original_rownd_user.data.user_id` as protected historical targeting evidence; require fresh topology inspection and `rownd_migration_complete: true` before session creation.
-- [ ] Re-fetch and normalize the Rownd profile before phase-3 finalization, then compare the new snapshot directly with the attempt snapshot before writing completion metadata.
+- [x] Keep `original_rownd_user.data.user_id` as protected historical targeting evidence; require fresh topology inspection and `rownd_migration_complete: true` before session creation.
+- [x] Re-fetch and normalize the Rownd profile before phase-3 finalization, then compare the new snapshot directly with the attempt snapshot before writing completion metadata.
 
 ## Convergent Reconciliation
 
 Reference Node.js commit: `36bfa04` (`feat: Converge concurrent Rownd migrations`).
 
-- [ ] Add the bounded inspect, repair, and final-verification loop.
-- [ ] Remove destructive migration rollback behavior.
-- [ ] Make an existing Rownd mapping the canonical repair anchor.
-- [ ] Reconcile verified Passwordless identities safely.
-- [ ] Repair mapped users whose verified Rownd email changed.
-- [ ] Delay migration-complete metadata until durable postconditions pass.
-- [ ] Recover from duplicate imports, linking races, mapping races, and uncertain mutation outcomes.
-- [ ] Keep session creation separate from durable migration completion.
+- [x] Add the bounded inspect, repair, and final-verification loop.
+- [x] Remove destructive migration rollback behavior.
+- [x] Make an existing Rownd mapping the canonical repair anchor.
+- [x] Reconcile verified Passwordless identities safely.
+- [x] Repair mapped users whose verified Rownd email changed.
+- [x] Delay migration-complete metadata until durable postconditions pass.
+- [x] Recover from duplicate imports, linking races, mapping races, and uncertain mutation outcomes.
+- [x] Keep session creation separate from durable migration completion.
 
 ## Mapping Safety
 

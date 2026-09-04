@@ -5,7 +5,19 @@ import json
 import uuid
 from contextlib import suppress
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, NoReturn, Optional, Tuple, Union, cast
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    NamedTuple,
+    NoReturn,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
 
 import httpx
 from supertokens_python import SupertokensConfig
@@ -17,6 +29,7 @@ from supertokens_python.asyncio import (
     list_users_by_account_info,
 )
 from supertokens_python.framework.request import BaseRequest
+from supertokens_python.framework.response import BaseResponse
 from supertokens_python.recipe.accountlinking import asyncio as accountlinking_asyncio
 from supertokens_python.recipe.accountlinking.interfaces import (
     CreatePrimaryUserOkResult,
@@ -24,18 +37,25 @@ from supertokens_python.recipe.accountlinking.interfaces import (
     LinkAccountsOkResult,
     LinkAccountsRecipeUserIdAlreadyLinkedError,
 )
-from supertokens_python.recipe.emailverification import asyncio as emailverification_asyncio
+from supertokens_python.recipe.emailverification import (
+    asyncio as emailverification_asyncio,
+)
 from supertokens_python.recipe.multitenancy import asyncio as multitenancy_asyncio
 from supertokens_python.recipe.passwordless import asyncio as passwordless_asyncio
 from supertokens_python.recipe.session import SessionContainer
 from supertokens_python.recipe.session import asyncio as session_asyncio
 from supertokens_python.recipe.thirdparty import asyncio as thirdparty_asyncio
-from supertokens_python.recipe.thirdparty.interfaces import ManuallyCreateOrUpdateUserOkResult
+from supertokens_python.recipe.thirdparty.interfaces import (
+    ManuallyCreateOrUpdateUserOkResult,
+)
 from supertokens_python.recipe.thirdparty.types import ThirdPartyInfo
 from supertokens_python.recipe.usermetadata import asyncio as usermetadata_asyncio
 from supertokens_python.types import LoginMethod, RecipeUserId, User
 from supertokens_python.types.base import AccountInfoInput, UserContext
-from supertokens_python.interfaces import CreateUserIdMappingOkResult, GetUserIdMappingOkResult
+from supertokens_python.interfaces import (
+    CreateUserIdMappingOkResult,
+    GetUserIdMappingOkResult,
+)
 
 from .constants import (
     GUEST_AUTH_METHOD_ID,
@@ -65,6 +85,9 @@ from .migration import (
     IdentityReservationOwner,
     MappingLookup,
     MappingState,
+    MigrationDisposition,
+    MigrationDispositionStatus,
+    MigrationMutation,
     MigrationMetadataState,
     MigrationSnapshot,
     MigrationUserState,
@@ -72,6 +95,8 @@ from .migration import (
     RawIdInspection,
     RawIdStatus,
     RowndIdentitySnapshot,
+    ValidatedMigrationMetadata,
+    classify_migration_snapshot,
     immutable_mapping,
     validate_migration_metadata,
 )
@@ -108,6 +133,46 @@ class _BulkImportError(RuntimeError):
         self.status = status
         self.response_text = response_text
         super().__init__("Bulk import failed with status %s: %s" % (status, response_text))
+
+
+class FreshMigrationSource(NamedTuple):
+    rownd_user: JsonDict
+    snapshot: RowndIdentitySnapshot
+
+
+class _MigrationSourceChanged(RuntimeError):
+    source: FreshMigrationSource
+
+    def __init__(self, source: FreshMigrationSource):
+        self.source = source
+        super().__init__("Rownd migration source changed before account linking")
+
+
+_SESSION_RESPONSE_HEADERS = (
+    "set-cookie",
+    "front-token",
+    "anti-csrf",
+    "st-access-token",
+    "st-refresh-token",
+)
+_SESSION_RESPONSE_COOKIES = (
+    ("sAccessToken", "/"),
+    ("sRefreshToken", "/auth/session/refresh"),
+)
+
+
+def scrub_migration_session_response(
+    response: BaseResponse, request: Optional[BaseRequest] = None
+) -> None:
+    if request is not None:
+        with suppress(Exception):
+            request.set_session_as_none()
+    for header in _SESSION_RESPONSE_HEADERS:
+        with suppress(Exception):
+            response.remove_header(header)
+    for name, path in _SESSION_RESPONSE_COOKIES:
+        with suppress(Exception):
+            response.set_cookie(name, "", 0, path=path, httponly=True, samesite="lax")
 
 
 def _mapping_lookup(result: object) -> Optional[MappingLookup]:
@@ -194,11 +259,15 @@ async def read_fresh_migration_snapshot(
         and _migration_method_reserves_identity(method, identity)
     ]
 
-    async def resolved_owner(entry: Tuple[ExpectedIdentity, User, LoginMethod]) -> IdentityOwner:
+    async def resolved_owner(
+        entry: Tuple[ExpectedIdentity, User, LoginMethod],
+    ) -> IdentityOwner:
         identity, user, method = entry
         internal_user_id = await resolve_supertokens_user_id(user.id, inspection_context)
         resolved_user = (
-            user if internal_user_id == user.id else await get_user(internal_user_id, inspection_context)
+            user
+            if internal_user_id == user.id
+            else await get_user(internal_user_id, inspection_context)
         )
         recipe_user_id = method.recipe_user_id.get_as_string()
         resolved_method = next(
@@ -229,12 +298,14 @@ async def read_fresh_migration_snapshot(
         )
 
     async def resolved_reservation(
-        entry: Tuple[ExpectedIdentity, User, LoginMethod]
+        entry: Tuple[ExpectedIdentity, User, LoginMethod],
     ) -> IdentityReservationOwner:
         identity, user, method = entry
         internal_user_id = await resolve_supertokens_user_id(user.id, inspection_context)
         resolved_user = (
-            user if internal_user_id == user.id else await get_user(internal_user_id, inspection_context)
+            user
+            if internal_user_id == user.id
+            else await get_user(internal_user_id, inspection_context)
         )
         recipe_user_id = method.recipe_user_id.get_as_string()
         resolved_method = next(
@@ -269,26 +340,65 @@ async def read_fresh_migration_snapshot(
     }
 
     async def inspect_candidate(user_id: str):
-        user = raw_user if raw_user and raw_user.id == user_id else await get_user(
-            user_id, inspection_context
+        user = (
+            raw_user
+            if raw_user and raw_user.id == user_id
+            else await get_user(user_id, inspection_context)
         )
         mapping_result = (
             source_internal_result
             if user_id == source.rownd_user_id
             else await get_user_id_mapping(user_id, "SUPERTOKENS", inspection_context)
         )
-        raw_metadata = await get_raw_user_metadata(user_id, inspection_context) if user else {}
+        metadata_inspection = (
+            await inspect_linked_user_metadata(user_id, inspection_context, user) if user else None
+        )
+        metadata_source_user_id = cast(
+            str,
+            metadata_inspection.get("rownd_metadata_source_user_id")
+            if metadata_inspection
+            else user_id,
+        ) or user_id
+        target_metadata = validate_migration_metadata(
+            await get_raw_user_metadata(user_id, inspection_context) if user else {},
+            source.tenant_id,
+        )
+        source_metadata = (
+            target_metadata
+            if metadata_source_user_id == user_id
+            else validate_migration_metadata(
+                await get_raw_user_metadata(metadata_source_user_id, inspection_context),
+                source.tenant_id,
+            )
+        )
+        metadata_state = MigrationMetadataState(
+            target_metadata.valid and source_metadata.valid,
+            (
+                ValidatedMigrationMetadata(
+                    legacy_complete=target_metadata.value.legacy_complete,
+                    canonical_email_recipe_user_id=(
+                        target_metadata.value.canonical_email_recipe_user_id
+                    ),
+                    original_rownd_user_id=source_metadata.value.original_rownd_user_id,
+                )
+                if target_metadata.value is not None and source_metadata.value is not None
+                else None
+            ),
+        )
         return (
             user_id,
             user,
             _mapping_lookup(mapping_result),
-            validate_migration_metadata(raw_metadata, source.tenant_id),
+            metadata_state,
+            metadata_source_user_id,
         )
 
-    candidates = await asyncio.gather(*(inspect_candidate(user_id) for user_id in sorted(candidate_ids)))
+    candidates = await asyncio.gather(
+        *(inspect_candidate(user_id) for user_id in sorted(candidate_ids))
+    )
     candidate_owner_entries = [
         (identity, user, method)
-        for _, user, _, _ in candidates
+        for _, user, _, _, _ in candidates
         if user is not None
         for identity in source.expected_identities
         for method in user.login_methods
@@ -296,7 +406,7 @@ async def read_fresh_migration_snapshot(
     ]
     candidate_reservation_entries = [
         (identity, user, method)
-        for _, user, _, _ in candidates
+        for _, user, _, _, _ in candidates
         if user is not None
         for identity in source.expected_identities
         for method in user.login_methods
@@ -322,13 +432,17 @@ async def read_fresh_migration_snapshot(
         reservations_by_method[key] = owner
     owners = tuple(owners_by_method.values())
     reservations = tuple(reservations_by_method.values())
-    internal_lookups = {user_id: mapping for user_id, _, mapping, _ in candidates}
+    internal_lookups = {user_id: mapping for user_id, _, mapping, _, _ in candidates}
     users = {
         user_id: MigrationUserState(user is not None, user.is_primary_user if user else False)
-        for user_id, user, _, _ in candidates
+        for user_id, user, _, _, _ in candidates
     }
     metadata: Dict[str, MigrationMetadataState] = {
-        user_id: state for user_id, _, _, state in candidates
+        user_id: state for user_id, _, _, state, _ in candidates
+    }
+    metadata_source_user_ids = {
+        user_id: metadata_source_user_id
+        for user_id, _, _, _, metadata_source_user_id in candidates
     }
     raw_metadata = metadata.get(raw_user.id) if raw_user else None
     raw_same_graph = bool(
@@ -346,9 +460,15 @@ async def read_fresh_migration_snapshot(
     )
 
     async def inspect_pointer(
-        candidate: Tuple[str, Optional[User], Optional[MappingLookup], MigrationMetadataState]
+        candidate: Tuple[
+            str,
+            Optional[User],
+            Optional[MappingLookup],
+            MigrationMetadataState,
+            str,
+        ],
     ) -> Tuple[str, CanonicalEmailPointerState]:
-        user_id, user, _, metadata_state = candidate
+        user_id, user, _, metadata_state, _ = candidate
         recipe_user_id = (
             metadata_state.value.canonical_email_recipe_user_id
             if metadata_state.valid and metadata_state.value
@@ -390,20 +510,21 @@ async def read_fresh_migration_snapshot(
         return (
             user_id,
             CanonicalEmailPointerState(
-                CanonicalEmailPointerStatus.INVALID if reason else CanonicalEmailPointerStatus.VALID,
+                CanonicalEmailPointerStatus.INVALID
+                if reason
+                else CanonicalEmailPointerStatus.VALID,
                 recipe_user_id,
                 reason,
             ),
         )
 
-    pointer_entries = await asyncio.gather(*(inspect_pointer(candidate) for candidate in candidates))
+    pointer_entries = await asyncio.gather(
+        *(inspect_pointer(candidate) for candidate in candidates)
+    )
     if source_internal_lookup and (
-        external_lookup is None
-        or external_lookup.supertokens_user_id != source.rownd_user_id
+        external_lookup is None or external_lookup.supertokens_user_id != source.rownd_user_id
     ):
-        raw_inspection = RawIdInspection(
-            RawIdStatus.PRESENT, source.rownd_user_id, False
-        )
+        raw_inspection = RawIdInspection(RawIdStatus.PRESENT, source.rownd_user_id, False)
     elif external_lookup:
         raw_inspection = RawIdInspection(RawIdStatus.UNINSPECTABLE)
     elif raw_user:
@@ -414,7 +535,10 @@ async def read_fresh_migration_snapshot(
         source,
         tuple(sorted(owners, key=lambda owner: (owner.identity_key, owner.recipe_user_id))),
         tuple(
-            sorted(reservations, key=lambda owner: (owner.identity_key, owner.recipe_user_id))
+            sorted(
+                reservations,
+                key=lambda owner: (owner.identity_key, owner.recipe_user_id),
+            )
         ),
         MappingState(
             external_lookup,
@@ -424,6 +548,7 @@ async def read_fresh_migration_snapshot(
         ),
         immutable_mapping(users),
         immutable_mapping(metadata),
+        immutable_mapping(metadata_source_user_ids),
         immutable_mapping(dict(pointer_entries)),
     )
 
@@ -513,60 +638,131 @@ async def create_guest_session(
 async def migrate_rownd_user_and_create_session(
     config: RowndPluginConfig,
     rownd_user_id: str,
-    rownd_user: JsonDict,
+    source: FreshMigrationSource,
     supertokens_config: SupertokensConfig,
     request: BaseRequest,
+    response: BaseResponse,
     tenant_id: str,
     app_variant_id: Optional[str],
     user_context: UserContext,
     migration_state: JsonDict,
+    read_fresh_source: Callable[[], Awaitable[Optional[FreshMigrationSource]]],
 ) -> str:
-    user = await get_user(rownd_user_id, user_context)
-    existing_metadata = await get_user_metadata(user.id, user_context) if user else None
-    recipe_user_id = None
+    if source.snapshot.rownd_user_id != rownd_user_id:
+        raise MigrationError(MigrationErrorReason.ROWND_USER_ID_MISMATCH, "source_normalize")
+    pinned_target: Optional[PinnedMigrationTarget] = None
+    completed_target: Optional[PinnedMigrationTarget] = None
+    last_error: Optional[BaseException] = None
 
-    if user is None or (existing_metadata or {}).get("rownd_migration_complete") is not True:
-        user_import = rownd_compatibility.map_rownd_user_to_supertokens(
-            rownd_user,
-            tenant_id if tenant_id != PUBLIC_TENANT_ID else None,
-        )
-        reconciled = await reconcile_rownd_user_with_existing_login_methods(
-            user_import, tenant_id, user_context
-        )
-        if not reconciled:
-            if user is not None:
-                raise RuntimeError("Incomplete migrated user could not be reconciled")
-            await _import_user_with_e006_recovery(
-                user_import, tenant_id, supertokens_config, user_context
+    for _ in range(2):
+        try:
+            durable = await read_fresh_migration_snapshot(
+                source.snapshot, user_context, pinned_target
             )
-        user = await get_user(rownd_user_id, user_context)
-        if user is None:
-            raise RowndPluginError("Imported user could not be resolved")
-    supertokens_user_id = user.id
+        except Exception as error:
+            last_error = error
+            clear_supertokens_core_call_cache(user_context)
+            continue
+        disposition = classify_migration_snapshot(durable, pinned_target)
+        if disposition.status is MigrationDispositionStatus.COMPLETE:
+            fresh_source = await read_fresh_source()
+            if fresh_source is None:
+                raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+            if fresh_source.snapshot != source.snapshot:
+                source = fresh_source
+                continue
+            completed_target = disposition.target
+            break
+        if disposition.status is MigrationDispositionStatus.BLOCKED:
+            raise MigrationError(
+                disposition.reason or MigrationErrorReason.MIGRATION_STATE_INVALID,
+                "state_inspect",
+            )
+        repair_target = pinned_target
+        if repair_target is None and disposition.target is not None:
+            pinned_target = disposition.target
+            repair_target = disposition.target
+        try:
+            changed_source = await apply_migration_repairs(
+                disposition,
+                source,
+                repair_target,
+                supertokens_config,
+                user_context,
+                read_fresh_source,
+            )
+            if changed_source is not None:
+                source = changed_source
+        except Exception as error:
+            last_error = error
+            clear_supertokens_core_call_cache(user_context)
+
+    if completed_target is None:
+        final_source = await read_fresh_source()
+        if final_source is None:
+            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+        source = final_source
+        try:
+            final_snapshot = await read_fresh_migration_snapshot(
+                source.snapshot, user_context, pinned_target
+            )
+            final_disposition = classify_migration_snapshot(final_snapshot, pinned_target)
+        except Exception as error:
+            reason = (
+                MigrationErrorReason.CORE_UNAVAILABLE
+                if _is_recognizable_core_outage(error) or _is_recognizable_core_outage(last_error)
+                else MigrationErrorReason.MIGRATION_INCOMPLETE
+            )
+            raise MigrationError(reason, "state_inspect", error) from error
+        if final_disposition.status is MigrationDispositionStatus.COMPLETE:
+            completed_target = final_disposition.target
+        elif final_disposition.status is MigrationDispositionStatus.BLOCKED:
+            raise MigrationError(
+                final_disposition.reason or MigrationErrorReason.MIGRATION_STATE_INVALID,
+                "state_inspect",
+                last_error,
+            )
+        else:
+            reason = (
+                MigrationErrorReason.CORE_UNAVAILABLE
+                if _is_recognizable_core_outage(last_error)
+                else MigrationErrorReason.MIGRATION_INCOMPLETE
+            )
+            raise MigrationError(reason, "state_inspect", last_error)
+    if completed_target is None:
+        raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+
+    supertokens_user_id = completed_target.user_id
     migration_state["supertokens_user_id"] = supertokens_user_id
-    recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else None
     await record_rownd_app_variant_for_user(
         config, supertokens_user_id, app_variant_id, user_context
     )
-    tenant_login_method = next(
-        (
-            method
-            for method in user.login_methods
-            if tenant_id in (getattr(method, "tenant_ids", None) or [])
-        ),
-        None,
-    )
-    if tenant_login_method is not None:
-        recipe_user_id = tenant_login_method.recipe_user_id
-    if recipe_user_id is None:
-        raise RowndPluginError("User not found or has no login methods")
 
-    await associate_user_login_methods_to_tenant(user, tenant_id, user_context)
-    await sync_imported_email_verification_state(
-        recipe_user_id, supertokens_user_id, tenant_id, user_context
+    session_source = await read_fresh_source()
+    if session_source is None or session_source.snapshot != source.snapshot:
+        raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+    final_snapshot = await read_fresh_migration_snapshot(
+        session_source.snapshot, user_context, completed_target
     )
+    final_disposition = classify_migration_snapshot(final_snapshot, completed_target)
+    if final_disposition.status is MigrationDispositionStatus.BLOCKED:
+        raise MigrationError(
+            final_disposition.reason or MigrationErrorReason.MIGRATION_STATE_INVALID,
+            "state_inspect",
+        )
+    if final_disposition.status is not MigrationDispositionStatus.COMPLETE:
+        raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+    recipe_user_id = await read_fresh_migration_session_method(
+        session_source.snapshot, completed_target, user_context
+    )
+    immediately_fresh_source = await read_fresh_source()
+    if (
+        immediately_fresh_source is None
+        or immediately_fresh_source.snapshot != session_source.snapshot
+    ):
+        raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
     try:
-        await session_asyncio.create_new_session(
+        session = await session_asyncio.create_new_session(
             request,
             tenant_id,
             recipe_user_id,
@@ -577,12 +773,47 @@ async def migrate_rownd_user_and_create_session(
             create_derived_user_context(user_context, {"rowndAppVariantId": app_variant_id}),
         )
     except MigrationError:
+        scrub_migration_session_response(response, request)
         raise
     except Exception as err:
+        scrub_migration_session_response(response, request)
         raise MigrationError(
             MigrationErrorReason.SESSION_CREATION_FAILED, "session_create", err
         ) from err
+    binding_error: Optional[BaseException] = None
+    try:
+        binding_matches = (
+            session.get_user_id(user_context) == immediately_fresh_source.snapshot.rownd_user_id
+            and session.get_recipe_user_id(user_context).get_as_string()
+            == recipe_user_id.get_as_string()
+            and session.get_tenant_id(user_context) == tenant_id
+        )
+    except Exception as error:
+        binding_error = error
+        binding_matches = False
+    if not binding_matches:
+        with suppress(Exception):
+            await session.revoke_session(user_context)
+        scrub_migration_session_response(response, request)
+        raise MigrationError(
+            MigrationErrorReason.SESSION_CREATION_FAILED, "session_create", binding_error
+        )
     return supertokens_user_id
+
+
+def _is_recognizable_core_outage(error: Optional[BaseException]) -> bool:
+    if error is None:
+        return False
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code >= 500
+    if isinstance(error, (httpx.RequestError, ConnectionError, TimeoutError)):
+        return True
+    for field in ("status", "status_code", "statusCode"):
+        value = getattr(error, field, None)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 500:
+            return True
+    cause = error.__cause__ or error.__context__
+    return _is_recognizable_core_outage(cause)
 
 
 async def associate_user_login_methods_to_tenant(
@@ -1343,6 +1574,587 @@ async def create_rownd_user_id_mapping(
     raise RuntimeError(
         "Failed to map migrated Rownd user ID: %s" % getattr(mapping_result, "status", "ERROR")
     )
+
+
+def _import_method_matches_expected_identity(
+    method_import: JsonDict, identity: ExpectedIdentity
+) -> bool:
+    if identity.recipe_id == "thirdparty":
+        return (
+            method_import.get("recipeId") == "thirdparty"
+            and method_import.get("thirdPartyId") == identity.provider_id
+            and method_import.get("thirdPartyUserId") == identity.provider_user_id
+        )
+    return method_import.get("recipeId") == "passwordless" and (
+        normalize_email(cast(str, method_import.get("email", ""))) == identity.identifier
+        if identity.identifier_type == "email"
+        else method_import.get("phoneNumber") == identity.identifier
+    )
+
+
+def _build_online_migration_import(source: FreshMigrationSource) -> JsonDict:
+    tenant_id = source.snapshot.tenant_id if source.snapshot.tenant_id != PUBLIC_TENANT_ID else None
+    mapped = rownd_compatibility.map_rownd_user_to_supertokens(
+        source.rownd_user, tenant_id, migration_complete=False
+    )
+    mapped_methods = as_json_list(mapped.get("loginMethods"))
+    login_methods = [
+        method
+        for method in mapped_methods
+        if any(
+            _import_method_matches_expected_identity(method, identity)
+            for identity in source.snapshot.expected_identities
+        )
+    ]
+    if not login_methods and not source.snapshot.expected_identities:
+        bridge_user = {
+            **source.rownd_user,
+            "data": {"user_id": source.snapshot.rownd_user_id},
+            "verified_data": {},
+        }
+        login_methods = as_json_list(
+            rownd_compatibility.map_rownd_user_to_supertokens(
+                cast(JsonDict, bridge_user), tenant_id, migration_complete=False
+            ).get("loginMethods")
+        )
+    if len(login_methods) > 1 and not any(method.get("isPrimary") for method in login_methods):
+        login_methods[0]["isPrimary"] = True
+    return cast(
+        JsonDict,
+        {
+            "externalUserId": source.snapshot.rownd_user_id,
+            "loginMethods": login_methods,
+            "userMetadata": rownd_compatibility.build_rownd_user_metadata(
+                source.rownd_user, migration_complete=False
+            ),
+        },
+    )
+
+
+async def _apply_to_fresh_migration_method(
+    recipe_user_id: str,
+    target_user_id: str,
+    user_context: UserContext,
+    mutate: Callable[[RecipeUserId], Awaitable[Any]],
+    permitted_unlinked_owner: Optional[IdentityOwner] = None,
+    expected_identity: Optional[ExpectedIdentity] = None,
+) -> Any:
+    clear_supertokens_core_call_cache(user_context)
+    user = await get_user(recipe_user_id, user_context)
+    method = next(
+        (
+            candidate
+            for candidate in (user.login_methods if user else [])
+            if candidate.recipe_user_id.get_as_string() == recipe_user_id
+        ),
+        None,
+    )
+    if user is None or method is None:
+        raise MigrationError(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link")
+    current_primary_user_id = await resolve_supertokens_user_id(user.id, user_context)
+    if permitted_unlinked_owner is not None:
+        normalized_identifier = (
+            "%s:%s" % (expected_identity.provider_id, expected_identity.provider_user_id)
+            if expected_identity is not None and expected_identity.recipe_id == "thirdparty"
+            else expected_identity.identifier if expected_identity is not None else None
+        )
+        mapping = await get_user_id_mapping(
+            current_primary_user_id, "SUPERTOKENS", user_context
+        )
+        if (
+            expected_identity is None
+            or permitted_unlinked_owner.recipe_user_id != recipe_user_id
+            or permitted_unlinked_owner.identity_key != expected_identity.key
+            or permitted_unlinked_owner.recipe_id != expected_identity.recipe_id
+            or permitted_unlinked_owner.normalized_identifier != normalized_identifier
+            or not _migration_method_matches_identity(method, expected_identity)
+            or method.verified != permitted_unlinked_owner.verified
+            or (expected_identity.recipe_id == "passwordless" and not method.verified)
+            or permitted_unlinked_owner.is_primary_user
+            or user.is_primary_user
+            or current_primary_user_id != permitted_unlinked_owner.primary_user_id
+            or isinstance(mapping, GetUserIdMappingOkResult)
+        ):
+            raise MigrationError(
+                MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link"
+            )
+    elif current_primary_user_id != target_user_id:
+        raise MigrationError(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link")
+    return await mutate(method.recipe_user_id)
+
+
+async def _assert_fresh_link_target_authority(
+    source: RowndIdentitySnapshot,
+    pinned_target: PinnedMigrationTarget,
+    user_context: UserContext,
+) -> None:
+    clear_supertokens_core_call_cache(user_context)
+    target_user = await get_user(pinned_target.user_id, user_context)
+    if target_user is None:
+        raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "account_link")
+    if await resolve_supertokens_user_id(target_user.id, user_context) != pinned_target.user_id:
+        raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "account_link")
+
+    external = await get_user_id_mapping(source.rownd_user_id, "EXTERNAL", user_context)
+    internal = await get_user_id_mapping(pinned_target.user_id, "SUPERTOKENS", user_context)
+    external_ok = isinstance(external, GetUserIdMappingOkResult)
+    internal_ok = isinstance(internal, GetUserIdMappingOkResult)
+    exact_external = (
+        external_ok
+        and external.external_user_id == source.rownd_user_id
+        and external.supertokens_user_id == pinned_target.user_id
+    )
+    exact_internal = (
+        internal_ok
+        and internal.external_user_id == source.rownd_user_id
+        and internal.supertokens_user_id == pinned_target.user_id
+    )
+    if pinned_target.user_id != source.rownd_user_id:
+        valid_mapping = exact_external and exact_internal
+    else:
+        valid_mapping = (not external_ok and not internal_ok) or (
+            exact_external and exact_internal
+        )
+    if not valid_mapping:
+        raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "account_link")
+
+
+async def _link_fresh_migration_method(
+    recipe_user_id: str,
+    identity: ExpectedIdentity,
+    owner: IdentityOwner,
+    source: FreshMigrationSource,
+    pinned_target: PinnedMigrationTarget,
+    user_context: UserContext,
+    read_fresh_source: Callable[[], Awaitable[Optional[FreshMigrationSource]]],
+) -> Tuple[Optional[Any], Optional[FreshMigrationSource]]:
+    async def link(method_recipe_user_id: RecipeUserId) -> Any:
+        latest_source = await read_fresh_source()
+        if latest_source is None:
+            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "account_link")
+        if latest_source.snapshot != source.snapshot:
+            raise _MigrationSourceChanged(latest_source)
+        await _assert_fresh_link_target_authority(
+            latest_source.snapshot, pinned_target, user_context
+        )
+        return await accountlinking_asyncio.link_accounts(
+            method_recipe_user_id, pinned_target.user_id, user_context
+        )
+
+    try:
+        result = await _apply_to_fresh_migration_method(
+            recipe_user_id,
+            pinned_target.user_id,
+            user_context,
+            link,
+            owner,
+            identity,
+        )
+        return result, None
+    except _MigrationSourceChanged as changed:
+        return None, changed.source
+
+
+async def _verify_migration_email(
+    recipe_user_id: RecipeUserId,
+    email: str,
+    tenant_id: str,
+    user_context: UserContext,
+) -> None:
+    token_result = await emailverification_asyncio.create_email_verification_token(
+        tenant_id, recipe_user_id, email, user_context
+    )
+    token = getattr(token_result, "token", None)
+    if getattr(token_result, "status", None) != "OK" or not isinstance(token, str):
+        raise RuntimeError("Failed to create migration verification token")
+    result = await emailverification_asyncio.verify_email_using_token(
+        tenant_id, token, False, user_context
+    )
+    if getattr(result, "status", None) != "OK":
+        raise RuntimeError("Failed to verify migrated email")
+
+
+async def apply_migration_repairs(
+    disposition: MigrationDisposition,
+    source: FreshMigrationSource,
+    pinned_target: Optional[PinnedMigrationTarget],
+    supertokens_config: SupertokensConfig,
+    user_context: UserContext,
+    read_fresh_source: Callable[[], Awaitable[Optional[FreshMigrationSource]]],
+) -> Optional[FreshMigrationSource]:
+    async def read_guarded_disposition(
+        mutation: MigrationMutation,
+    ) -> Tuple[FreshMigrationSource, Optional[MigrationSnapshot], bool]:
+        fresh = await read_fresh_source()
+        if fresh is None:
+            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+        if fresh.snapshot != source.snapshot:
+            return fresh, None, False
+        snapshot = await read_fresh_migration_snapshot(fresh.snapshot, user_context, pinned_target)
+        current = classify_migration_snapshot(snapshot, pinned_target)
+        if current.status is MigrationDispositionStatus.BLOCKED:
+            raise MigrationError(
+                current.reason or MigrationErrorReason.MIGRATION_STATE_INVALID,
+                "state_inspect",
+            )
+        return (
+            fresh,
+            snapshot,
+            (
+                current.status is MigrationDispositionStatus.REPAIRABLE
+                and mutation in current.mutations
+            ),
+        )
+
+    for mutation in disposition.mutations:
+        fresh, snapshot, should_apply = await read_guarded_disposition(mutation)
+        if fresh.snapshot != source.snapshot:
+            return fresh
+        if snapshot is None:
+            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+        if not should_apply:
+            continue
+
+        if mutation.type == "IMPORT_USER":
+            await import_user(
+                _build_online_migration_import(fresh), supertokens_config, user_context
+            )
+            clear_supertokens_core_call_cache(user_context)
+            continue
+        if pinned_target is None:
+            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+        target_user_id = pinned_target.user_id
+        if mutation.type == "CREATE_MAPPING":
+            await create_rownd_user_id_mapping(
+                cast(str, mutation.target_user_id),
+                fresh.snapshot.rownd_user_id,
+                user_context,
+            )
+            clear_supertokens_core_call_cache(user_context)
+            continue
+        if mutation.type == "MAKE_PRIMARY":
+            user = await get_user(cast(str, mutation.target_user_id), user_context)
+            if user is None or not user.login_methods:
+                raise RuntimeError("Migration target has no login method")
+            await ensure_primary_user(
+                user,
+                user.login_methods[0],
+                cast(str, mutation.target_user_id),
+                user_context,
+            )
+            clear_supertokens_core_call_cache(user_context)
+            continue
+        if mutation.type == "CREATE_IDENTITY":
+            identity = cast(ExpectedIdentity, mutation.identity)
+            method_import = next(
+                (
+                    method
+                    for method in as_json_list(
+                        _build_online_migration_import(fresh).get("loginMethods")
+                    )
+                    if _import_method_matches_expected_identity(method, identity)
+                ),
+                None,
+            )
+            if method_import is None:
+                raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "account_link")
+            recipe_user_id, _ = await create_missing_login_method(
+                method_import, fresh.snapshot.tenant_id, target_user_id, user_context
+            )
+            clear_supertokens_core_call_cache(user_context)
+            created_user = await get_user(recipe_user_id.get_as_string(), user_context)
+            if created_user is None:
+                raise RuntimeError("Created migrated login method was not found")
+            if not await sdk_user_id_matches_internal_target(
+                created_user.id, target_user_id, user_context
+            ):
+                before_link_source = await read_fresh_source()
+                if before_link_source is None:
+                    raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "account_link")
+                if before_link_source.snapshot != fresh.snapshot:
+                    return before_link_source
+                before_link = await read_fresh_migration_snapshot(
+                    before_link_source.snapshot, user_context, pinned_target
+                )
+                created_owner = next(
+                    (
+                        owner
+                        for owner in before_link.owners
+                        if owner.identity_key == identity.key
+                        and owner.recipe_user_id == recipe_user_id.get_as_string()
+                    ),
+                    None,
+                )
+                if (
+                    created_owner is None
+                    or created_owner.is_primary_user
+                    or before_link.mapping.internal_lookups.get(created_owner.primary_user_id)
+                    is not None
+                ):
+                    raise MigrationError(
+                        MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
+                        "account_link",
+                    )
+                link_result, changed_source = await _link_fresh_migration_method(
+                    recipe_user_id.get_as_string(),
+                    identity,
+                    created_owner,
+                    before_link_source,
+                    pinned_target,
+                    user_context,
+                    read_fresh_source,
+                )
+                if changed_source is not None:
+                    return changed_source
+                already_linked = isinstance(
+                    link_result, LinkAccountsRecipeUserIdAlreadyLinkedError
+                ) and await sdk_user_id_matches_internal_target(
+                    link_result.primary_user_id, target_user_id, user_context
+                )
+                if not isinstance(link_result, LinkAccountsOkResult) and not already_linked:
+                    raise RuntimeError(
+                        "Failed to link created migration identity: %s"
+                        % getattr(link_result, "status", "ERROR")
+                    )
+                clear_supertokens_core_call_cache(user_context)
+            continue
+        if mutation.type == "LINK_IDENTITY":
+            owner = next(
+                (
+                    candidate
+                    for candidate in snapshot.owners
+                    if candidate.recipe_user_id == mutation.recipe_user_id
+                ),
+                None,
+            )
+            if owner is None or owner.is_primary_user:
+                raise MigrationError(
+                    MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED,
+                    "account_link",
+                )
+            identity = next(
+                (
+                    candidate
+                    for candidate in fresh.snapshot.expected_identities
+                    if candidate.key == owner.identity_key
+                ),
+                None,
+            )
+            if identity is None:
+                raise MigrationError(
+                    MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link"
+                )
+
+            result, changed_source = await _link_fresh_migration_method(
+                cast(str, mutation.recipe_user_id),
+                identity,
+                owner,
+                fresh,
+                pinned_target,
+                user_context,
+                read_fresh_source,
+            )
+            if changed_source is not None:
+                return changed_source
+            if not isinstance(result, LinkAccountsOkResult):
+                raise RuntimeError(
+                    "Failed to link migrated login method: %s" % getattr(result, "status", "ERROR")
+                )
+            clear_supertokens_core_call_cache(user_context)
+            continue
+        if mutation.type == "ASSOCIATE_TENANT":
+            owner = next(
+                (
+                    candidate
+                    for candidate in snapshot.owners
+                    if candidate.recipe_user_id == mutation.recipe_user_id
+                ),
+                None,
+            )
+            if owner is None or owner.primary_user_id != target_user_id:
+                raise MigrationError(
+                    MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
+                    "tenant_associate",
+                )
+
+            async def associate(recipe_user_id: RecipeUserId) -> Any:
+                return await multitenancy_asyncio.associate_user_to_tenant(
+                    cast(str, mutation.tenant_id), recipe_user_id, user_context
+                )
+
+            result = await _apply_to_fresh_migration_method(
+                cast(str, mutation.recipe_user_id),
+                target_user_id,
+                user_context,
+                associate,
+            )
+            if getattr(result, "status", None) != "OK":
+                raise RuntimeError(
+                    "Failed to associate migrated login method: %s"
+                    % getattr(result, "status", "ERROR")
+                )
+            clear_supertokens_core_call_cache(user_context)
+            continue
+        if mutation.type == "VERIFY_IDENTITY":
+            identity_key = next(
+                (
+                    owner.identity_key
+                    for owner in snapshot.owners
+                    if owner.recipe_user_id == mutation.recipe_user_id
+                ),
+                None,
+            )
+            identity = next(
+                (
+                    candidate
+                    for candidate in fresh.snapshot.expected_identities
+                    if candidate.key == identity_key
+                ),
+                None,
+            )
+            if (
+                identity is None
+                or identity.recipe_id != "passwordless"
+                or identity.identifier_type != "email"
+                or identity.identifier is None
+            ):
+                raise RuntimeError("Unsupported migration verification method")
+            email_to_verify = cast(str, identity.identifier)
+
+            async def verify(recipe_user_id: RecipeUserId) -> None:
+                await _verify_migration_email(
+                    recipe_user_id,
+                    email_to_verify,
+                    fresh.snapshot.tenant_id,
+                    user_context,
+                )
+
+            await _apply_to_fresh_migration_method(
+                cast(str, mutation.recipe_user_id),
+                target_user_id,
+                user_context,
+                verify,
+            )
+            clear_supertokens_core_call_cache(user_context)
+            continue
+
+        current = classify_migration_snapshot(snapshot, pinned_target)
+        if current.status is not MigrationDispositionStatus.REPAIRABLE or any(
+            repair.type != "WRITE_METADATA" for repair in current.mutations
+        ):
+            continue
+        verified_email = next(
+            (
+                identity.identifier
+                for identity in fresh.snapshot.expected_identities
+                if identity.recipe_id == "passwordless" and identity.identifier_type == "email"
+            ),
+            None,
+        )
+        email_owner = next(
+            (
+                owner
+                for owner in snapshot.owners
+                if verified_email
+                and owner.identity_key == "passwordless:email:%s" % verified_email
+                and owner.primary_user_id == target_user_id
+                and owner.verified
+                and fresh.snapshot.tenant_id in owner.tenant_ids
+            ),
+            None,
+        )
+        current_metadata = await get_raw_user_metadata(target_user_id, user_context)
+        metadata_inspection = await inspect_linked_user_metadata(target_user_id, user_context)
+        metadata_source_user_id = cast(
+            str,
+            metadata_inspection.get("rownd_metadata_source_user_id") or target_user_id,
+        )
+        publication_source = await read_fresh_source()
+        if publication_source is None:
+            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "metadata_finalize")
+        if publication_source.snapshot != fresh.snapshot:
+            return publication_source
+        profile_metadata = rownd_compatibility.build_rownd_user_metadata(
+            publication_source.rownd_user, migration_complete=False
+        )
+        if metadata_source_user_id != target_user_id:
+            await usermetadata_asyncio.update_user_metadata(
+                metadata_source_user_id, profile_metadata, user_context
+            )
+        metadata = {
+            **(profile_metadata if metadata_source_user_id == target_user_id else {}),
+            "rownd_migration_complete": True,
+            **(
+                {
+                    "rownd_email_recipe_user_id": email_owner.recipe_user_id,
+                    "rownd_email_recipe_user_ids": {
+                        **as_json_dict(current_metadata.get("rownd_email_recipe_user_ids")),
+                        publication_source.snapshot.tenant_id: email_owner.recipe_user_id,
+                    },
+                }
+                if email_owner is not None
+                else {}
+            ),
+        }
+        await usermetadata_asyncio.update_user_metadata(target_user_id, metadata, user_context)
+        clear_supertokens_core_call_cache(user_context)
+        completion_written = validate_migration_metadata(
+            await get_raw_user_metadata(target_user_id, user_context),
+            publication_source.snapshot.tenant_id,
+        )
+        profile_written = (
+            completion_written
+            if metadata_source_user_id == target_user_id
+            else validate_migration_metadata(
+                await get_raw_user_metadata(metadata_source_user_id, user_context),
+                publication_source.snapshot.tenant_id,
+            )
+        )
+        if (
+            not completion_written.valid
+            or completion_written.value is None
+            or completion_written.value.legacy_complete is not True
+            or not profile_written.valid
+            or profile_written.value is None
+            or profile_written.value.original_rownd_user_id
+            != publication_source.snapshot.rownd_user_id
+            or (
+                email_owner is not None
+                and completion_written.value.canonical_email_recipe_user_id
+                != email_owner.recipe_user_id
+            )
+        ):
+            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "metadata_finalize")
+    return None
+
+
+async def read_fresh_migration_session_method(
+    source: RowndIdentitySnapshot,
+    target: PinnedMigrationTarget,
+    user_context: UserContext,
+) -> RecipeUserId:
+    clear_supertokens_core_call_cache(user_context)
+    user = await get_user(target.user_id, user_context)
+    if user is None:
+        raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+    if await resolve_supertokens_user_id(user.id, user_context) != target.user_id:
+        raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "state_inspect")
+    for method in user.login_methods:
+        if source.tenant_id not in method.tenant_ids:
+            continue
+        recipe_user_id = method.recipe_user_id.get_as_string()
+        owner = await get_user(recipe_user_id, user_context)
+        if (
+            owner is not None
+            and await resolve_supertokens_user_id(owner.id, user_context) == target.user_id
+            and any(
+                candidate.recipe_user_id.get_as_string() == recipe_user_id
+                and source.tenant_id in candidate.tenant_ids
+                for candidate in owner.login_methods
+            )
+        ):
+            return method.recipe_user_id
+    raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
 
 
 async def reconcile_rownd_user_with_existing_login_methods(

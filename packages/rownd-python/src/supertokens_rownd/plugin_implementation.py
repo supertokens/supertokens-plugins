@@ -19,6 +19,7 @@ from . import utils
 from .constants import GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID
 from .errors import MigrationError, MigrationErrorReason, RowndEmailChangeError, RowndPluginError
 from .logger import log_debug
+from .migration import create_rownd_identity_snapshot
 from .rownd_repository import RowndTokenValidationError, RowndTokenValidationReason
 from .types import JsonDict, MigrationStage, RowndClientProtocol, RowndPluginConfig, RowndTelemetryClient
 
@@ -174,17 +175,48 @@ async def handle_migrate(
         )
         if profile_user_id != rownd_user_id:
             raise MigrationError(MigrationErrorReason.ROWND_USER_ID_MISMATCH, stage)
+        source = repository.FreshMigrationSource(
+            rownd_user,
+            create_rownd_identity_snapshot(rownd_user, tenant_id, app_variant_id, config.schema),
+        )
+
+        async def read_fresh_source() -> Optional[repository.FreshMigrationSource]:
+            try:
+                fresh_user = await client.fetch_optional_user_info(cast(str, rownd_user_id))
+            except MigrationError:
+                raise
+            except Exception as err:
+                raise MigrationError(
+                    MigrationErrorReason.ROWND_UNAVAILABLE, "rownd_profile_fetch", err
+                ) from err
+            if fresh_user is None:
+                return None
+            fresh_data = fresh_user.get("data")
+            fresh_user_id = fresh_data.get("user_id") if isinstance(fresh_data, dict) else None
+            if fresh_user_id != rownd_user_id:
+                raise MigrationError(
+                    MigrationErrorReason.ROWND_USER_ID_MISMATCH, "source_normalize"
+                )
+            return repository.FreshMigrationSource(
+                fresh_user,
+                create_rownd_identity_snapshot(
+                    fresh_user, tenant_id, app_variant_id, config.schema
+                ),
+            )
+
         stage = "state_inspect"
         supertokens_user_id = await repository.migrate_rownd_user_and_create_session(
             config,
             rownd_user_id,
-            rownd_user,
+            source,
             supertokens_config,
             request,
+            response,
             tenant_id,
             app_variant_id,
             user_context,
             migration_state,
+            read_fresh_source,
         )
         await telemetry.record_success(
             telemetry_client, started_at, tenant_id, rownd_user_id, supertokens_user_id

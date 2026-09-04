@@ -129,6 +129,7 @@ class MigrationSnapshot:
     mapping: MappingState
     users: Mapping[str, MigrationUserState]
     metadata: Mapping[str, MigrationMetadataState]
+    metadata_source_user_ids: Mapping[str, str]
     canonical_email_pointers: Mapping[str, CanonicalEmailPointerState]
 
 
@@ -394,6 +395,11 @@ def classify_migration_snapshot(
         for owners in owners_by_identity.values()
     ):
         return _blocked(MigrationErrorReason.IDENTITY_AMBIGUOUS)
+    passwordless_owner_ids = {
+        owner.primary_user_id for owner in snapshot.owners if owner.recipe_id == "passwordless"
+    }
+    if len(passwordless_owner_ids) > 1:
+        return _blocked(MigrationErrorReason.IDENTITY_AMBIGUOUS)
 
     authoritative_target = None
     if snapshot.mapping.external_lookup:
@@ -477,11 +483,32 @@ def classify_migration_snapshot(
             return _blocked(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER)
         if owner.primary_user_id != target.user_id and not owner_metadata.valid:
             return _blocked(MigrationErrorReason.MIGRATION_STATE_INVALID)
-    if any(
-        owner.primary_user_id != target.user_id
-        and owner.is_primary_user
+    foreign_third_party = tuple(
+        owner
         for owner in snapshot.owners
-    ) or any(owner.primary_user_id != target.user_id for owner in primary_reservations):
+        if owner.primary_user_id != target.user_id and owner.recipe_id == "thirdparty"
+    )
+    if any(owner.is_primary_user for owner in foreign_third_party):
+        return _blocked(MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED)
+    foreign_passwordless = tuple(
+        owner
+        for owner in snapshot.owners
+        if owner.primary_user_id != target.user_id and owner.recipe_id == "passwordless"
+    )
+    if any(
+        not owner.verified
+        or not any(
+            identity.recipe_id == "passwordless"
+            and identity.key == owner.identity_key
+            and identity.identifier == owner.normalized_identifier
+            for identity in source.expected_identities
+        )
+        for owner in foreign_passwordless
+    ):
+        return _blocked(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER)
+    if any(owner.is_primary_user for owner in foreign_passwordless) or any(
+        owner.primary_user_id != target.user_id for owner in primary_reservations
+    ):
         return _blocked(MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED)
 
     metadata = snapshot.metadata.get(target.user_id)
@@ -551,7 +578,10 @@ def classify_migration_snapshot(
         *verify_mutations,
     ]
 
-    metadata_matches = metadata.value.legacy_complete is True
+    metadata_matches = (
+        metadata.value.legacy_complete is True
+        and metadata.value.original_rownd_user_id == source.rownd_user_id
+    )
     verified_email = next(
         (
             identity.identifier
