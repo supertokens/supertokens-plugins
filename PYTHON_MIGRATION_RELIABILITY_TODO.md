@@ -58,6 +58,8 @@ Reference Node.js commit: `36bfa04` (`feat: Converge concurrent Rownd migrations
 - [x] Recover from duplicate imports, linking races, mapping races, and uncertain mutation outcomes.
 - [x] Keep session creation separate from durable migration completion.
 
+Implemented by commit `6d6722c` (`feat: Converge concurrent Rownd migrations`).
+
 ## Mapping Safety
 
 Reference Node.js commit: `ec277cf` (`feat: Guard forced migration mapping`).
