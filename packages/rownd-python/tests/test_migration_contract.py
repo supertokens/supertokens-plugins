@@ -13,6 +13,19 @@ from supertokens_python import SupertokensConfig
 import supertokens_rownd.plugin_implementation as implementation
 import supertokens_rownd.plugin as plugin
 from supertokens_rownd.errors import MigrationError, MigrationErrorReason
+from supertokens_rownd.migration import (
+    CanonicalEmailPointerState,
+    CanonicalEmailPointerStatus,
+    MappingLookup,
+    MappingState,
+    MigrationMetadataState,
+    MigrationSnapshot,
+    MigrationUserState,
+    RawIdInspection,
+    RawIdStatus,
+    ValidatedMigrationMetadata,
+    immutable_mapping,
+)
 from supertokens_rownd.plugin_implementation import handle_migrate, migration_error_response
 from supertokens_rownd.rownd_repository import (
     RowndAPIError,
@@ -204,6 +217,7 @@ async def invoke_migration(
     migration_state: Optional[JsonDict] = None,
     response: Optional[FakeResponse] = None,
     capture_telemetry: bool = True,
+    use_real_repository: bool = False,
 ) -> tuple[FakeResponse, CapturingTelemetry]:
     async def migrate(*args: Any, **kwargs: Any) -> str:
         if migration_state is not None:
@@ -212,7 +226,10 @@ async def invoke_migration(
             raise repository_error
         return "supertokens-user"
 
-    monkeypatch.setattr(implementation.repository, "migrate_rownd_user_and_create_session", migrate)
+    if not use_real_repository:
+        monkeypatch.setattr(
+            implementation.repository, "migrate_rownd_user_and_create_session", migrate
+        )
     if capture_telemetry:
         monkeypatch.setattr(implementation.telemetry, "_migration_tasks", CapturingRegistry())
     response = response or FakeResponse()
@@ -616,6 +633,141 @@ async def test_failure_emits_one_private_terminal_event(monkeypatch: pytest.Monk
     assert "rowndUserId" not in event
     assert "superTokensUserId" not in event
     assert "error" not in event
+
+
+@pytest.mark.asyncio
+async def test_identity_conflict_context_is_internal_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response, telemetry = await invoke_migration(
+        monkeypatch,
+        repository_error=MigrationError(
+            MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link"
+        ),
+        migration_state={
+            "blocked_identity_type": "passwordless_email",
+            "target_source": "mapping",
+        },
+    )
+
+    assert response.body is not None
+    assert "blockedIdentityType" not in response.body
+    assert "targetSource" not in response.body
+    event = telemetry.events[0]
+    assert event["blockedIdentityType"] == "passwordless_email"
+    assert event["targetSource"] == "mapping"
+    assert set(event) == {
+        "operationId",
+        "operation",
+        "outcome",
+        "stage",
+        "httpStatus",
+        "retryable",
+        "attemptCount",
+        "path",
+        "forcedMappingUsed",
+        "durationMs",
+        "reason",
+        "blockedIdentityType",
+        "targetSource",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    [
+        MigrationErrorReason.IDENTITY_AMBIGUOUS,
+        MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
+        MigrationErrorReason.MAPPING_CONFLICT,
+        MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED,
+    ],
+)
+async def test_blocked_topology_reason_is_stable_at_route_boundary(
+    monkeypatch: pytest.MonkeyPatch, reason: MigrationErrorReason
+) -> None:
+    response, _ = await invoke_migration(
+        monkeypatch,
+        repository_error=MigrationError(reason, "state_inspect"),
+    )
+
+    assert response.status_code == 409
+    assert response.body is not None
+    assert response.body["reason"] == reason.value
+    assert response.body["retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_mapping_conflict_does_not_reuse_prior_identity_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshots: list[MigrationSnapshot] = []
+
+    async def read_snapshot(source, *_args: Any) -> MigrationSnapshot:
+        mapping = MappingLookup("rownd-user", "mapped-target")
+        consistent = not snapshots
+        result = MigrationSnapshot(
+            source=source,
+            owners=(),
+            reservation_owners=(),
+            mapping=MappingState(
+                external_lookup=mapping,
+                source_internal_lookup=None,
+                internal_lookups=immutable_mapping(
+                    {
+                        "mapped-target": (
+                            mapping
+                            if consistent
+                            else MappingLookup("rownd-user", "wrong-target")
+                        )
+                    }
+                ),
+                raw_id_inspection=RawIdInspection(RawIdStatus.UNINSPECTABLE),
+            ),
+            users=immutable_mapping({"mapped-target": MigrationUserState(True, True)}),
+            metadata=immutable_mapping(
+                {
+                    "mapped-target": MigrationMetadataState(
+                        True,
+                        ValidatedMigrationMetadata(
+                            legacy_complete=False,
+                            original_rownd_user_id="rownd-user",
+                        ),
+                    )
+                }
+            ),
+            metadata_source_user_ids=immutable_mapping({"mapped-target": "mapped-target"}),
+            canonical_email_pointers=immutable_mapping(
+                {
+                    "mapped-target": CanonicalEmailPointerState(
+                        CanonicalEmailPointerStatus.ABSENT
+                    )
+                }
+            ),
+        )
+        snapshots.append(result)
+        return result
+
+    async def no_op_repair(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(implementation.repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(implementation.repository, "apply_migration_repairs", no_op_repair)
+
+    response, telemetry = await invoke_migration(
+        monkeypatch, use_real_repository=True
+    )
+
+    assert response.status_code == 409
+    assert response.body is not None
+    assert response.body["reason"] == "MAPPING_CONFLICT"
+    assert "targetSource" not in response.body
+    event = telemetry.events[0]
+    assert event["reason"] == "MAPPING_CONFLICT"
+    assert event["targetSource"] == "mapping"
+    assert "blockedIdentityType" not in event
+    assert "rownd-user" not in json.dumps(event)
+    assert "mapped-target" not in json.dumps(event)
 
 
 @pytest.mark.asyncio

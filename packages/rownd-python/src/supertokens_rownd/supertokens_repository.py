@@ -687,8 +687,13 @@ async def migrate_rownd_user_and_create_session(
             clear_supertokens_core_call_cache(user_context)
             continue
         disposition = classify_migration_snapshot(durable, pinned_target)
+        migration_state.pop("blocked_identity_type", None)
         if disposition.target is not None:
             migration_state["target_source"] = disposition.target.source.value
+        elif disposition.status is MigrationDispositionStatus.BLOCKED:
+            migration_state.pop("target_source", None)
+        if disposition.blocked_identity_type is not None:
+            migration_state["blocked_identity_type"] = disposition.blocked_identity_type
         if disposition.status is MigrationDispositionStatus.COMPLETE:
             if recovered_after_error:
                 migration_state["path"] = "retry_recovery"
@@ -728,6 +733,7 @@ async def migrate_rownd_user_and_create_session(
                 user_context,
                 read_fresh_source,
                 mapping_retry_state,
+                migration_state,
             )
             if changed_source is not None:
                 source = changed_source
@@ -751,8 +757,15 @@ async def migrate_rownd_user_and_create_session(
                 source.snapshot, user_context, pinned_target
             )
             final_disposition = classify_migration_snapshot(final_snapshot, pinned_target)
+            migration_state.pop("blocked_identity_type", None)
             if final_disposition.target is not None:
                 migration_state["target_source"] = final_disposition.target.source.value
+            elif final_disposition.status is MigrationDispositionStatus.BLOCKED:
+                migration_state.pop("target_source", None)
+            if final_disposition.blocked_identity_type is not None:
+                migration_state["blocked_identity_type"] = (
+                    final_disposition.blocked_identity_type
+                )
         except Exception as error:
             reason = (
                 MigrationErrorReason.CORE_UNAVAILABLE
@@ -1837,6 +1850,8 @@ async def _apply_to_fresh_migration_method(
     mutate: Callable[[RecipeUserId], Awaitable[Any]],
     permitted_unlinked_owner: Optional[IdentityOwner] = None,
     expected_identity: Optional[ExpectedIdentity] = None,
+    expected_tenant_id: Optional[str] = None,
+    expected_rownd_user_id: Optional[str] = None,
 ) -> Any:
     clear_supertokens_core_call_cache(user_context)
     user = await get_user(recipe_user_id, user_context)
@@ -1873,6 +1888,26 @@ async def _apply_to_fresh_migration_method(
             or user.is_primary_user
             or current_primary_user_id != permitted_unlinked_owner.primary_user_id
             or isinstance(mapping, GetUserIdMappingOkResult)
+            or (
+                expected_tenant_id is not None
+                and expected_tenant_id not in method.tenant_ids
+            )
+        ):
+            raise MigrationError(
+                MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link"
+            )
+        metadata = validate_migration_metadata(
+            await get_raw_user_metadata(current_primary_user_id, user_context),
+            expected_tenant_id or "public",
+        )
+        if not metadata.valid:
+            raise MigrationError(MigrationErrorReason.MIGRATION_STATE_INVALID, "account_link")
+        original_rownd_user_id = (
+            metadata.value.original_rownd_user_id if metadata.value is not None else None
+        )
+        if (
+            original_rownd_user_id is not None
+            and original_rownd_user_id != expected_rownd_user_id
         ):
             raise MigrationError(
                 MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link"
@@ -1936,8 +1971,17 @@ async def _link_fresh_migration_method(
         await _assert_fresh_link_target_authority(
             latest_source.snapshot, pinned_target, user_context
         )
-        return await accountlinking_asyncio.link_accounts(
-            method_recipe_user_id, pinned_target.user_id, user_context
+        return await _apply_to_fresh_migration_method(
+            recipe_user_id,
+            pinned_target.user_id,
+            user_context,
+            lambda fresh_recipe_user_id: accountlinking_asyncio.link_accounts(
+                fresh_recipe_user_id, pinned_target.user_id, user_context
+            ),
+            owner,
+            identity,
+            latest_source.snapshot.tenant_id,
+            latest_source.snapshot.rownd_user_id,
         )
 
     try:
@@ -1948,7 +1992,57 @@ async def _link_fresh_migration_method(
             link,
             owner,
             identity,
+            source.snapshot.tenant_id,
+            source.snapshot.rownd_user_id,
         )
+        if isinstance(result, LinkAccountsRecipeUserIdAlreadyLinkedError):
+            latest_source = await read_fresh_source()
+            if latest_source is None:
+                raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "account_link")
+            if latest_source.snapshot != source.snapshot:
+                return None, latest_source
+            await _assert_fresh_link_target_authority(
+                latest_source.snapshot, pinned_target, user_context
+            )
+            clear_supertokens_core_call_cache(user_context)
+            linked_user = await get_user(recipe_user_id, user_context)
+            linked_method = next(
+                (
+                    method
+                    for method in (linked_user.login_methods if linked_user else [])
+                    if method.recipe_user_id.get_as_string() == recipe_user_id
+                    and _migration_method_matches_identity(method, identity)
+                    and source.snapshot.tenant_id in method.tenant_ids
+                ),
+                None,
+            )
+            if (
+                linked_user is None
+                or linked_method is None
+                or not linked_user.is_primary_user
+                or (identity.recipe_id == "passwordless" and not linked_method.verified)
+                or await resolve_supertokens_user_id(linked_user.id, user_context)
+                != pinned_target.user_id
+            ):
+                raise MigrationError(
+                    MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link"
+                )
+            linked_metadata = validate_migration_metadata(
+                await get_raw_user_metadata(pinned_target.user_id, user_context),
+                latest_source.snapshot.tenant_id,
+            )
+            if (
+                not linked_metadata.valid
+                or linked_metadata.value is None
+                or (
+                    linked_metadata.value.original_rownd_user_id is not None
+                    and linked_metadata.value.original_rownd_user_id
+                    != latest_source.snapshot.rownd_user_id
+                )
+            ):
+                raise MigrationError(
+                    MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link"
+                )
         return result, None
     except _MigrationSourceChanged as changed:
         return None, changed.source
@@ -1981,6 +2075,7 @@ async def apply_migration_repairs(
     user_context: UserContext,
     read_fresh_source: Callable[[], Awaitable[Optional[FreshMigrationSource]]],
     mapping_retry_state: Optional[_MappingRetryState] = None,
+    migration_state: Optional[JsonDict] = None,
 ) -> Optional[FreshMigrationSource]:
     retry_state = mapping_retry_state or _MappingRetryState()
 
@@ -1995,6 +2090,14 @@ async def apply_migration_repairs(
         snapshot = await read_fresh_migration_snapshot(fresh.snapshot, user_context, pinned_target)
         current = classify_migration_snapshot(snapshot, pinned_target)
         if current.status is MigrationDispositionStatus.BLOCKED:
+            if migration_state is not None:
+                migration_state.pop("blocked_identity_type", None)
+                if current.target is not None:
+                    migration_state["target_source"] = current.target.source.value
+                else:
+                    migration_state.pop("target_source", None)
+                if current.blocked_identity_type is not None:
+                    migration_state["blocked_identity_type"] = current.blocked_identity_type
             raise MigrationError(
                 current.reason or MigrationErrorReason.MIGRATION_STATE_INVALID,
                 "state_inspect",
@@ -2111,8 +2214,6 @@ async def apply_migration_repairs(
                     return changed_source
                 already_linked = isinstance(
                     link_result, LinkAccountsRecipeUserIdAlreadyLinkedError
-                ) and await sdk_user_id_matches_internal_target(
-                    link_result.primary_user_id, target_user_id, user_context
                 )
                 if not isinstance(link_result, LinkAccountsOkResult) and not already_linked:
                     raise RuntimeError(
@@ -2147,7 +2248,6 @@ async def apply_migration_repairs(
                 raise MigrationError(
                     MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link"
                 )
-
             result, changed_source = await _link_fresh_migration_method(
                 cast(str, mutation.recipe_user_id),
                 identity,
@@ -2159,42 +2259,11 @@ async def apply_migration_repairs(
             )
             if changed_source is not None:
                 return changed_source
-            if not isinstance(result, LinkAccountsOkResult):
+            if not isinstance(
+                result, (LinkAccountsOkResult, LinkAccountsRecipeUserIdAlreadyLinkedError)
+            ):
                 raise RuntimeError(
                     "Failed to link migrated login method: %s" % getattr(result, "status", "ERROR")
-                )
-            clear_supertokens_core_call_cache(user_context)
-            continue
-        if mutation.type == "ASSOCIATE_TENANT":
-            owner = next(
-                (
-                    candidate
-                    for candidate in snapshot.owners
-                    if candidate.recipe_user_id == mutation.recipe_user_id
-                ),
-                None,
-            )
-            if owner is None or owner.primary_user_id != target_user_id:
-                raise MigrationError(
-                    MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
-                    "tenant_associate",
-                )
-
-            async def associate(recipe_user_id: RecipeUserId) -> Any:
-                return await multitenancy_asyncio.associate_user_to_tenant(
-                    cast(str, mutation.tenant_id), recipe_user_id, user_context
-                )
-
-            result = await _apply_to_fresh_migration_method(
-                cast(str, mutation.recipe_user_id),
-                target_user_id,
-                user_context,
-                associate,
-            )
-            if getattr(result, "status", None) != "OK":
-                raise RuntimeError(
-                    "Failed to associate migrated login method: %s"
-                    % getattr(result, "status", "ERROR")
                 )
             clear_supertokens_core_call_cache(user_context)
             continue

@@ -95,6 +95,19 @@ Reference Node.js commit: `ec277cf` (`feat: Guard forced migration mapping`).
 - [ ] Return `CORE_CAPABILITY_REQUIRED` when the narrow atomic Core capability is unavailable (blocked until the Python SDK exposes the exact Core result and narrow operation).
 - [x] Add tests proving conflicts, collisions, and generic Core errors never force mapping.
 
+## Different-User Login Methods
+
+- [x] Select mapping, safe raw ID, unique verified third-party owner, unique verified Passwordless owner, or fresh import in order.
+- [x] Reject unrelated owner ambiguity, foreign mappings/metadata, and primary-account merges with stable permanent reasons.
+- [x] Re-fetch Rownd source, ownership, target mapping authority, and tenant membership immediately around linking.
+- [x] Fail closed without mutation when a discovered method lacks request-tenant membership.
+- [x] Accept a sibling link only after fresh exact identity, tenant, target-authority, and final-owner checks.
+- [x] Add redacted identity-type and target-source context to terminal migration telemetry without changing public errors.
+- [ ] Classify affected accounts through a read-only command (shared points 2/4/5 diagnostic remains unimplemented).
+- [ ] Reconcile eligible cross-tenant standalone owners (unsafe without discoverability and an atomic association/link operation).
+
+Point 4 is partial. Point 2's unavailable narrow Core mapping capability remains blocked; this work neither broadens force behavior nor adds a workaround.
+
 ## Telemetry
 
 Reference Node.js commit: `2e9c702` (`feat: Add migration telemetry taxonomy`).
@@ -133,3 +146,14 @@ Reference Node.js commit: `55d7643` (`fix: Harden Rownd migration reliability`).
 - Follow Node.js final behavior for missing Rownd profiles: return `ROWND_USER_NOT_FOUND`/401 instead of a successful no-op.
 - Follow Node.js fail-closed mapping behavior: do not use broad boolean force while the narrow atomic Core capability is unavailable.
 - Treat the Node.js final implementation as the behavior reference where older plans disagree.
+
+## Point 4 Verification
+
+Verification on 2026-09-05 using Python 3.9.25:
+
+- `uv run pytest tests/test_migration.py tests/test_migration_contract.py`: 191 passed.
+- `uv run pytest --ignore=tests/test_integration.py`: 570 passed.
+- `uv run pytest`: 706 passed.
+- `uv run ruff check .`: passed.
+- `uv run pyright`: passed.
+- `git diff --check`: passed.

@@ -139,7 +139,6 @@ class MigrationMutation:
     target_user_id: Optional[str] = None
     identity: Optional[ExpectedIdentity] = None
     recipe_user_id: Optional[str] = None
-    tenant_id: Optional[str] = None
 
 
 class MigrationDispositionStatus(str, Enum):
@@ -154,6 +153,7 @@ class MigrationDisposition:
     target: Optional[PinnedMigrationTarget] = None
     reason: Optional[MigrationErrorReason] = None
     mutations: Tuple[MigrationMutation, ...] = ()
+    blocked_identity_type: Optional[str] = None
 
 
 _MISSING = object()
@@ -324,8 +324,23 @@ def immutable_mapping(values: Mapping[str, _T]) -> Mapping[str, _T]:
     return MappingProxyType(dict(values))
 
 
-def _blocked(reason: MigrationErrorReason) -> MigrationDisposition:
-    return MigrationDisposition(MigrationDispositionStatus.BLOCKED, reason=reason)
+def _blocked(
+    reason: MigrationErrorReason,
+    target: Optional[PinnedMigrationTarget] = None,
+    blocked_identity_type: Optional[str] = None,
+) -> MigrationDisposition:
+    return MigrationDisposition(
+        MigrationDispositionStatus.BLOCKED,
+        target=target,
+        reason=reason,
+        blocked_identity_type=blocked_identity_type,
+    )
+
+
+def _diagnostic_identity_type(identity: ExpectedIdentity) -> str:
+    if identity.recipe_id == "thirdparty":
+        return "thirdparty"
+    return "passwordless_%s" % identity.identifier_type
 
 
 def _mapping_consistent(snapshot: MigrationSnapshot) -> Optional[bool]:
@@ -383,23 +398,56 @@ def classify_migration_snapshot(
     snapshot: MigrationSnapshot, pinned_target: Optional[PinnedMigrationTarget] = None
 ) -> MigrationDisposition:
     source = snapshot.source
+    diagnostic_target = pinned_target
+    if diagnostic_target is None and snapshot.mapping.external_lookup is not None:
+        diagnostic_target = PinnedMigrationTarget(
+            snapshot.mapping.external_lookup.supertokens_user_id,
+            MigrationTargetSource.MAPPING,
+        )
     mapping_exact = _mapping_consistent(snapshot)
     if mapping_exact is None:
-        return _blocked(MigrationErrorReason.MAPPING_CONFLICT)
+        return _blocked(MigrationErrorReason.MAPPING_CONFLICT, diagnostic_target)
     owners_by_identity = {
         identity.key: tuple(owner for owner in snapshot.owners if owner.identity_key == identity.key)
         for identity in source.expected_identities
     }
-    if any(
-        len({owner.primary_user_id for owner in owners}) > 1
-        for owners in owners_by_identity.values()
-    ):
-        return _blocked(MigrationErrorReason.IDENTITY_AMBIGUOUS)
+    ambiguous_identity = next(
+        (
+            identity
+            for identity in source.expected_identities
+            if len(
+                {
+                    owner.primary_user_id
+                    for owner in owners_by_identity[identity.key]
+                }
+            )
+            > 1
+        ),
+        None,
+    )
+    if ambiguous_identity is not None:
+        return _blocked(
+            MigrationErrorReason.IDENTITY_AMBIGUOUS,
+            diagnostic_target,
+            blocked_identity_type=_diagnostic_identity_type(ambiguous_identity),
+        )
     passwordless_owner_ids = {
         owner.primary_user_id for owner in snapshot.owners if owner.recipe_id == "passwordless"
     }
     if len(passwordless_owner_ids) > 1:
-        return _blocked(MigrationErrorReason.IDENTITY_AMBIGUOUS)
+        passwordless_owner = next(
+            owner for owner in snapshot.owners if owner.recipe_id == "passwordless"
+        )
+        identity = next(
+            item
+            for item in source.expected_identities
+            if item.key == passwordless_owner.identity_key
+        )
+        return _blocked(
+            MigrationErrorReason.IDENTITY_AMBIGUOUS,
+            diagnostic_target,
+            _diagnostic_identity_type(identity),
+        )
 
     authoritative_target = None
     if snapshot.mapping.external_lookup:
@@ -409,7 +457,7 @@ def classify_migration_snapshot(
         if not snapshot.users.get(
             authoritative_target.user_id, MigrationUserState(False, False)
         ).exists:
-            return _blocked(MigrationErrorReason.MAPPING_CONFLICT)
+            return _blocked(MigrationErrorReason.MAPPING_CONFLICT, authoritative_target)
     elif snapshot.mapping.raw_id_inspection.status is RawIdStatus.PRESENT:
         raw = snapshot.mapping.raw_id_inspection
         if not raw.same_identity_graph:
@@ -422,9 +470,19 @@ def classify_migration_snapshot(
         and authoritative_target
         and pinned_target.user_id != authoritative_target.user_id
     ):
-        return _blocked(MigrationErrorReason.MAPPING_CONFLICT)
+        return _blocked(MigrationErrorReason.MAPPING_CONFLICT, pinned_target)
     target = pinned_target or authoritative_target
     if target is None:
+        third_party_owner_ids = {
+            owner.primary_user_id
+            for owner in snapshot.owners
+            if owner.recipe_id == "thirdparty"
+        }
+        if len(third_party_owner_ids) > 1:
+            return _blocked(
+                MigrationErrorReason.IDENTITY_AMBIGUOUS,
+                blocked_identity_type="thirdparty",
+            )
         owner_target = next(
             (
                 owner
@@ -451,14 +509,14 @@ def classify_migration_snapshot(
             mutations=(MigrationMutation("IMPORT_USER"),),
         )
     if not snapshot.users.get(target.user_id, MigrationUserState(False, False)).exists:
-        return _blocked(MigrationErrorReason.MAPPING_CONFLICT)
+        return _blocked(MigrationErrorReason.MAPPING_CONFLICT, target)
     if target.user_id not in snapshot.mapping.internal_lookups:
-        return _blocked(MigrationErrorReason.MAPPING_CONFLICT)
+        return _blocked(MigrationErrorReason.MAPPING_CONFLICT, target)
     internal = snapshot.mapping.internal_lookups[target.user_id]
     if not snapshot.mapping.external_lookup and internal and internal.external_user_id == source.rownd_user_id:
-        return _blocked(MigrationErrorReason.MAPPING_CONFLICT)
+        return _blocked(MigrationErrorReason.MAPPING_CONFLICT, target)
     if internal and internal.external_user_id != source.rownd_user_id:
-        return _blocked(
+        reason = (
             MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
             if target.source in {
                 MigrationTargetSource.THIRD_PARTY,
@@ -466,11 +524,19 @@ def classify_migration_snapshot(
             }
             else MigrationErrorReason.MAPPING_CONFLICT
         )
+        return _blocked(reason, target)
 
     for owner in snapshot.owners:
         owner_mapping = snapshot.mapping.internal_lookups.get(owner.primary_user_id)
         if owner_mapping and owner_mapping.external_user_id != source.rownd_user_id:
-            return _blocked(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER)
+            identity = next(
+                item for item in source.expected_identities if item.key == owner.identity_key
+            )
+            return _blocked(
+                MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
+                target,
+                _diagnostic_identity_type(identity),
+            )
         owner_metadata = snapshot.metadata.get(owner.primary_user_id)
         if owner_metadata is None:
             return _blocked(MigrationErrorReason.MIGRATION_STATE_INVALID)
@@ -480,7 +546,14 @@ def classify_migration_snapshot(
             and owner_metadata.value.original_rownd_user_id is not None
             and owner_metadata.value.original_rownd_user_id != source.rownd_user_id
         ):
-            return _blocked(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER)
+            identity = next(
+                item for item in source.expected_identities if item.key == owner.identity_key
+            )
+            return _blocked(
+                MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
+                target,
+                _diagnostic_identity_type(identity),
+            )
         if owner.primary_user_id != target.user_id and not owner_metadata.valid:
             return _blocked(MigrationErrorReason.MIGRATION_STATE_INVALID)
     foreign_third_party = tuple(
@@ -489,7 +562,9 @@ def classify_migration_snapshot(
         if owner.primary_user_id != target.user_id and owner.recipe_id == "thirdparty"
     )
     if any(owner.is_primary_user for owner in foreign_third_party):
-        return _blocked(MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED)
+        return _blocked(
+            MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED, target, "thirdparty"
+        )
     foreign_passwordless = tuple(
         owner
         for owner in snapshot.owners
@@ -505,11 +580,50 @@ def classify_migration_snapshot(
         )
         for owner in foreign_passwordless
     ):
-        return _blocked(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER)
-    if any(owner.is_primary_user for owner in foreign_passwordless) or any(
-        owner.primary_user_id != target.user_id for owner in primary_reservations
-    ):
-        return _blocked(MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED)
+        blocked_owner = next(
+            owner
+            for owner in foreign_passwordless
+            if not owner.verified
+            or not any(
+                identity.recipe_id == "passwordless"
+                and identity.key == owner.identity_key
+                and identity.identifier == owner.normalized_identifier
+                for identity in source.expected_identities
+            )
+        )
+        identity = next(
+            item for item in source.expected_identities if item.key == blocked_owner.identity_key
+        )
+        return _blocked(
+            MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
+            target,
+            _diagnostic_identity_type(identity),
+        )
+    foreign_primary_passwordless = next(
+        (owner for owner in foreign_passwordless if owner.is_primary_user), None
+    )
+    foreign_primary_reservation = next(
+        (
+            owner
+            for owner in primary_reservations
+            if owner.primary_user_id != target.user_id
+        ),
+        None,
+    )
+    if foreign_primary_passwordless or foreign_primary_reservation:
+        if foreign_primary_passwordless is not None:
+            blocked_key = foreign_primary_passwordless.identity_key
+        else:
+            assert foreign_primary_reservation is not None
+            blocked_key = foreign_primary_reservation.identity_key
+        identity = next(
+            item for item in source.expected_identities if item.key == blocked_key
+        )
+        return _blocked(
+            MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED,
+            target,
+            _diagnostic_identity_type(identity),
+        )
 
     metadata = snapshot.metadata.get(target.user_id)
     if metadata is None or not metadata.valid or metadata.value is None:
@@ -527,7 +641,6 @@ def classify_migration_snapshot(
         prefix_mutations.append(MigrationMutation("MAKE_PRIMARY", target_user_id=target.user_id))
     create_mutations = []
     link_mutations = []
-    tenant_mutations = []
     verify_mutations = []
     for identity in source.expected_identities:
         owners = owners_by_identity[identity.key]
@@ -553,12 +666,10 @@ def classify_migration_snapshot(
         ):
             return _blocked(MigrationErrorReason.MIGRATION_STATE_INVALID)
         if owner and source.tenant_id not in owner.tenant_ids:
-            tenant_mutations.append(
-                MigrationMutation(
-                    "ASSOCIATE_TENANT",
-                    recipe_user_id=owner.recipe_user_id,
-                    tenant_id=source.tenant_id,
-                )
+            return _blocked(
+                MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
+                target,
+                _diagnostic_identity_type(identity),
             )
         if (
             owner
@@ -574,7 +685,6 @@ def classify_migration_snapshot(
         *prefix_mutations,
         *create_mutations,
         *link_mutations,
-        *tenant_mutations,
         *verify_mutations,
     ]
 

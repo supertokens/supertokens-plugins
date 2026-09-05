@@ -205,8 +205,36 @@ async def record_migration_terminal(
     if reason is not None:
         event["reason"] = reason.value
     target_source = migration_state.get("target_source")
-    if isinstance(target_source, str):
+    target_context_reasons = {
+        MigrationErrorReason.IDENTITY_AMBIGUOUS,
+        MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
+        MigrationErrorReason.MAPPING_CONFLICT,
+        MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED,
+    }
+    if (
+        (outcome == "success" or reason in target_context_reasons)
+        and isinstance(target_source, str)
+        and target_source
+        in {
+            "mapping",
+            "raw_id",
+            "third_party",
+            "verified_passwordless",
+            "new_import",
+        }
+    ):
         event["targetSource"] = target_source
+    identity_type = migration_state.get("blocked_identity_type")
+    if reason in {
+        MigrationErrorReason.IDENTITY_AMBIGUOUS,
+        MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
+        MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED,
+    } and isinstance(identity_type, str) and identity_type in {
+        "thirdparty",
+        "passwordless_email",
+        "passwordless_phone",
+    }:
+        event["blockedIdentityType"] = identity_type
     try:
         _migration_tasks.submit(client, event)
     except Exception:

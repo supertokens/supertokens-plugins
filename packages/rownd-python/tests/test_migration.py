@@ -90,7 +90,9 @@ def owner(
         recipe_user_id,
         user_id,
         effective_recipe,
-        identity_key.split(":", 2)[-1],
+        ":".join(identity_key.split(":")[1:])
+        if effective_recipe == "thirdparty"
+        else identity_key.split(":", 2)[-1],
         verified,
         tenant_ids,
         is_primary,
@@ -104,6 +106,7 @@ def login_method(
     provider_id: Optional[str] = None,
     provider_user_id: Optional[str] = None,
     email: Optional[str] = None,
+    phone_number: Optional[str] = None,
     verified: bool = True,
     tenant_ids: tuple[str, ...] = ("tenant-a",),
 ) -> Any:
@@ -114,13 +117,15 @@ def login_method(
             SimpleNamespace(id=provider_id, user_id=provider_user_id) if provider_id else None
         ),
         email=email,
-        phone_number=None,
+        phone_number=phone_number,
         verified=verified,
         tenant_ids=list(tenant_ids),
         has_same_email_as=lambda value: (
             email is not None and value is not None and email.lower() == value.lower()
         ),
-        has_same_phone_number_as=lambda value: False,
+        has_same_phone_number_as=lambda value: (
+            phone_number is not None and value is not None and phone_number == value
+        ),
     )
 
 
@@ -485,6 +490,33 @@ def test_third_party_owner_precedes_passwordless_owner() -> None:
     )
 
 
+def test_multiple_unrelated_third_party_owners_are_ambiguous() -> None:
+    identity_source = source(apple_id="apple", google_id="google")
+    result = classify_migration_snapshot(
+        snapshot(
+            identity_source=identity_source,
+            owners=(
+                owner(
+                    "thirdparty:apple:apple",
+                    "apple-owner",
+                    recipe_user_id="apple-recipe",
+                    is_primary=False,
+                ),
+                owner(
+                    "thirdparty:google:google",
+                    "google-owner",
+                    recipe_user_id="google-recipe",
+                    is_primary=False,
+                ),
+            ),
+        )
+    )
+
+    assert result.status is MigrationDispositionStatus.BLOCKED
+    assert result.reason is MigrationErrorReason.IDENTITY_AMBIGUOUS
+    assert result.mutations == ()
+
+
 def test_new_identity_graph_selects_import() -> None:
     result = classify_migration_snapshot(snapshot())
     assert result.status is MigrationDispositionStatus.REPAIRABLE
@@ -797,6 +829,83 @@ def test_mapping_target_blocks_unverified_foreign_passwordless_owner() -> None:
     assert result.status is MigrationDispositionStatus.BLOCKED
     assert result.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
     assert result.mutations == ()
+    assert result.target == PinnedMigrationTarget("mapped", MigrationTargetSource.MAPPING)
+    assert result.blocked_identity_type == "passwordless_email"
+
+
+def test_mapping_target_links_verified_standalone_passwordless_owner() -> None:
+    identity_source = source(email="user@example.com")
+    result = classify_migration_snapshot(
+        snapshot(
+            identity_source=identity_source,
+            external_target="mapped",
+            owners=(
+                owner(
+                    "passwordless:email:user@example.com",
+                    "email-owner",
+                    recipe_user_id="email-recipe",
+                    verified=True,
+                    is_primary=False,
+                ),
+            ),
+        )
+    )
+
+    assert result.status is MigrationDispositionStatus.REPAIRABLE
+    assert any(
+        mutation.type == "LINK_IDENTITY" and mutation.recipe_user_id == "email-recipe"
+        for mutation in result.mutations
+    )
+
+
+def test_foreign_mapped_owner_is_never_linked() -> None:
+    identity_source = source(google_id="google")
+    result = classify_migration_snapshot(
+        snapshot(
+            identity_source=identity_source,
+            external_target="mapped",
+            owners=(
+                owner(
+                    "thirdparty:google:google",
+                    "foreign",
+                    recipe_user_id="google-recipe",
+                    is_primary=False,
+                ),
+            ),
+            internal={
+                "mapped": MappingLookup("rownd-1", "mapped"),
+                "foreign": MappingLookup("another-rownd-user", "foreign"),
+            },
+        )
+    )
+
+    assert result.status is MigrationDispositionStatus.BLOCKED
+    assert result.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+    assert result.mutations == ()
+
+
+def test_foreign_primary_owner_requires_manual_merge_without_mutation() -> None:
+    identity_source = source(google_id="google")
+    result = classify_migration_snapshot(
+        snapshot(
+            identity_source=identity_source,
+            external_target="mapped",
+            owners=(
+                owner(
+                    "thirdparty:google:google",
+                    "foreign",
+                    recipe_user_id="google-recipe",
+                    is_primary=True,
+                ),
+            ),
+        )
+    )
+
+    assert result.status is MigrationDispositionStatus.BLOCKED
+    assert result.reason is MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED
+    assert result.mutations == ()
+    assert result.target == PinnedMigrationTarget("mapped", MigrationTargetSource.MAPPING)
+    assert result.blocked_identity_type == "thirdparty"
 
 
 def test_pinned_target_must_match_authoritative_mapping() -> None:
@@ -871,7 +980,7 @@ def test_unverified_phone_owner_is_invalid_but_email_is_repairable() -> None:
     assert "VERIFY_IDENTITY" in [mutation.type for mutation in email_result.mutations]
 
 
-def test_missing_tenant_membership_is_an_explicit_repair() -> None:
+def test_missing_tenant_membership_is_blocked_without_mutations() -> None:
     identity_source = source(google_id="g")
     result = classify_migration_snapshot(
         snapshot(
@@ -886,14 +995,35 @@ def test_missing_tenant_membership_is_an_explicit_repair() -> None:
             ),
         )
     )
-    assert result.status is MigrationDispositionStatus.REPAIRABLE
-    assert any(
-        mutation.type == "ASSOCIATE_TENANT"
-        and mutation.recipe_user_id == "provider-recipe"
-        and mutation.tenant_id == "tenant-a"
-        for mutation in result.mutations
+    assert result.status is MigrationDispositionStatus.BLOCKED
+    assert result.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+    assert result.blocked_identity_type == "thirdparty"
+    assert result.mutations == ()
+
+
+def test_foreign_owner_without_tenant_membership_is_never_linked() -> None:
+    identity_source = source(google_id="g")
+    result = classify_migration_snapshot(
+        snapshot(
+            identity_source=identity_source,
+            external_target="mapped",
+            owners=(
+                owner(
+                    "thirdparty:google:g",
+                    "provider",
+                    recipe_user_id="provider-recipe",
+                    tenant_ids=(),
+                    is_primary=False,
+                ),
+            ),
+        )
     )
-    assert result.mutations[-1].type == "WRITE_METADATA"
+
+    assert result.status is MigrationDispositionStatus.BLOCKED
+    assert result.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+    assert result.target == PinnedMigrationTarget("mapped", MigrationTargetSource.MAPPING)
+    assert result.blocked_identity_type == "thirdparty"
+    assert result.mutations == ()
 
 
 def test_mixed_repair_plan_has_stable_global_mutation_order() -> None:
@@ -912,14 +1042,14 @@ def test_mixed_repair_plan_has_stable_global_mutation_order() -> None:
                     "email-owner",
                     recipe_user_id="email-recipe",
                     verified=True,
-                    tenant_ids=(),
+                    tenant_ids=("tenant-a",),
                     is_primary=False,
                 ),
                 owner(
                     "thirdparty:google:google",
                     "pinned",
                     recipe_user_id="google-recipe",
-                    tenant_ids=(),
+                    tenant_ids=("tenant-a",),
                     is_primary=False,
                 ),
             ),
@@ -939,8 +1069,6 @@ def test_mixed_repair_plan_has_stable_global_mutation_order() -> None:
         "CREATE_IDENTITY",
         "CREATE_IDENTITY",
         "LINK_IDENTITY",
-        "ASSOCIATE_TENANT",
-        "ASSOCIATE_TENANT",
         "WRITE_METADATA",
     ]
 
@@ -1166,7 +1294,7 @@ async def test_repository_accepts_current_exact_identity_as_raw_id_anchor(
 
 
 @pytest.mark.asyncio
-async def test_repository_scans_mapped_candidate_methods_outside_request_tenant(
+async def test_repository_does_not_treat_out_of_tenant_candidate_as_convergent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     identity_source = source(email="user@example.com", google_id="google-1")
@@ -1215,12 +1343,9 @@ async def test_repository_scans_mapped_candidate_methods_outside_request_tenant(
         for reservation in result.reservation_owners
     ] == [("passwordless:email:user@example.com", "emailpassword-recipe")]
     disposition = classify_migration_snapshot(result)
-    assert [
-        mutation.identity.key
-        for mutation in disposition.mutations
-        if mutation.type == "CREATE_IDENTITY" and mutation.identity is not None
-    ] == ["passwordless:email:user@example.com"]
-    assert "ASSOCIATE_TENANT" in [mutation.type for mutation in disposition.mutations]
+    assert disposition.status is MigrationDispositionStatus.BLOCKED
+    assert disposition.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+    assert disposition.mutations == ()
 
 
 @pytest.mark.asyncio
@@ -1502,6 +1627,60 @@ async def test_link_rechecks_exact_third_party_identity_before_mutation(
 
 
 @pytest.mark.asyncio
+async def test_link_rechecks_foreign_rownd_metadata_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = source(google_id="google-user").expected_identities[0]
+    existing_owner = owner(
+        expected.key,
+        "standalone-owner",
+        recipe_user_id="google-recipe",
+        recipe_id="thirdparty",
+        is_primary=False,
+    )
+    method = login_method(
+        "google-recipe",
+        "thirdparty",
+        provider_id="google",
+        provider_user_id="google-user",
+    )
+
+    async def get_owner(*_args: Any):
+        return sdk_user("standalone-owner", [method], primary=False)
+
+    async def resolve_owner(*_args: Any):
+        return "standalone-owner"
+
+    async def no_mapping(*_args: Any):
+        return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
+
+    async def foreign_metadata(*_args: Any):
+        return {"original_rownd_user": {"data": {"user_id": "another-rownd-user"}}}
+
+    async def unexpected_link(*_args: Any):
+        raise AssertionError("foreign Rownd metadata must prevent linking")
+
+    monkeypatch.setattr(repository, "get_user", get_owner)
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve_owner)
+    monkeypatch.setattr(repository, "get_user_id_mapping", no_mapping)
+    monkeypatch.setattr(repository, "get_raw_user_metadata", foreign_metadata)
+
+    with pytest.raises(MigrationError) as raised:
+        await repository._apply_to_fresh_migration_method(
+            "google-recipe",
+            "target",
+            {},
+            unexpected_link,
+            existing_owner,
+            expected,
+            "tenant-a",
+            "rownd-1",
+        )
+
+    assert raised.value.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("removed", [False, True])
 async def test_link_stops_when_provider_source_changes_or_is_removed(
     monkeypatch: pytest.MonkeyPatch, removed: bool
@@ -1559,6 +1738,9 @@ async def test_link_stops_when_provider_source_changes_or_is_removed(
     async def no_mapping(*_args: Any):
         return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
 
+    async def exact_metadata(*_args: Any):
+        return {"original_rownd_user": {"data": {"user_id": "rownd-1"}}}
+
     async def read_changed_source():
         return None if removed else revoked
 
@@ -1568,6 +1750,7 @@ async def test_link_stops_when_provider_source_changes_or_is_removed(
     monkeypatch.setattr(repository, "get_user", get_owner)
     monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve_owner)
     monkeypatch.setattr(repository, "get_user_id_mapping", no_mapping)
+    monkeypatch.setattr(repository, "get_raw_user_metadata", exact_metadata)
     monkeypatch.setattr(repository.accountlinking_asyncio, "link_accounts", unexpected_link)
 
     if removed:
@@ -1654,12 +1837,16 @@ async def test_link_rechecks_target_authority_before_mutation(
     async def read_same_source():
         return fresh
 
+    async def exact_metadata(*_args: Any):
+        return {"original_rownd_user": {"data": {"user_id": "rownd-1"}}}
+
     async def unexpected_link(*_args: Any):
         raise AssertionError("link target authority changed")
 
     monkeypatch.setattr(repository, "get_user", get_current_user)
     monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve_user_id)
     monkeypatch.setattr(repository, "get_user_id_mapping", get_mapping)
+    monkeypatch.setattr(repository, "get_raw_user_metadata", exact_metadata)
     monkeypatch.setattr(repository.accountlinking_asyncio, "link_accounts", unexpected_link)
 
     with pytest.raises(MigrationError) as raised:
@@ -1674,6 +1861,169 @@ async def test_link_rechecks_target_authority_before_mutation(
         )
 
     assert raised.value.reason is MigrationErrorReason.MAPPING_CONFLICT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_owner_matches", [True, False])
+async def test_concurrent_sibling_link_requires_fresh_exact_ownership(
+    monkeypatch: pytest.MonkeyPatch, final_owner_matches: bool
+) -> None:
+    rownd_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "google_id": "google-user"},
+            "verified_data": {"google_id": True},
+        },
+    )
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    identity = fresh.snapshot.expected_identities[0]
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    existing_owner = owner(
+        identity.key,
+        "standalone-owner",
+        recipe_user_id="google-recipe",
+        recipe_id="thirdparty",
+        is_primary=False,
+    )
+    link_returned = False
+
+    def current_method() -> Any:
+        return login_method(
+            "google-recipe",
+            "thirdparty",
+            provider_id="google",
+            provider_user_id="google-user",
+        )
+
+    async def get_current_user(user_id: str, *_args: Any):
+        if user_id == "target":
+            return sdk_user("target", [current_method()])
+        if user_id == "google-recipe":
+            if link_returned:
+                final_owner = "target" if final_owner_matches else "foreign"
+                return sdk_user(final_owner, [current_method()], primary=True)
+            return sdk_user("standalone-owner", [current_method()], primary=False)
+        return None
+
+    async def resolve_user_id(user_id: str, *_args: Any):
+        return user_id
+
+    async def get_mapping(user_id: str, mapping_type: str, *_args: Any):
+        if (user_id, mapping_type) == ("rownd-1", "EXTERNAL"):
+            return GetUserIdMappingOkResult("target", "rownd-1")
+        if (user_id, mapping_type) == ("target", "SUPERTOKENS"):
+            return GetUserIdMappingOkResult("target", "rownd-1")
+        return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
+
+    async def exact_metadata(*_args: Any):
+        return {"original_rownd_user": {"data": {"user_id": "rownd-1"}}}
+
+    async def read_source():
+        return fresh
+
+    async def sibling_link(*_args: Any):
+        nonlocal link_returned
+        link_returned = True
+        return repository.LinkAccountsRecipeUserIdAlreadyLinkedError(
+            "target", sdk_user("target", [current_method()]), "linked by sibling"
+        )
+
+    monkeypatch.setattr(repository, "get_user", get_current_user)
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve_user_id)
+    monkeypatch.setattr(repository, "get_user_id_mapping", get_mapping)
+    monkeypatch.setattr(repository, "get_raw_user_metadata", exact_metadata)
+    monkeypatch.setattr(repository.accountlinking_asyncio, "link_accounts", sibling_link)
+
+    if final_owner_matches:
+        result, changed = await repository._link_fresh_migration_method(
+            "google-recipe", identity, existing_owner, fresh, target, {}, read_source
+        )
+        assert isinstance(result, repository.LinkAccountsRecipeUserIdAlreadyLinkedError)
+        assert changed is None
+    else:
+        with pytest.raises(MigrationError) as raised:
+            await repository._link_fresh_migration_method(
+                "google-recipe", identity, existing_owner, fresh, target, {}, read_source
+            )
+        assert raised.value.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+
+
+@pytest.mark.asyncio
+async def test_verified_standalone_passwordless_method_links_to_pinned_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "email": "user@example.com"},
+            "verified_data": {"email": True},
+        },
+    )
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    identity = fresh.snapshot.expected_identities[0]
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    existing_owner = owner(
+        identity.key,
+        "standalone-owner",
+        recipe_user_id="email-recipe",
+        recipe_id="passwordless",
+        verified=True,
+        is_primary=False,
+    )
+    method = login_method(
+        "email-recipe", "passwordless", email="user@example.com", verified=True
+    )
+    linked = False
+
+    async def get_current_user(user_id: str, *_args: Any):
+        if user_id == "target":
+            return sdk_user("target", [method] if linked else [])
+        if user_id == "email-recipe":
+            return sdk_user(
+                "target" if linked else "standalone-owner",
+                [method],
+                primary=linked,
+            )
+        return None
+
+    async def resolve_user_id(user_id: str, *_args: Any):
+        return user_id
+
+    async def get_mapping(user_id: str, mapping_type: str, *_args: Any):
+        if (user_id, mapping_type) == ("rownd-1", "EXTERNAL"):
+            return GetUserIdMappingOkResult("target", "rownd-1")
+        if (user_id, mapping_type) == ("target", "SUPERTOKENS"):
+            return GetUserIdMappingOkResult("target", "rownd-1")
+        return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
+
+    async def no_metadata(*_args: Any):
+        return {}
+
+    async def read_source():
+        return fresh
+
+    async def link(*_args: Any):
+        nonlocal linked
+        linked = True
+        return repository.LinkAccountsOkResult(False, sdk_user("target", [method]))
+
+    monkeypatch.setattr(repository, "get_user", get_current_user)
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve_user_id)
+    monkeypatch.setattr(repository, "get_user_id_mapping", get_mapping)
+    monkeypatch.setattr(repository, "get_raw_user_metadata", no_metadata)
+    monkeypatch.setattr(repository.accountlinking_asyncio, "link_accounts", link)
+
+    result, changed = await repository._link_fresh_migration_method(
+        "email-recipe", identity, existing_owner, fresh, target, {}, read_source
+    )
+
+    assert isinstance(result, repository.LinkAccountsOkResult)
+    assert changed is None
+    assert linked
 
 
 @pytest.mark.asyncio
@@ -1763,6 +2113,9 @@ async def test_create_identity_rechecks_created_method_immediately_before_link(
     async def no_mapping(*_args: Any):
         return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
 
+    async def no_metadata(*_args: Any):
+        return {}
+
     async def unexpected_link(*_args: Any):
         raise AssertionError("raced created identity must not be linked")
 
@@ -1772,6 +2125,7 @@ async def test_create_identity_rechecks_created_method_immediately_before_link(
     monkeypatch.setattr(repository, "sdk_user_id_matches_internal_target", not_linked_to_target)
     monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve_created)
     monkeypatch.setattr(repository, "get_user_id_mapping", no_mapping)
+    monkeypatch.setattr(repository, "get_raw_user_metadata", no_metadata)
     monkeypatch.setattr(repository.accountlinking_asyncio, "link_accounts", unexpected_link)
 
     with pytest.raises(MigrationError) as raised:

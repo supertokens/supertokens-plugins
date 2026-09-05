@@ -232,6 +232,8 @@ A Rownd profile can contain multiple verified identities whose matching SuperTok
 
 Commits `4f18700` and `6d6722c` inspect all identity owners, pin a target, and link permitted non-primary methods after fresh checks. Primary-account and contradictory ownership cases fail closed.
 
+Point 4 is partially implemented in the working tree. Already-associated eligible methods can be linked safely, but the shared read-only diagnostic command is still pending and cross-tenant standalone owners cannot be reconciled safely. Therefore the six reported accounts cannot yet be classified without invoking migration. Point 2's unavailable narrow mapping capability remains unchanged and is not bypassed.
+
 ### Implementation
 
 1. Build expected identities only from Rownd fields that are verified and authoritative for authentication.
@@ -248,8 +250,8 @@ Commits `4f18700` and `6d6722c` inspect all identity owners, pin a target, and l
    - is still unlinked at mutation time;
    - has no user-ID mapping;
    - has no metadata claiming another Rownd user;
-   - belongs to the expected tenant or can be associated through the existing SDK tenant API and verified by a fresh membership read.
-5. Associate an otherwise eligible method with the request tenant and verify membership before linking. Never link first and repair tenant membership afterward.
+   - already belongs to the expected tenant.
+5. Fail closed with `IDENTITY_OWNED_BY_ANOTHER_USER` when a discovered method lacks request-tenant membership. Do not associate or link it on the request path.
 6. Re-fetch the Rownd source and Core ownership immediately before linking.
 7. Verify target mapping authority immediately before linking.
 8. Treat a sibling link to the same target as convergence after a fresh read.
@@ -278,9 +280,13 @@ Commits `4f18700` and `6d6722c` inspect all identity owners, pin a target, and l
 - Every blocked topology has a specific permanent reason.
 - The six reported accounts can be classified through the diagnostic command.
 
+Status: partial. The safe online subset and redacted terminal diagnostic context are implemented and the full 706-test suite passes. The diagnostic-command criterion remains pending, and automatic cross-tenant association is intentionally unavailable.
+
 ### Residual Limitation
 
 Primary-primary and contradictory ownership cases cannot be made successful safely by the plugin. They require a separately authorized account-recovery process outside online migration.
+
+The shared read-only diagnostic command is required to classify affected accounts without invoking migration. Cross-tenant standalone reconciliation additionally requires reliable cross-tenant owner discovery and an atomic association/link operation; current tenant-scoped account-info lookup and irreversible SDK association cannot provide those guarantees. The plugin therefore neither enumerates other tenants nor associates or links a discovered owner that lacks request-tenant membership.
 
 ## Point 5: Incomplete Migrated User Could Not Be Reconciled
 
@@ -302,8 +308,6 @@ Commits `4f18700` and `6d6722c` add immutable Rownd source snapshots, durable st
    - create an unforced mapping;
    - make the selected target primary;
    - create a missing verified identity;
-   - associate a recipe user with the tenant;
-   - fresh-read and verify tenant membership;
    - link a permitted identity;
    - verify a Rownd-authorized email;
    - write canonical email and migration completion metadata together as the final metadata mutation.
@@ -314,6 +318,7 @@ Commits `4f18700` and `6d6722c` add immutable Rownd source snapshots, durable st
 9. Record the unresolved mutation category in telemetry and diagnostics.
 10. Never destructively roll back users, mappings, methods, or links performed by this or a concurrent request.
 11. Keep session creation separate. A completed durable migration with failed session creation must be retryable without repeating account mutations.
+12. Treat missing request-tenant membership as permanently blocked with `IDENTITY_OWNED_BY_ANOTHER_USER`; do not associate or link on the request path.
 
 ### Clarification On Phone Identities
 
@@ -325,7 +330,8 @@ The current integration suite demonstrates that a plugin-created phone method ca
 - Retry after metadata finalization failure converges without duplicate identities.
 - Retry after session creation failure reuses completed durable state.
 - Existing mapping remains the canonical target when Rownd email changes.
-- Missing provider, email, phone, tenant membership, and metadata each repair independently.
+- Missing provider, email, phone, and metadata each repair independently.
+- Missing tenant membership fails closed without association or linking.
 - Source profile changes during repair restart classification safely.
 - Attempt exhaustion returns the final specific blocker or `MIGRATION_INCOMPLETE`.
 - No failed attempt deletes state created by a sibling.
@@ -336,6 +342,7 @@ The current integration suite demonstrates that a plugin-created phone method ca
 - Repeated requests do not create duplicate users or methods.
 - Completion metadata is never published before all durable invariants pass.
 - Session failure does not corrupt an otherwise complete migration.
+- Cross-tenant standalone reconciliation remains blocked until owner discovery and tenant association/linking can be performed atomically.
 
 ## Point 6: Passwordless `canonical_topology`
 
