@@ -109,6 +109,16 @@ class MigrationTargetSource(str, Enum):
     NEW_IMPORT = "new_import"
 
 
+class MigrationMutationType(str, Enum):
+    IMPORT_USER = "IMPORT_USER"
+    CREATE_MAPPING = "CREATE_MAPPING"
+    MAKE_PRIMARY = "MAKE_PRIMARY"
+    CREATE_IDENTITY = "CREATE_IDENTITY"
+    LINK_IDENTITY = "LINK_IDENTITY"
+    VERIFY_IDENTITY = "VERIFY_IDENTITY"
+    WRITE_METADATA = "WRITE_METADATA"
+
+
 @dataclass(frozen=True)
 class PinnedMigrationTarget:
     user_id: str

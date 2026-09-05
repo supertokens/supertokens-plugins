@@ -7,6 +7,7 @@ import time
 from typing import Callable, Optional
 
 from ..errors import MigrationErrorReason
+from ..migration import MigrationMutationType
 from ..types import JsonDict, MigrationStage, RowndPluginConfig, RowndTelemetryClient, RowndTelemetryConfig
 from .axiom_telemetry_client import AxiomTelemetryClient
 
@@ -204,6 +205,13 @@ async def record_migration_terminal(
     }
     if reason is not None:
         event["reason"] = reason.value
+    unresolved_mutation = migration_state.get("unresolved_mutation")
+    if (
+        outcome == "error"
+        and isinstance(unresolved_mutation, str)
+        and unresolved_mutation in {mutation.value for mutation in MigrationMutationType}
+    ):
+        event["unresolvedMutation"] = unresolved_mutation
     target_source = migration_state.get("target_source")
     target_context_reasons = {
         MigrationErrorReason.IDENTITY_AMBIGUOUS,

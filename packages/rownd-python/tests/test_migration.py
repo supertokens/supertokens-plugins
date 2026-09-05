@@ -26,6 +26,7 @@ from supertokens_rownd.migration import (
     MigrationMetadataState,
     MigrationSnapshot,
     MigrationMutation,
+    MigrationMutationType,
     MigrationTargetSource,
     MigrationUserState,
     PinnedMigrationTarget,
@@ -614,6 +615,52 @@ def test_new_verified_identity_repairs_topology_before_republishing_completion()
 
     assert [mutation.type for mutation in result.mutations] == [
         "CREATE_IDENTITY",
+        "WRITE_METADATA",
+    ]
+
+
+@pytest.mark.parametrize(
+    "identity_source",
+    [
+        source(google_id="missing-provider"),
+        source(email="missing@example.com"),
+        source(phone_number="+12025550199"),
+    ],
+)
+def test_missing_verified_identity_types_repair_independently(identity_source: Any) -> None:
+    result = classify_migration_snapshot(
+        snapshot(
+            identity_source=identity_source,
+            external_target="mapped",
+            metadata={"mapped": valid_metadata(identity_source)},
+        )
+    )
+
+    assert [mutation.type for mutation in result.mutations] == [
+        "CREATE_IDENTITY",
+        "WRITE_METADATA",
+    ]
+
+
+def test_missing_mapping_repairs_before_metadata() -> None:
+    identity_source = source(google_id="mapped-provider")
+    result = classify_migration_snapshot(
+        snapshot(
+            identity_source=identity_source,
+            owners=(
+                owner(
+                    "thirdparty:google:mapped-provider",
+                    "target",
+                    recipe_user_id="provider-recipe",
+                ),
+            ),
+            internal={"target": None},
+            metadata={"target": valid_metadata(identity_source)},
+        )
+    )
+
+    assert [mutation.type for mutation in result.mutations] == [
+        "CREATE_MAPPING",
         "WRITE_METADATA",
     ]
 
@@ -1764,7 +1811,8 @@ async def test_link_stops_when_provider_source_changes_or_is_removed(
                 {},
                 read_changed_source,
             )
-        assert raised.value.reason is MigrationErrorReason.MIGRATION_INCOMPLETE
+        assert raised.value.reason is MigrationErrorReason.ROWND_USER_NOT_FOUND
+        assert raised.value.stage == "rownd_profile_fetch"
     else:
         result, changed = await repository._link_fresh_migration_method(
             "google-recipe",
@@ -2699,6 +2747,7 @@ async def test_mapping_recovers_uncertain_committed_write(
     )
 
     assert await arranged.create() is True
+    assert len(arranged.create_calls) == 1
     arranged.assert_unforced()
 
 
@@ -2820,3 +2869,1050 @@ async def test_repository_reports_retry_recovery_truthfully(
     assert migration_state["attempt_count"] == 2
     assert migration_state["target_source"] == "mapping"
     assert migration_state["path"] == "retry_recovery"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation_type", list(MigrationMutationType))
+async def test_uncertain_mutation_result_converges_from_fresh_state_without_repeat(
+    monkeypatch: pytest.MonkeyPatch, mutation_type: MigrationMutationType
+) -> None:
+    rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    pending = True
+    mutation_calls = 0
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        return cast(Any, object())
+
+    def classify(*_args: Any):
+        if pending:
+            return MigrationDisposition(
+                MigrationDispositionStatus.REPAIRABLE,
+                target,
+                mutations=(MigrationMutation(mutation_type.value, target_user_id="target"),),
+            )
+        return MigrationDisposition(MigrationDispositionStatus.COMPLETE, target)
+
+    async def lose_response(*_args: Any, **_kwargs: Any):
+        nonlocal pending, mutation_calls
+        mutation_calls += 1
+        pending = False
+        raise TimeoutError("response lost after durable mutation")
+
+    async def no_op(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def session_method(*_args: Any, **_kwargs: Any) -> RecipeUserId:
+        return RecipeUserId("recipe-user")
+
+    async def create_session(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(
+            get_user_id=lambda _context: "rownd-1",
+            get_recipe_user_id=lambda _context: RecipeUserId("recipe-user"),
+            get_tenant_id=lambda _context: "tenant-a",
+        )
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "classify_migration_snapshot", classify)
+    monkeypatch.setattr(repository, "apply_migration_repairs", lose_response)
+    monkeypatch.setattr(repository, "record_rownd_app_variant_for_user", no_op)
+    monkeypatch.setattr(repository, "read_fresh_migration_session_method", session_method)
+    monkeypatch.setattr(repository, "build_rownd_session_claims", lambda *_args: no_op())
+    monkeypatch.setattr(repository.session_asyncio, "create_new_session", create_session)
+    migration_state: JsonDict = {}
+
+    result = await repository.migrate_rownd_user_and_create_session(
+        cast(Any, SimpleNamespace()),
+        "rownd-1",
+        fresh,
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        "tenant-a",
+        None,
+        {},
+        migration_state,
+        read_source,
+    )
+
+    assert result == "target"
+    assert mutation_calls == 1
+    assert "unresolved_mutation" not in migration_state
+
+
+@pytest.mark.asyncio
+async def test_import_response_loss_converges_through_real_repair_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    mutation = MigrationMutation("IMPORT_USER")
+    disposition = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE, mutations=(mutation,)
+    )
+    imported = False
+    calls = 0
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        return cast(Any, object())
+
+    def classify(*_args: Any):
+        return (
+            MigrationDisposition(MigrationDispositionStatus.COMPLETE)
+            if imported
+            else disposition
+        )
+
+    async def import_then_lose_response(*_args: Any, **_kwargs: Any):
+        nonlocal imported, calls
+        calls += 1
+        imported = True
+        raise TimeoutError("import response lost")
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "classify_migration_snapshot", classify)
+    monkeypatch.setattr(repository, "import_user", import_then_lose_response)
+
+    with pytest.raises(TimeoutError):
+        await repository.apply_migration_repairs(
+            disposition, fresh, None, cast(Any, SimpleNamespace()), {}, read_source
+        )
+    await repository.apply_migration_repairs(
+        disposition, fresh, None, cast(Any, SimpleNamespace()), {}, read_source
+    )
+
+    assert imported
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_make_primary_response_loss_converges_through_real_repair_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    disposition = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE,
+        target,
+        mutations=(MigrationMutation("MAKE_PRIMARY", target_user_id="target"),),
+    )
+    primary = False
+    calls = 0
+    method = login_method("recipe", "thirdparty", provider_id="rownd", provider_user_id="id")
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        return cast(Any, object())
+
+    async def get_target(*_args: Any):
+        return sdk_user("target", [method], primary=primary)
+
+    async def make_primary_then_lose_response(*_args: Any, **_kwargs: Any):
+        nonlocal primary, calls
+        calls += 1
+        primary = True
+        raise TimeoutError("make-primary response lost")
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(
+        repository,
+        "classify_migration_snapshot",
+        lambda *_args: MigrationDisposition(MigrationDispositionStatus.COMPLETE, target)
+        if primary
+        else disposition,
+    )
+    monkeypatch.setattr(repository, "get_user", get_target)
+    monkeypatch.setattr(repository, "ensure_primary_user", make_primary_then_lose_response)
+
+    with pytest.raises(TimeoutError):
+        await repository.apply_migration_repairs(
+            disposition, fresh, target, cast(Any, SimpleNamespace()), {}, read_source
+        )
+    await repository.apply_migration_repairs(
+        disposition, fresh, target, cast(Any, SimpleNamespace()), {}, read_source
+    )
+
+    assert primary
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_identity_create_response_loss_converges_through_real_repair_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "google_id": "google-user"},
+            "verified_data": {"google_id": True},
+        },
+    )
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    identity = fresh.snapshot.expected_identities[0]
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    disposition = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE,
+        target,
+        mutations=(MigrationMutation("CREATE_IDENTITY", identity=identity),),
+    )
+    created = False
+    calls = 0
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        return cast(Any, object())
+
+    async def create_then_lose_response(*_args: Any, **_kwargs: Any):
+        nonlocal created, calls
+        calls += 1
+        created = True
+        raise TimeoutError("identity-create response lost")
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(
+        repository,
+        "classify_migration_snapshot",
+        lambda *_args: MigrationDisposition(MigrationDispositionStatus.COMPLETE, target)
+        if created
+        else disposition,
+    )
+    monkeypatch.setattr(repository, "create_missing_login_method", create_then_lose_response)
+
+    with pytest.raises(TimeoutError):
+        await repository.apply_migration_repairs(
+            disposition, fresh, target, cast(Any, SimpleNamespace()), {}, read_source
+        )
+    await repository.apply_migration_repairs(
+        disposition, fresh, target, cast(Any, SimpleNamespace()), {}, read_source
+    )
+
+    assert created
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_email_verification_response_loss_converges_through_real_repair_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "email": "user@example.com"},
+            "verified_data": {"email": True},
+        },
+    )
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    email_owner = owner(
+        "passwordless:email:user@example.com",
+        "target",
+        recipe_user_id="email-recipe",
+        verified=False,
+    )
+    durable = snapshot(identity_source=fresh.snapshot, owners=(email_owner,))
+    disposition = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE,
+        target,
+        mutations=(MigrationMutation("VERIFY_IDENTITY", recipe_user_id="email-recipe"),),
+    )
+    verified = False
+    calls = 0
+    method = login_method(
+        "email-recipe", "passwordless", email="user@example.com", verified=False
+    )
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        return durable
+
+    async def get_target(*_args: Any):
+        return sdk_user("target", [method])
+
+    async def resolve_target(*_args: Any):
+        return "target"
+
+    async def create_token(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(status="OK", token="verification-token")
+
+    async def verify_then_lose_response(*_args: Any, **_kwargs: Any):
+        nonlocal verified, calls
+        calls += 1
+        verified = True
+        raise TimeoutError("verification response lost")
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(
+        repository,
+        "classify_migration_snapshot",
+        lambda *_args: MigrationDisposition(MigrationDispositionStatus.COMPLETE, target)
+        if verified
+        else disposition,
+    )
+    monkeypatch.setattr(repository, "get_user", get_target)
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve_target)
+    monkeypatch.setattr(
+        repository.emailverification_asyncio, "create_email_verification_token", create_token
+    )
+    monkeypatch.setattr(
+        repository.emailverification_asyncio, "verify_email_using_token", verify_then_lose_response
+    )
+
+    with pytest.raises(TimeoutError):
+        await repository.apply_migration_repairs(
+            disposition, fresh, target, cast(Any, SimpleNamespace()), {}, read_source
+        )
+    await repository.apply_migration_repairs(
+        disposition, fresh, target, cast(Any, SimpleNamespace()), {}, read_source
+    )
+
+    assert verified
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_metadata_response_loss_converges_through_real_repair_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    durable = snapshot(identity_source=fresh.snapshot, external_target="target")
+    disposition = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE,
+        target,
+        mutations=(MigrationMutation("WRITE_METADATA", target_user_id="target"),),
+    )
+    complete = False
+    calls = 0
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        return durable
+
+    async def get_metadata(*_args: Any):
+        return {}
+
+    async def inspect_metadata(*_args: Any):
+        return {"rownd_metadata_source_user_id": "target"}
+
+    async def write_then_lose_response(*_args: Any, **_kwargs: Any):
+        nonlocal complete, calls
+        calls += 1
+        complete = True
+        raise TimeoutError("metadata response lost")
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(
+        repository,
+        "classify_migration_snapshot",
+        lambda *_args: MigrationDisposition(MigrationDispositionStatus.COMPLETE, target)
+        if complete
+        else disposition,
+    )
+    monkeypatch.setattr(repository, "get_raw_user_metadata", get_metadata)
+    monkeypatch.setattr(repository, "inspect_linked_user_metadata", inspect_metadata)
+    monkeypatch.setattr(
+        repository.usermetadata_asyncio, "update_user_metadata", write_then_lose_response
+    )
+
+    with pytest.raises(TimeoutError):
+        await repository.apply_migration_repairs(
+            disposition, fresh, target, cast(Any, SimpleNamespace()), {}, read_source
+        )
+    await repository.apply_migration_repairs(
+        disposition, fresh, target, cast(Any, SimpleNamespace()), {}, read_source
+    )
+
+    assert complete
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_link_response_loss_converges_through_real_repair_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "google_id": "google-user"},
+            "verified_data": {"google_id": True},
+        },
+    )
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    identity = fresh.snapshot.expected_identities[0]
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    foreign_owner = owner(
+        identity.key,
+        "foreign",
+        recipe_user_id="google-recipe",
+        recipe_id="thirdparty",
+        is_primary=False,
+    )
+    durable = snapshot(identity_source=fresh.snapshot, owners=(foreign_owner,))
+    disposition = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE,
+        target,
+        mutations=(
+            MigrationMutation(
+                "LINK_IDENTITY", target_user_id="target", recipe_user_id="google-recipe"
+            ),
+        ),
+    )
+    linked = False
+    calls = 0
+    foreign_method = login_method(
+        "google-recipe",
+        "thirdparty",
+        provider_id="google",
+        provider_user_id="google-user",
+    )
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        return durable
+
+    async def get_current_user(user_id: str, *_args: Any):
+        if user_id == "target":
+            return sdk_user("target", [], primary=True)
+        return sdk_user("foreign", [foreign_method], primary=False)
+
+    async def resolve(user_id: str, *_args: Any):
+        return "target" if linked and user_id == "foreign" else user_id
+
+    async def get_mapping(user_id: str, mapping_type: str, *_args: Any):
+        if (user_id, mapping_type) in {
+            ("rownd-1", "EXTERNAL"),
+            ("target", "SUPERTOKENS"),
+        }:
+            return GetUserIdMappingOkResult("target", "rownd-1")
+        return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
+
+    async def get_metadata(*_args: Any):
+        return {}
+
+    async def link_then_lose_response(*_args: Any, **_kwargs: Any):
+        nonlocal linked, calls
+        calls += 1
+        linked = True
+        raise TimeoutError("link response lost")
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(
+        repository,
+        "classify_migration_snapshot",
+        lambda *_args: MigrationDisposition(MigrationDispositionStatus.COMPLETE, target)
+        if linked
+        else disposition,
+    )
+    monkeypatch.setattr(repository, "get_user", get_current_user)
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve)
+    monkeypatch.setattr(repository, "get_user_id_mapping", get_mapping)
+    monkeypatch.setattr(repository, "get_raw_user_metadata", get_metadata)
+    monkeypatch.setattr(repository.accountlinking_asyncio, "link_accounts", link_then_lose_response)
+
+    with pytest.raises(TimeoutError):
+        await repository.apply_migration_repairs(
+            disposition, fresh, target, cast(Any, SimpleNamespace()), {}, read_source
+        )
+    await repository.apply_migration_repairs(
+        disposition, fresh, target, cast(Any, SimpleNamespace()), {}, read_source
+    )
+
+    assert linked
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation_type", list(MigrationMutationType))
+async def test_source_change_at_each_repair_boundary_restarts_without_mutation(
+    monkeypatch: pytest.MonkeyPatch, mutation_type: MigrationMutationType
+) -> None:
+    original_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
+    changed_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "email": "changed@example.com"},
+            "verified_data": {"email": True},
+        },
+    )
+    original = repository.FreshMigrationSource(
+        original_user, create_rownd_identity_snapshot(original_user, "tenant-a")
+    )
+    changed = repository.FreshMigrationSource(
+        changed_user, create_rownd_identity_snapshot(changed_user, "tenant-a")
+    )
+    disposition = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE,
+        PinnedMigrationTarget("target", MigrationTargetSource.THIRD_PARTY),
+        mutations=(MigrationMutation(mutation_type.value, target_user_id="target"),),
+    )
+
+    async def changed_source():
+        return changed
+
+    async def unexpected_snapshot(*_args: Any):
+        raise AssertionError("changed source must restart before Core classification")
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", unexpected_snapshot)
+
+    result = await repository.apply_migration_repairs(
+        disposition,
+        original,
+        disposition.target,
+        cast(Any, SimpleNamespace()),
+        {},
+        changed_source,
+    )
+
+    assert result == changed
+
+
+@pytest.mark.asyncio
+async def test_source_change_discards_identity_derived_pin_before_reclassification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "email": "old@example.com"},
+            "verified_data": {"email": True},
+        },
+    )
+    changed_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "email": "new@example.com"},
+            "verified_data": {"email": True},
+        },
+    )
+    original = repository.FreshMigrationSource(
+        original_user, create_rownd_identity_snapshot(original_user, "tenant-a")
+    )
+    changed = repository.FreshMigrationSource(
+        changed_user, create_rownd_identity_snapshot(changed_user, "tenant-a")
+    )
+    old_target = PinnedMigrationTarget("old-owner", MigrationTargetSource.VERIFIED_PASSWORDLESS)
+    new_target = PinnedMigrationTarget("new-owner", MigrationTargetSource.VERIFIED_PASSWORDLESS)
+    source_reads = 0
+    classifications = 0
+
+    async def read_source():
+        nonlocal source_reads
+        source_reads += 1
+        return original if source_reads == 1 else changed
+
+    async def read_snapshot(*_args: Any):
+        return cast(Any, object())
+
+    def classify(_snapshot: Any, pinned: Optional[PinnedMigrationTarget]):
+        nonlocal classifications
+        classifications += 1
+        if classifications == 1:
+            assert pinned is None
+            return MigrationDisposition(
+                MigrationDispositionStatus.REPAIRABLE,
+                old_target,
+                mutations=(MigrationMutation("CREATE_MAPPING", target_user_id="old-owner"),),
+            )
+        assert pinned is None
+        return MigrationDisposition(MigrationDispositionStatus.COMPLETE, new_target)
+
+    async def source_changes(*_args: Any, **_kwargs: Any):
+        return changed
+
+    async def no_op(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def session_method(*_args: Any, **_kwargs: Any) -> RecipeUserId:
+        return RecipeUserId("recipe-user")
+
+    async def create_session(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(
+            get_user_id=lambda _context: "rownd-1",
+            get_recipe_user_id=lambda _context: RecipeUserId("recipe-user"),
+            get_tenant_id=lambda _context: "tenant-a",
+        )
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "classify_migration_snapshot", classify)
+    monkeypatch.setattr(repository, "apply_migration_repairs", source_changes)
+    monkeypatch.setattr(repository, "record_rownd_app_variant_for_user", no_op)
+    monkeypatch.setattr(repository, "read_fresh_migration_session_method", session_method)
+    monkeypatch.setattr(repository, "build_rownd_session_claims", lambda *_args: no_op())
+    monkeypatch.setattr(repository.session_asyncio, "create_new_session", create_session)
+
+    result = await repository.migrate_rownd_user_and_create_session(
+        cast(Any, SimpleNamespace()),
+        "rownd-1",
+        original,
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        "tenant-a",
+        None,
+        {},
+        {},
+        read_source,
+    )
+
+    assert result == "new-owner"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("final_disposition", "expected_reason", "expected_unresolved"),
+    [
+        (
+            MigrationDisposition(
+                MigrationDispositionStatus.BLOCKED,
+                reason=MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
+            ),
+            MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
+            None,
+        ),
+        (
+            MigrationDisposition(
+                MigrationDispositionStatus.REPAIRABLE,
+                mutations=(MigrationMutation("VERIFY_IDENTITY"),),
+            ),
+            MigrationErrorReason.MIGRATION_INCOMPLETE,
+            "VERIFY_IDENTITY",
+        ),
+        (
+            MigrationDisposition(
+                MigrationDispositionStatus.REPAIRABLE,
+                mutations=(MigrationMutation("FUTURE_MUTATION"),),
+            ),
+            MigrationErrorReason.MIGRATION_INCOMPLETE,
+            None,
+        ),
+        (
+            MigrationDisposition(
+                MigrationDispositionStatus.REPAIRABLE,
+                mutations=(
+                    MigrationMutation("FUTURE_MUTATION"),
+                    MigrationMutation("WRITE_METADATA"),
+                ),
+            ),
+            MigrationErrorReason.MIGRATION_INCOMPLETE,
+            None,
+        ),
+    ],
+)
+async def test_budget_exhaustion_uses_final_fresh_disposition(
+    monkeypatch: pytest.MonkeyPatch,
+    final_disposition: MigrationDisposition,
+    expected_reason: MigrationErrorReason,
+    expected_unresolved: Optional[str],
+) -> None:
+    rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    repairable = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE,
+        target,
+        mutations=(MigrationMutation("VERIFY_IDENTITY"),),
+    )
+    classifications = 0
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        return cast(Any, object())
+
+    def classify(*_args: Any):
+        nonlocal classifications
+        classifications += 1
+        return repairable if classifications <= 2 else final_disposition
+
+    async def no_progress(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "classify_migration_snapshot", classify)
+    monkeypatch.setattr(repository, "apply_migration_repairs", no_progress)
+    migration_state: JsonDict = {}
+
+    with pytest.raises(MigrationError) as raised:
+        await repository.migrate_rownd_user_and_create_session(
+            cast(Any, SimpleNamespace()),
+            "rownd-1",
+            fresh,
+            cast(Any, SimpleNamespace()),
+            cast(Any, SimpleNamespace()),
+            cast(Any, SimpleNamespace()),
+            "tenant-a",
+            None,
+            {},
+            migration_state,
+            read_source,
+        )
+
+    assert raised.value.reason is expected_reason
+    assert migration_state.get("unresolved_mutation") == expected_unresolved
+
+
+@pytest.mark.asyncio
+async def test_metadata_failure_reclassifies_without_recreating_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    identity_exists = False
+    complete = False
+    identity_creates = 0
+    metadata_writes = 0
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        return cast(Any, object())
+
+    def classify(*_args: Any):
+        if complete:
+            return MigrationDisposition(MigrationDispositionStatus.COMPLETE, target)
+        mutations = []
+        if not identity_exists:
+            mutations.append(MigrationMutation("CREATE_IDENTITY"))
+        mutations.append(MigrationMutation("WRITE_METADATA", target_user_id="target"))
+        return MigrationDisposition(
+            MigrationDispositionStatus.REPAIRABLE, target, mutations=tuple(mutations)
+        )
+
+    async def repair(disposition: MigrationDisposition, *_args: Any, **_kwargs: Any):
+        nonlocal identity_exists, complete, identity_creates, metadata_writes
+        if any(item.type == "CREATE_IDENTITY" for item in disposition.mutations):
+            identity_creates += 1
+            identity_exists = True
+        metadata_writes += 1
+        if metadata_writes == 1:
+            raise TimeoutError("metadata response lost")
+        complete = True
+
+    async def no_op(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def session_method(*_args: Any, **_kwargs: Any) -> RecipeUserId:
+        return RecipeUserId("recipe-user")
+
+    async def create_session(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(
+            get_user_id=lambda _context: "rownd-1",
+            get_recipe_user_id=lambda _context: RecipeUserId("recipe-user"),
+            get_tenant_id=lambda _context: "tenant-a",
+        )
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "classify_migration_snapshot", classify)
+    monkeypatch.setattr(repository, "apply_migration_repairs", repair)
+    monkeypatch.setattr(repository, "record_rownd_app_variant_for_user", no_op)
+    monkeypatch.setattr(repository, "read_fresh_migration_session_method", session_method)
+    monkeypatch.setattr(repository, "build_rownd_session_claims", lambda *_args: no_op())
+    monkeypatch.setattr(repository.session_asyncio, "create_new_session", create_session)
+
+    await repository.migrate_rownd_user_and_create_session(
+        cast(Any, SimpleNamespace()),
+        "rownd-1",
+        fresh,
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        "tenant-a",
+        None,
+        {},
+        {},
+        read_source,
+    )
+
+    assert identity_creates == 1
+    assert metadata_writes == 2
+
+
+@pytest.mark.asyncio
+async def test_session_failure_retry_reuses_complete_state_without_account_repairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    complete = MigrationDisposition(MigrationDispositionStatus.COMPLETE, target)
+    session_calls = 0
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        return cast(Any, object())
+
+    async def unexpected_repair(*_args: Any, **_kwargs: Any):
+        raise AssertionError("complete retry must not mutate account state")
+
+    async def no_op(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def session_method(*_args: Any, **_kwargs: Any) -> RecipeUserId:
+        return RecipeUserId("recipe-user")
+
+    async def create_session(*_args: Any, **_kwargs: Any):
+        nonlocal session_calls
+        session_calls += 1
+        if session_calls == 1:
+            raise RuntimeError("session transport failed")
+        return SimpleNamespace(
+            get_user_id=lambda _context: "rownd-1",
+            get_recipe_user_id=lambda _context: RecipeUserId("recipe-user"),
+            get_tenant_id=lambda _context: "tenant-a",
+        )
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "classify_migration_snapshot", lambda *_args: complete)
+    monkeypatch.setattr(repository, "apply_migration_repairs", unexpected_repair)
+    monkeypatch.setattr(repository, "record_rownd_app_variant_for_user", no_op)
+    monkeypatch.setattr(repository, "read_fresh_migration_session_method", session_method)
+    monkeypatch.setattr(repository, "build_rownd_session_claims", lambda *_args: no_op())
+    monkeypatch.setattr(repository.session_asyncio, "create_new_session", create_session)
+
+    arguments = (
+        cast(Any, SimpleNamespace()),
+        "rownd-1",
+        fresh,
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        "tenant-a",
+        None,
+        {},
+        {},
+        read_source,
+    )
+    with pytest.raises(MigrationError) as raised:
+        await repository.migrate_rownd_user_and_create_session(*arguments)
+    assert raised.value.reason is MigrationErrorReason.SESSION_CREATION_FAILED
+
+    assert await repository.migrate_rownd_user_and_create_session(*arguments) == "target"
+    assert session_calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change_during", "blocked_after_change"),
+    [("app_variant_metadata", False), ("claim_preparation", True)],
+)
+async def test_session_preparation_source_change_restarts_before_session_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    change_during: str,
+    blocked_after_change: bool,
+) -> None:
+    user_a = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "email": "a@example.com"},
+            "verified_data": {"email": True},
+        },
+    )
+    user_b = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "google_id": "source-b"},
+            "verified_data": {"google_id": True},
+        },
+    )
+    source_a = repository.FreshMigrationSource(
+        user_a, create_rownd_identity_snapshot(user_a, "tenant-a")
+    )
+    source_b = repository.FreshMigrationSource(
+        user_b, create_rownd_identity_snapshot(user_b, "tenant-a")
+    )
+    current_source = source_a
+    target_a = PinnedMigrationTarget("source-a-owner", MigrationTargetSource.THIRD_PARTY)
+    target_b = PinnedMigrationTarget("source-b-owner", MigrationTargetSource.MAPPING)
+    prepared_targets: list[tuple[str, str]] = []
+    session_targets: list[str] = []
+
+    async def read_source():
+        return current_source
+
+    async def read_snapshot(source, *_args: Any):
+        return source
+
+    def classify(source, pinned):
+        is_source_b = any(identity.recipe_id == "thirdparty" for identity in source.expected_identities)
+        if is_source_b and blocked_after_change:
+            return MigrationDisposition(
+                MigrationDispositionStatus.BLOCKED,
+                target_b,
+                reason=MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
+                blocked_identity_type="thirdparty",
+            )
+        return MigrationDisposition(
+            MigrationDispositionStatus.COMPLETE,
+            target_b if is_source_b else target_a,
+        )
+
+    async def session_method(_source: Any, target: PinnedMigrationTarget, *_args: Any):
+        return RecipeUserId("%s-recipe" % target.user_id)
+
+    async def record_variant(_config: Any, target_id: str, *_args: Any):
+        nonlocal current_source
+        prepared_targets.append(("metadata", target_id))
+        if change_during == "app_variant_metadata" and target_id == target_a.user_id:
+            current_source = source_b
+
+    async def build_claims(_config: Any, target_id: str, *_args: Any):
+        nonlocal current_source
+        prepared_targets.append(("claims", target_id))
+        if change_during == "claim_preparation" and target_id == target_a.user_id:
+            current_source = source_b
+        return {"preparedFor": target_id}
+
+    async def create_session(
+        _request: Any,
+        _tenant_id: str,
+        recipe_user_id: RecipeUserId,
+        claims: JsonDict,
+        *_args: Any,
+    ):
+        target_id = cast(str, claims["preparedFor"])
+        session_targets.append(target_id)
+        return SimpleNamespace(
+            get_user_id=lambda _context: "rownd-1",
+            get_recipe_user_id=lambda _context: recipe_user_id,
+            get_tenant_id=lambda _context: "tenant-a",
+        )
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "classify_migration_snapshot", classify)
+    monkeypatch.setattr(repository, "read_fresh_migration_session_method", session_method)
+    monkeypatch.setattr(repository, "record_rownd_app_variant_for_user", record_variant)
+    monkeypatch.setattr(repository, "build_rownd_session_claims", build_claims)
+    monkeypatch.setattr(repository.session_asyncio, "create_new_session", create_session)
+    migration_state: JsonDict = {
+        "path": "source-a-path",
+        "blocked_identity_type": "passwordless_email",
+        "unresolved_mutation": "WRITE_METADATA",
+    }
+    arguments = (
+        cast(Any, SimpleNamespace()),
+        "rownd-1",
+        source_a,
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        "tenant-a",
+        None,
+        {},
+        migration_state,
+        read_source,
+    )
+
+    if blocked_after_change:
+        with pytest.raises(MigrationError) as raised:
+            await repository.migrate_rownd_user_and_create_session(*arguments)
+        assert raised.value.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+        assert session_targets == []
+        assert migration_state["target_source"] == "mapping"
+        assert migration_state["blocked_identity_type"] == "thirdparty"
+        assert "path" not in migration_state
+        assert "unresolved_mutation" not in migration_state
+        assert "supertokens_user_id" not in migration_state
+    else:
+        result = await repository.migrate_rownd_user_and_create_session(*arguments)
+        assert result == target_b.user_id
+        assert session_targets == [target_b.user_id]
+        assert migration_state["target_source"] == "mapping"
+        assert migration_state["path"] == "already_complete"
+        assert "blocked_identity_type" not in migration_state
+        assert "unresolved_mutation" not in migration_state
+
+    assert ("metadata", target_a.user_id) in prepared_targets
+    assert ("claims", target_a.user_id) in prepared_targets
+
+
+@pytest.mark.asyncio
+async def test_metadata_is_not_written_while_other_durable_invariants_are_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    stale_plan = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE,
+        target,
+        mutations=(MigrationMutation("WRITE_METADATA", target_user_id="target"),),
+    )
+    current_plan = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE,
+        target,
+        mutations=(
+            MigrationMutation("CREATE_IDENTITY"),
+            MigrationMutation("WRITE_METADATA", target_user_id="target"),
+        ),
+    )
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        return cast(Any, object())
+
+    async def unexpected_write(*_args: Any, **_kwargs: Any):
+        raise AssertionError("completion metadata must remain last")
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "classify_migration_snapshot", lambda *_args: current_plan)
+    monkeypatch.setattr(repository.usermetadata_asyncio, "update_user_metadata", unexpected_write)
+
+    assert (
+        await repository.apply_migration_repairs(
+            stale_plan,
+            fresh,
+            target,
+            cast(Any, SimpleNamespace()),
+            {},
+            read_source,
+        )
+        is None
+    )

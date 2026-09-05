@@ -91,6 +91,7 @@ from .migration import (
     MigrationDispositionStatus,
     MigrationMutation,
     MigrationMetadataState,
+    MigrationMutationType,
     MigrationSnapshot,
     MigrationUserState,
     PinnedMigrationTarget,
@@ -675,18 +676,35 @@ async def migrate_rownd_user_and_create_session(
     mapping_retry_state = _MappingRetryState()
 
     recovered_after_error = False
-    for attempt_count in range(1, 3):
-        migration_state["attempt_count"] = attempt_count
-        try:
-            durable = await read_fresh_migration_snapshot(
-                source.snapshot, user_context, pinned_target
+
+    def transition_source_epoch(next_source: FreshMigrationSource) -> bool:
+        nonlocal source, pinned_target, completed_target, last_error, capability_error
+        nonlocal mapping_retry_state, recovered_after_error
+        if next_source.snapshot == source.snapshot:
+            source = next_source
+            return False
+        source = next_source
+        pinned_target = None
+        completed_target = None
+        last_error = None
+        capability_error = None
+        mapping_retry_state = _MappingRetryState()
+        recovered_after_error = False
+        attempt_count = migration_state.get("attempt_count")
+        migration_state.clear()
+        if attempt_count is not None:
+            migration_state["attempt_count"] = attempt_count
+        return True
+
+    async def require_fresh_source() -> FreshMigrationSource:
+        fresh_source = await read_fresh_source()
+        if fresh_source is None:
+            raise MigrationError(
+                MigrationErrorReason.ROWND_USER_NOT_FOUND, "rownd_profile_fetch"
             )
-        except Exception as error:
-            last_error = error
-            recovered_after_error = True
-            clear_supertokens_core_call_cache(user_context)
-            continue
-        disposition = classify_migration_snapshot(durable, pinned_target)
+        return fresh_source
+
+    def record_disposition(disposition: MigrationDisposition) -> None:
         migration_state.pop("blocked_identity_type", None)
         if disposition.target is not None:
             migration_state["target_source"] = disposition.target.source.value
@@ -694,16 +712,39 @@ async def migrate_rownd_user_and_create_session(
             migration_state.pop("target_source", None)
         if disposition.blocked_identity_type is not None:
             migration_state["blocked_identity_type"] = disposition.blocked_identity_type
+
+    def record_unresolved_mutation(disposition: MigrationDisposition) -> None:
+        migration_state.pop("unresolved_mutation", None)
+        mutation_types = {mutation.value for mutation in MigrationMutationType}
+        if disposition.mutations and disposition.mutations[0].type in mutation_types:
+            migration_state["unresolved_mutation"] = disposition.mutations[0].type
+
+    for attempt_count in range(1, 3):
+        migration_state["attempt_count"] = attempt_count
+        transition_source_epoch(await require_fresh_source())
+        try:
+            durable = await read_fresh_migration_snapshot(
+                source.snapshot, user_context, pinned_target
+            )
+        except Exception as error:
+            if (
+                isinstance(error, MigrationError)
+                and error.reason is MigrationErrorReason.ROWND_USER_NOT_FOUND
+            ):
+                raise
+            last_error = error
+            recovered_after_error = True
+            clear_supertokens_core_call_cache(user_context)
+            continue
+        disposition = classify_migration_snapshot(durable, pinned_target)
+        record_disposition(disposition)
         if disposition.status is MigrationDispositionStatus.COMPLETE:
             if recovered_after_error:
                 migration_state["path"] = "retry_recovery"
             elif "path" not in migration_state:
                 migration_state["path"] = "already_complete"
-            fresh_source = await read_fresh_source()
-            if fresh_source is None:
-                raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
-            if fresh_source.snapshot != source.snapshot:
-                source = fresh_source
+            fresh_source = await require_fresh_source()
+            if transition_source_epoch(fresh_source):
                 continue
             completed_target = disposition.target
             break
@@ -736,8 +777,13 @@ async def migrate_rownd_user_and_create_session(
                 migration_state,
             )
             if changed_source is not None:
-                source = changed_source
+                transition_source_epoch(changed_source)
         except Exception as error:
+            if (
+                isinstance(error, MigrationError)
+                and error.reason is MigrationErrorReason.ROWND_USER_NOT_FOUND
+            ):
+                raise
             last_error = error
             recovered_after_error = True
             if (
@@ -748,24 +794,13 @@ async def migrate_rownd_user_and_create_session(
             clear_supertokens_core_call_cache(user_context)
 
     if completed_target is None:
-        final_source = await read_fresh_source()
-        if final_source is None:
-            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
-        source = final_source
+        transition_source_epoch(await require_fresh_source())
         try:
             final_snapshot = await read_fresh_migration_snapshot(
                 source.snapshot, user_context, pinned_target
             )
             final_disposition = classify_migration_snapshot(final_snapshot, pinned_target)
-            migration_state.pop("blocked_identity_type", None)
-            if final_disposition.target is not None:
-                migration_state["target_source"] = final_disposition.target.source.value
-            elif final_disposition.status is MigrationDispositionStatus.BLOCKED:
-                migration_state.pop("target_source", None)
-            if final_disposition.blocked_identity_type is not None:
-                migration_state["blocked_identity_type"] = (
-                    final_disposition.blocked_identity_type
-                )
+            record_disposition(final_disposition)
         except Exception as error:
             reason = (
                 MigrationErrorReason.CORE_UNAVAILABLE
@@ -774,15 +809,18 @@ async def migrate_rownd_user_and_create_session(
             )
             raise MigrationError(reason, "state_inspect", error) from error
         if final_disposition.status is MigrationDispositionStatus.COMPLETE:
+            migration_state.pop("unresolved_mutation", None)
             migration_state["path"] = "postcondition_recovery"
             completed_target = final_disposition.target
         elif final_disposition.status is MigrationDispositionStatus.BLOCKED:
+            migration_state.pop("unresolved_mutation", None)
             raise MigrationError(
                 final_disposition.reason or MigrationErrorReason.MIGRATION_STATE_INVALID,
                 "state_inspect",
                 last_error,
             )
         else:
+            record_unresolved_mutation(final_disposition)
             capability_required = (
                 capability_error is not None
                 and final_disposition.status is MigrationDispositionStatus.REPAIRABLE
@@ -802,43 +840,52 @@ async def migrate_rownd_user_and_create_session(
     if completed_target is None:
         raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
 
-    supertokens_user_id = completed_target.user_id
-    migration_state["supertokens_user_id"] = supertokens_user_id
-    await record_rownd_app_variant_for_user(
-        config, supertokens_user_id, app_variant_id, user_context
-    )
-
-    session_source = await read_fresh_source()
-    if session_source is None or session_source.snapshot != source.snapshot:
-        raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
-    final_snapshot = await read_fresh_migration_snapshot(
-        session_source.snapshot, user_context, completed_target
-    )
-    final_disposition = classify_migration_snapshot(final_snapshot, completed_target)
-    if final_disposition.status is MigrationDispositionStatus.BLOCKED:
-        raise MigrationError(
-            final_disposition.reason or MigrationErrorReason.MIGRATION_STATE_INVALID,
-            "state_inspect",
+    migration_state.pop("unresolved_mutation", None)
+    for _ in range(3):
+        session_source = await require_fresh_source()
+        transition_source_epoch(session_source)
+        final_snapshot = await read_fresh_migration_snapshot(
+            source.snapshot, user_context, pinned_target
         )
-    if final_disposition.status is not MigrationDispositionStatus.COMPLETE:
+        final_disposition = classify_migration_snapshot(final_snapshot, pinned_target)
+        record_disposition(final_disposition)
+        if final_disposition.status is MigrationDispositionStatus.BLOCKED:
+            raise MigrationError(
+                final_disposition.reason or MigrationErrorReason.MIGRATION_STATE_INVALID,
+                "state_inspect",
+            )
+        if final_disposition.status is not MigrationDispositionStatus.COMPLETE:
+            record_unresolved_mutation(final_disposition)
+            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+        completed_target = final_disposition.target
+        if completed_target is None:
+            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+        if "path" not in migration_state:
+            migration_state["path"] = "already_complete"
+        recipe_user_id = await read_fresh_migration_session_method(
+            source.snapshot, completed_target, user_context
+        )
+        supertokens_user_id = completed_target.user_id
+        await record_rownd_app_variant_for_user(
+            config, supertokens_user_id, app_variant_id, user_context
+        )
+        session_claims = await build_rownd_session_claims(
+            config, supertokens_user_id, {}, app_variant_id, user_context
+        )
+        immediately_fresh_source = await require_fresh_source()
+        if transition_source_epoch(immediately_fresh_source):
+            continue
+        migration_state["supertokens_user_id"] = supertokens_user_id
+        break
+    else:
         raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
-    recipe_user_id = await read_fresh_migration_session_method(
-        session_source.snapshot, completed_target, user_context
-    )
-    immediately_fresh_source = await read_fresh_source()
-    if (
-        immediately_fresh_source is None
-        or immediately_fresh_source.snapshot != session_source.snapshot
-    ):
-        raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+
     try:
         session = await session_asyncio.create_new_session(
             request,
             tenant_id,
             recipe_user_id,
-            await build_rownd_session_claims(
-                config, supertokens_user_id, {}, app_variant_id, user_context
-            ),
+            session_claims,
             {},
             create_derived_user_context(user_context, {"rowndAppVariantId": app_variant_id}),
         )
@@ -1682,7 +1729,11 @@ async def _create_rownd_user_id_mapping(
 ) -> bool:
     async def preflight() -> Tuple[FreshMigrationSource, bool]:
         fresh = await read_fresh_source()
-        if fresh is None or fresh.snapshot != source.snapshot:
+        if fresh is None:
+            raise MigrationError(
+                MigrationErrorReason.ROWND_USER_NOT_FOUND, "rownd_profile_fetch"
+            )
+        if fresh.snapshot != source.snapshot:
             raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "mapping")
         snapshot = await read_fresh_migration_snapshot(
             fresh.snapshot, user_context, target
@@ -1965,7 +2016,9 @@ async def _link_fresh_migration_method(
     async def link(method_recipe_user_id: RecipeUserId) -> Any:
         latest_source = await read_fresh_source()
         if latest_source is None:
-            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "account_link")
+            raise MigrationError(
+                MigrationErrorReason.ROWND_USER_NOT_FOUND, "rownd_profile_fetch"
+            )
         if latest_source.snapshot != source.snapshot:
             raise _MigrationSourceChanged(latest_source)
         await _assert_fresh_link_target_authority(
@@ -1998,7 +2051,9 @@ async def _link_fresh_migration_method(
         if isinstance(result, LinkAccountsRecipeUserIdAlreadyLinkedError):
             latest_source = await read_fresh_source()
             if latest_source is None:
-                raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "account_link")
+                raise MigrationError(
+                    MigrationErrorReason.ROWND_USER_NOT_FOUND, "rownd_profile_fetch"
+                )
             if latest_source.snapshot != source.snapshot:
                 return None, latest_source
             await _assert_fresh_link_target_authority(
@@ -2084,7 +2139,9 @@ async def apply_migration_repairs(
     ) -> Tuple[FreshMigrationSource, Optional[MigrationSnapshot], bool]:
         fresh = await read_fresh_source()
         if fresh is None:
-            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+            raise MigrationError(
+                MigrationErrorReason.ROWND_USER_NOT_FOUND, "rownd_profile_fetch"
+            )
         if fresh.snapshot != source.snapshot:
             return fresh, None, False
         snapshot = await read_fresh_migration_snapshot(fresh.snapshot, user_context, pinned_target)
@@ -2176,7 +2233,9 @@ async def apply_migration_repairs(
             ):
                 before_link_source = await read_fresh_source()
                 if before_link_source is None:
-                    raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "account_link")
+                    raise MigrationError(
+                        MigrationErrorReason.ROWND_USER_NOT_FOUND, "rownd_profile_fetch"
+                    )
                 if before_link_source.snapshot != fresh.snapshot:
                     return before_link_source
                 before_link = await read_fresh_migration_snapshot(
@@ -2343,7 +2402,9 @@ async def apply_migration_repairs(
         )
         publication_source = await read_fresh_source()
         if publication_source is None:
-            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "metadata_finalize")
+            raise MigrationError(
+                MigrationErrorReason.ROWND_USER_NOT_FOUND, "rownd_profile_fetch"
+            )
         if publication_source.snapshot != fresh.snapshot:
             return publication_source
         profile_metadata = rownd_compatibility.build_rownd_user_metadata(

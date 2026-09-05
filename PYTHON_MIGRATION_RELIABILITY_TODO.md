@@ -85,6 +85,33 @@ Reference Node.js commit: `36bfa04` (`feat: Converge concurrent Rownd migrations
 
 Implemented by commit `6d6722c` (`feat: Converge concurrent Rownd migrations`).
 
+## Incomplete Migration Reconciliation
+
+- [x] Re-fetch and normalize Rownd source at every bounded repair iteration and immediately before each planned mutation.
+- [x] Reclassify fresh durable mappings, users, identity owners, primary state, tenant membership, migration metadata, and canonical-email state as `COMPLETE`, `REPAIRABLE`, or `BLOCKED`.
+- [x] Keep import, unforced mapping, primary conversion, identity creation, permitted linking, email verification, and final metadata publication ordered and convergent.
+- [x] Clear caches and use fresh durable postconditions after errors or uncertain mutation results; never roll back sibling-created state.
+- [x] Discard identity-derived target pins when normalized source changes, while allowing an exact durable mapping to become canonical on reclassification.
+- [x] Reset all source-scoped target, blocker, path, capability, error, recovery, unresolved-mutation, and mapping-retry state through one source-epoch transition path.
+- [x] Return `ROWND_USER_NOT_FOUND`/401 when a fresh profile disappears at attempt, completion, final, mutation, or session boundaries.
+- [x] Perform one final fresh classification after the two-iteration online budget and preserve a specific blocker where available.
+- [x] Emit only a safely allowlisted unresolved mutation category from a final fresh `REPAIRABLE` disposition; unknown future mutation types cannot alter the migration error.
+- [x] Keep completion metadata last and session creation after durable completion so session retries do not repeat account repair mutations.
+- [x] Complete app-variant publication and asynchronous claim preparation before the final Rownd source comparison; restart bounded classification instead of issuing a stale session when preparation races a source change.
+- [x] Derive unresolved telemetry from only the first planned mutation and omit it when that first type is not allowlisted.
+- [ ] Expose the shared read-only account diagnostic command for Points 2, 4, and 5.
+
+Point 5 online reconciliation is complete in the working tree. Mapping capability and cross-tenant limitations remain unchanged: no broad force, destructive rollback, cross-tenant enumeration/association, or unsafe ownership inference was added.
+
+Verification on 2026-09-05 using Python 3.9.25:
+
+- `uv run pytest tests/test_migration.py tests/test_migration_contract.py`: 237 passed.
+- `uv run pytest --ignore=tests/test_integration.py`: 616 passed.
+- `uv run pytest`: 752 passed in 166.57 seconds with Docker-backed integration tests.
+- `uv run ruff check .`: passed.
+- `uv run pyright`: passed with 0 errors and 0 warnings.
+- `git diff --check`: passed.
+
 ## Mapping Safety
 
 Reference Node.js commit: `ec277cf` (`feat: Guard forced migration mapping`).
@@ -131,7 +158,7 @@ Reference Node.js commit: `f8e4ded` (`fix: Authorize canonical email topology`).
 
 Reference Node.js commit: `55d7643` (`fix: Harden Rownd migration reliability`).
 
-- [ ] Fetch fresh Rownd profiles without per-user caching.
+- [x] Fetch fresh Rownd profiles without per-user caching at every migration repair iteration and mutation boundary.
 - [x] Add bounded app-config/profile request deadlines, streamed response limits, and redirect rejection.
 - [ ] Add explicit Rownd API base URL validation.
 - [x] Map profile 404 to `ROWND_USER_NOT_FOUND`/401.

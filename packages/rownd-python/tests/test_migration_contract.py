@@ -19,8 +19,13 @@ from supertokens_rownd.migration import (
     MappingLookup,
     MappingState,
     MigrationMetadataState,
+    MigrationDisposition,
+    MigrationDispositionStatus,
     MigrationSnapshot,
+    MigrationMutation,
+    MigrationTargetSource,
     MigrationUserState,
+    PinnedMigrationTarget,
     RawIdInspection,
     RawIdStatus,
     ValidatedMigrationMetadata,
@@ -361,6 +366,186 @@ async def test_missing_profile_is_not_a_successful_no_op(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("boundary", "profiles_before_disappearance", "repairable"),
+    [
+        ("attempt_refresh", 1, False),
+        ("complete_refresh", 2, False),
+        ("final_refresh", 3, True),
+        ("session_refresh", 3, False),
+        ("immediate_session_refresh", 4, False),
+    ],
+)
+async def test_profile_disappearance_at_migration_boundary_is_user_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    profiles_before_disappearance: int,
+    repairable: bool,
+) -> None:
+    profile = cast(JsonDict, {"data": {"user_id": "rownd-user"}, "verified_data": {}})
+
+    class DisappearingClient(FakeRowndClient):
+        def __init__(self) -> None:
+            super().__init__(user_info=profile)
+            self.profile_reads = 0
+
+        async def fetch_optional_user_info(self, user_id: str) -> Optional[JsonDict]:
+            self.profile_reads += 1
+            return profile if self.profile_reads <= profiles_before_disappearance else None
+
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    disposition = MigrationDisposition(
+        MigrationDispositionStatus.REPAIRABLE if repairable else MigrationDispositionStatus.COMPLETE,
+        target,
+        mutations=(MigrationMutation("WRITE_METADATA", target_user_id="target"),)
+        if repairable
+        else (),
+    )
+
+    async def read_snapshot(*_args: Any):
+        return cast(Any, object())
+
+    async def no_op(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def session_method(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(get_as_string=lambda: "recipe-user")
+
+    monkeypatch.setattr(implementation.repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(
+        implementation.repository, "classify_migration_snapshot", lambda *_args: disposition
+    )
+    monkeypatch.setattr(implementation.repository, "apply_migration_repairs", no_op)
+    monkeypatch.setattr(implementation.repository, "read_fresh_migration_session_method", session_method)
+    monkeypatch.setattr(implementation.repository, "record_rownd_app_variant_for_user", no_op)
+    monkeypatch.setattr(implementation.repository, "build_rownd_session_claims", lambda *_args: no_op())
+
+    response, telemetry = await invoke_migration(
+        monkeypatch,
+        client=DisappearingClient(),
+        use_real_repository=True,
+    )
+
+    assert response.status_code == 401, boundary
+    assert response.body is not None
+    assert response.body["reason"] == "ROWND_USER_NOT_FOUND"
+    assert response.body["stage"] == "rownd_profile_fetch"
+    assert telemetry.events[0]["reason"] == "ROWND_USER_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["complete", "final"])
+async def test_source_epoch_change_uses_only_new_source_attribution(
+    monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    source_a = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-user", "email": "a@example.com"},
+            "verified_data": {"email": True},
+        },
+    )
+    source_b = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-user", "google_id": "source-b"},
+            "verified_data": {"google_id": True},
+        },
+    )
+    change_after = 2 if boundary == "complete" else 3
+
+    class ChangingClient(FakeRowndClient):
+        def __init__(self) -> None:
+            super().__init__(user_info=source_a)
+            self.profile_reads = 0
+
+        async def fetch_optional_user_info(self, user_id: str) -> Optional[JsonDict]:
+            self.profile_reads += 1
+            return source_a if self.profile_reads <= change_after else source_b
+
+    target_a = PinnedMigrationTarget("source-a-owner", MigrationTargetSource.THIRD_PARTY)
+    target_b = PinnedMigrationTarget("source-b-owner", MigrationTargetSource.MAPPING)
+    selected_session_targets: list[str] = []
+
+    async def read_snapshot(source, *_args: Any):
+        return source
+
+    def classify(source, pinned):
+        is_source_b = any(identity.recipe_id == "thirdparty" for identity in source.expected_identities)
+        if is_source_b:
+            assert pinned is None
+            return MigrationDisposition(MigrationDispositionStatus.COMPLETE, target_b)
+        if boundary == "complete":
+            return MigrationDisposition(MigrationDispositionStatus.COMPLETE, target_a)
+        return MigrationDisposition(
+            MigrationDispositionStatus.REPAIRABLE,
+            target_a,
+            mutations=(MigrationMutation("CREATE_MAPPING", target_user_id=target_a.user_id),),
+        )
+
+    repair_calls = 0
+
+    async def no_progress(*args: Any, **_kwargs: Any) -> None:
+        nonlocal repair_calls
+        repair_calls += 1
+        state = cast(JsonDict, args[7])
+        state.update(
+            {
+                "target_source": "third_party",
+                "blocked_identity_type": "passwordless_email",
+                "path": "identity_reconcile",
+                "unresolved_mutation": "CREATE_MAPPING",
+            }
+        )
+        if repair_calls == 1:
+            raise MigrationError(MigrationErrorReason.CORE_CAPABILITY_REQUIRED, "mapping")
+
+    async def session_method(_source: Any, target: PinnedMigrationTarget, *_args: Any):
+        selected_session_targets.append(target.user_id)
+        return SimpleNamespace(get_as_string=lambda: "source-b-recipe")
+
+    async def no_op(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def create_session(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(
+            get_user_id=lambda _context: "rownd-user",
+            get_recipe_user_id=lambda _context: SimpleNamespace(
+                get_as_string=lambda: "source-b-recipe"
+            ),
+            get_tenant_id=lambda _context: "public",
+        )
+
+    monkeypatch.setattr(implementation.repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(implementation.repository, "classify_migration_snapshot", classify)
+    monkeypatch.setattr(implementation.repository, "apply_migration_repairs", no_progress)
+    monkeypatch.setattr(
+        implementation.repository, "read_fresh_migration_session_method", session_method
+    )
+    monkeypatch.setattr(implementation.repository, "record_rownd_app_variant_for_user", no_op)
+    monkeypatch.setattr(implementation.repository, "build_rownd_session_claims", lambda *_args: no_op())
+    monkeypatch.setattr(implementation.repository.session_asyncio, "create_new_session", create_session)
+
+    response, telemetry = await invoke_migration(
+        monkeypatch,
+        client=ChangingClient(),
+        use_real_repository=True,
+    )
+
+    assert response.status_code == 200
+    assert response.body == {"status": "OK"}
+    assert selected_session_targets == ["source-b-owner"]
+    event = telemetry.events[0]
+    assert event["targetSource"] == "mapping"
+    assert event["path"] == (
+        "already_complete" if boundary == "complete" else "postcondition_recovery"
+    )
+    assert "blockedIdentityType" not in event
+    assert "unresolvedMutation" not in event
+    assert "source-a" not in json.dumps(event)
+
+
+@pytest.mark.asyncio
 async def test_early_failure_emits_exactly_one_terminal_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -633,6 +818,47 @@ async def test_failure_emits_one_private_terminal_event(monkeypatch: pytest.Monk
     assert "rowndUserId" not in event
     assert "superTokensUserId" not in event
     assert "error" not in event
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("CREATE_IDENTITY", "CREATE_IDENTITY"),
+        ("https://private.example/user/secret", None),
+        ("", None),
+        (None, None),
+    ],
+)
+async def test_terminal_unresolved_mutation_is_allowlisted(
+    monkeypatch: pytest.MonkeyPatch, value: Optional[str], expected: Optional[str]
+) -> None:
+    migration_state: JsonDict = {}
+    if value is not None:
+        migration_state["unresolved_mutation"] = value
+    response, telemetry = await invoke_migration(
+        monkeypatch,
+        repository_error=MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect"),
+        migration_state=migration_state,
+    )
+
+    assert response.status_code == 503
+    event = telemetry.events[0]
+    assert event.get("unresolvedMutation") == expected
+    assert "private.example" not in json.dumps(event)
+
+
+@pytest.mark.asyncio
+async def test_success_never_emits_stale_unresolved_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response, telemetry = await invoke_migration(
+        monkeypatch,
+        migration_state={"unresolved_mutation": "CREATE_MAPPING"},
+    )
+
+    assert response.status_code == 200
+    assert "unresolvedMutation" not in telemetry.events[0]
 
 
 @pytest.mark.asyncio

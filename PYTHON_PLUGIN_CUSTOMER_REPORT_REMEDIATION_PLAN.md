@@ -6,7 +6,7 @@
 - Scope: changes that can be made in the `supertokens-rownd` plugin only.
 - Report: Sandboxx production report dated 2026-09-02.
 - Reference behavior: the Node.js Rownd plugin where it is compatible with the plugin-only constraint.
-- Current baseline: commits `0355e45` through `180c882`.
+- Current baseline: commits `0355e45` through `95aab0c`, plus the uncommitted Point 5 remediation described below.
 
 ## Scope Boundary
 
@@ -298,6 +298,8 @@ An earlier attempt can leave durable partial state: an imported user, mapping, l
 
 Commits `4f18700` and `6d6722c` add immutable Rownd source snapshots, durable state inspection, a bounded inspect/repair/final-verify loop, race recovery, and delayed completion metadata.
 
+Point 5's online reconciliation behavior is implemented in the working tree. Characterization tests confirm the baseline snapshot, classification, ordered mutation, uncertain-result convergence, metadata-last, non-destructive concurrency, and session separation behavior. The remaining production delta refreshes normalized Rownd source at every repair-budget iteration, centralizes source-epoch changes so no target, path, blocker, error, capability, or mapping-retry attribution survives from the old source, and reports an unresolved mutation only from the final fresh `REPAIRABLE` disposition through a safe bounded allowlist. A profile that disappears at any refresh boundary returns `ROWND_USER_NOT_FOUND` rather than an incomplete-migration retry.
+
 ### Implementation
 
 1. Fetch and normalize a fresh Rownd profile for each attempt.
@@ -343,6 +345,12 @@ The current integration suite demonstrates that a plugin-created phone method ca
 - Completion metadata is never published before all durable invariants pass.
 - Session failure does not corrupt an otherwise complete migration.
 - Cross-tenant standalone reconciliation remains blocked until owner discovery and tenant association/linking can be performed atomically.
+
+Status: the online Point 5 behavior is complete in the working tree. Focused migration tests pass with category-specific production-branch response-loss coverage for every mutation category, source changes at every repair boundary and terminal/session classification boundary, profile disappearance at each route boundary, independent provider/email/phone/mapping/metadata repairs, final-budget classification, metadata-finalization recovery, session retry, metadata-last publication, and bounded telemetry. App-variant metadata publication and asynchronous claim construction now precede the last Rownd source read; a change during either preparation step restarts bounded durable classification and cannot issue a stale session. The shared read-only diagnostic command remains pending and is not claimed as complete.
+
+### Residual Limitation
+
+The plugin still cannot repair a structurally rejected unforced mapping, safely merge primary accounts, or associate/link a standalone owner missing request-tenant membership. Those states retain the Point 2 and Point 4 permanent failure behavior. Terminal telemetry reports only the allowlisted unresolved mutation category and does not replace the pending read-only per-account diagnostic command.
 
 ## Point 6: Passwordless `canonical_topology`
 
