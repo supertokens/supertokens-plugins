@@ -113,10 +113,16 @@ def parse_migration_authorization_header(request: BaseRequest) -> str:
     auth_header = request.get_header("authorization")
     if auth_header is None or auth_header == "":
         raise MigrationError(MigrationErrorReason.TOKEN_MISSING, "request_parse")
-    match = re.fullmatch(r"Bearer ([^\s]+)", auth_header, flags=re.IGNORECASE)
-    if match is None:
+    prefix_length = len("Bearer ")
+    if (
+        len(auth_header) <= prefix_length
+        or auth_header[:prefix_length].lower() != "bearer "
+    ):
         raise MigrationError(MigrationErrorReason.TOKEN_MALFORMED, "request_parse")
-    return match.group(1)
+    token = auth_header[prefix_length:]
+    if any(character.isspace() for character in token):
+        raise MigrationError(MigrationErrorReason.TOKEN_MALFORMED, "request_parse")
+    return token
 
 
 def get_requested_app_variant_id_from_request(request: BaseRequest) -> Optional[str]:

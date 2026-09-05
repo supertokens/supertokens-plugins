@@ -179,7 +179,9 @@ A token can reference a `kid` absent from the plugin's cached JWKS. A normal key
 
 ### Current Baseline
 
-Commit `0355e45` adds bounded JWKS caching, one forced refresh after an unknown `kid`, single-flight concurrent refresh, typed token reasons, and preservation of the last valid cache after failed refreshes.
+Commit `0355e45` added bounded JWKS caching, one forced refresh after an unknown `kid`, single-flight concurrent refresh, typed token reasons, and preservation of the last valid cache after failed refreshes. Point 3 is now complete in the working tree: it adds generation-bound negative caching, global refresh backoff for unknown-key and outage paths, required audience and temporal claims, conditional trusted-discovery issuer validation, signature/temporal-first authenticated-request protection with bounded app-ID caching, a practical total refresh timeout, atomic refresh completion state, and sampled redacted diagnostics with isolated bounded delivery.
+
+Operational bounds are a 5-second refresh cooldown, 5-second app-ID failure backoff, 5-second negative-cache TTL, 256 negative entries, practical 10-second total discovery/JWKS timeout, 5-minute JWKS and app-ID TTLs, and 10% diagnostic sampling. Expired app IDs are not served stale; their typed refresh failure is replayed during backoff. Diagnostics are globally limited to one submission per second and use a separate four-slot registry that requests cancellation after 250 ms while retaining the slot until actual termination. Negative entries do not suppress the first refresh permitted after cooldown, so maximum policy-induced recognition delay for a newly published key is 5 seconds; network and refresh execution time is additional. Python 3.9 `asyncio.wait_for` is not a strict cancellation-independent deadline when lower-level code suppresses cancellation. `TOKEN_KID_UNKNOWN` remains HTTP 401 and `retryable:false`; callers must discard the token and reauthenticate rather than automatically retry it.
 
 ### Implementation
 
@@ -194,7 +196,6 @@ Commit `0355e45` adds bounded JWKS caching, one forced refresh after an unknown 
 9. Require expected audience and temporal claims. Add expected issuer validation if the Rownd token issuer is available from trusted plugin configuration or trusted discovery metadata.
 10. Emit sampled structured diagnostics containing a bounded hash or truncated representation of the requested `kid`, key count, cache generation, and refresh outcome. Do not use `kid` as an unbounded metric label and never log the token.
 11. Document `TOKEN_KID_UNKNOWN` as requiring token discard and reauthentication. Retrying the same token cannot succeed until the published key set changes.
-12. Enforce maximum encoded-header size, `kid` length, JWKS response size, and JWKS key count before logging or parsing attacker-controlled data.
 
 ### Tests
 
@@ -214,6 +215,8 @@ Commit `0355e45` adds bounded JWKS caching, one forced refresh after an unknown 
 - A key absent from fresh JWKS returns a deterministic 401.
 - Repeated invalid tokens cannot create a JWKS request storm.
 - The 88 migration failures become distinguishable and instruct the caller to reauthenticate.
+
+Status: the final app-ID backoff change is verified on Python 3.9.25 with all 82 repository tests and all 565 non-integration tests passing. Ruff, Pyright, and diff whitespace checks pass. The immediately preceding full-suite attempts were limited by documented RootlessKit host-port collisions and were not repeated for this final isolated change. Full verification details are recorded in `PYTHON_MIGRATION_RELIABILITY_TODO.md`.
 
 ### Residual Limitation
 

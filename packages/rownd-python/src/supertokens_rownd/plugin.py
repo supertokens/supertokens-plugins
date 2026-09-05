@@ -458,10 +458,12 @@ def init(
     config.api_base_path = _normalise_path(config.api_base_path)
     _validate_config(config)
     set_active_rownd_config(config)
-    client = (
-        None if config.disable_rownd_user_migration else config.rownd_client or RowndClient(config)
-    )
     telemetry_client = create_telemetry_client(config)
+    client = (
+        None
+        if config.disable_rownd_user_migration
+        else config.rownd_client or RowndClient(config, telemetry_client=telemetry_client)
+    )
 
     route_base = config.api_base_path + HANDLE_BASE_PATH
     plugin_config = config

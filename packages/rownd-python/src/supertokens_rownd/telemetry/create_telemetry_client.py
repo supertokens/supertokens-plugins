@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from ..errors import MigrationErrorReason
 from ..types import JsonDict, MigrationStage, RowndPluginConfig, RowndTelemetryClient, RowndTelemetryConfig
@@ -17,8 +17,9 @@ class NoopTelemetryClient:
 
 
 class _MigrationTelemetryTaskRegistry:
-    def __init__(self, capacity: int = 128) -> None:
+    def __init__(self, capacity: int = 128, delivery_timeout: Optional[float] = None) -> None:
         self._capacity = capacity
+        self._delivery_timeout = delivery_timeout
         self._lock = threading.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -27,7 +28,11 @@ class _MigrationTelemetryTaskRegistry:
             if len(self._tasks) >= self._capacity:
                 return False
             try:
-                delivery = client.record_event(event)
+                delivery = (
+                    client.record_event(event)
+                    if self._delivery_timeout is None
+                    else self._record_with_deadline(client, event)
+                )
             except Exception:
                 return False
             try:
@@ -45,6 +50,19 @@ class _MigrationTelemetryTaskRegistry:
                 return False
         return True
 
+    async def _record_with_deadline(
+        self, client: RowndTelemetryClient, event: JsonDict
+    ) -> None:
+        assert self._delivery_timeout is not None
+        delivery = asyncio.create_task(client.record_event(event))
+        done, _ = await asyncio.wait({delivery}, timeout=self._delivery_timeout)
+        if delivery not in done:
+            delivery.cancel()
+        try:
+            await delivery
+        except (asyncio.CancelledError, Exception):
+            pass
+
     def _task_done(self, task: asyncio.Task[None]) -> None:
         self._consume_task_exception(task)
         with self._lock:
@@ -59,6 +77,32 @@ class _MigrationTelemetryTaskRegistry:
 
 
 _migration_tasks = _MigrationTelemetryTaskRegistry()
+
+
+class _JwksDiagnosticLimiter:
+    def __init__(
+        self,
+        registry: _MigrationTelemetryTaskRegistry,
+        interval_seconds: float = 1.0,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._registry = registry
+        self._interval_seconds = interval_seconds
+        self._monotonic = monotonic
+        self._lock = threading.Lock()
+        self._next_allowed_at = 0.0
+
+    def submit(self, client: RowndTelemetryClient, event: JsonDict) -> bool:
+        with self._lock:
+            now = self._monotonic()
+            if now < self._next_allowed_at:
+                return False
+            self._next_allowed_at = now + self._interval_seconds
+        return self._registry.submit(client, event)
+
+
+_jwks_tasks = _MigrationTelemetryTaskRegistry(capacity=4, delivery_timeout=0.25)
+_jwks_diagnostics = _JwksDiagnosticLimiter(_jwks_tasks)
 
 
 def create_telemetry_client(config: RowndPluginConfig) -> RowndTelemetryClient:
@@ -86,6 +130,13 @@ def create_telemetry_client(config: RowndPluginConfig) -> RowndTelemetryClient:
     if telemetry.provider == "axiom" and telemetry.token and telemetry.dataset:
         return AxiomTelemetryClient(telemetry.token, telemetry.dataset, telemetry.url)
     return NoopTelemetryClient()
+
+
+def record_jwks_diagnostic(client: RowndTelemetryClient, event: JsonDict) -> None:
+    try:
+        _jwks_diagnostics.submit(client, event)
+    except Exception:
+        pass
 
 
 async def record_success(

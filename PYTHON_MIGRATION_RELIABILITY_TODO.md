@@ -12,6 +12,30 @@
 
 Implemented by commit `0355e45` (`fix: Refresh rotated Rownd signing keys`).
 
+## Unknown JWKS `kid` Hardening
+
+- [x] Require a non-empty `kid` and `EdDSA` before network access.
+- [x] Add a generation-aware single-flight miss refresh with a 5-second global cooldown.
+- [x] Add a generation-bound 5-second, 256-entry negative cache that never blocks the first refresh permitted after cooldown.
+- [x] Require `aud`, `exp`, and `iat`; validate `nbf` when present and trusted discovery `issuer` only when published.
+- [x] Verify known-key signatures before authenticated app-config requests while retaining required audience validation.
+- [x] Validate temporal claims before app-config access and cache trusted app IDs for 5 minutes with generation tracking and single-flight refresh.
+- [x] Replay typed app-ID refresh failures for 5 seconds without serving expired app IDs stale.
+- [x] Back off failed cold-cache and expired-cache refreshes, atomically publish completion state, preserve known-good keys, and apply a practical 10-second total discovery/JWKS timeout.
+- [x] Emit sampled redacted JWKS diagnostics through a globally rate-limited registry isolated from terminal telemetry; cancellation-resistant deliveries retain one of four slots until termination.
+- [x] Cover cached, rotated, unknown, concurrent, cooldown, prepublication, outage, deadline, signature amplification, claims, issuer, diagnostics, and discovery behavior.
+
+Completed in the working tree for Point 3 of `PYTHON_PLUGIN_CUSTOMER_REPORT_REMEDIATION_PLAN.md`.
+
+Verification on 2026-09-05 using Python 3.9.25:
+
+- `uv run pytest tests/test_rownd_repository.py`: 73 passed.
+- `uv run pytest --ignore=tests/test_integration.py`: 555 passed.
+- Full pytest was not repeated for the final isolated app-ID backoff change. The immediately preceding full runs produced 687 passes and 11 integration fixture setup errors, with no assertion failures, because RootlessKit could not bind occupied host ports `43018` and `43022`.
+- `uv run ruff check .`: passed.
+- `uv run pyright`: passed.
+- `git diff --check`: passed.
+
 ## Next: Stable Error Contract
 
 Reference Node.js commit: `40c7107` (`feat: Add stable migration error contract`).

@@ -132,6 +132,42 @@ preempted by the event-loop deadline, but its work is bounded by that response l
 does not classify disabled Rownd profiles because the current profile response contract in
 this repository does not establish an authoritative disabled-state field and value.
 
+Rownd migration tokens must use `EdDSA`, include a non-empty `kid`, and contain valid `aud`,
+`exp`, and `iat` claims. `nbf` is validated when present. The expected audience is the configured
+Rownd application (`app:<app-id>`). If trusted Rownd discovery metadata publishes an `issuer`,
+the token must also contain the matching `iss`; no issuer is assumed when discovery omits it.
+
+An unknown signing key triggers at most one generation-aware, single-flight JWKS refresh. If the
+key remains absent, migration returns HTTP 401 with `reason: "TOKEN_KID_UNKNOWN"` and
+`retryable: false`. The caller must discard the token and reauthenticate; repeatedly submitting
+the same token cannot help until Rownd publishes its key. Refreshes have a 5-second global
+cooldown, and fresh misses enter a 256-entry per-`kid` negative cache for 5 seconds. Negative
+entries never suppress the first generation-aware refresh permitted after the global cooldown,
+so maximum policy-induced new-key recognition delay is 5 seconds, independent of the normal
+5-minute JWKS TTL; network and refresh execution time is additional. Cold-cache and expired-cache
+failures use the same backoff. Failed refreshes retain the last known-good keys and repeat their
+typed JWKS failure during the cooldown. `asyncio.wait_for` applies a practical 10-second total
+timeout to discovery plus JWKS. On Python 3.9 it cannot provide a strict cancellation-independent
+deadline if lower-level code suppresses cancellation.
+
+The migration `Authorization` header must be exactly `Bearer <token>`; the scheme remains
+case-insensitive for compatibility. For known keys, signature and
+issuer-independent temporal verification happen before the authenticated app-ID request; forged,
+expired, and not-active tokens therefore cannot amplify authenticated requests. App IDs use a
+single-flight, generation-counted 5-minute cache, bounding requests from valid-signature
+cross-audience tokens while final audience and trusted issuer validation remain mandatory. Fast
+app-config failures are single-flight and replay their typed error for 5 seconds. An expired app ID
+is not served stale during failure because the plugin cannot safely distinguish an outage from an
+application-ID change.
+
+The plugin samples 10% of key-miss diagnostics, globally limits them to one submission per second,
+and delivers them through a dedicated four-slot registry that requests cancellation after 250 ms.
+Terminal migration telemetry has separate capacity. If custom telemetry suppresses cancellation,
+its slot remains occupied until it actually exits; this keeps pending diagnostic deliveries hard
+bounded at four rather than accumulating detached tasks. Diagnostic events contain only a
+16-hex-character `kid` hash, bounded outcome and reason values, key count, and cache generation;
+they never contain the token or raw `kid`, and the `kid` is not used as a metric label.
+
 The plugin constructs exactly one terminal telemetry event and attempts one non-blocking
 submission per migration request. Migration events contain stable result and reconciliation
 fields, but no raw Rownd or SuperTokens IDs, tokens, URLs, response bodies, stack traces, or

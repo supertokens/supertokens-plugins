@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import time
 from collections import Counter
 from typing import Callable, Optional
@@ -20,6 +21,7 @@ from supertokens_rownd.rownd_repository import (
     RowndTokenValidationError,
     RowndTokenValidationReason,
 )
+import supertokens_rownd.telemetry.create_telemetry_client as telemetry
 from supertokens_rownd.types import JsonDict, RowndPluginConfig
 
 
@@ -42,13 +44,19 @@ def _token(
     *,
     algorithm: str = "EdDSA",
     claims: Optional[JsonDict] = None,
+    omit_claims: tuple[str, ...] = (),
 ) -> str:
+    now = int(time.time())
     payload: JsonDict = {
         "aud": "app:%s" % APP_ID,
+        "exp": now + 300,
+        "iat": now,
         "https://auth.rownd.io/app_user_id": USER_ID,
     }
     if claims is not None:
         payload.update(claims)
+    for claim in omit_claims:
+        payload.pop(claim, None)
     token = jwt.encode(
         payload,
         private_key,
@@ -64,21 +72,38 @@ class RowndTransport(httpx.AsyncBaseTransport):
         self.jwks = jwks
         self.calls: Counter[str] = Counter()
         self.refresh_failure: Optional[str] = None
-        self.jwks_delay = 0.0
+        self.jwks_started: Optional[asyncio.Event] = None
+        self.release_jwks: Optional[asyncio.Event] = None
+        self.gate_all_jwks = False
+        self.discovery: JsonDict = {"jwks_uri": "https://keys.example/jwks"}
+        self.app_config_started: Optional[asyncio.Event] = None
+        self.release_app_config: Optional[asyncio.Event] = None
+        self.app_config_status = 200
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.calls[request.url.path] += 1
         if request.url.path == "/hub/auth/.well-known/oauth-authorization-server":
-            return httpx.Response(200, json={"jwks_uri": "https://keys.example/jwks"})
+            return httpx.Response(200, json=self.discovery)
         if request.url.path == "/jwks":
-            if self.jwks_delay:
-                await asyncio.sleep(self.jwks_delay)
-            if self.refresh_failure == "timeout" and self.calls["/jwks"] > 1:
+            gated = self.gate_all_jwks or self.calls["/jwks"] > 1
+            if self.jwks_started is not None and gated:
+                self.jwks_started.set()
+            if self.release_jwks is not None and gated:
+                await self.release_jwks.wait()
+            if self.refresh_failure == "always_timeout" or (
+                self.refresh_failure == "timeout" and self.calls["/jwks"] > 1
+            ):
                 raise httpx.ReadTimeout("JWKS timed out", request=request)
             if self.refresh_failure == "malformed" and self.calls["/jwks"] > 1:
                 return httpx.Response(200, json={"keys": "invalid"})
             return httpx.Response(200, json=self.jwks)
         if request.url.path == "/hub/app-config":
+            if self.app_config_started is not None:
+                self.app_config_started.set()
+            if self.release_app_config is not None:
+                await self.release_app_config.wait()
+            if self.app_config_status != 200:
+                return httpx.Response(self.app_config_status)
             return httpx.Response(200, json={"app": {"id": APP_ID}})
         return httpx.Response(404)
 
@@ -135,6 +160,19 @@ async def test_malformed_or_unsupported_header_makes_no_http_calls(token: str) -
 
 
 @pytest.mark.asyncio
+async def test_malformed_payload_has_typed_reason() -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    valid = _token("A", key)
+    header, _, signature = valid.split(".")
+
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await _client(transport).validate_token("%s.invalid*.%s" % (header, signature))
+
+    assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_MALFORMED
+
+
+@pytest.mark.asyncio
 async def test_second_validation_reuses_discovery_and_jwks_cache() -> None:
     key = Ed25519PrivateKey.generate()
     transport = RowndTransport({"keys": [_jwk("A", key)]})
@@ -146,6 +184,7 @@ async def test_second_validation_reuses_discovery_and_jwks_cache() -> None:
 
     assert transport.calls["/hub/auth/.well-known/oauth-authorization-server"] == 1
     assert transport.calls["/jwks"] == 1
+    assert transport.calls["/hub/app-config"] == 1
 
 
 @pytest.mark.asyncio
@@ -197,6 +236,152 @@ async def test_known_kid_with_invalid_signature_does_not_refresh() -> None:
 
 
 @pytest.mark.asyncio
+async def test_known_kid_forgery_does_not_amplify_authenticated_requests() -> None:
+    key = Ed25519PrivateKey.generate()
+    attacker_key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    client = _client(transport)
+    assert await client.validate_token(_token("A", key)) == USER_ID
+
+    for _ in range(8):
+        with pytest.raises(RowndTokenValidationError) as exc_info:
+            await client.validate_token(_token("A", attacker_key))
+        assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_SIGNATURE_INVALID
+
+    assert transport.calls["/hub/app-config"] == 1
+    assert transport.calls["/jwks"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("temporal_state", ["expired", "not_active"])
+async def test_temporally_invalid_token_does_not_fetch_app_config(
+    temporal_state: str,
+) -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    claims: JsonDict = (
+        {"exp": int(time.time()) - 120}
+        if temporal_state == "expired"
+        else {"nbf": int(time.time()) + 120}
+    )
+
+    with pytest.raises(RowndTokenValidationError):
+        await _client(transport).validate_token(_token("A", key, claims=claims))
+
+    assert transport.calls["/hub/app-config"] == 0
+
+
+@pytest.mark.asyncio
+async def test_cross_audience_tokens_reuse_bounded_app_id_cache() -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    client = _client(transport)
+
+    for _ in range(8):
+        with pytest.raises(RowndTokenValidationError) as exc_info:
+            await client.validate_token(_token("A", key, claims={"aud": "app:other"}))
+        assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_CLAIMS_INVALID
+
+    assert transport.calls["/hub/app-config"] == 1
+
+
+@pytest.mark.asyncio
+async def test_app_id_cache_is_bounded_and_single_flight() -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    now = 10.0
+    client = _client_with_clock(transport, lambda: now)
+    transport.app_config_started = asyncio.Event()
+    transport.release_app_config = asyncio.Event()
+
+    loads = [asyncio.create_task(client._fetch_app_id()) for _ in range(8)]
+    await transport.app_config_started.wait()
+    transport.release_app_config.set()
+    assert await asyncio.gather(*loads) == [APP_ID] * 8
+    assert transport.calls["/hub/app-config"] == 1
+    assert client._app_id_cache is not None
+    assert client._app_id_cache.generation == 1
+
+    assert await client._fetch_app_id() == APP_ID
+    assert transport.calls["/hub/app-config"] == 1
+    now += RowndClient._APP_ID_CACHE_TTL_SECONDS
+    assert await client._fetch_app_id() == APP_ID
+    assert transport.calls["/hub/app-config"] == 2
+    assert client._app_id_cache is not None
+    assert client._app_id_cache.generation == 2
+
+
+@pytest.mark.asyncio
+async def test_app_id_failure_is_replayed_during_backoff() -> None:
+    transport = RowndTransport({"keys": []})
+    transport.app_config_status = 503
+    now = 10.0
+    client = _client_with_clock(transport, lambda: now)
+
+    for _ in range(2):
+        with pytest.raises(RowndAPIError) as exc_info:
+            await client._fetch_app_id()
+        assert exc_info.value.reason is RowndAPIErrorReason.UNAVAILABLE
+    assert transport.calls["/hub/app-config"] == 1
+
+    now += RowndClient._APP_ID_FAILURE_BACKOFF_SECONDS
+    with pytest.raises(RowndAPIError) as exc_info:
+        await client._fetch_app_id()
+    assert exc_info.value.reason is RowndAPIErrorReason.UNAVAILABLE
+    assert transport.calls["/hub/app-config"] == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_app_id_outage_is_single_flight_and_backed_off() -> None:
+    transport = RowndTransport({"keys": []})
+    transport.app_config_status = 503
+    transport.app_config_started = asyncio.Event()
+    transport.release_app_config = asyncio.Event()
+    client = _client(transport)
+
+    loads = [asyncio.create_task(client._fetch_app_id()) for _ in range(8)]
+    await transport.app_config_started.wait()
+    transport.release_app_config.set()
+    results = await asyncio.gather(*loads, return_exceptions=True)
+    assert all(
+        isinstance(result, RowndAPIError)
+        and result.reason is RowndAPIErrorReason.UNAVAILABLE
+        for result in results
+    )
+    assert transport.calls["/hub/app-config"] == 1
+
+    with pytest.raises(RowndAPIError):
+        await client._fetch_app_id()
+    assert transport.calls["/hub/app-config"] == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_app_id_failure_does_not_serve_stale_and_recovers() -> None:
+    transport = RowndTransport({"keys": []})
+    now = 10.0
+    client = _client_with_clock(transport, lambda: now)
+    assert await client._fetch_app_id() == APP_ID
+    assert client._app_id_cache is not None
+    assert client._app_id_cache.generation == 1
+
+    now += RowndClient._APP_ID_CACHE_TTL_SECONDS
+    transport.app_config_status = 503
+    with pytest.raises(RowndAPIError) as exc_info:
+        await client._fetch_app_id()
+    assert exc_info.value.reason is RowndAPIErrorReason.UNAVAILABLE
+    with pytest.raises(RowndAPIError):
+        await client._fetch_app_id()
+    assert transport.calls["/hub/app-config"] == 2
+
+    now += RowndClient._APP_ID_FAILURE_BACKOFF_SECONDS
+    transport.app_config_status = 200
+    assert await client._fetch_app_id() == APP_ID
+    assert transport.calls["/hub/app-config"] == 3
+    assert client._app_id_cache is not None
+    assert client._app_id_cache.generation == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("claims_factory", "reason"),
     [
@@ -219,6 +404,39 @@ async def test_token_claim_failures_have_typed_reasons(
         await _client(transport).validate_token(_token("A", key, claims=claims_factory()))
 
     assert exc_info.value.reason == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_claim", ["aud", "exp", "iat"])
+async def test_required_token_claims_are_typed(missing_claim: str) -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await _client(transport).validate_token(
+            _token("A", key, omit_claims=(missing_claim,))
+        )
+
+    assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_CLAIMS_INVALID
+
+
+@pytest.mark.asyncio
+async def test_discovery_issuer_is_required_and_validated_only_when_available() -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    assert await _client(transport).validate_token(_token("A", key)) == USER_ID
+
+    transport.discovery["issuer"] = "https://issuer.example"
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await _client(transport).validate_token(_token("A", key))
+    assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_CLAIMS_INVALID
+
+    assert (
+        await _client(transport).validate_token(
+            _token("A", key, claims={"iss": "https://issuer.example"})
+        )
+        == USER_ID
+    )
 
 
 @pytest.mark.asyncio
@@ -255,8 +473,12 @@ async def test_concurrent_rotated_key_validations_share_one_refresh() -> None:
 
     rotated_jwks: JsonDict = {"keys": [_jwk("B", key_b)]}
     transport.jwks = rotated_jwks
-    transport.jwks_delay = 0.01
-    results = await asyncio.gather(*[client.validate_token(_token("B", key_b)) for _ in range(8)])
+    transport.jwks_started = asyncio.Event()
+    transport.release_jwks = asyncio.Event()
+    validations = [asyncio.create_task(client.validate_token(_token("B", key_b))) for _ in range(8)]
+    await transport.jwks_started.wait()
+    transport.release_jwks.set()
+    results = await asyncio.gather(*validations)
 
     assert results == [USER_ID] * 8
     assert transport.calls["/hub/auth/.well-known/oauth-authorization-server"] == 2
@@ -272,11 +494,12 @@ async def test_concurrent_failed_refresh_is_attempted_once() -> None:
     assert await client.validate_token(_token("A", key_a)) == USER_ID
 
     transport.refresh_failure = "timeout"
-    transport.jwks_delay = 0.01
-    results = await asyncio.gather(
-        *[client.validate_token(_token("B", key_b)) for _ in range(8)],
-        return_exceptions=True,
-    )
+    transport.jwks_started = asyncio.Event()
+    transport.release_jwks = asyncio.Event()
+    validations = [asyncio.create_task(client.validate_token(_token("B", key_b))) for _ in range(8)]
+    await transport.jwks_started.wait()
+    transport.release_jwks.set()
+    results = await asyncio.gather(*validations, return_exceptions=True)
 
     assert all(
         isinstance(result, RowndTokenValidationError)
@@ -317,7 +540,8 @@ async def test_rotation_can_retry_after_a_failed_refresh() -> None:
     key_a = Ed25519PrivateKey.generate()
     key_b = Ed25519PrivateKey.generate()
     transport = RowndTransport({"keys": [_jwk("A", key_a)]})
-    client = _client(transport)
+    now = 10.0
+    client = _client_with_clock(transport, lambda: now)
     assert await client.validate_token(_token("A", key_a)) == USER_ID
 
     transport.refresh_failure = "timeout"
@@ -326,10 +550,246 @@ async def test_rotation_can_retry_after_a_failed_refresh() -> None:
     assert exc_info.value.reason == RowndTokenValidationReason.JWKS_FETCH_FAILED
 
     transport.refresh_failure = None
+    now += RowndClient._REFRESH_COOLDOWN_SECONDS
     rotated_jwks: JsonDict = {"keys": [_jwk("B", key_b)]}
     transport.jwks = rotated_jwks
     assert await client.validate_token(_token("B", key_b)) == USER_ID
     assert transport.calls["/jwks"] == 3
+
+
+@pytest.mark.asyncio
+async def test_forced_refresh_cooldown_prevents_repeated_fetches() -> None:
+    key_a = Ed25519PrivateKey.generate()
+    unknown_key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key_a)]})
+    now = 10.0
+    client = _client_with_clock(transport, lambda: now)
+    assert await client.validate_token(_token("A", key_a)) == USER_ID
+
+    with pytest.raises(RowndTokenValidationError):
+        await client.validate_token(_token("missing-1", unknown_key))
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await client.validate_token(_token("missing-2", unknown_key))
+    assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_KID_UNKNOWN
+    assert transport.calls["/jwks"] == 2
+
+    now += RowndClient._REFRESH_COOLDOWN_SECONDS
+    with pytest.raises(RowndTokenValidationError):
+        await client.validate_token(_token("missing-2", unknown_key))
+    assert transport.calls["/jwks"] == 3
+
+
+@pytest.mark.asyncio
+async def test_negative_cache_is_bounded_and_expires() -> None:
+    key_a = Ed25519PrivateKey.generate()
+    unknown_key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key_a)]})
+    now = 10.0
+    client = _client_with_clock(transport, lambda: now)
+    client._MAX_NEGATIVE_CACHE_ENTRIES = 2
+    client._NEGATIVE_CACHE_TTL_SECONDS = 30
+    assert await client.validate_token(_token("A", key_a)) == USER_ID
+
+    for index, key_id in enumerate(("missing-1", "missing-2", "missing-3")):
+        with pytest.raises(RowndTokenValidationError):
+            await client.validate_token(_token(key_id, unknown_key))
+        if index < 2:
+            now += RowndClient._REFRESH_COOLDOWN_SECONDS
+    assert list(client._negative_kids) == ["missing-2", "missing-3"]
+    assert transport.calls["/jwks"] == 4
+
+    with pytest.raises(RowndTokenValidationError):
+        await client.validate_token(_token("missing-3", unknown_key))
+    assert transport.calls["/jwks"] == 4
+
+    now += client._NEGATIVE_CACHE_TTL_SECONDS
+    rotated_jwks: JsonDict = {"keys": [_jwk("missing-3", unknown_key)]}
+    transport.jwks = rotated_jwks
+    assert await client.validate_token(_token("missing-3", unknown_key)) == USER_ID
+    assert transport.calls["/jwks"] == 5
+
+
+@pytest.mark.asyncio
+async def test_negative_entry_does_not_hide_key_after_refresh_cooldown() -> None:
+    key_a = Ed25519PrivateKey.generate()
+    key_b = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key_a)]})
+    now = 10.0
+    client = _client_with_clock(transport, lambda: now)
+    client._NEGATIVE_CACHE_TTL_SECONDS = 30
+    assert await client.validate_token(_token("A", key_a)) == USER_ID
+
+    with pytest.raises(RowndTokenValidationError):
+        await client.validate_token(_token("B", key_b))
+    rotated_jwks: JsonDict = {"keys": [_jwk("B", key_b)]}
+    transport.jwks = rotated_jwks
+    now += RowndClient._REFRESH_COOLDOWN_SECONDS
+
+    assert await client.validate_token(_token("B", key_b)) == USER_ID
+    assert transport.calls["/jwks"] == 3
+
+
+@pytest.mark.asyncio
+async def test_cold_cache_outage_is_single_flight_and_backed_off() -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    transport.refresh_failure = "always_timeout"
+    transport.gate_all_jwks = True
+    transport.jwks_started = asyncio.Event()
+    transport.release_jwks = asyncio.Event()
+    now = 10.0
+    client = _client_with_clock(transport, lambda: now)
+
+    validations = [asyncio.create_task(client.validate_token(_token("A", key))) for _ in range(8)]
+    await transport.jwks_started.wait()
+    transport.release_jwks.set()
+    results = await asyncio.gather(*validations, return_exceptions=True)
+    assert all(
+        isinstance(result, RowndTokenValidationError)
+        and result.reason is RowndTokenValidationReason.JWKS_FETCH_FAILED
+        for result in results
+    )
+    assert transport.calls["/jwks"] == 1
+
+    with pytest.raises(RowndTokenValidationError):
+        await client.validate_token(_token("A", key))
+    assert transport.calls["/jwks"] == 1
+
+    now += RowndClient._REFRESH_COOLDOWN_SECONDS
+    with pytest.raises(RowndTokenValidationError):
+        await client.validate_token(_token("A", key))
+    assert transport.calls["/jwks"] == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_refresh_publishes_backoff_before_completion_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    transport.refresh_failure = "always_timeout"
+    now = 10.0
+    client = _client_with_clock(transport, lambda: now)
+    handoff: list[asyncio.Task[str]] = []
+
+    def handoff_on_completion(refresh: asyncio.Task[object]) -> None:
+        if client._jwks_refresh is refresh:
+            client._jwks_refresh = None
+        handoff.append(asyncio.create_task(client.validate_token(_token("A", key))))
+
+    monkeypatch.setattr(client, "_clear_jwks_refresh", handoff_on_completion)
+    with pytest.raises(RowndTokenValidationError):
+        await client.validate_token(_token("A", key))
+    assert len(handoff) == 1
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await handoff[0]
+
+    assert exc_info.value.reason is RowndTokenValidationReason.JWKS_FETCH_FAILED
+    assert transport.calls["/jwks"] == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_cache_outage_is_backed_off_and_retains_cache() -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    now = 10.0
+    client = _client_with_clock(transport, lambda: now)
+    assert await client.validate_token(_token("A", key)) == USER_ID
+    generation = client._jwks_cache.generation if client._jwks_cache else 0
+
+    now += RowndClient._JWKS_CACHE_TTL_SECONDS
+    transport.refresh_failure = "timeout"
+    transport.jwks_started = asyncio.Event()
+    transport.release_jwks = asyncio.Event()
+    validations = [asyncio.create_task(client.validate_token(_token("A", key))) for _ in range(8)]
+    await transport.jwks_started.wait()
+    transport.release_jwks.set()
+    results = await asyncio.gather(*validations, return_exceptions=True)
+    assert all(
+        isinstance(result, RowndTokenValidationError)
+        and result.reason is RowndTokenValidationReason.JWKS_FETCH_FAILED
+        for result in results
+    )
+
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await client.validate_token(_token("A", key))
+    assert exc_info.value.reason is RowndTokenValidationReason.JWKS_FETCH_FAILED
+
+    assert transport.calls["/jwks"] == 2
+    assert client._jwks_cache is not None
+    assert client._jwks_cache.generation == generation
+
+
+@pytest.mark.asyncio
+async def test_complete_jwks_refresh_has_absolute_deadline() -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    transport.gate_all_jwks = True
+    transport.jwks_started = asyncio.Event()
+    transport.release_jwks = asyncio.Event()
+    client = _client(transport)
+    client._JWKS_REFRESH_DEADLINE_SECONDS = 0.01
+    validation = asyncio.create_task(client.validate_token(_token("A", key)))
+    await transport.jwks_started.wait()
+
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await validation
+
+    assert exc_info.value.reason is RowndTokenValidationReason.JWKS_FETCH_FAILED
+    assert transport.calls["/hub/auth/.well-known/oauth-authorization-server"] == 1
+    assert transport.calls["/jwks"] == 1
+
+
+@pytest.mark.asyncio
+async def test_jwks_diagnostic_is_sampled_structured_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CapturingTelemetry:
+        def __init__(self) -> None:
+            self.events: list[JsonDict] = []
+
+        async def record_event(self, event: JsonDict) -> None:
+            self.events.append(event)
+
+    class CapturingRegistry:
+        def submit(self, client: CapturingTelemetry, event: JsonDict) -> bool:
+            client.events.append(event)
+            return True
+
+    key_a = Ed25519PrivateKey.generate()
+    unknown_key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key_a)]})
+    telemetry_client = CapturingTelemetry()
+    monkeypatch.setattr(telemetry, "_jwks_diagnostics", CapturingRegistry())
+    client = RowndClient(
+        RowndPluginConfig(
+            rownd_app_key="app-key",
+            rownd_app_secret="app-secret",
+            rownd_api_base_url="https://api.example",
+        ),
+        transport=transport,
+        telemetry_client=telemetry_client,
+        random_value=lambda: 0.0,
+    )
+    token = _token("attacker-controlled-kid", unknown_key)
+    await client.validate_token(_token("A", key_a))
+
+    with pytest.raises(RowndTokenValidationError):
+        await client.validate_token(token)
+
+    assert telemetry_client.events == [
+        {
+            "operation": "jwks_refresh",
+            "outcome": "refreshed_missing",
+            "kidHash": telemetry_client.events[0]["kidHash"],
+            "keyCount": 1,
+            "generation": 2,
+        }
+    ]
+    assert len(str(telemetry_client.events[0]["kidHash"])) == 16
+    serialized = json.dumps(telemetry_client.events)
+    assert token not in serialized
+    assert "attacker-controlled-kid" not in serialized
 
 
 @pytest.mark.asyncio

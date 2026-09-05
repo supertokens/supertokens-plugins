@@ -170,6 +170,7 @@ class FakeRowndClient:
     ) -> None:
         self.validation_error = validation_error
         self.fetch_error = fetch_error
+        self.validation_calls = 0
         self.user_info: Optional[JsonDict] = (
             user_info
             if user_info is not None
@@ -177,6 +178,7 @@ class FakeRowndClient:
         )
 
     async def validate_token(self, token: str) -> str:
+        self.validation_calls += 1
         if self.validation_error is not None:
             raise self.validation_error
         return "rownd-user"
@@ -675,6 +677,102 @@ async def test_hung_task_occupies_one_bounded_slot_without_blocking_another() ->
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert not registry._tasks
+
+
+@pytest.mark.asyncio
+async def test_jwks_diagnostics_are_globally_limited_and_do_not_consume_terminal_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 10.0
+    diagnostic_started = asyncio.Event()
+    diagnostic_cancelled = asyncio.Event()
+    terminal_delivered = asyncio.Event()
+
+    class Telemetry:
+        async def record_event(self, event: JsonDict) -> None:
+            if event.get("operation") == "jwks_refresh":
+                diagnostic_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    diagnostic_cancelled.set()
+            terminal_delivered.set()
+
+    client = cast(Any, Telemetry())
+    diagnostic_tasks = implementation.telemetry._MigrationTelemetryTaskRegistry(
+        capacity=1, delivery_timeout=0.01
+    )
+    limiter = implementation.telemetry._JwksDiagnosticLimiter(
+        diagnostic_tasks, interval_seconds=1.0, monotonic=lambda: now
+    )
+    terminal_tasks = implementation.telemetry._MigrationTelemetryTaskRegistry(capacity=1)
+    monkeypatch.setattr(implementation.telemetry, "_jwks_diagnostics", limiter)
+    monkeypatch.setattr(implementation.telemetry, "_migration_tasks", terminal_tasks)
+
+    for sequence in range(100):
+        implementation.telemetry.record_jwks_diagnostic(
+            client, {"operation": "jwks_refresh", "sequence": sequence}
+        )
+    await asyncio.wait_for(diagnostic_started.wait(), 1)
+    assert len(diagnostic_tasks._tasks) == 1
+
+    assert terminal_tasks.submit(client, {"operation": "migration"}) is True
+    await asyncio.wait_for(terminal_delivered.wait(), 1)
+    await asyncio.wait_for(diagnostic_cancelled.wait(), 1)
+    await asyncio.sleep(0)
+    assert not diagnostic_tasks._tasks
+
+    now += 1.0
+    diagnostic_started.clear()
+    diagnostic_cancelled.clear()
+    implementation.telemetry.record_jwks_diagnostic(
+        client, {"operation": "jwks_refresh", "sequence": 101}
+    )
+    await asyncio.wait_for(diagnostic_started.wait(), 1)
+    await asyncio.wait_for(diagnostic_cancelled.wait(), 1)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_resistant_jwks_delivery_keeps_capacity_until_child_exits() -> None:
+    started = asyncio.Event()
+    cancellation_suppressed = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+    loop_errors: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+
+    class CancellationResistantTelemetry:
+        async def record_event(self, event: JsonDict) -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_suppressed.set()
+                await release.wait()
+                raise RuntimeError("contained diagnostic failure")
+            finally:
+                finished.set()
+
+    registry = implementation.telemetry._MigrationTelemetryTaskRegistry(
+        capacity=1, delivery_timeout=0.01
+    )
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    try:
+        assert registry.submit(cast(Any, CancellationResistantTelemetry()), {}) is True
+        await asyncio.wait_for(started.wait(), 1)
+        await asyncio.wait_for(cancellation_suppressed.wait(), 1)
+        assert len(registry._tasks) == 1
+        assert registry.submit(cast(Any, CancellationResistantTelemetry()), {}) is False
+
+        release.set()
+        await asyncio.wait_for(finished.wait(), 1)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not registry._tasks
+        assert loop_errors == []
+    finally:
+        loop.set_exception_handler(previous_handler)
 
 
 @pytest.mark.asyncio
