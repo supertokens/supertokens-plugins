@@ -1396,7 +1396,9 @@ async def test_migrate_repairs_changed_verified_email_on_mapped_target(
         old_email,
         new_email,
     }
+    old_method = next(method for method in user.login_methods if method.email == old_email)
     new_method = next(method for method in user.login_methods if method.email == new_email)
+    assert old_method.verified is True
     assert new_method.verified is True
     metadata = await usermetadata_asyncio.get_user_metadata(second_mapping.supertokens_user_id)
     assert metadata.metadata["rownd_migration_complete"] is True
@@ -1405,6 +1407,64 @@ async def test_migrate_repairs_changed_verified_email_on_mapped_target(
     assert metadata.metadata["rownd_email_recipe_user_ids"]["public"] == (
         new_method.recipe_user_id.get_as_string()
     )
+
+    await emailverification_asyncio.unverify_email(old_method.recipe_user_id, old_email, {})
+    rownd_plugin.rownd_config.get_active_rownd_config().email_change["retirement_mode"] = "guard"
+    retired_consume_code = await passwordless_asyncio.create_code("public", email=old_email)
+    retired_resend_code = await passwordless_asyncio.create_code("public", email=old_email)
+    canonical_create = client.post(
+        "/auth/signinup/code",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={"email": new_email},
+    )
+    retired_create = client.post(
+        "/auth/signinup/code",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={"email": old_email},
+    )
+    canonical_resend_code = await passwordless_asyncio.create_code("public", email=new_email)
+    canonical_resend = client.post(
+        "/auth/signinup/code/resend",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={
+            "deviceId": canonical_resend_code.device_id,
+            "preAuthSessionId": canonical_resend_code.pre_auth_session_id,
+        },
+    )
+    canonical_code = await passwordless_asyncio.create_code("public", email=new_email)
+    canonical_consume = client.post(
+        "/auth/signinup/code/consume",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={
+            "preAuthSessionId": canonical_code.pre_auth_session_id,
+            "linkCode": canonical_code.link_code,
+        },
+    )
+    retired_resend = client.post(
+        "/auth/signinup/code/resend",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={
+            "deviceId": retired_resend_code.device_id,
+            "preAuthSessionId": retired_resend_code.pre_auth_session_id,
+        },
+    )
+    retired_consume = client.post(
+        "/auth/signinup/code/consume",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={
+            "preAuthSessionId": retired_consume_code.pre_auth_session_id,
+            "linkCode": retired_consume_code.link_code,
+        },
+    )
+
+    assert canonical_create.json()["status"] == "OK"
+    assert retired_create.json()["status"] == "GENERAL_ERROR"
+    assert canonical_resend.json()["status"] == "OK"
+    assert retired_resend.json()["status"] == "RESTART_FLOW_ERROR"
+    assert canonical_consume.json()["status"] == "OK"
+    assert canonical_consume.headers.get("st-access-token")
+    assert retired_consume.json()["status"] == "RESTART_FLOW_ERROR"
+    assert "st-access-token" not in retired_consume.headers
 
 
 async def test_concurrent_fresh_migrations_recover_bulk_import_race(

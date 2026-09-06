@@ -149,10 +149,23 @@ Reference Node.js commit: `2e9c702` (`feat: Add migration telemetry taxonomy`).
 
 Reference Node.js commit: `f8e4ded` (`fix: Authorize canonical email topology`).
 
-- [ ] Permit a verified canonical Passwordless method beside retained unverified noncanonical methods.
-- [ ] Continue classifying old noncanonical methods as retired and blocking their authentication.
-- [ ] Verify migration-created canonical metadata satisfies guard mode.
-- [ ] Keep old methods during synchronous reconciliation; retire or remove them only through manual/asynchronous tooling.
+- [x] Permit a verified canonical Passwordless method beside retained unverified noncanonical methods.
+- [x] Continue classifying old noncanonical methods as retired and blocking their authentication.
+- [x] Verify migration-created canonical metadata satisfies guard mode.
+- [x] Keep old methods during synchronous reconciliation; retire or remove them only through manual/asynchronous tooling.
+
+Point 6 is complete in the working tree. Tenant-scoped canonical and migration-completion
+metadata are published together and fresh-validated before completion. Passwordless session
+cleanup and binding remain tracked separately under Final Hardening/Point 7.
+
+Verification on 2026-09-05 using Python 3.9.25:
+
+- `uv run pytest tests/test_mapping.py tests/test_overrides.py tests/test_migration.py -q`: 464 passed.
+- `uv run pytest --ignore=tests/test_integration.py -q`: 625 passed.
+- `uv run pytest -q`: 761 passed with Docker-backed integration tests.
+- `uv run ruff check .`: passed.
+- `uv run pyright`: passed with 0 errors and 0 warnings.
+- `git diff --check`: passed.
 
 ## Final Hardening
 

@@ -398,6 +398,12 @@ The current Python classifier marks an account malformed when any tenant Passwor
 - The 93 reported rejections are resolved when they match the retained-method topology and are otherwise reclassified precisely.
 - Observe mode retains its existing non-blocking behavior.
 
+Status: complete in the working tree. The classifier now validates the selected canonical
+method rather than requiring every retained Passwordless email method to be verified. Guard
+create, resend, and consume permit the verified canonical method and reject every valid
+noncanonical method. Migration retains prior methods, publishes tenant canonical and completion
+metadata together, and fresh-validates both before completion.
+
 ## Point 7: Passwordless Session Binding And Cleanup
 
 ### Problem

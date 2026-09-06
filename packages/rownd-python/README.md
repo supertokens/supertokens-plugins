@@ -273,7 +273,10 @@ completion claims are local compatibility behavior rather than a distributed gua
 The tenant's canonical email method is tracked separately from its login aliases.
 Existing metadata using `rownd_email_recipe_user_id` remains
 supported; new updates also maintain the tenant-scoped `rownd_email_recipe_user_ids`
-map.
+map. Guard mode permits the verified canonical Passwordless email and blocks every
+retained noncanonical alias during create, resend, and consume, even when an old alias
+is unverified. Synchronous migration retains old methods and publishes the tenant
+canonical pointer with migration-completion metadata only after durable verification.
 
 Successful profile or field updates that start verification return
 `email_verification_pending: true`. Until verification completes, the returned profile

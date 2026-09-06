@@ -27,6 +27,7 @@ from supertokens_rownd.rownd_compatibility import (
 )
 from supertokens_rownd.types import (
     EmailCredentialAuthorization,
+    EmailCredentialReason,
     EmailCredentialState,
     JsonDict,
     JsonList,
@@ -266,13 +267,19 @@ def test_canonical_passwordless_method_is_tenant_local_and_requires_marker_for_m
     assert find_canonical_passwordless_method(user, {}, "tenant-b") is methods[2]
 
 
-def _email_method(recipe_user_id: str, email: str, tenant_id: str = "public") -> Any:
+def _email_method(
+    recipe_user_id: str,
+    email: str,
+    tenant_id: str = "public",
+    *,
+    verified: bool = True,
+) -> Any:
     return SimpleNamespace(
         recipe_id="passwordless",
         recipe_user_id=SimpleNamespace(get_as_string=lambda: recipe_user_id),
         tenant_ids=[tenant_id],
         email=email,
-        verified=True,
+        verified=verified,
     )
 
 
@@ -324,6 +331,151 @@ def test_strict_classifier_retires_noncanonical_linked_email():
     assert result.state is EmailCredentialState.RETIRED
 
 
+@pytest.mark.parametrize("retired_verified", [True, False])
+def test_strict_classifier_allows_verified_canonical_and_retires_old_method(
+    retired_verified: bool,
+):
+    user = cast(
+        Any,
+        SimpleNamespace(
+            id="owner",
+            login_methods=[
+                _email_method("retired", "old@example.com", verified=retired_verified),
+                _email_method("canonical", "new@example.com"),
+            ],
+        ),
+    )
+    metadata: JsonDict = {"rownd_email_recipe_user_ids": {"public": "canonical"}}
+
+    canonical = impl.classify_email_credential(
+        user, metadata, "public", "new@example.com"
+    )
+    retired = impl.classify_email_credential(user, metadata, "public", "old@example.com")
+
+    assert canonical.state is EmailCredentialState.ALLOW
+    assert canonical.reason is EmailCredentialReason.CANONICAL
+    assert canonical.recipe_user_id == "canonical"
+    assert retired.state is EmailCredentialState.RETIRED
+    assert retired.reason is EmailCredentialReason.NONCANONICAL
+    assert retired.recipe_user_id == "retired"
+
+
+def test_strict_classifier_rejects_unverified_canonical_method():
+    user = cast(
+        Any,
+        SimpleNamespace(
+            id="owner",
+            login_methods=[
+                _email_method("retired", "old@example.com"),
+                _email_method("canonical", "new@example.com", verified=False),
+            ],
+        ),
+    )
+
+    result = impl.classify_email_credential(
+        user,
+        {"rownd_email_recipe_user_ids": {"public": "canonical"}},
+        "public",
+        "new@example.com",
+    )
+
+    assert result.state is EmailCredentialState.MALFORMED
+    assert result.reason is EmailCredentialReason.CANONICAL_TOPOLOGY
+
+
+def test_strict_classifier_rejects_canonical_pointer_to_malformed_email_method():
+    for malformed_email in ("   ", 42):
+        user = cast(
+            Any,
+            SimpleNamespace(
+                id="owner",
+                login_methods=[_email_method("canonical", cast(Any, malformed_email))],
+            ),
+        )
+
+        result = impl.classify_email_credential(
+            user,
+            {"rownd_email_recipe_user_ids": {"public": "canonical"}},
+            "public",
+            "new@example.com",
+        )
+
+        assert result.state is EmailCredentialState.MALFORMED
+        assert result.reason is EmailCredentialReason.CANONICAL_TOPOLOGY
+
+
+def test_strict_classifier_rejects_duplicate_recipe_user_ids():
+    user = cast(
+        Any,
+        SimpleNamespace(
+            id="owner",
+            login_methods=[
+                _email_method("duplicate", "one@example.com"),
+                _email_method("duplicate", "two@example.com"),
+            ],
+        ),
+    )
+
+    result = impl.classify_email_credential(
+        user,
+        {"rownd_email_recipe_user_ids": {"public": "duplicate"}},
+        "public",
+        "one@example.com",
+    )
+
+    assert result.state is EmailCredentialState.MALFORMED
+    assert result.reason is EmailCredentialReason.CANONICAL_TOPOLOGY
+
+
+def test_strict_classifier_uses_legacy_pointer_only_when_scoped_map_is_absent():
+    methods = [
+        _email_method("legacy", "legacy@example.com"),
+        _email_method("other", "other@example.com"),
+    ]
+    user = cast(Any, SimpleNamespace(id="owner", login_methods=methods))
+
+    legacy = impl.classify_email_credential(
+        user,
+        {"rownd_email_recipe_user_id": "legacy"},
+        "public",
+        "legacy@example.com",
+    )
+    scoped_absent = impl.classify_email_credential(
+        user,
+        {
+            "rownd_email_recipe_user_id": "legacy",
+            "rownd_email_recipe_user_ids": {"tenant-b": "other"},
+        },
+        "public",
+        "legacy@example.com",
+    )
+    malformed_scoped = impl.classify_email_credential(
+        user,
+        {
+            "rownd_email_recipe_user_id": "legacy",
+            "rownd_email_recipe_user_ids": {"tenant-b": ""},
+        },
+        "public",
+        "legacy@example.com",
+    )
+    scoped = impl.classify_email_credential(
+        user,
+        {
+            "rownd_email_recipe_user_id": "legacy",
+            "rownd_email_recipe_user_ids": {"public": "other"},
+        },
+        "public",
+        "other@example.com",
+    )
+
+    assert legacy.state is EmailCredentialState.ALLOW
+    assert scoped_absent.state is EmailCredentialState.AMBIGUOUS
+    assert malformed_scoped.state is EmailCredentialState.MALFORMED
+    assert malformed_scoped.reason is EmailCredentialReason.SECURITY_METADATA
+    assert scoped.state is EmailCredentialState.ALLOW
+    assert scoped.recipe_user_id == "other"
+
+
 @pytest.mark.parametrize(
     "metadata",
     [
@@ -351,10 +503,10 @@ def test_strict_classifier_rejects_multiple_methods_without_marker():
         ),
     )
 
-    assert (
-        impl.classify_email_credential(user, {}, "public", "a@x.com").state
-        is EmailCredentialState.AMBIGUOUS
-    )
+    result = impl.classify_email_credential(user, {}, "public", "a@x.com")
+
+    assert result.state is EmailCredentialState.AMBIGUOUS
+    assert result.reason is EmailCredentialReason.CANONICAL_TOPOLOGY
 
 
 def test_strict_classifier_allows_complete_committing_target():
@@ -393,6 +545,62 @@ def test_strict_classifier_allows_complete_committing_target():
         impl.classify_email_credential(user, metadata, "public", "a@x.com", "old").state
         is EmailCredentialState.RETIRED
     )
+
+
+def test_strict_classifier_requires_verified_committing_target_but_not_retired_method():
+    plan: JsonDict = {
+        "schemaVersion": 2,
+        "id": "operation",
+        "field": "email",
+        "created_at": "2026-01-01T00:00:00Z",
+        "normalizedEmail": "new@example.com",
+        "tenantId": "public",
+        "purpose": "UPDATE_PASSWORDLESS",
+        "initiatingSessionHandle": "session",
+        "verificationRecipeUserId": "old",
+        "initiatingRecipeUserId": "old",
+        "status": "COMMITTING",
+        "targetCanonicalRecipeUserId": "target",
+        "retiredMethods": [
+            {"recipeUserId": "old", "normalizedEmail": "old@example.com"}
+        ],
+    }
+    metadata = {
+        "rownd_email_recipe_user_ids": {"public": "target"},
+        "rownd_pending_verification": [plan],
+    }
+
+    unverified_retired = cast(
+        Any,
+        SimpleNamespace(
+            id="owner",
+            login_methods=[
+                _email_method("old", "old@example.com", verified=False),
+                _email_method("target", "new@example.com"),
+            ],
+        ),
+    )
+    unverified_target = cast(
+        Any,
+        SimpleNamespace(
+            id="owner",
+            login_methods=[
+                _email_method("old", "old@example.com"),
+                _email_method("target", "new@example.com", verified=False),
+            ],
+        ),
+    )
+
+    allowed = impl.classify_email_credential(
+        unverified_retired, metadata, "public", "new@example.com", "target"
+    )
+    malformed = impl.classify_email_credential(
+        unverified_target, metadata, "public", "new@example.com", "target"
+    )
+
+    assert allowed.state is EmailCredentialState.TARGET_COMMITTING
+    assert malformed.state is EmailCredentialState.MALFORMED
+    assert malformed.reason is EmailCredentialReason.CANONICAL_TOPOLOGY
 
 
 @pytest.mark.parametrize(

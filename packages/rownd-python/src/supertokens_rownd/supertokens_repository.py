@@ -3296,8 +3296,8 @@ def get_pending_verifications(metadata: JsonDict) -> List[JsonDict]:
     ]
 
 
-def normalize_email(email: str) -> str:
-    return email.strip().lower()
+def normalize_email(email: object) -> str:
+    return email.strip().lower() if isinstance(email, str) else ""
 
 
 def _nonempty_string(value: object) -> Optional[str]:
@@ -3443,8 +3443,10 @@ def classify_email_credential(
         and bool(method.email)
     ]
     method_ids = [method.recipe_user_id.get_as_string() for method in methods]
-    if len(method_ids) != len(set(method_ids)) or any(
-        not method.verified or not normalize_email(cast(str, method.email)) for method in methods
+    if (
+        not normalized_email
+        or len(method_ids) != len(set(method_ids))
+        or any(not normalize_email(cast(str, method.email)) for method in methods)
     ):
         return EmailCredentialAuthorization(
             EmailCredentialState.MALFORMED,
@@ -3456,7 +3458,9 @@ def classify_email_credential(
     canonical_id: Optional[str]
     if canonical_map_present:
         canonical_map = metadata["rownd_email_recipe_user_ids"]
-        if not isinstance(canonical_map, dict):
+        if not isinstance(canonical_map, dict) or any(
+            _nonempty_string(value) is None for value in canonical_map.values()
+        ):
             return EmailCredentialAuthorization(
                 EmailCredentialState.MALFORMED,
                 EmailCredentialReason.SECURITY_METADATA,
@@ -3494,6 +3498,15 @@ def classify_email_credential(
     }
     if committing:
         plan = committing[0]
+        target_method = next(
+            (
+                method
+                for method in methods
+                if method.recipe_user_id.get_as_string()
+                == plan.target_canonical_recipe_user_id
+            ),
+            None,
+        )
         expected_retired = {
             (method_id, method_email)
             for method_id, method_email in methods_by_id.items()
@@ -3502,6 +3515,8 @@ def classify_email_credential(
         if (
             canonical_id != plan.target_canonical_recipe_user_id
             or plan.initiating_recipe_user_id != plan.verification_recipe_user_id
+            or target_method is None
+            or not target_method.verified
             or methods_by_id.get(plan.target_canonical_recipe_user_id) != plan.normalized_email
             or set(plan.retired_methods) != expected_retired
         ):
@@ -3596,6 +3611,17 @@ def classify_email_credential(
             )
         canonical_id = method_ids[0] if method_ids else None
     if canonical_id not in method_ids:
+        return EmailCredentialAuthorization(
+            EmailCredentialState.MALFORMED,
+            EmailCredentialReason.CANONICAL_TOPOLOGY,
+            user.id,
+        )
+    canonical_method = next(
+        method
+        for method in methods
+        if method.recipe_user_id.get_as_string() == canonical_id
+    )
+    if not canonical_method.verified:
         return EmailCredentialAuthorization(
             EmailCredentialState.MALFORMED,
             EmailCredentialReason.CANONICAL_TOPOLOGY,

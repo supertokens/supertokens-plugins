@@ -2312,6 +2312,91 @@ async def test_metadata_repair_stops_when_refetched_source_snapshot_changed(
     assert source_reads == 2
 
 
+@pytest.mark.asyncio
+async def test_metadata_finalization_detects_concurrent_canonical_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rownd_user = cast(
+        JsonDict,
+        {
+            "data": {"user_id": "rownd-1", "email": "user@example.com"},
+            "verified_data": {"email": True},
+        },
+    )
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, "tenant-a")
+    )
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    durable = snapshot(
+        identity_source=fresh.snapshot,
+        owners=(
+            owner(
+                "passwordless:email:user@example.com",
+                "target",
+                recipe_user_id="canonical",
+            ),
+        ),
+        external_target="target",
+        metadata={
+            "target": MigrationMetadataState(
+                True,
+                ValidatedMigrationMetadata(
+                    legacy_complete=False,
+                    original_rownd_user_id="rownd-1",
+                ),
+            )
+        },
+        pointers={
+            "target": CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)
+        },
+    )
+    disposition = classify_migration_snapshot(durable, target)
+    assert disposition.mutations == (
+        MigrationMutation("WRITE_METADATA", target_user_id="target"),
+    )
+    metadata_reads = 0
+    writes: list[JsonDict] = []
+
+    async def read_source():
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        return durable
+
+    async def get_metadata(*_args: Any):
+        nonlocal metadata_reads
+        metadata_reads += 1
+        if metadata_reads == 1:
+            return {}
+        return {
+            "original_rownd_user": {"data": {"user_id": "rownd-1"}},
+            "rownd_migration_complete": True,
+            "rownd_email_recipe_user_ids": {"tenant-a": "concurrent"},
+        }
+
+    async def inspect_metadata(*_args: Any):
+        return {"rownd_metadata_source_user_id": "target"}
+
+    async def update_metadata(_user_id: str, metadata: JsonDict, *_args: Any):
+        writes.append(metadata)
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "get_raw_user_metadata", get_metadata)
+    monkeypatch.setattr(repository, "inspect_linked_user_metadata", inspect_metadata)
+    monkeypatch.setattr(repository.usermetadata_asyncio, "update_user_metadata", update_metadata)
+
+    with pytest.raises(MigrationError) as raised:
+        await repository.apply_migration_repairs(
+            disposition, fresh, target, cast(Any, SimpleNamespace()), {}, read_source
+        )
+
+    assert raised.value.reason is MigrationErrorReason.MIGRATION_INCOMPLETE
+    assert raised.value.stage == "metadata_finalize"
+    assert len(writes) == 1
+    assert writes[0]["rownd_migration_complete"] is True
+    assert writes[0]["rownd_email_recipe_user_ids"] == {"tenant-a": "canonical"}
+
+
 def mapping_safety_snapshot(
     fresh: repository.FreshMigrationSource,
     *,

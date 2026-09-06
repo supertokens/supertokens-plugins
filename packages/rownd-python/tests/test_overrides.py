@@ -569,6 +569,38 @@ async def test_passwordless_create_observe_mode_does_not_enforce(
     assert result.status == "OK"
 
 
+async def test_passwordless_create_guard_allows_canonical_email(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def canonical(*_args: Any, **_kwargs: Any):
+        return EmailCredentialAuthorization(
+            EmailCredentialState.ALLOW,
+            EmailCredentialReason.CANONICAL,
+            "owner",
+            "canonical",
+        )
+
+    async def original_create(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace(status="OK")
+
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", canonical)
+    overridden = plugin._passwordless_api_override(make_guard_config())(
+        cast(Any, SimpleNamespace(create_code_post=original_create, consume_code_post=None))
+    )
+
+    result = await overridden.create_code_post(
+        "canonical@example.com",
+        None,
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+
+    assert result.status == "OK"
+
+
 async def test_passwordless_create_guard_rejects_foreign_owner_from_session(
     monkeypatch: pytest.MonkeyPatch,
 ):
