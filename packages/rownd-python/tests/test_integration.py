@@ -7,7 +7,7 @@ import time
 import uuid
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 import jwt
@@ -166,10 +166,12 @@ async def test_blocked_migration_aliases_return_422_without_session(
     path: str,
     reason: MigrationErrorReason,
 ):
-    client = make_client("http://localhost:3567", rownd_client)
-    registry = Mock()
+    telemetry_client = CapturingTelemetryClient()
+    client = make_client(
+        "http://localhost:3567", rownd_client,
+        plugin_config={"telemetry": {"provider": "custom", "factory": lambda: telemetry_client}},
+    )
     create_session = AsyncMock()
-    monkeypatch.setattr(telemetry, "_migration_tasks", registry)
     monkeypatch.setattr(session_asyncio, "create_new_session", create_session)
     monkeypatch.setattr(impl, "read_fresh_migration_snapshot", AsyncMock())
     monkeypatch.setattr(
@@ -187,8 +189,8 @@ async def test_blocked_migration_aliases_return_422_without_session(
     create_session.assert_not_called()
     for header in ("st-access-token", "st-refresh-token", "front-token", "set-cookie"):
         assert header not in response.headers
-    registry.submit.assert_called_once()
-    event = registry.submit.call_args.args[1]
+    assert len(telemetry_client.events) == 1
+    event = telemetry_client.events[0]
     assert event["operationId"] == response.json()["operationId"]
     assert event["operation"] == "migration"
     assert event["outcome"] == "error"
@@ -215,10 +217,12 @@ async def test_jwks_miss_aliases_preserve_retry_contract_without_session(
     status_code: int,
     retryable: bool,
 ) -> None:
-    client = make_client("http://localhost:3567", rownd_client)
-    registry = Mock()
+    telemetry_client = CapturingTelemetryClient()
+    client = make_client(
+        "http://localhost:3567", rownd_client,
+        plugin_config={"telemetry": {"provider": "custom", "factory": lambda: telemetry_client}},
+    )
     migrate = AsyncMock()
-    monkeypatch.setattr(telemetry, "_migration_tasks", registry)
     monkeypatch.setattr(impl, "migrate_rownd_user_and_create_session", migrate)
     monkeypatch.setattr(
         rownd_client, "validate_token",
@@ -233,8 +237,8 @@ async def test_jwks_miss_aliases_preserve_retry_contract_without_session(
     migrate.assert_not_called()
     for header in ("st-access-token", "st-refresh-token", "front-token", "set-cookie"):
         assert header not in response.headers
-    registry.submit.assert_called_once()
-    event = registry.submit.call_args.args[1]
+    assert len(telemetry_client.events) == 1
+    event = telemetry_client.events[0]
     assert event["reason"] == reason
     assert event["retryable"] is retryable
     assert event["httpStatus"] == status_code

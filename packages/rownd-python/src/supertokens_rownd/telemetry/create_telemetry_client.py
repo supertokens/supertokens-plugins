@@ -25,9 +25,28 @@ class _MigrationTelemetryTaskRegistry:
         self._tasks: set[asyncio.Task[None]] = set()
 
     def submit(self, client: RowndTelemetryClient, event: JsonDict) -> bool:
+        return self._start(client, event) is not None
+
+    async def record(
+        self, client: RowndTelemetryClient, event: JsonDict, timeout: float = 0.25
+    ) -> None:
+        task = self._start(client, event)
+        if task is None:
+            return
+        try:
+            # Unlike wait_for, wait does not wait for cancellation acknowledgement.
+            # The registry retains the slot and consumes late failures until exit.
+            await asyncio.wait({task}, timeout=timeout)
+        finally:
+            if not task.done():
+                task.cancel()
+
+    def _start(
+        self, client: RowndTelemetryClient, event: JsonDict
+    ) -> Optional[asyncio.Task[None]]:
         with self._lock:
             if len(self._tasks) >= self._capacity:
-                return False
+                return None
             try:
                 delivery = (
                     client.record_event(event)
@@ -35,12 +54,12 @@ class _MigrationTelemetryTaskRegistry:
                     else self._record_with_deadline(client, event)
                 )
             except Exception:
-                return False
+                return None
             try:
                 task = asyncio.create_task(delivery)
             except Exception:
                 delivery.close()
-                return False
+                return None
             try:
                 self._tasks.add(task)
                 task.add_done_callback(self._task_done)
@@ -48,8 +67,8 @@ class _MigrationTelemetryTaskRegistry:
                 self._tasks.discard(task)
                 task.add_done_callback(self._consume_task_exception)
                 task.cancel()
-                return False
-        return True
+                return None
+        return task
 
     async def _record_with_deadline(
         self, client: RowndTelemetryClient, event: JsonDict
@@ -244,7 +263,7 @@ async def record_migration_terminal(
     }:
         event["blockedIdentityType"] = identity_type
     try:
-        _migration_tasks.submit(client, event)
+        await _migration_tasks.record(client, event)
     except Exception:
         pass
 

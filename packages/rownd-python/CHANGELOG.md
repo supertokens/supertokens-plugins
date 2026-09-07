@@ -15,6 +15,11 @@
 
 ### Patch Changes
 
+- Await terminal migration telemetry for up to 250 ms so cooperative delivery can finish before
+  request-scoped loops close (including Django WSGI). Isolate client failures, preserve request
+  cancellation, and retain timed-out deliveries in the admission cap until they exit without
+  awaiting cancellation acknowledgement. Custom clients must not block the event loop or
+  suppress cancellation during framework loop teardown. JWKS diagnostics are unchanged.
 - Normalize verified provider IDs and phone numbers before online migration mapping so padded
   identities converge during new imports and missing-method repairs. Retain the original Rownd
   profile in metadata; offline mapping is unchanged.

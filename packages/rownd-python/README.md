@@ -195,20 +195,25 @@ bounded at four rather than accumulating detached tasks. Diagnostic events conta
 16-hex-character `kid` hash, bounded outcome and reason values, key count, and cache generation;
 they never contain the token or raw `kid`, and the `kid` is not used as a metric label.
 
-The plugin constructs exactly one terminal telemetry event and attempts one non-blocking
-submission per migration request. Migration events contain stable result and reconciliation
+The plugin constructs exactly one terminal telemetry event and awaits best-effort delivery
+for up to 250 ms per migration request, allowing cooperative clients to finish before a
+request-scoped event loop (such as Django WSGI) closes. Migration events contain stable result and reconciliation
 fields, but no raw Rownd or SuperTokens IDs, tokens, URLs, response bodies, stack traces, or
 exception messages. Delivery uses application-event-loop tasks tracked in a process-wide
-bounded registry. Delivery is best effort and lossy: a new event is dropped when all slots are
-occupied. A hung or cancellation-resistant delivery consumes one slot but does not prevent
+128-slot registry. Delivery is lossy: a new event is dropped when all slots are
+occupied. Timeout requests cancellation without waiting for acknowledgement. A hung or
+cancellation-resistant delivery retains its slot until it exits but does not prevent
 other available slots from delivering independently. In-process custom async telemetry is
 trusted extension code and runs on the application event loop where it was submitted; it must
 not perform synchronous blocking work on that loop. The plugin cannot preempt arbitrary
-blocking Python callback code. Synchronous implementations are rejected, and task exceptions
-and submission failures are contained. Early failures report `attemptCount: 0`; recovery paths
+blocking Python callback code, so the deadline requires a responsive event loop. A client
+that suppresses cancellation can also delay framework-owned loop teardown; the plugin does
+not wait for it after the deadline. Synchronous implementations are rejected. Client failures
+(including client cancellation) do not change the migration result; external request cancellation
+during delivery cancels the delivery task and propagates promptly. Early failures report `attemptCount: 0`; recovery paths
 distinguish retry convergence from final postcondition recovery. Cancelled requests construct
-a terminal `outcome: "cancelled"` event with telemetry-only `httpStatus: 499`, attempt to submit
-it subject to the same bounded-capacity drop policy, do not fabricate an HTTP response, and
+a terminal `outcome: "cancelled"` event with telemetry-only `httpStatus: 499`, attempt delivery
+subject to the same deadline and bounded-capacity drop policy, do not fabricate an HTTP response, and
 re-raise cancellation. These privacy guarantees apply to migration events. Guest telemetry
 retains its legacy payload and delivery path and is outside this migration contract.
 

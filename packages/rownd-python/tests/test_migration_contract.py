@@ -172,12 +172,6 @@ class CapturingTelemetry:
         self.events.append(event)
 
 
-class CapturingRegistry:
-    def submit(self, client: CapturingTelemetry, event: JsonDict) -> bool:
-        client.events.append(event)
-        return True
-
-
 class FakeRowndClient:
     def __init__(
         self,
@@ -221,7 +215,6 @@ async def invoke_migration(
     telemetry_client: Optional[CapturingTelemetry] = None,
     migration_state: Optional[JsonDict] = None,
     response: Optional[FakeResponse] = None,
-    capture_telemetry: bool = True,
     use_real_repository: bool = False,
 ) -> tuple[FakeResponse, CapturingTelemetry]:
     async def migrate(*args: Any, **kwargs: Any) -> str:
@@ -235,8 +228,6 @@ async def invoke_migration(
         monkeypatch.setattr(
             implementation.repository, "migrate_rownd_user_and_create_session", migrate
         )
-    if capture_telemetry:
-        monkeypatch.setattr(implementation.telemetry, "_migration_tasks", CapturingRegistry())
     response = response or FakeResponse()
     telemetry = telemetry_client or CapturingTelemetry()
     await handle_migrate(
@@ -1008,6 +999,7 @@ async def test_migration_telemetry_preserves_application_loop_affinity_and_retur
     class LoopAffineTelemetry:
         async def record_event(self, event: JsonDict) -> None:
             assert asyncio.get_running_loop() is application_loop
+            await asyncio.sleep(0.01)
             delivered.set()
 
     registry = implementation.telemetry._MigrationTelemetryTaskRegistry(capacity=2)
@@ -1016,13 +1008,12 @@ async def test_migration_telemetry_preserves_application_loop_affinity_and_retur
     response, _ = await invoke_migration(
         monkeypatch,
         telemetry_client=cast(Any, LoopAffineTelemetry()),
-        capture_telemetry=False,
     )
     elapsed = time.monotonic() - started_at
 
     assert response.status_code == 200
     assert elapsed < 0.1
-    await asyncio.wait_for(delivered.wait(), 1)
+    assert delivered.is_set()
 
 
 @pytest.mark.asyncio
@@ -1057,6 +1048,130 @@ async def test_hung_task_occupies_one_bounded_slot_without_blocking_another() ->
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert not registry._tasks
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer token"])
+def test_terminal_delivery_finishes_before_request_scoped_loop_teardown(
+    monkeypatch: pytest.MonkeyPatch, authorization: Optional[str]
+) -> None:
+    client = CapturingTelemetry()
+    sequence: list[str] = []
+    registry = implementation.telemetry._MigrationTelemetryTaskRegistry(capacity=1)
+    monkeypatch.setattr(implementation.telemetry, "_migration_tasks", registry)
+
+    class SuspendingTelemetry(CapturingTelemetry):
+        async def record_event(self, event: JsonDict) -> None:
+            await asyncio.sleep(0.01)
+            await client.record_event(event)
+            sequence.append("delivered")
+
+    async def request() -> None:
+        previous_count = len(client.events)
+        response, _ = await invoke_migration(
+            monkeypatch, authorization=authorization, telemetry_client=SuspendingTelemetry()
+        )
+        assert response.status_code == (401 if authorization is None else 200)
+        assert len(client.events) == previous_count + 1
+        sequence.append("request_return")
+
+    for request_count in range(1, 3):
+        asyncio.run(request())
+        assert not registry._tasks
+        assert len(client.events) == request_count
+        assert sequence == ["delivered", "request_return"] * request_count
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["slow", "failing", "cancelled", "resistant"])
+@pytest.mark.parametrize("authorization", [None, "Bearer token"])
+async def test_terminal_client_failure_is_bounded_and_preserves_response(
+    monkeypatch: pytest.MonkeyPatch, mode: str, authorization: Optional[str]
+) -> None:
+    release = asyncio.Event()
+    finished = asyncio.Event()
+    calls: list[JsonDict] = []
+    loop_errors: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    registry = implementation.telemetry._MigrationTelemetryTaskRegistry(capacity=1)
+    monkeypatch.setattr(implementation.telemetry, "_migration_tasks", registry)
+
+    class Telemetry(CapturingTelemetry):
+        async def record_event(self, event: JsonDict) -> None:
+            calls.append(event)
+            try:
+                await asyncio.sleep(0)
+                if mode == "failing":
+                    raise RuntimeError("private delivery failure")
+                if mode == "cancelled":
+                    raise asyncio.CancelledError()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    if mode != "resistant":
+                        raise
+                    await release.wait()
+                    raise RuntimeError("late delivery failure")
+            finally:
+                finished.set()
+
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    try:
+        started_at = time.monotonic()
+        response, _ = await invoke_migration(
+            monkeypatch, authorization=authorization, telemetry_client=Telemetry()
+        )
+        assert time.monotonic() - started_at < 0.75
+        assert response.status_code == (401 if authorization is None else 200)
+        assert len(calls) == 1
+        if mode == "resistant":
+            # A timed-out client must retain its slot, not admit more hung work.
+            await invoke_migration(monkeypatch, telemetry_client=Telemetry())
+            assert len(calls) == 1
+        release.set()
+        await asyncio.wait_for(finished.wait(), 1)
+        await asyncio.sleep(0)
+        _, recovered = await invoke_migration(monkeypatch)
+        assert len(recovered.events) == 1
+        assert loop_errors == []
+    finally:
+        release.set()
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+async def test_external_cancellation_during_terminal_delivery_propagates_promptly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    cancellation_received = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    class Telemetry(CapturingTelemetry):
+        async def record_event(self, event: JsonDict) -> None:
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancellation_received.set()
+                await release.wait()
+            finally:
+                finished.set()
+
+    request = asyncio.create_task(invoke_migration(monkeypatch, telemetry_client=Telemetry()))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        request.cancel()
+        done, _ = await asyncio.wait({request}, timeout=0.1)
+        assert request in done
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        await asyncio.wait_for(cancellation_received.wait(), 1)
+        assert not finished.is_set()
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), 1)
 
 
 @pytest.mark.asyncio
@@ -1096,8 +1211,9 @@ async def test_jwks_diagnostics_are_globally_limited_and_do_not_consume_terminal
     await asyncio.wait_for(diagnostic_started.wait(), 1)
     assert len(diagnostic_tasks._tasks) == 1
 
-    assert terminal_tasks.submit(client, {"operation": "migration"}) is True
-    await asyncio.wait_for(terminal_delivered.wait(), 1)
+    response, _ = await invoke_migration(monkeypatch, telemetry_client=client)
+    assert response.status_code == 200
+    assert terminal_delivered.is_set()
     await asyncio.wait_for(diagnostic_cancelled.wait(), 1)
     await asyncio.sleep(0)
     assert not diagnostic_tasks._tasks
@@ -1202,11 +1318,11 @@ async def test_migration_telemetry_submission_failure_does_not_change_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FailingRegistry:
-        def submit(self, client: CapturingTelemetry, event: JsonDict) -> bool:
+        async def record(self, client: CapturingTelemetry, event: JsonDict) -> None:
             raise RuntimeError("registry failed")
 
     monkeypatch.setattr(implementation.telemetry, "_migration_tasks", FailingRegistry())
-    response, _ = await invoke_migration(monkeypatch, capture_telemetry=False)
+    response, _ = await invoke_migration(monkeypatch)
 
     assert response.status_code == 200
     assert response.body == {"status": "OK"}
@@ -1250,7 +1366,6 @@ async def test_migration_aliases_invoke_same_error_contract(
 
     assert set(handlers) == {"/auth/plugin/rownd/migrate", "/auth/plugin/migrate-session"}
     assert handlers["/auth/plugin/rownd/migrate"] is handlers["/auth/plugin/migrate-session"]
-    monkeypatch.setattr(implementation.telemetry, "_migration_tasks", CapturingRegistry())
     monkeypatch.setattr(
         "supertokens_python.Supertokens.get_instance",
         lambda: SimpleNamespace(supertokens_config=SupertokensConfig("http://localhost:3567")),
