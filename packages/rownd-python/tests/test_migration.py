@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Optional, cast
 
@@ -207,6 +208,18 @@ def login_method(
 
 def sdk_user(user_id: str, methods: list[Any], *, primary: bool = True) -> Any:
     return SimpleNamespace(id=user_id, is_primary_user=primary, login_methods=methods)
+
+
+@pytest.fixture
+def target_already_in_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def get_user(user_id: str, _context: Any):
+        return sdk_user(user_id, [login_method("recipe-user", "passwordless")])
+
+    async def resolve(user_id: str, _context: Any):
+        return user_id
+
+    monkeypatch.setattr(repository, "get_user", get_user)
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve)
 
 
 def snapshot(
@@ -1202,7 +1215,7 @@ def test_unverified_phone_owner_is_invalid_but_email_is_repairable() -> None:
     assert "VERIFY_IDENTITY" in [mutation.type for mutation in email_result.mutations]
 
 
-def test_missing_tenant_membership_is_blocked_without_mutations() -> None:
+def test_target_missing_tenant_membership_is_repairable() -> None:
     identity_source = source(google_id="g")
     result = classify_migration_snapshot(
         snapshot(
@@ -1217,10 +1230,9 @@ def test_missing_tenant_membership_is_blocked_without_mutations() -> None:
             ),
         )
     )
-    assert result.status is MigrationDispositionStatus.BLOCKED
-    assert result.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
-    assert result.blocked_identity_type == "thirdparty"
-    assert result.mutations == ()
+    assert result.status is MigrationDispositionStatus.REPAIRABLE
+    assert result.target == PinnedMigrationTarget("provider", MigrationTargetSource.THIRD_PARTY)
+    assert [mutation.type for mutation in result.mutations] == ["CREATE_MAPPING", "WRITE_METADATA"]
 
 
 def test_foreign_owner_without_tenant_membership_is_never_linked() -> None:
@@ -1246,6 +1258,171 @@ def test_foreign_owner_without_tenant_membership_is_never_linked() -> None:
     assert result.target == PinnedMigrationTarget("mapped", MigrationTargetSource.MAPPING)
     assert result.blocked_identity_type == "thirdparty"
     assert result.mutations == ()
+
+
+@pytest.mark.parametrize("tenant_id", ["public", "tenant-a"])
+def test_complete_mapped_target_does_not_require_tenant_membership(tenant_id: str) -> None:
+    identity_source = replace(source(google_id="g"), tenant_id=tenant_id)
+    result = classify_migration_snapshot(
+        snapshot(
+            identity_source=identity_source,
+            external_target="mapped",
+            owners=(owner("thirdparty:google:g", "mapped", tenant_ids=()),),
+            metadata={"mapped": valid_metadata(identity_source)},
+        )
+    )
+    assert result.status is MigrationDispositionStatus.COMPLETE
+    assert result.mutations == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tenant_id", "failure"),
+    [
+        ("public", None),
+        ("public", "missing_membership"),
+        ("public", "method_owner"),
+        ("tenant-a", None),
+        ("tenant-a", "association_status"),
+        ("tenant-a", "association_timeout"),
+        ("tenant-a", "missing_membership"),
+        ("tenant-a", "missing_target"),
+        ("tenant-a", "target_owner"),
+        ("tenant-a", "method_owner"),
+        ("tenant-a", "binding_user"),
+        ("tenant-a", "binding_recipe"),
+        ("tenant-a", "binding_tenant"),
+    ],
+)
+async def test_completion_associates_before_fresh_session_resolution(
+    monkeypatch: pytest.MonkeyPatch, tenant_id: str, failure: Optional[str]
+) -> None:
+    rownd_user = cast(JsonDict, {
+        "data": {"user_id": "rownd-1", "google_id": "g"},
+        "verified_data": {"google_id": True},
+    })
+    fresh = repository.FreshMigrationSource(
+        rownd_user, create_rownd_identity_snapshot(rownd_user, tenant_id)
+    )
+    methods = [
+        login_method("google-recipe", "thirdparty", tenant_ids=()),
+        login_method("extra-recipe", "emailpassword", tenant_ids=()),
+    ]
+    if tenant_id == "public" and failure != "missing_membership":
+        for method in methods:
+            method.tenant_ids.append("public")
+    user = sdk_user("rownd-1", methods)
+    events: list[str] = []
+
+    async def read_source():
+        events.append("source")
+        return fresh
+
+    async def read_snapshot(*_args: Any):
+        events.append("snapshot")
+        return snapshot(
+            identity_source=fresh.snapshot,
+            external_target="mapped",
+            owners=(owner("thirdparty:google:g", "mapped", tenant_ids=()),),
+            metadata={"mapped": valid_metadata(fresh.snapshot)},
+        )
+
+    async def get_user(user_id: str, _context: Any):
+        events.append("get:" + user_id)
+        if user_id == "mapped" and failure == "missing_target":
+            return None
+        if failure == "target_owner" or (
+            failure == "method_owner" and user_id != "mapped"
+        ):
+            return sdk_user("foreign", methods)
+        return user
+
+    async def get_mapping(user_id: str, mapping_type: str, _context: Any):
+        if (user_id, mapping_type) == ("rownd-1", "EXTERNAL"):
+            return GetUserIdMappingOkResult("mapped", "rownd-1")
+        return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
+
+    async def associate(tenant: str, recipe: RecipeUserId, _context: Any):
+        assert tenant == "tenant-a"
+        events.append("associate:" + recipe.get_as_string())
+        if failure == "association_timeout":
+            raise TimeoutError("association unavailable")
+        if failure == "association_status":
+            return SimpleNamespace(status="EMAIL_ALREADY_EXISTS_ERROR")
+        if failure != "missing_membership":
+            next(
+                method for method in methods
+                if method.recipe_user_id.get_as_string() == recipe.get_as_string()
+            ).tenant_ids.append(tenant)
+        return SimpleNamespace(status="OK")
+
+    async def no_op(*_args: Any, **_kwargs: Any):
+        return {}
+
+    async def revoke(_context: Any):
+        events.append("revoke")
+
+    async def create_session(_request: Any, tenant: str, recipe: RecipeUserId, *_args: Any):
+        events.append("session")
+        assert events[-2] == "source"
+        return SimpleNamespace(
+            get_user_id=lambda _context: "foreign" if failure == "binding_user" else "rownd-1",
+            get_recipe_user_id=lambda _context: (
+                RecipeUserId("wrong") if failure == "binding_recipe" else recipe
+            ),
+            get_tenant_id=lambda _context: "wrong" if failure == "binding_tenant" else tenant,
+            revoke_session=revoke,
+        )
+
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "get_user", get_user)
+    monkeypatch.setattr(repository, "get_user_id_mapping", get_mapping)
+    monkeypatch.setattr(repository.multitenancy_asyncio, "associate_user_to_tenant", associate)
+    monkeypatch.setattr(repository, "record_rownd_app_variant_for_user", no_op)
+    monkeypatch.setattr(repository, "build_rownd_session_claims", no_op)
+    monkeypatch.setattr(repository.session_asyncio, "create_new_session", create_session)
+    monkeypatch.setattr(
+        repository, "scrub_migration_session_response", lambda *_args: events.append("scrub")
+    )
+    arguments = (
+        cast(Any, SimpleNamespace()), "rownd-1", fresh,
+        cast(Any, SimpleNamespace()), cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()), tenant_id, None, {}, {}, read_source,
+    )
+    if failure is None:
+        assert await repository.migrate_rownd_user_and_create_session(*arguments) == "mapped"
+        assert events[-1] == "session"
+    else:
+        with pytest.raises(MigrationError) as raised:
+            await repository.migrate_rownd_user_and_create_session(*arguments)
+        if failure.startswith("binding_"):
+            assert raised.value.reason is MigrationErrorReason.SESSION_CREATION_FAILED
+            assert events[-3:] == ["session", "revoke", "scrub"]
+        else:
+            assert "session" not in events
+            expected_reason = (
+                MigrationErrorReason.CORE_UNAVAILABLE if failure == "association_timeout"
+                else MigrationErrorReason.MAPPING_CONFLICT if failure == "target_owner"
+                else MigrationErrorReason.MIGRATION_INCOMPLETE
+            )
+            assert raised.value.reason is expected_reason
+            assert raised.value.stage == (
+                "tenant_associate" if failure in {
+                    "association_status", "association_timeout", "missing_target", "target_owner"
+                } else "state_inspect"
+            )
+    associations = [event for event in events if event.startswith("associate:")]
+    if tenant_id == "public" or failure in {"missing_target", "target_owner"}:
+        assert associations == []
+    elif failure in {"association_status", "association_timeout"}:
+        assert associations == ["associate:google-recipe"]
+    else:
+        assert associations == ["associate:google-recipe", "associate:extra-recipe"]
+        first_get = events.index("get:mapped")
+        assert events[first_get - 1] == "snapshot"
+        assert events[first_get:first_get + 4] == [
+            "get:mapped", "associate:google-recipe", "associate:extra-recipe", "get:mapped"
+        ]
 
 
 def test_mixed_repair_plan_has_stable_global_mutation_order() -> None:
@@ -1516,7 +1693,7 @@ async def test_repository_accepts_current_exact_identity_as_raw_id_anchor(
 
 
 @pytest.mark.asyncio
-async def test_repository_does_not_treat_out_of_tenant_candidate_as_convergent(
+async def test_repository_allows_repair_of_out_of_tenant_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     identity_source = source(email="user@example.com", google_id="google-1")
@@ -1565,9 +1742,10 @@ async def test_repository_does_not_treat_out_of_tenant_candidate_as_convergent(
         for reservation in result.reservation_owners
     ] == [("passwordless:email:user@example.com", "emailpassword-recipe")]
     disposition = classify_migration_snapshot(result)
-    assert disposition.status is MigrationDispositionStatus.BLOCKED
-    assert disposition.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
-    assert disposition.mutations == ()
+    assert disposition.status is MigrationDispositionStatus.REPAIRABLE
+    assert [mutation.type for mutation in disposition.mutations] == [
+        "CREATE_IDENTITY", "WRITE_METADATA"
+    ]
 
 
 @pytest.mark.asyncio
@@ -3069,6 +3247,7 @@ async def test_final_mapping_repair_preserves_capability_required(
 @pytest.mark.asyncio
 async def test_repository_reports_retry_recovery_truthfully(
     monkeypatch: pytest.MonkeyPatch,
+    target_already_in_tenant: None,
 ) -> None:
     rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
     fresh = repository.FreshMigrationSource(
@@ -3134,7 +3313,8 @@ async def test_repository_reports_retry_recovery_truthfully(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mutation_type", list(MigrationMutationType))
 async def test_uncertain_mutation_result_converges_from_fresh_state_without_repeat(
-    monkeypatch: pytest.MonkeyPatch, mutation_type: MigrationMutationType
+    monkeypatch: pytest.MonkeyPatch, mutation_type: MigrationMutationType,
+    target_already_in_tenant: None,
 ) -> None:
     rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
     fresh = repository.FreshMigrationSource(
@@ -3662,6 +3842,7 @@ async def test_source_change_at_each_repair_boundary_restarts_without_mutation(
 @pytest.mark.asyncio
 async def test_source_change_discards_identity_derived_pin_before_reclassification(
     monkeypatch: pytest.MonkeyPatch,
+    target_already_in_tenant: None,
 ) -> None:
     original_user = cast(
         JsonDict,
@@ -3850,6 +4031,7 @@ async def test_budget_exhaustion_uses_final_fresh_disposition(
 @pytest.mark.asyncio
 async def test_metadata_failure_reclassifies_without_recreating_identity(
     monkeypatch: pytest.MonkeyPatch,
+    target_already_in_tenant: None,
 ) -> None:
     rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
     fresh = repository.FreshMigrationSource(
@@ -3930,6 +4112,7 @@ async def test_metadata_failure_reclassifies_without_recreating_identity(
 @pytest.mark.asyncio
 async def test_session_failure_retry_reuses_complete_state_without_account_repairs(
     monkeypatch: pytest.MonkeyPatch,
+    target_already_in_tenant: None,
 ) -> None:
     rownd_user = cast(JsonDict, {"data": {"user_id": "rownd-1"}, "verified_data": {}})
     fresh = repository.FreshMigrationSource(
@@ -4001,6 +4184,7 @@ async def test_session_failure_retry_reuses_complete_state_without_account_repai
 )
 async def test_session_preparation_source_change_restarts_before_session_creation(
     monkeypatch: pytest.MonkeyPatch,
+    target_already_in_tenant: None,
     change_during: str,
     blocked_after_change: bool,
 ) -> None:

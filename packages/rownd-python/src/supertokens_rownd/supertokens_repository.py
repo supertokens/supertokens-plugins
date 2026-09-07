@@ -862,6 +862,33 @@ async def migrate_rownd_user_and_create_session(
             raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
         if "path" not in migration_state:
             migration_state["path"] = "already_complete"
+        if tenant_id != PUBLIC_TENANT_ID:
+            try:
+                clear_supertokens_core_call_cache(user_context)
+                target_user = await get_user(completed_target.user_id, user_context)
+                if target_user is None:
+                    raise MigrationError(
+                        MigrationErrorReason.MIGRATION_INCOMPLETE, "tenant_associate"
+                    )
+                if (
+                    await resolve_supertokens_user_id(target_user.id, user_context)
+                    != completed_target.user_id
+                ):
+                    raise MigrationError(
+                        MigrationErrorReason.MAPPING_CONFLICT, "tenant_associate"
+                    )
+                await associate_user_login_methods_to_tenant(
+                    target_user, tenant_id, user_context
+                )
+            except MigrationError:
+                raise
+            except Exception as error:
+                reason = (
+                    MigrationErrorReason.CORE_UNAVAILABLE
+                    if _is_recognizable_core_outage(error)
+                    else MigrationErrorReason.MIGRATION_INCOMPLETE
+                )
+                raise MigrationError(reason, "tenant_associate", error) from error
         recipe_user_id = await read_fresh_migration_session_method(
             source.snapshot, completed_target, user_context
         )

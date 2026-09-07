@@ -680,7 +680,7 @@ def classify_migration_snapshot(
             and not owner.verified
         ):
             return _blocked(MigrationErrorReason.MIGRATION_STATE_INVALID)
-        if owner and source.tenant_id not in owner.tenant_ids:
+        if link_owner and source.tenant_id not in link_owner.tenant_ids:
             return _blocked(
                 MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
                 target,
