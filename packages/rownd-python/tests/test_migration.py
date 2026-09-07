@@ -205,6 +205,106 @@ def snapshot(
     )
 
 
+@pytest.mark.parametrize("missing", ["email", "phone"])
+@pytest.mark.parametrize("authority", ["mapping", "pinned", "none", "raw", "pinned_raw"])
+def test_split_passwordless_owners_require_safe_authority(missing: str, authority: str) -> None:
+    identity_source = source(email="user@example.com", phone_number="+442079460018")
+    target_id = "rownd-1" if "raw" in authority else "target"
+    owners = tuple(
+        owner(
+            identity.key,
+            "standalone" if identity.identifier_type == missing else target_id,
+            recipe_user_id=identity.identifier_type or "recipe",
+            is_primary=identity.identifier_type != missing,
+        )
+        for identity in identity_source.expected_identities
+    )
+    state = snapshot(
+        identity_source=identity_source,
+        owners=owners,
+        external_target=target_id if authority == "mapping" else None,
+        raw_user_id=target_id if "raw" in authority else None,
+        raw_same_graph="raw" in authority,
+    )
+    pinned = (
+        PinnedMigrationTarget(
+            target_id,
+            MigrationTargetSource.RAW_ID
+            if authority == "pinned_raw"
+            else MigrationTargetSource.VERIFIED_PASSWORDLESS,
+        )
+        if authority in {"pinned", "pinned_raw"}
+        else None
+    )
+    result = classify_migration_snapshot(state, pinned)
+    if authority in {"mapping", "pinned"}:
+        assert result.status is MigrationDispositionStatus.REPAIRABLE
+        assert result.target is not None and result.target.user_id == target_id
+        assert MigrationMutation(
+            "LINK_IDENTITY", target_user_id=target_id, recipe_user_id=missing
+        ) in result.mutations
+        assert not any(m.type == "CREATE_IDENTITY" for m in result.mutations)
+    else:
+        assert result.reason is MigrationErrorReason.IDENTITY_AMBIGUOUS
+        assert result.mutations == ()
+
+
+@pytest.mark.parametrize("missing", ["email", "phone"])
+@pytest.mark.parametrize("mapped", [False, True])
+@pytest.mark.parametrize(
+    "unsafe,reason",
+    [
+        ("primary", MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED),
+        ("mapping", MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER),
+        ("metadata_owner", MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER),
+        ("metadata_invalid", MigrationErrorReason.MIGRATION_STATE_INVALID),
+        ("unverified", MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER),
+        ("tenant", MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER),
+        ("same_identity", MigrationErrorReason.IDENTITY_AMBIGUOUS),
+    ],
+)
+def test_split_passwordless_recovery_blocks_unsafe_foreign_owner(
+    missing: str, mapped: bool, unsafe: str, reason: MigrationErrorReason
+) -> None:
+    identity_source = source(email="user@example.com", phone_number="+442079460018")
+    owners = tuple(
+        owner(
+            identity.key,
+            "standalone" if identity.identifier_type == missing else "target",
+            recipe_user_id=identity.identifier_type or "recipe",
+            is_primary=identity.identifier_type != missing or unsafe == "primary",
+            verified=identity.identifier_type != missing or unsafe != "unverified",
+            tenant_ids=("other",) if unsafe == "tenant" else ("tenant-a",),
+        )
+        for identity in identity_source.expected_identities
+    )
+    if unsafe == "same_identity":
+        identity = next(i for i in identity_source.expected_identities if i.identifier_type == missing)
+        owners += (owner(identity.key, "target", recipe_user_id="duplicate"),)
+    metadata = {}
+    if unsafe == "metadata_invalid":
+        metadata["standalone"] = MigrationMetadataState(False)
+    elif unsafe == "metadata_owner":
+        metadata["standalone"] = MigrationMetadataState(
+            True, ValidatedMigrationMetadata(original_rownd_user_id="another-rownd-user")
+        )
+    result = classify_migration_snapshot(
+        snapshot(
+            identity_source=identity_source,
+            owners=owners,
+            external_target="target" if mapped else None,
+            metadata=metadata,
+            internal={
+                "target": MappingLookup("rownd-1", "target") if mapped else None,
+                "standalone": MappingLookup("other", "standalone") if unsafe == "mapping" else None,
+            },
+        ),
+        None if mapped else PinnedMigrationTarget("target", MigrationTargetSource.VERIFIED_PASSWORDLESS),
+    )
+    assert result.reason is reason
+    assert result.mutations == ()
+
+
 def test_snapshot_normalizes_only_verified_account_identities() -> None:
     identity_source = create_rownd_identity_snapshot(
         {

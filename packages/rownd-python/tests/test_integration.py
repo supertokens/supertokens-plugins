@@ -1405,6 +1405,83 @@ async def test_migrate_existing_user_does_not_duplicate(
     assert len(user.login_methods) == 1
 
 
+@pytest.mark.parametrize("missing", ["email", "phone"])
+@pytest.mark.parametrize("next_invocation", [False, True])
+async def test_migrate_recovers_split_passwordless_owner_after_create_response_loss(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+    missing: str,
+    next_invocation: bool,
+):
+    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    rownd_user_id = "split-%s-%s" % (missing, next_invocation)
+    email = "%s@example.com" % rownd_user_id.lower()
+    phone = "+155555508%02d" % (["email", "phone"].index(missing) * 2 + next_invocation)
+    target = await passwordless_asyncio.signinup(
+        "public", email if missing == "phone" else None,
+        phone if missing == "email" else None, None, {},
+    )
+    mapping = await create_user_id_mapping(target.user.id, rownd_user_id, user_context={})
+    assert getattr(mapping, "status", "OK") == "OK"
+    user_info = {
+        "data": {"user_id": rownd_user_id, "email": email, "phone_number": phone},
+        "verified_data": {"email": True, "phone_number": True},
+    }
+    original_create = impl.create_missing_login_method
+    original_link = impl._link_fresh_migration_method
+    created_ids: list[str] = []
+
+    async def create_then_lose_response(*args: Any, **kwargs: Any):
+        recipe_user_id, _ = await original_create(*args, **kwargs)
+        created_ids.append(recipe_user_id.get_as_string())
+        standalone = await get_user(created_ids[-1])
+        assert standalone is not None and not standalone.is_primary_user
+        assert len(standalone.login_methods) == 1
+        assert standalone.login_methods[0].verified
+        raise TimeoutError("Identity committed, response lost")
+
+    async def unavailable_link(*args: Any, **kwargs: Any):
+        raise TimeoutError("Link unavailable for the rest of this invocation")
+
+    monkeypatch.setattr(impl, "create_missing_login_method", create_then_lose_response)
+    if next_invocation:
+        monkeypatch.setattr(impl, "_link_fresh_migration_method", unavailable_link)
+    first = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
+    assert len(created_ids) == 1
+    if next_invocation:
+        assert first.status_code == 503, first.json()
+        assert first.headers.get("st-access-token") is None
+        standalone = await get_user(created_ids[0])
+        assert standalone is not None and not standalone.is_primary_user
+        unchanged_target = await get_user(target.user.id)
+        assert unchanged_target is not None and len(unchanged_target.login_methods) == 1
+        monkeypatch.setattr(impl, "_link_fresh_migration_method", original_link)
+    else:
+        assert first.status_code == 200, first.json()
+        assert first.headers.get("st-access-token")
+
+    # A new HTTP invocation has no pinned target or request-local recovery state.
+    for _ in range(2):
+        recovered = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
+        assert recovered.status_code == 200, recovered.json()
+        assert recovered.headers.get("st-access-token")
+    assert len(created_ids) == 1
+    final_mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})
+    assert isinstance(final_mapping, GetUserIdMappingOkResult)
+    assert final_mapping.supertokens_user_id == target.user.id
+    linked = await get_user(created_ids[0])
+    assert linked is not None and linked.id == rownd_user_id and linked.is_primary_user
+    assert len(linked.login_methods) == 2
+    assert all(method.verified for method in linked.login_methods)
+    metadata = await usermetadata_asyncio.get_user_metadata(target.user.id)
+    assert metadata.metadata["rownd_migration_complete"] is True
+    email_method = next(method for method in linked.login_methods if method.email == email)
+    assert metadata.metadata["rownd_email_recipe_user_ids"]["public"] == (
+        email_method.recipe_user_id.get_as_string()
+    )
+
+
 async def test_migrate_repairs_changed_verified_email_on_mapped_target(
     core_url: str, rownd_client: MockRowndClient
 ):

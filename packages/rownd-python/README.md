@@ -137,6 +137,13 @@ HTTP 409 is avoided because existing native clients interpret it as an existing 
 These blocked outcomes create no session and return no session credentials. Email-change
 conflicts retain their HTTP 409 status.
 
+If a Passwordless identity is created but linking is interrupted, migration can recover
+the standalone email/phone owner using an exact Rownd mapping or a non-raw target already
+pinned in the invocation. Recovery still requires a verified, matching, same-tenant,
+nonprimary foreign owner with valid metadata and no conflicting Rownd ownership/mapping.
+Multiple owners of the same identity always block. Separate email/phone owners without
+that authority remain ambiguous; raw-ID graph overlap alone does not bypass this check.
+
 | Migration Reason | HTTP Status | Retryable |
 | --- | --- | --- |
 | `IDENTITY_AMBIGUOUS` | 422 | false |

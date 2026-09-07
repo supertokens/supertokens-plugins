@@ -441,24 +441,6 @@ def classify_migration_snapshot(
             diagnostic_target,
             blocked_identity_type=_diagnostic_identity_type(ambiguous_identity),
         )
-    passwordless_owner_ids = {
-        owner.primary_user_id for owner in snapshot.owners if owner.recipe_id == "passwordless"
-    }
-    if len(passwordless_owner_ids) > 1:
-        passwordless_owner = next(
-            owner for owner in snapshot.owners if owner.recipe_id == "passwordless"
-        )
-        identity = next(
-            item
-            for item in source.expected_identities
-            if item.key == passwordless_owner.identity_key
-        )
-        return _blocked(
-            MigrationErrorReason.IDENTITY_AMBIGUOUS,
-            diagnostic_target,
-            _diagnostic_identity_type(identity),
-        )
-
     authoritative_target = None
     if snapshot.mapping.external_lookup:
         authoritative_target = PinnedMigrationTarget(
@@ -482,6 +464,29 @@ def classify_migration_snapshot(
     ):
         return _blocked(MigrationErrorReason.MAPPING_CONFLICT, pinned_target)
     target = pinned_target or authoritative_target
+    passwordless_owner_ids = {
+        owner.primary_user_id for owner in snapshot.owners if owner.recipe_id == "passwordless"
+    }
+    # A committed create can leave a standalone owner before linking. Only a mapping
+    # or a previously selected non-raw target disambiguates that recovery; raw-ID
+    # graph overlap alone does not establish authority over separate owners.
+    can_recover_split_owners = mapping_exact or (
+        pinned_target is not None and pinned_target.source is not MigrationTargetSource.RAW_ID
+    )
+    if len(passwordless_owner_ids) > 1 and not can_recover_split_owners:
+        passwordless_owner = next(
+            owner for owner in snapshot.owners if owner.recipe_id == "passwordless"
+        )
+        identity = next(
+            item
+            for item in source.expected_identities
+            if item.key == passwordless_owner.identity_key
+        )
+        return _blocked(
+            MigrationErrorReason.IDENTITY_AMBIGUOUS,
+            target,
+            _diagnostic_identity_type(identity),
+        )
     if target is None:
         third_party_owner_ids = {
             owner.primary_user_id

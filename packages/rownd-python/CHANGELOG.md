@@ -15,6 +15,9 @@
 
 ### Patch Changes
 
+- Recover verified standalone Passwordless email/phone identities left by interrupted
+  create-before-link repairs when an exact mapping or non-raw pinned target resolves
+  cross-identity ambiguity. Existing ownership and verification checks remain required.
 - Return HTTP 422 instead of 409 for the six migration identity/state conflicts so native
   clients do not mistake blocked migrations for existing sessions. Reasons and
   `retryable: false` are unchanged; email-change conflicts remain HTTP 409.
