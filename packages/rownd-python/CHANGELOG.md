@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 0.2.1
+
+### Patch Changes
+
+- Fix rownd token validation and additional migration bugs
+
 ## 0.2.0
 
 ### Minor Changes
