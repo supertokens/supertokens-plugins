@@ -76,23 +76,24 @@ MIGRATION_ERROR_DETAILS: Dict[MigrationErrorReason, MigrationErrorDetails] = {
     MigrationErrorReason.SOURCE_IDENTITY_INVALID: MigrationErrorDetails(
         422, False, "The Rownd identity data is invalid"
     ),
+    # Native clients interpret migration HTTP 409 as an existing session, not a failure.
     MigrationErrorReason.IDENTITY_AMBIGUOUS: MigrationErrorDetails(
-        409, False, "The Rownd identity resolves to multiple users"
+        422, False, "The Rownd identity resolves to multiple users"
     ),
     MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER: MigrationErrorDetails(
-        409, False, "The Rownd identity belongs to another user"
+        422, False, "The Rownd identity belongs to another user"
     ),
     MigrationErrorReason.MAPPING_CONFLICT: MigrationErrorDetails(
-        409, False, "The Rownd identity is linked to another user"
+        422, False, "The Rownd identity is linked to another user"
     ),
     MigrationErrorReason.RAW_USER_ID_COLLISION: MigrationErrorDetails(
-        409, False, "The Rownd user ID conflicts with an existing user"
+        422, False, "The Rownd user ID conflicts with an existing user"
     ),
     MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED: MigrationErrorDetails(
-        409, False, "Migration requires merging primary accounts"
+        422, False, "Migration requires merging primary accounts"
     ),
     MigrationErrorReason.MIGRATION_STATE_INVALID: MigrationErrorDetails(
-        409, False, "The persisted migration state is invalid"
+        422, False, "The persisted migration state is invalid"
     ),
     MigrationErrorReason.ROWND_UNAVAILABLE: MigrationErrorDetails(
         503, True, "Rownd is temporarily unavailable"

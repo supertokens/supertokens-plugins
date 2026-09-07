@@ -132,6 +132,20 @@ preempted by the event-loop deadline, but its work is bounded by that response l
 does not classify disabled Rownd profiles because the current profile response contract in
 this repository does not establish an authoritative disabled-state field and value.
 
+Migration conflicts return HTTP 422 with body `code: 422` and `retryable: false`.
+HTTP 409 is avoided because existing native clients interpret it as an existing session.
+These blocked outcomes create no session and return no session credentials. Email-change
+conflicts retain their HTTP 409 status.
+
+| Migration Reason | HTTP Status | Retryable |
+| --- | --- | --- |
+| `IDENTITY_AMBIGUOUS` | 422 | false |
+| `IDENTITY_OWNED_BY_ANOTHER_USER` | 422 | false |
+| `MAPPING_CONFLICT` | 422 | false |
+| `RAW_USER_ID_COLLISION` | 422 | false |
+| `PRIMARY_ACCOUNT_MERGE_REQUIRED` | 422 | false |
+| `MIGRATION_STATE_INVALID` | 422 | false |
+
 Rownd migration tokens must use `EdDSA`, include a non-empty `kid`, and contain valid `aud`,
 `exp`, and `iat` claims. `nbf` is validated when present. The expected audience is the configured
 Rownd application (`app:<app-id>`). If trusted Rownd discovery metadata publishes an `issuer`,

@@ -5,6 +5,7 @@ import json
 import threading
 import uuid
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import jwt
@@ -49,6 +50,7 @@ from supertokens_rownd.errors import (
     RowndEmailChangeError,
     RowndPluginError,
 )
+from supertokens_rownd.migration import MigrationDisposition, MigrationDispositionStatus
 from supertokens_rownd.types import (
     EmailCredentialAuthorization,
     EmailCredentialReason,
@@ -130,6 +132,56 @@ async def start_native_email_change(client, current_email: str, target_email: st
     )
     assert response.status_code == 200
     return sign_in, st_session
+
+
+@pytest.mark.parametrize("path", ["/auth/plugin/rownd/migrate", "/auth/plugin/migrate-session"])
+@pytest.mark.parametrize(
+    "reason",
+    [
+        MigrationErrorReason.IDENTITY_AMBIGUOUS,
+        MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER,
+        MigrationErrorReason.MAPPING_CONFLICT,
+        MigrationErrorReason.RAW_USER_ID_COLLISION,
+        MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED,
+        MigrationErrorReason.MIGRATION_STATE_INVALID,
+    ],
+)
+async def test_blocked_migration_aliases_return_422_without_session(
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    reason: MigrationErrorReason,
+):
+    client = make_client("http://localhost:3567", rownd_client)
+    registry = Mock()
+    create_session = AsyncMock()
+    monkeypatch.setattr(telemetry, "_migration_tasks", registry)
+    monkeypatch.setattr(session_asyncio, "create_new_session", create_session)
+    monkeypatch.setattr(impl, "read_fresh_migration_snapshot", AsyncMock())
+    monkeypatch.setattr(
+        impl,
+        "classify_migration_snapshot",
+        lambda *_args: MigrationDisposition(MigrationDispositionStatus.BLOCKED, reason=reason),
+    )
+
+    response = client.post(
+        path,
+        headers={"Authorization": "Bearer rownd-token", **session_headers()},
+    )
+
+    assert_migration_error(response, reason.value, 422, False, "state_inspect")
+    create_session.assert_not_called()
+    for header in ("st-access-token", "st-refresh-token", "front-token", "set-cookie"):
+        assert header not in response.headers
+    registry.submit.assert_called_once()
+    event = registry.submit.call_args.args[1]
+    assert event["operationId"] == response.json()["operationId"]
+    assert event["operation"] == "migration"
+    assert event["outcome"] == "error"
+    assert event["stage"] == "state_inspect"
+    assert event["httpStatus"] == 422
+    assert event["retryable"] is False
+    assert event["reason"] == reason.value
 
 
 async def test_migrate_user_successfully(core_url: str, rownd_client: MockRowndClient):
@@ -596,7 +648,7 @@ async def test_migrate_reconciles_cross_recipe_primary_email_owner(
 
     res = migrate_rownd_user(client, rownd_client, rownd_user_id, user_info)
 
-    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 409, False, "state_inspect")
+    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 422, False, "state_inspect")
     assert res.headers.get("st-access-token") is None
     unchanged = await get_user(apple.user.id)
     assert unchanged is not None
@@ -658,7 +710,7 @@ async def test_migrate_fails_closed_for_cross_recipe_owner_without_mutual_verifi
     )
 
     if incoming_verified:
-        assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 409, False, "state_inspect")
+        assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 422, False, "state_inspect")
         assert res.headers.get("st-access-token") is None
         assert await get_user(rownd_user_id) is None
     else:
@@ -790,7 +842,7 @@ async def test_migrate_blocks_distinct_verified_passwordless_owners_without_muta
         },
     )
 
-    assert_migration_error(res, "IDENTITY_AMBIGUOUS", 409, False, "state_inspect")
+    assert_migration_error(res, "IDENTITY_AMBIGUOUS", 422, False, "state_inspect")
     assert res.headers.get("st-access-token") is None
     assert (await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})).__class__.__name__ == (
         "UnknownMappingError"
@@ -843,7 +895,7 @@ async def test_migrate_does_not_link_verified_email_owner_mapped_to_another_rown
         },
     )
 
-    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 409, False, "state_inspect")
+    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 422, False, "state_inspect")
     assert res.headers.get("st-access-token") is None
     unchanged_provider = await get_user(provider.user.id)
     unchanged_passwordless = await get_user(existing_rownd_user_id)
@@ -1140,7 +1192,7 @@ async def test_migrate_does_not_modify_user_mapped_to_another_external_id(
         },
     )
 
-    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 409, False, "state_inspect")
+    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 422, False, "state_inspect")
     unchanged_user = await get_user(existing.user.id)
     assert unchanged_user is not None
     assert unchanged_user.is_primary_user is False
@@ -1321,7 +1373,7 @@ async def test_migrate_blocks_foreign_primary_third_party_owner_without_mutation
         },
     )
 
-    assert_migration_error(res, "PRIMARY_ACCOUNT_MERGE_REQUIRED", 409, False, "state_inspect")
+    assert_migration_error(res, "PRIMARY_ACCOUNT_MERGE_REQUIRED", 422, False, "state_inspect")
     unchanged_provider = await get_user(provider.user.id)
     unchanged_target = await get_user(mapping_owner.user.id)
     assert unchanged_provider is not None
@@ -1610,7 +1662,7 @@ async def test_e006_recovery_rejects_passwordless_owner_mapped_to_another_rownd_
         },
     )
 
-    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 409, False, "state_inspect")
+    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 422, False, "state_inspect")
     assert res.headers.get("st-access-token") is None
     assert telemetry_reasons == [MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER]
     existing_mapping = await get_user_id_mapping(existing_rownd_user_id, "EXTERNAL", {})

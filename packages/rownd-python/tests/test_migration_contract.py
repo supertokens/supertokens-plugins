@@ -76,32 +76,32 @@ ERROR_CONTRACT = {
         "The Rownd identity data is invalid",
     ),
     MigrationErrorReason.IDENTITY_AMBIGUOUS: (
-        409,
+        422,
         False,
         "The Rownd identity resolves to multiple users",
     ),
     MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER: (
-        409,
+        422,
         False,
         "The Rownd identity belongs to another user",
     ),
     MigrationErrorReason.MAPPING_CONFLICT: (
-        409,
+        422,
         False,
         "The Rownd identity is linked to another user",
     ),
     MigrationErrorReason.RAW_USER_ID_COLLISION: (
-        409,
+        422,
         False,
         "The Rownd user ID conflicts with an existing user",
     ),
     MigrationErrorReason.PRIMARY_ACCOUNT_MERGE_REQUIRED: (
-        409,
+        422,
         False,
         "Migration requires merging primary accounts",
     ),
     MigrationErrorReason.MIGRATION_STATE_INVALID: (
-        409,
+        422,
         False,
         "The persisted migration state is invalid",
     ),
@@ -784,7 +784,7 @@ async def test_typed_repository_failure_keeps_its_stage(monkeypatch: pytest.Monk
         repository_error=MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "mapping"),
     )
 
-    assert response.status_code == 409
+    assert response.status_code == 422
     assert response.body is not None
     assert response.body["reason"] == "MAPPING_CONFLICT"
     assert response.body["stage"] == "mapping"
@@ -801,14 +801,14 @@ async def test_failure_emits_one_private_terminal_event(monkeypatch: pytest.Monk
         migration_state={"attempt_count": 2, "path": "mapped_repair", "target_source": "mapping"},
     )
 
-    assert response.status_code == 409
+    assert response.status_code == 422
     assert len(telemetry.events) == 1
     event = telemetry.events[0]
     assert event["operation"] == "migration"
     assert event["outcome"] == "error"
     assert event["reason"] == "MAPPING_CONFLICT"
     assert event["stage"] == "mapping"
-    assert event["httpStatus"] == 409
+    assert event["httpStatus"] == 422
     assert event["retryable"] is False
     assert event["attemptCount"] == 2
     assert event["path"] == "mapped_repair"
@@ -917,7 +917,7 @@ async def test_blocked_topology_reason_is_stable_at_route_boundary(
         repository_error=MigrationError(reason, "state_inspect"),
     )
 
-    assert response.status_code == 409
+    assert response.status_code == 422
     assert response.body is not None
     assert response.body["reason"] == reason.value
     assert response.body["retryable"] is False
@@ -984,7 +984,7 @@ async def test_mapping_conflict_does_not_reuse_prior_identity_context(
         monkeypatch, use_real_repository=True
     )
 
-    assert response.status_code == 409
+    assert response.status_code == 422
     assert response.body is not None
     assert response.body["reason"] == "MAPPING_CONFLICT"
     assert "targetSource" not in response.body

@@ -15,6 +15,9 @@
 
 ### Patch Changes
 
+- Return HTTP 422 instead of 409 for the six migration identity/state conflicts so native
+  clients do not mistake blocked migrations for existing sessions. Reasons and
+  `retryable: false` are unchanged; email-change conflicts remain HTTP 409.
 - Rate-limit Rownd signing-key refreshes and diagnostics, verify signatures before authenticated
   lookups, and preserve cached keys during outages
 - Recover simultaneous E006 passwordless email import races
