@@ -15,6 +15,9 @@
 
 ### Patch Changes
 
+- Normalize verified provider IDs and phone numbers before online migration mapping so padded
+  identities converge during new imports and missing-method repairs. Retain the original Rownd
+  profile in metadata; offline mapping is unchanged.
 - Accept legacy non-expiring Rownd tokens without `exp` on both migration routes. Continue
   verifying expiration when present and preserve signature, algorithm, issued-at, not-before,
   audience, discovery issuer, and Rownd user ID validation.

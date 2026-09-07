@@ -1857,8 +1857,15 @@ def _import_method_matches_expected_identity(
 
 def _build_online_migration_import(source: FreshMigrationSource) -> JsonDict:
     tenant_id = source.snapshot.tenant_id if source.snapshot.tenant_id != PUBLIC_TENANT_ID else None
+    # The offline mapper preserves raw IDs; online imports must match the inspected identities.
+    data = dict(as_json_dict(source.rownd_user.get("data")))
+    for identity in source.snapshot.expected_identities:
+        if identity.recipe_id == "thirdparty":
+            data["%s_id" % identity.provider_id] = identity.provider_user_id
+        elif identity.identifier_type == "phone":
+            data["phone_number"] = identity.identifier
     mapped = rownd_compatibility.map_rownd_user_to_supertokens(
-        source.rownd_user, tenant_id, migration_complete=False
+        {**source.rownd_user, "data": data}, tenant_id, migration_complete=False
     )
     mapped_methods = as_json_list(mapped.get("loginMethods"))
     login_methods = [

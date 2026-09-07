@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, Optional, cast
 
@@ -42,6 +43,80 @@ from supertokens_rownd.types import JsonDict, RowndSchema
 
 
 PHONE_SCHEMA: RowndSchema = {"phone_number": {"type": "string"}}
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("google_id", "google-123"), ("apple_id", "apple-123"), ("phone_number", "+1234567890")],
+)
+@pytest.mark.parametrize("verification", [True, "matching_string"])
+@pytest.mark.parametrize("with_email", [False, True])
+def test_online_import_normalizes_authoritative_identities(
+    field: str, value: str, verification: Any, with_email: bool,
+) -> None:
+    profile: JsonDict = {
+        "data": {
+            "user_id": "rownd-1", field: "  " + value + "  ", "email": "user@example.com"
+        },
+        "verified_data": {
+            field: " " + value + " " if verification == "matching_string" else verification,
+            "email": with_email,
+        },
+        "meta": {"custom": "retained"},
+    }
+    original = deepcopy(profile)
+    snapshot = create_rownd_identity_snapshot(profile, "tenant-a")
+    payload = repository._build_online_migration_import(
+        repository.FreshMigrationSource(profile, snapshot)
+    )
+    methods = cast(list[dict[str, Any]], payload["loginMethods"])
+    expected_method: dict[str, Any] = {
+        "recipeId": "passwordless" if field == "phone_number" else "thirdparty",
+        "isVerified": field == "phone_number",
+        "tenantIds": ["tenant-a"],
+        "isPrimary": True,
+    }
+    if field == "phone_number":
+        expected_method["phoneNumber"] = value
+    else:
+        provider = field.removesuffix("_id")
+        expected_method.update({
+            "thirdPartyId": provider,
+            "thirdPartyUserId": value,
+            "email": repository.rownd_compatibility.build_supertokens_fake_email(value, provider),
+        })
+    expected_methods = [expected_method]
+    if with_email:
+        expected_methods.append({
+            "recipeId": "passwordless", "email": "user@example.com",
+            "isVerified": True, "tenantIds": ["tenant-a"],
+        })
+    assert methods == expected_methods
+    assert profile == original
+    assert cast(dict, payload["userMetadata"])["original_rownd_user"] == original
+
+
+@pytest.mark.parametrize("auth_level", ["guest", "instant"])
+def test_online_import_keeps_unverified_identities_out_of_bridge(auth_level: str) -> None:
+    profile: JsonDict = {
+        "data": {
+            "user_id": "rownd-1", "google_id": " google-123 ",
+            "apple_id": " apple-123 ", "phone_number": " +1234567890 ",
+        },
+        "verified_data": {},
+        "auth_level": auth_level,
+    }
+    original = deepcopy(profile)
+    payload = repository._build_online_migration_import(repository.FreshMigrationSource(
+        profile, create_rownd_identity_snapshot(profile, "public")
+    ))
+    assert payload["loginMethods"] == [{
+        "recipeId": "thirdparty", "thirdPartyId": auth_level,
+        "thirdPartyUserId": "rownd-1", "email": "rownd-1@anonymous.local",
+        "isVerified": False,
+    }]
+    assert profile == original
+    assert cast(dict, payload["userMetadata"])["original_rownd_user"] == original
 
 
 def source(**data: Any):

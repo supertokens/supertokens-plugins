@@ -5,6 +5,7 @@ import json
 import threading
 import time
 import uuid
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -58,7 +59,12 @@ from supertokens_rownd.errors import (
     RowndEmailChangeError,
     RowndPluginError,
 )
-from supertokens_rownd.migration import MigrationDisposition, MigrationDispositionStatus
+from supertokens_rownd.migration import (
+    MigrationDisposition,
+    MigrationDispositionStatus,
+    classify_migration_snapshot,
+    create_rownd_identity_snapshot,
+)
 from supertokens_rownd.types import (
     EmailCredentialAuthorization,
     EmailCredentialReason,
@@ -615,6 +621,85 @@ async def test_migrate_phone_user_successfully(core_url: str, rownd_client: Mock
     user = await get_user("py-phone-user")
     assert user is not None
     assert user.login_methods[0].phone_number == "+1234567890"
+
+
+@pytest.mark.parametrize("field", ["google_id", "apple_id", "phone_number"])
+@pytest.mark.parametrize("repair", [False, True])
+async def test_migrate_padded_verified_identity_converges(
+    core_url: str, rownd_client: MockRowndClient, field: str, repair: bool,
+):
+    client = make_client(core_url, rownd_client)
+    user_id = "padded-" + str(uuid.uuid4())
+    value = (
+        "+1555%07d" % (uuid.uuid4().int % 10000000)
+        if field == "phone_number"
+        else "provider-" + user_id
+    )
+    profile: dict[str, Any] = {
+        "data": {"user_id": user_id, field: "  " + value + "  "},
+        "verified_data": {field: " " + value + " "},
+        "meta": {"custom": "retained"},
+    }
+    target_id = None
+    if repair:
+        # Establish an exact mapping before adding the previously missing identity.
+        seed = {
+            "data": {"user_id": user_id, "email": user_id + "@example.com"},
+            "verified_data": {"email": True},
+        }
+        assert migrate_rownd_user(client, rownd_client, user_id, seed).status_code == 200
+        mapping = await get_user_id_mapping(user_id, "EXTERNAL")
+        assert isinstance(mapping, GetUserIdMappingOkResult)
+        target_id = mapping.supertokens_user_id
+        profile["data"]["email"] = seed["data"]["email"]
+        profile["verified_data"]["email"] = True
+    original = deepcopy(profile)
+    if target_id is not None:
+        # Model a partial migration: original metadata persisted, identity method missing.
+        await usermetadata_asyncio.update_user_metadata(
+            target_id, {"original_rownd_user": original}
+        )
+    snapshot = create_rownd_identity_snapshot(cast(Any, profile), "public")
+    before = classify_migration_snapshot(await impl.read_fresh_migration_snapshot(snapshot, {}))
+    assert before.status is MigrationDispositionStatus.REPAIRABLE
+    assert any(
+        mutation.type == ("CREATE_IDENTITY" if repair else "IMPORT_USER")
+        for mutation in before.mutations
+    )
+
+    response = migrate_rownd_user(client, rownd_client, user_id, profile)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "OK"}
+    assert response.headers.get("st-access-token")
+    durable = await impl.read_fresh_migration_snapshot(snapshot, {})
+    disposition = classify_migration_snapshot(durable)
+    assert disposition.status is MigrationDispositionStatus.COMPLETE
+    assert disposition.target is not None
+    if target_id is not None:
+        assert disposition.target.user_id == target_id
+    user = await get_user(user_id)
+    assert user is not None
+    assert len(user.login_methods) == (2 if repair else 1)
+    if field == "phone_number":
+        assert any(method.phone_number == value and method.verified for method in user.login_methods)
+    else:
+        method = next(method for method in user.login_methods if method.third_party is not None)
+        assert method.third_party is not None
+        assert method.third_party.id == field.removesuffix("_id")
+        assert method.third_party.user_id == value
+        assert method.email == impl.rownd_compatibility.build_supertokens_fake_email(
+            value, field.removesuffix("_id")
+        )
+        assert not method.verified
+    metadata = await impl.get_user_metadata(user_id)
+    assert metadata["original_rownd_user"] == original
+    assert profile == original
+    assert migrate_rownd_user(client, rownd_client, user_id, profile).status_code == 200
+    repeated = await get_user(user_id)
+    assert repeated is not None
+    assert {m.recipe_user_id.get_as_string() for m in repeated.login_methods} == {
+        m.recipe_user_id.get_as_string() for m in user.login_methods
+    }
 
 
 async def test_migrate_guest_user_successfully(core_url: str, rownd_client: MockRowndClient):
