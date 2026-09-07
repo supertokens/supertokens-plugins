@@ -316,6 +316,7 @@ def test_migration_authorization_accepts_case_insensitive_bearer() -> None:
         ),
         (RowndTokenValidationReason.JWKS_FETCH_FAILED, MigrationErrorReason.ROWND_UNAVAILABLE),
         (RowndTokenValidationReason.JWKS_INVALID_RESPONSE, MigrationErrorReason.ROWND_UNAVAILABLE),
+        (RowndTokenValidationReason.JWKS_REFRESH_SUPPRESSED, MigrationErrorReason.ROWND_UNAVAILABLE),
     ],
 )
 @pytest.mark.asyncio
@@ -332,6 +333,7 @@ async def test_handler_maps_nominal_token_and_jwks_reasons(
     assert response.body is not None
     assert response.status_code == ERROR_CONTRACT[public_reason][0]
     assert response.body["reason"] == public_reason.value
+    assert response.body["retryable"] is ERROR_CONTRACT[public_reason][1]
     assert response.body["stage"] == "token_validate"
 
 

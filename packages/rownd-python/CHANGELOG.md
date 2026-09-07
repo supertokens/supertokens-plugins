@@ -15,6 +15,10 @@
 
 ### Patch Changes
 
+- Return retryable `ROWND_UNAVAILABLE` (503) on both migration routes when JWKS cooldown
+  prevents checking a new signing key, rather than permanently rejecting a potentially valid
+  rotated token. Preserve confirmed-unknown 401s, refresh limits, and negative caching.
+
 - Recover verified standalone Passwordless email/phone identities left by interrupted
   create-before-link repairs when an exact mapping or non-raw pinned target resolves
   cross-identity ambiguity. Existing ownership and verification checks remain required.

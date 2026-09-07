@@ -566,17 +566,87 @@ async def test_forced_refresh_cooldown_prevents_repeated_fetches() -> None:
     client = _client_with_clock(transport, lambda: now)
     assert await client.validate_token(_token("A", key_a)) == USER_ID
 
-    with pytest.raises(RowndTokenValidationError):
-        await client.validate_token(_token("missing-1", unknown_key))
+    for _ in range(2):
+        with pytest.raises(RowndTokenValidationError) as exc_info:
+            await client.validate_token(_token("missing-1", unknown_key))
+        assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_KID_UNKNOWN
+    results = await asyncio.gather(
+        *(client.validate_token(_token("flood-%s" % i, unknown_key)) for i in range(300)),
+        return_exceptions=True,
+    )
+    assert all(
+        isinstance(result, RowndTokenValidationError)
+        and result.reason is RowndTokenValidationReason.JWKS_REFRESH_SUPPRESSED
+        for result in results
+    )
+    assert list(client._negative_kids) == ["missing-1"]
+    assert await client.validate_token(_token("A", key_a)) == USER_ID
+    assert transport.calls["/jwks"] == 2
+    assert transport.calls["/hub/auth/.well-known/oauth-authorization-server"] == 2
+
+    now += RowndClient._REFRESH_COOLDOWN_SECONDS
     with pytest.raises(RowndTokenValidationError) as exc_info:
         await client.validate_token(_token("missing-2", unknown_key))
     assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_KID_UNKNOWN
+    assert transport.calls["/jwks"] == 3
+
+
+@pytest.mark.asyncio
+async def test_rotation_during_cooldown_is_retryable_then_succeeds() -> None:
+    key_a = Ed25519PrivateKey.generate()
+    key_b = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key_a)]})
+    now = 10.0
+    client = _client_with_clock(transport, lambda: now)
+    assert await client.validate_token(_token("A", key_a)) == USER_ID
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await client.validate_token(_token("missing", key_b))
+    assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_KID_UNKNOWN
+
+    rotated_jwks: JsonDict = {"keys": [_jwk("A", key_a), _jwk("B", key_b)]}
+    transport.jwks = rotated_jwks
+    for _ in range(2):
+        with pytest.raises(RowndTokenValidationError) as exc_info:
+            await client.validate_token(_token("B", key_b))
+        assert exc_info.value.reason is RowndTokenValidationReason.JWKS_REFRESH_SUPPRESSED
+    assert "B" not in client._negative_kids
     assert transport.calls["/jwks"] == 2
+    assert await client.validate_token(_token("A", key_a)) == USER_ID
 
     now += RowndClient._REFRESH_COOLDOWN_SECONDS
-    with pytest.raises(RowndTokenValidationError):
-        await client.validate_token(_token("missing-2", unknown_key))
+    assert await client.validate_token(_token("B", key_b)) == USER_ID
     assert transport.calls["/jwks"] == 3
+    assert transport.calls["/hub/auth/.well-known/oauth-authorization-server"] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expire_cache", [False, True])
+async def test_coalesced_misses_are_confirmed_even_during_cooldown(expire_cache: bool) -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    now = 10.0
+    client = _client_with_clock(transport, lambda: now)
+    client._JWKS_CACHE_TTL_SECONDS = 1.0
+    assert await client.validate_token(_token("A", key)) == USER_ID
+    transport.jwks_started = asyncio.Event()
+    transport.release_jwks = asyncio.Event()
+    first = asyncio.create_task(client.validate_token(_token("missing-1", key)))
+    await transport.jwks_started.wait()
+    if expire_cache:
+        now += client._JWKS_CACHE_TTL_SECONDS
+    second = asyncio.create_task(client.validate_token(_token("missing-2", key)))
+    # Let the second validation join the gated refresh before releasing it.
+    await asyncio.sleep(0)
+    transport.release_jwks.set()
+    results = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert all(
+        isinstance(result, RowndTokenValidationError)
+        and result.reason is RowndTokenValidationReason.TOKEN_KID_UNKNOWN
+        for result in results
+    )
+    assert set(client._negative_kids) == {"missing-1", "missing-2"}
+    assert transport.calls["/jwks"] == 2
 
 
 @pytest.mark.asyncio
@@ -770,6 +840,7 @@ async def test_jwks_diagnostic_is_sampled_structured_and_redacted(
         transport=transport,
         telemetry_client=telemetry_client,
         random_value=lambda: 0.0,
+        monotonic=lambda: 10.0,
     )
     token = _token("attacker-controlled-kid", unknown_key)
     await client.validate_token(_token("A", key_a))
@@ -786,10 +857,21 @@ async def test_jwks_diagnostic_is_sampled_structured_and_redacted(
             "generation": 2,
         }
     ]
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await client.validate_token(_token("new-unchecked-kid", unknown_key))
+    assert exc_info.value.reason is RowndTokenValidationReason.JWKS_REFRESH_SUPPRESSED
+    assert telemetry_client.events[1] == {
+        "operation": "jwks_refresh",
+        "outcome": "cooldown",
+        "kidHash": telemetry_client.events[1]["kidHash"],
+        "keyCount": 1,
+        "generation": 2,
+    }
     assert len(str(telemetry_client.events[0]["kidHash"])) == 16
     serialized = json.dumps(telemetry_client.events)
     assert token not in serialized
     assert "attacker-controlled-kid" not in serialized
+    assert "new-unchecked-kid" not in serialized
 
 
 @pytest.mark.asyncio

@@ -159,10 +159,14 @@ Rownd application (`app:<app-id>`). If trusted Rownd discovery metadata publishe
 the token must also contain the matching `iss`; no issuer is assumed when discovery omits it.
 
 An unknown signing key triggers at most one generation-aware, single-flight JWKS refresh. If the
-key remains absent, migration returns HTTP 401 with `reason: "TOKEN_KID_UNKNOWN"` and
+key is confirmed absent after a fetch (or a valid negative-cache lookup for the current
+generation), migration returns HTTP 401 with `reason: "TOKEN_KID_UNKNOWN"` and
 `retryable: false`. The caller must discard the token and reauthenticate; repeatedly submitting
 the same token cannot help until Rownd publishes its key. Refreshes have a 5-second global
-cooldown, and fresh misses enter a 256-entry per-`kid` negative cache for 5 seconds. Negative
+cooldown. If that cooldown suppresses a refresh for an unconfirmed miss, both migration routes
+return HTTP 503 with `reason: "ROWND_UNAVAILABLE"` and `retryable: true`; retry after the cooldown
+without discarding the token. Suppressed misses are not negative-cached, and known cached keys
+remain usable. Confirmed misses enter a 256-entry per-`kid` negative cache for 5 seconds. Negative
 entries never suppress the first generation-aware refresh permitted after the global cooldown,
 so maximum policy-induced new-key recognition delay is 5 seconds, independent of the normal
 5-minute JWKS TTL; network and refresh execution time is additional. Cold-cache and expired-cache

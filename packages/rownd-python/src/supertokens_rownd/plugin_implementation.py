@@ -39,6 +39,7 @@ _TOKEN_REASON_MAP = {
     RowndTokenValidationReason.TOKEN_SIGNATURE_INVALID: MigrationErrorReason.TOKEN_SIGNATURE_INVALID,
     RowndTokenValidationReason.JWKS_FETCH_FAILED: MigrationErrorReason.ROWND_UNAVAILABLE,
     RowndTokenValidationReason.JWKS_INVALID_RESPONSE: MigrationErrorReason.ROWND_UNAVAILABLE,
+    RowndTokenValidationReason.JWKS_REFRESH_SUPPRESSED: MigrationErrorReason.ROWND_UNAVAILABLE,
 }
 
 _ROWND_API_REASON_MAP = {

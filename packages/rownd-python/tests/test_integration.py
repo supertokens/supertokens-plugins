@@ -43,6 +43,7 @@ from supertokens_rownd.supertokens_repository import (
     complete_pending_email_verification,
 )
 from supertokens_rownd.rownd_compatibility import map_rownd_user_to_supertokens
+from supertokens_rownd.rownd_repository import RowndTokenValidationError, RowndTokenValidationReason
 from supertokens_rownd import create_magic_link_with_confirmation_bypass
 from supertokens_rownd.errors import (
     MigrationError,
@@ -182,6 +183,49 @@ async def test_blocked_migration_aliases_return_422_without_session(
     assert event["httpStatus"] == 422
     assert event["retryable"] is False
     assert event["reason"] == reason.value
+
+
+@pytest.mark.parametrize("path", ["/auth/plugin/rownd/migrate", "/auth/plugin/migrate-session"])
+@pytest.mark.parametrize(
+    ("internal_reason", "reason", "status_code", "retryable"),
+    [
+        (RowndTokenValidationReason.JWKS_REFRESH_SUPPRESSED, "ROWND_UNAVAILABLE", 503, True),
+        (RowndTokenValidationReason.TOKEN_KID_UNKNOWN, "TOKEN_KID_UNKNOWN", 401, False),
+    ],
+)
+async def test_jwks_miss_aliases_preserve_retry_contract_without_session(
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    internal_reason: RowndTokenValidationReason,
+    reason: str,
+    status_code: int,
+    retryable: bool,
+) -> None:
+    client = make_client("http://localhost:3567", rownd_client)
+    registry = Mock()
+    migrate = AsyncMock()
+    monkeypatch.setattr(telemetry, "_migration_tasks", registry)
+    monkeypatch.setattr(impl, "migrate_rownd_user_and_create_session", migrate)
+    monkeypatch.setattr(
+        rownd_client, "validate_token",
+        AsyncMock(side_effect=RowndTokenValidationError(internal_reason)),
+    )
+
+    response = client.post(
+        path, headers={"Authorization": "Bearer rownd-token", **session_headers()}
+    )
+
+    assert_migration_error(response, reason, status_code, retryable, "token_validate")
+    migrate.assert_not_called()
+    for header in ("st-access-token", "st-refresh-token", "front-token", "set-cookie"):
+        assert header not in response.headers
+    registry.submit.assert_called_once()
+    event = registry.submit.call_args.args[1]
+    assert event["reason"] == reason
+    assert event["retryable"] is retryable
+    assert event["httpStatus"] == status_code
+    assert event["stage"] == "token_validate"
 
 
 async def test_migrate_user_successfully(core_url: str, rownd_client: MockRowndClient):

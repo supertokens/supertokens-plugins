@@ -28,6 +28,7 @@ class RowndTokenValidationReason(str, Enum):
     TOKEN_SIGNATURE_INVALID = "TOKEN_SIGNATURE_INVALID"
     JWKS_FETCH_FAILED = "JWKS_FETCH_FAILED"
     JWKS_INVALID_RESPONSE = "JWKS_INVALID_RESPONSE"
+    JWKS_REFRESH_SUPPRESSED = "JWKS_REFRESH_SUPPRESSED"
 
 
 class RowndTokenValidationError(RowndPluginError):
@@ -106,7 +107,7 @@ class RowndClient:
     async def validate_token(self, token: str) -> str:
         try:
             key_id = self._parse_token_header(token)
-            cache, _ = await self._load_jwks(
+            cache, load_outcome = await self._load_jwks(
                 force=False,
                 observed_generation=self._jwks_cache.generation if self._jwks_cache else 0,
                 requested_key_id=key_id,
@@ -127,6 +128,7 @@ class RowndClient:
                         RowndTokenValidationReason.TOKEN_KID_UNKNOWN
                     )
                 self._negative_kids.pop(key_id, None)
+                checked_generation = cache.generation if load_outcome == "refreshed" else None
                 cache, refresh_outcome = await self._load_jwks(
                     force=True,
                     observed_generation=cache.generation,
@@ -134,7 +136,12 @@ class RowndClient:
                 )
                 key = cache.keys.get(key_id)
                 if key is None:
-                    if refresh_outcome != "cooldown":
+                    # A cooldown alone cannot confirm that a newly published key is absent.
+                    suppressed = (
+                        refresh_outcome == "cooldown"
+                        and checked_generation != cache.generation
+                    )
+                    if not suppressed:
                         self._remember_unknown_kid(key_id, cache.generation)
                     self._record_jwks_diagnostic(
                         key_id,
@@ -142,7 +149,9 @@ class RowndClient:
                         "cooldown" if refresh_outcome == "cooldown" else "refreshed_missing",
                     )
                     raise RowndTokenValidationError(
-                        RowndTokenValidationReason.TOKEN_KID_UNKNOWN
+                        RowndTokenValidationReason.JWKS_REFRESH_SUPPRESSED
+                        if suppressed
+                        else RowndTokenValidationReason.TOKEN_KID_UNKNOWN
                     )
                 self._negative_kids.pop(key_id, None)
                 self._record_jwks_diagnostic(key_id, cache, "refreshed_found")
