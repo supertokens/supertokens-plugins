@@ -225,6 +225,10 @@ class RowndClient:
             or key_id != key_id.strip()
         ):
             raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_MALFORMED)
+        try:
+            key_id.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as err:
+            raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_MALFORMED) from err
         return key_id
 
     async def _load_jwks(

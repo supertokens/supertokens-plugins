@@ -6,6 +6,7 @@ import json
 import time
 from collections import Counter
 from typing import Callable, Optional
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import jwt
@@ -160,6 +161,64 @@ async def test_malformed_or_unsupported_header_makes_no_http_calls(token: str) -
         await _client(transport).validate_token(token)
 
     assert transport.calls == Counter()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key_id", ["\ud800", "\udfff"], ids=["high-surrogate", "low-surrogate"])
+@pytest.mark.parametrize("sample", [0.0, 1.0], ids=["sampled", "not-sampled"])
+async def test_surrogate_kid_is_malformed_before_jwks_work(
+    monkeypatch: pytest.MonkeyPatch, key_id: str, sample: float,
+) -> None:
+    token = _token(key_id, Ed25519PrivateKey.generate())
+    assert token.isascii()
+    assert jwt.get_unverified_header(token)["kid"] == key_id
+    transport = RowndTransport({"keys": [_jwk("A", Ed25519PrivateKey.generate())]})
+    client = _client(transport)
+    telemetry_client = Mock()
+    random_value = Mock(return_value=sample)
+    monkeypatch.setattr(client, "_telemetry_client", telemetry_client)
+    monkeypatch.setattr(client, "_random_value", random_value)
+    load = AsyncMock(wraps=client._load_jwks)
+    diagnostic = Mock(wraps=client._record_jwks_diagnostic)
+    remember = Mock(wraps=client._remember_unknown_kid)
+    monkeypatch.setattr(client, "_load_jwks", load)
+    monkeypatch.setattr(client, "_record_jwks_diagnostic", diagnostic)
+    monkeypatch.setattr(client, "_remember_unknown_kid", remember)
+
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await client.validate_token(token)
+
+    assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_MALFORMED
+    load.assert_not_called()
+    diagnostic.assert_not_called()
+    remember.assert_not_called()
+    random_value.assert_not_called()
+    assert telemetry_client.mock_calls == []
+    assert transport.calls == Counter()
+    assert client._jwks_cache is None
+    assert client._jwks_refresh is None
+    assert not client._negative_kids
+    assert client._refresh_blocked_until == 0.0
+    assert client._app_id_cache is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key_id", ["cl\u00e9-\u5bc6\u94a5", "key-\U0001f511"])
+async def test_valid_unicode_kid_verifies_and_reuses_cache(key_id: str) -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk(key_id, key)]})
+    client = _client(transport)
+    token = _token(key_id, key)
+    assert token.isascii()
+    assert jwt.get_unverified_header(token)["kid"] == key_id
+
+    assert await client.validate_token(token) == USER_ID
+    assert await client.validate_token(token) == USER_ID
+    assert transport.calls == Counter({
+        "/hub/auth/.well-known/oauth-authorization-server": 1,
+        "/jwks": 1,
+        "/hub/app-config": 1,
+    })
 
 
 @pytest.mark.asyncio
