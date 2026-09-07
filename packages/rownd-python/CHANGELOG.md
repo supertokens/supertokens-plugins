@@ -15,6 +15,9 @@
 
 ### Patch Changes
 
+- Reject decoded token key IDs containing lone Unicode surrogates as `TOKEN_MALFORMED`
+  (401) before network/cache work or sampled JWKS diagnostics, preventing encoding errors
+  from becoming internal failures. Valid Unicode key IDs and cache policy are unchanged.
 - Await terminal migration telemetry for up to 250 ms so cooperative delivery can finish before
   request-scoped loops close (including Django WSGI). Isolate client failures, preserve request
   cancellation, and retain timed-out deliveries in the admission cap until they exit without

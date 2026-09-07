@@ -246,6 +246,59 @@ async def test_jwks_miss_aliases_preserve_retry_contract_without_session(
 
 
 @pytest.mark.parametrize("path", ["/auth/plugin/rownd/migrate", "/auth/plugin/migrate-session"])
+@pytest.mark.parametrize("key_id", ["\ud800", "\udfff"], ids=["high-surrogate", "low-surrogate"])
+@pytest.mark.parametrize("sample", [0.0, 1.0], ids=["sampled", "not-sampled"])
+async def test_surrogate_kid_aliases_return_malformed_without_session(
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    key_id: str,
+    sample: float,
+) -> None:
+    telemetry_client = CapturingTelemetryClient()
+    network_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        network_calls.append(str(request.url))
+        return httpx.Response(500)
+
+    validator = RowndClient(
+        RowndPluginConfig(rownd_app_key="key", rownd_app_secret="secret"),
+        transport=httpx.MockTransport(handler),
+        telemetry_client=telemetry_client,
+        random_value=lambda: sample,
+    )
+    monkeypatch.setattr(rownd_client, "validate_token", validator.validate_token)
+    migrate = AsyncMock()
+    create_session = AsyncMock()
+    monkeypatch.setattr(impl, "migrate_rownd_user_and_create_session", migrate)
+    monkeypatch.setattr(session_asyncio, "create_new_session", create_session)
+    client = make_client(
+        "http://localhost:3567", rownd_client,
+        plugin_config={"telemetry": {"provider": "custom", "factory": lambda: telemetry_client}},
+    )
+    token = jwt.encode(
+        {}, Ed25519PrivateKey.generate(), algorithm="EdDSA", headers={"kid": key_id},
+    )
+    assert token.isascii()
+    response = client.post(
+        path, headers={"Authorization": "Bearer %s" % token, **session_headers()},
+    )
+
+    assert_migration_error(response, "TOKEN_MALFORMED", 401, False, "token_validate")
+    assert network_calls == []
+    migrate.assert_not_called()
+    create_session.assert_not_called()
+    for header in ("st-access-token", "st-refresh-token", "front-token", "set-cookie"):
+        assert header not in response.headers
+    assert len(telemetry_client.events) == 1
+    event = telemetry_client.events[0]
+    assert event["operation"] == "migration"
+    assert event["reason"] == "TOKEN_MALFORMED"
+    assert event["httpStatus"] == 401
+
+
+@pytest.mark.parametrize("path", ["/auth/plugin/rownd/migrate", "/auth/plugin/migrate-session"])
 async def test_non_expiring_legacy_token_migrates_through_both_aliases(
     core_url: str,
     rownd_client: MockRowndClient,
