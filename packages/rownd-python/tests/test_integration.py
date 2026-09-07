@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 import jwt
+from jwt.algorithms import OKPAlgorithm
 import httpx
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from typing import Any, Optional, cast
 from urllib.parse import parse_qs, urlparse
 
@@ -43,7 +46,11 @@ from supertokens_rownd.supertokens_repository import (
     complete_pending_email_verification,
 )
 from supertokens_rownd.rownd_compatibility import map_rownd_user_to_supertokens
-from supertokens_rownd.rownd_repository import RowndTokenValidationError, RowndTokenValidationReason
+from supertokens_rownd.rownd_repository import (
+    RowndClient,
+    RowndTokenValidationError,
+    RowndTokenValidationReason,
+)
 from supertokens_rownd import create_magic_link_with_confirmation_bypass
 from supertokens_rownd.errors import (
     MigrationError,
@@ -226,6 +233,75 @@ async def test_jwks_miss_aliases_preserve_retry_contract_without_session(
     assert event["retryable"] is retryable
     assert event["httpStatus"] == status_code
     assert event["stage"] == "token_validate"
+
+
+@pytest.mark.parametrize("path", ["/auth/plugin/rownd/migrate", "/auth/plugin/migrate-session"])
+async def test_non_expiring_legacy_token_migrates_through_both_aliases(
+    core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    key = Ed25519PrivateKey.generate()
+    jwk = json.loads(OKPAlgorithm.to_jwk(key.public_key()))
+    jwk["kid"] = "legacy"
+    user_id = "py-never-%s" % uuid.uuid4()
+    rownd_client.user_info = {
+        "data": {"user_id": user_id, "email": "%s@example.com" % user_id},
+        "verified_data": {"email": True},
+        "meta": {"access_token_ttl": "never"},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/hub/auth/.well-known/oauth-authorization-server":
+            return httpx.Response(200, json={
+                "jwks_uri": "https://api.example/jwks",
+                "issuer": "https://issuer.example",
+            })
+        if request.url.path == "/jwks":
+            return httpx.Response(200, json={"keys": [jwk]})
+        if request.url.path == "/hub/app-config":
+            return httpx.Response(200, json={"app": {"id": "app-id"}})
+        return httpx.Response(404)
+
+    validator = RowndClient(
+        RowndPluginConfig(
+            rownd_app_key="key",
+            rownd_app_secret="secret",
+            rownd_api_base_url="https://api.example",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr(rownd_client, "validate_token", validator.validate_token)
+    token = jwt.encode(
+        {
+            "aud": "app:app-id",
+            "iat": int(time.time()),
+            "iss": "https://issuer.example",
+            "https://auth.rownd.io/app_user_id": user_id,
+        },
+        key,
+        algorithm="EdDSA",
+        headers={"kid": "legacy"},
+    )
+    client = make_client(core_url, rownd_client)
+    response = client.post(
+        path, headers={"Authorization": "Bearer %s" % token, **session_headers()},
+    )
+
+    assert response.status_code == 200, response.json()
+    assert response.json() == {"status": "OK"}
+    assert response.headers.get("st-refresh-token")
+    assert response.headers.get("front-token")
+    session = await session_asyncio.get_session_without_request_response(
+        response.headers["st-access-token"]
+    )
+    assert session is not None
+    assert session.get_user_id() == user_id
+    mapping = await get_user_id_mapping(user_id, "EXTERNAL", {})
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    metadata = await usermetadata_asyncio.get_user_metadata(mapping.supertokens_user_id)
+    assert metadata.metadata["rownd_migration_complete"] is True
 
 
 async def test_migrate_user_successfully(core_url: str, rownd_client: MockRowndClient):

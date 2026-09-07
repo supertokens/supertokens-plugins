@@ -163,12 +163,13 @@ class RowndClient:
                 options={
                     "verify_aud": False,
                     "verify_iss": False,
-                    "require": ["exp", "iat"],
+                    # Legacy Rownd access_token_ttl="never" tokens omit exp.
+                    "require": ["iat"],
                 },
             )
             app_id = await self._fetch_app_id()
 
-            decode_options = {"require": ["aud", "exp", "iat"]}
+            decode_options = {"require": ["aud", "iat"]}
             decode_kwargs: Dict[str, Any] = {
                 "algorithms": ["EdDSA"],
                 "audience": "app:%s" % app_id,

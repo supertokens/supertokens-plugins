@@ -134,11 +134,14 @@ def _client_with_clock(
 
 
 @pytest.mark.asyncio
-async def test_valid_eddsa_token_returns_rownd_user_id() -> None:
+@pytest.mark.parametrize("omit_claims", [(), ("exp",)])
+async def test_valid_eddsa_token_returns_rownd_user_id(omit_claims: tuple[str, ...]) -> None:
     key = Ed25519PrivateKey.generate()
     transport = RowndTransport({"keys": [_jwk("A", key)]})
 
-    assert await _client(transport).validate_token(_token("A", key)) == USER_ID
+    assert await _client(transport).validate_token(
+        _token("A", key, omit_claims=omit_claims)
+    ) == USER_ID
 
 
 @pytest.mark.asyncio
@@ -220,7 +223,10 @@ async def test_unknown_kid_refreshes_once_and_has_typed_reason() -> None:
 
 
 @pytest.mark.asyncio
-async def test_known_kid_with_invalid_signature_does_not_refresh() -> None:
+@pytest.mark.parametrize("omit_claims", [(), ("exp",)])
+async def test_known_kid_with_invalid_signature_does_not_refresh(
+    omit_claims: tuple[str, ...],
+) -> None:
     key_a = Ed25519PrivateKey.generate()
     wrong_key = Ed25519PrivateKey.generate()
     transport = RowndTransport({"keys": [_jwk("A", key_a)]})
@@ -228,7 +234,7 @@ async def test_known_kid_with_invalid_signature_does_not_refresh() -> None:
     assert await client.validate_token(_token("A", key_a)) == USER_ID
 
     with pytest.raises(RowndTokenValidationError) as exc_info:
-        await client.validate_token(_token("A", wrong_key))
+        await client.validate_token(_token("A", wrong_key, omit_claims=omit_claims))
 
     assert exc_info.value.reason == RowndTokenValidationReason.TOKEN_SIGNATURE_INVALID
     assert transport.calls["/hub/auth/.well-known/oauth-authorization-server"] == 1
@@ -386,6 +392,7 @@ async def test_expired_app_id_failure_does_not_serve_stale_and_recovers() -> Non
     ("claims_factory", "reason"),
     [
         (lambda: {"exp": int(time.time()) - 120}, RowndTokenValidationReason.TOKEN_EXPIRED),
+        (lambda: {"exp": "invalid"}, RowndTokenValidationReason.TOKEN_MALFORMED),
         (lambda: {"nbf": int(time.time()) + 120}, RowndTokenValidationReason.TOKEN_NOT_ACTIVE),
         (lambda: {"aud": "app:other"}, RowndTokenValidationReason.TOKEN_CLAIMS_INVALID),
         (
@@ -407,36 +414,80 @@ async def test_token_claim_failures_have_typed_reasons(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing_claim", ["aud", "exp", "iat"])
-async def test_required_token_claims_are_typed(missing_claim: str) -> None:
+@pytest.mark.parametrize("omit_claims", [(), ("exp",)])
+@pytest.mark.parametrize("missing_claim", ["aud", "iat", "https://auth.rownd.io/app_user_id"])
+async def test_required_token_claims_are_typed(
+    missing_claim: str, omit_claims: tuple[str, ...],
+) -> None:
     key = Ed25519PrivateKey.generate()
     transport = RowndTransport({"keys": [_jwk("A", key)]})
 
     with pytest.raises(RowndTokenValidationError) as exc_info:
         await _client(transport).validate_token(
-            _token("A", key, omit_claims=(missing_claim,))
+            _token("A", key, omit_claims=(*omit_claims, missing_claim))
         )
 
     assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_CLAIMS_INVALID
 
 
 @pytest.mark.asyncio
-async def test_discovery_issuer_is_required_and_validated_only_when_available() -> None:
+@pytest.mark.parametrize("omit_claims", [(), ("exp",)])
+async def test_discovery_issuer_is_required_and_validated_only_when_available(
+    omit_claims: tuple[str, ...],
+) -> None:
     key = Ed25519PrivateKey.generate()
     transport = RowndTransport({"keys": [_jwk("A", key)]})
-    assert await _client(transport).validate_token(_token("A", key)) == USER_ID
+    assert await _client(transport).validate_token(
+        _token("A", key, omit_claims=omit_claims)
+    ) == USER_ID
 
     transport.discovery["issuer"] = "https://issuer.example"
     with pytest.raises(RowndTokenValidationError) as exc_info:
-        await _client(transport).validate_token(_token("A", key))
+        await _client(transport).validate_token(_token("A", key, omit_claims=omit_claims))
     assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_CLAIMS_INVALID
 
     assert (
         await _client(transport).validate_token(
-            _token("A", key, claims={"iss": "https://issuer.example"})
+            _token("A", key, claims={"iss": "https://issuer.example"}, omit_claims=omit_claims)
         )
         == USER_ID
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("claims_factory", "reason"),
+    [
+        (lambda: {"aud": "app:other"}, RowndTokenValidationReason.TOKEN_CLAIMS_INVALID),
+        (lambda: {"iss": "https://wrong.example"}, RowndTokenValidationReason.TOKEN_CLAIMS_INVALID),
+        (lambda: {"iat": "invalid"}, RowndTokenValidationReason.TOKEN_CLAIMS_INVALID),
+        (lambda: {"iat": int(time.time()) + 120}, RowndTokenValidationReason.TOKEN_NOT_ACTIVE),
+        (lambda: {"nbf": int(time.time()) + 120}, RowndTokenValidationReason.TOKEN_NOT_ACTIVE),
+        (lambda: {"nbf": "invalid"}, RowndTokenValidationReason.TOKEN_MALFORMED),
+        (
+            lambda: {"https://auth.rownd.io/app_user_id": ""},
+            RowndTokenValidationReason.TOKEN_CLAIMS_INVALID,
+        ),
+        (
+            lambda: {"https://auth.rownd.io/app_user_id": 123},
+            RowndTokenValidationReason.TOKEN_CLAIMS_INVALID,
+        ),
+    ],
+)
+async def test_non_expiring_token_still_validates_claims(
+    claims_factory: Callable[[], JsonDict], reason: RowndTokenValidationReason,
+) -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    transport.discovery["issuer"] = "https://issuer.example"
+    claims = {"iss": "https://issuer.example", **claims_factory()}
+
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await _client(transport).validate_token(
+            _token("A", key, claims=claims, omit_claims=("exp",))
+        )
+
+    assert exc_info.value.reason is reason
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,9 @@
 
 ### Patch Changes
 
+- Accept legacy non-expiring Rownd tokens without `exp` on both migration routes. Continue
+  verifying expiration when present and preserve signature, algorithm, issued-at, not-before,
+  audience, discovery issuer, and Rownd user ID validation.
 - Return retryable `ROWND_UNAVAILABLE` (503) on both migration routes when JWKS cooldown
   prevents checking a new signing key, rather than permanently rejecting a potentially valid
   rotated token. Preserve confirmed-unknown 401s, refresh limits, and negative caching.

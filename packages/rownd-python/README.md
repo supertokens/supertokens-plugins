@@ -153,8 +153,10 @@ that authority remain ambiguous; raw-ID graph overlap alone does not bypass this
 | `PRIMARY_ACCOUNT_MERGE_REQUIRED` | 422 | false |
 | `MIGRATION_STATE_INVALID` | 422 | false |
 
-Rownd migration tokens must use `EdDSA`, include a non-empty `kid`, and contain valid `aud`,
-`exp`, and `iat` claims. `nbf` is validated when present. The expected audience is the configured
+Rownd migration tokens must use `EdDSA`, include a non-empty `kid`, and contain valid `aud`
+and `iat` claims, plus a non-empty string `https://auth.rownd.io/app_user_id`. Legacy Rownd tokens
+issued with `meta.access_token_ttl: "never"` may omit `exp`; expiration is still verified when
+`exp` is present. `nbf` is also validated when present. The expected audience is the configured
 Rownd application (`app:<app-id>`). If trusted Rownd discovery metadata publishes an `issuer`,
 the token must also contain the matching `iss`; no issuer is assumed when discovery omits it.
 
