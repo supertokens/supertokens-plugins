@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -77,7 +78,7 @@ from .errors import (
     RowndEmailChangeError,
     RowndPluginError,
 )
-from .logger import log_debug
+from .logger import log_warning
 from . import rownd_compatibility
 from .migration import (
     CanonicalEmailPointerState,
@@ -130,12 +131,24 @@ _LINKED_OPERATIONAL_METADATA_FIELDS = {
 
 class _BulkImportError(RuntimeError):
     status: int
-    response_text: str
+    duplicate_identity: bool
 
     def __init__(self, status: int, response_text: str):
         self.status = status
-        self.response_text = response_text
-        super().__init__("Bulk import failed with status %s: %s" % (status, response_text))
+        # Retain only the verified recovery predicate, never Core's identity-bearing body.
+        self.duplicate_identity = False
+        if status == 400:
+            try:
+                body = json.loads(response_text)
+            except (TypeError, ValueError, RecursionError):
+                body = None
+            errors = body.get("errors") if isinstance(body, dict) else None
+            self.duplicate_identity = (
+                isinstance(errors, list)
+                and bool(errors)
+                and all(isinstance(entry, str) and entry.startswith("E006:") for entry in errors)
+            )
+        super().__init__("Bulk import failed with status %s" % status)
 
 
 class FreshMigrationSource(NamedTuple):
@@ -151,20 +164,20 @@ class _MigrationSourceChanged(RuntimeError):
         super().__init__("Rownd migration source changed before account linking")
 
 
-class _MappingRetryState:
-    narrow_retry_attempted: bool
-
-    def __init__(self) -> None:
-        self.narrow_retry_attempted = False
-
-
-class _NonAuthRecipeUserIdReferenceError:
-    status: Literal["NON_AUTH_RECIPE_USER_ID_REFERENCE_ERROR"] = (
-        "NON_AUTH_RECIPE_USER_ID_REFERENCE_ERROR"
+def _is_non_auth_mapping_rejection(error: Exception) -> bool:
+    # SDK 0.31.3 wraps Core 12.0.10's plain-text HTTP 400 in a generic Exception.
+    # Keep this compatibility contract closed until additional formats/recipes are verified.
+    return (
+        type(error) is Exception
+        and len(error.args) == 1
+        and isinstance(error.args[0], str)
+        and re.fullmatch(
+            r"SuperTokens core threw an error for a POST request to path: "
+            r"'/recipe/userid/map' with status code: 400 and message: "
+            r"UserId is already in use in (?:Session|UserMetadata) recipe\n?",
+            error.args[0],
+        ) is not None
     )
-
-
-_NarrowMappingCapability = Callable[[str, str, UserContext], Awaitable[object]]
 
 
 _SESSION_RESPONSE_HEADERS = (
@@ -573,19 +586,8 @@ async def read_fresh_migration_snapshot(
 
 
 def is_bulk_import_duplicate_identity_error(error: object) -> bool:
-    if not isinstance(error, _BulkImportError) or error.status != 400:
-        return False
-    try:
-        body = json.loads(error.response_text)
-    except (TypeError, ValueError):
-        return False
-    if not isinstance(body, dict):
-        return False
-    errors = body.get("errors")
     return (
-        isinstance(errors, list)
-        and bool(errors)
-        and all(isinstance(entry, str) and entry.startswith("E006:") for entry in errors)
+        isinstance(error, _BulkImportError) and error.status == 400 and error.duplicate_identity
     )
 
 
@@ -673,13 +675,12 @@ async def migrate_rownd_user_and_create_session(
     completed_target: Optional[PinnedMigrationTarget] = None
     last_error: Optional[BaseException] = None
     capability_error: Optional[MigrationError] = None
-    mapping_retry_state = _MappingRetryState()
 
     recovered_after_error = False
 
     def transition_source_epoch(next_source: FreshMigrationSource) -> bool:
         nonlocal source, pinned_target, completed_target, last_error, capability_error
-        nonlocal mapping_retry_state, recovered_after_error
+        nonlocal recovered_after_error
         if next_source.snapshot == source.snapshot:
             source = next_source
             return False
@@ -688,7 +689,6 @@ async def migrate_rownd_user_and_create_session(
         completed_target = None
         last_error = None
         capability_error = None
-        mapping_retry_state = _MappingRetryState()
         recovered_after_error = False
         attempt_count = migration_state.get("attempt_count")
         migration_state.clear()
@@ -773,8 +773,7 @@ async def migrate_rownd_user_and_create_session(
                 supertokens_config,
                 user_context,
                 read_fresh_source,
-                mapping_retry_state,
-                migration_state,
+                migration_state=migration_state,
             )
             if changed_source is not None:
                 transition_source_epoch(changed_source)
@@ -946,18 +945,33 @@ async def migrate_rownd_user_and_create_session(
 
 
 def _is_recognizable_core_outage(error: Optional[BaseException]) -> bool:
-    if error is None:
-        return False
-    if isinstance(error, httpx.HTTPStatusError):
-        return error.response.status_code >= 500
-    if isinstance(error, (httpx.RequestError, ConnectionError, TimeoutError)):
-        return True
-    for field in ("status", "status_code", "statusCode"):
-        value = getattr(error, field, None)
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 500:
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, MigrationError) and error.reason is MigrationErrorReason.CORE_UNAVAILABLE:
             return True
-    cause = error.__cause__ or error.__context__
-    return _is_recognizable_core_outage(cause)
+        if isinstance(error, httpx.HTTPStatusError):
+            return 500 <= error.response.status_code < 600
+        if isinstance(error, (httpx.RequestError, ConnectionError, TimeoutError, asyncio.TimeoutError)):
+            return True
+        for field in ("status", "status_code", "statusCode"):
+            value = getattr(error, field, None)
+            if isinstance(value, int) and not isinstance(value, bool) and 500 <= value < 600:
+                return True
+        # SDK 0.31.3's Querier wraps HTTP errors in this exact envelope; the body is opaque.
+        if (
+            type(error) is Exception
+            and len(error.args) == 1
+            and isinstance(error.args[0], str)
+            and re.fullmatch(
+                r"SuperTokens core threw an error for a (?:GET|POST|PUT|DELETE) request to path: "
+                r"'/(?!/)[A-Za-z0-9_./%\-]*' with status code: 5[0-9]{2} and message: [\s\S]*",
+                error.args[0],
+            ) is not None
+        ):
+            return True
+        error = getattr(error, "__cause__", None) or getattr(error, "__context__", None)
+    return False
 
 
 async def associate_user_login_methods_to_tenant(
@@ -1394,31 +1408,68 @@ async def record_rownd_app_variant_for_user(
     )
 
 
+_BULK_IMPORT_TOTAL_TIMEOUT_SECONDS = 15.0
+_BULK_IMPORT_MAX_RESPONSE_BYTES = 1024 * 1024
+
+
 async def import_user(
     user_import: JsonDict,
     supertokens_config: SupertokensConfig,
     user_context: UserContext,
 ) -> JsonDict:
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "Accept-Encoding": "identity"}
     if supertokens_config.api_key:
         headers["api-key"] = supertokens_config.api_key
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            res = await client.post(
+
+    async def perform_request() -> JsonDict:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            async with client.stream(
+                "POST",
                 supertokens_config.connection_uri.rstrip("/") + "/bulk-import/import",
                 headers=headers,
                 json=user_import,
-            )
+            ) as res:
+                invalid_response = MigrationError(
+                    MigrationErrorReason.CORE_UNAVAILABLE
+                    if 500 <= res.status_code < 600 else MigrationErrorReason.MIGRATION_INCOMPLETE,
+                    "bulk_import",
+                )
+                # Reject compression before HTTPX can inflate an unbounded decoded chunk.
+                if res.headers.get("content-encoding", "identity").strip().lower() != "identity":
+                    raise invalid_response
+                content_length = res.headers.get("content-length")
+                if content_length is not None:
+                    try:
+                        length = int(content_length)
+                    except ValueError:
+                        raise invalid_response from None
+                    if length < 0 or length > _BULK_IMPORT_MAX_RESPONSE_BYTES:
+                        raise invalid_response
+                body = bytearray()
+                async for chunk in res.aiter_bytes():
+                    if len(body) + len(chunk) > _BULK_IMPORT_MAX_RESPONSE_BYTES:
+                        raise invalid_response
+                    body.extend(chunk)
+                if not 200 <= res.status_code < 300:
+                    raise _BulkImportError(res.status_code, body.decode("utf-8", errors="replace"))
+                try:
+                    data = json.loads(body)
+                except (ValueError, RecursionError):
+                    raise invalid_response from None
+                if not isinstance(data, dict) or data.get("status") != "OK":
+                    raise invalid_response
+                user = data.get("user")
+                if not isinstance(user, dict) or not user:
+                    raise invalid_response
+                return user
+
+    try:
+        # No transport retries: a timed-out write may have committed. Reconciliation must inspect.
+        return await asyncio.wait_for(perform_request(), timeout=_BULK_IMPORT_TOTAL_TIMEOUT_SECONDS)
+    except (httpx.RequestError, asyncio.TimeoutError):
+        raise MigrationError(MigrationErrorReason.CORE_UNAVAILABLE, "bulk_import") from None
     finally:
         clear_supertokens_core_call_cache(user_context)
-    if res.status_code < 200 or res.status_code >= 300:
-        raise _BulkImportError(res.status_code, res.text)
-    data = res.json()
-    if data.get("status") != "OK" or not data.get("user"):
-        raise RuntimeError(
-            "Bulk import failed: %s" % (data.get("message") or "Missing user in response")
-        )
-    return data["user"]
 
 
 def login_method_matches_import(login_method: LoginMethod, method_import: JsonDict) -> bool:
@@ -1751,8 +1802,6 @@ async def _create_rownd_user_id_mapping(
     target: PinnedMigrationTarget,
     user_context: UserContext,
     read_fresh_source: Callable[[], Awaitable[Optional[FreshMigrationSource]]],
-    retry_state: _MappingRetryState,
-    narrow_capability: Optional[_NarrowMappingCapability] = None,
 ) -> bool:
     async def preflight() -> Tuple[FreshMigrationSource, bool]:
         fresh = await read_fresh_source()
@@ -1816,35 +1865,14 @@ async def _create_rownd_user_id_mapping(
             return True
         if postcondition == "CONFLICT":
             raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "mapping", error) from error
+        if _is_non_auth_mapping_rejection(error):
+            _, mapping_exists = await preflight()
+            if mapping_exists:
+                return False
+            raise MigrationError(
+                MigrationErrorReason.CORE_CAPABILITY_REQUIRED, "mapping", error
+            ) from error
         raise
-
-    if (
-        isinstance(result, _NonAuthRecipeUserIdReferenceError)
-        and result.status == "NON_AUTH_RECIPE_USER_ID_REFERENCE_ERROR"
-    ):
-        second_source, mapping_exists = await preflight()
-        if mapping_exists:
-            return False
-        if narrow_capability is None:
-            raise MigrationError(MigrationErrorReason.CORE_CAPABILITY_REQUIRED, "mapping")
-        if retry_state.narrow_retry_attempted:
-            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "mapping")
-        retry_state.narrow_retry_attempted = True
-        try:
-            result = await narrow_capability(
-                target.user_id, second_source.snapshot.rownd_user_id, user_context
-            )
-        except Exception as error:
-            postcondition = await _read_mapping_postcondition(
-                target.user_id, second_source.snapshot.rownd_user_id, user_context
-            )
-            if postcondition == "EXACT":
-                return True
-            if postcondition == "CONFLICT":
-                raise MigrationError(
-                    MigrationErrorReason.MAPPING_CONFLICT, "mapping", error
-                ) from error
-            raise
 
     if isinstance(result, (CreateUserIdMappingOkResult, UserIdMappingAlreadyExistsError)):
         postcondition = await _read_mapping_postcondition(
@@ -2163,11 +2191,8 @@ async def apply_migration_repairs(
     supertokens_config: SupertokensConfig,
     user_context: UserContext,
     read_fresh_source: Callable[[], Awaitable[Optional[FreshMigrationSource]]],
-    mapping_retry_state: Optional[_MappingRetryState] = None,
     migration_state: Optional[JsonDict] = None,
 ) -> Optional[FreshMigrationSource]:
-    retry_state = mapping_retry_state or _MappingRetryState()
-
     async def read_guarded_disposition(
         mutation: MigrationMutation,
     ) -> Tuple[FreshMigrationSource, Optional[MigrationSnapshot], bool]:
@@ -2226,7 +2251,6 @@ async def apply_migration_repairs(
                 pinned_target,
                 user_context,
                 read_fresh_source,
-                retry_state,
             )
             continue
         if mutation.type == "MAKE_PRIMARY":
@@ -3257,11 +3281,9 @@ async def complete_pending_email_verification(
                 except Exception as rollback_error:
                     rollback_errors.append(rollback_error)
             if rollback_errors:
-                log_debug(
+                log_warning(
                     get_active_rownd_config(),
-                    "Email change replacement-session rollback failed for user %s; "
-                    "reconciliation required. Errors: %s"
-                    % (user_id, "; ".join(str(error) for error in rollback_errors)),
+                    "email_change_replacement_session_rollback_failed reconciliation_required=true",
                 )
                 raise RowndEmailChangeError(
                     "CONFLICT",
@@ -3290,10 +3312,9 @@ async def complete_pending_email_verification(
                     return_exceptions=True,
                 )
             if rollback_error is not None:
-                log_debug(
+                log_warning(
                     get_active_rownd_config(),
-                    "Email change rollback failed for user %s; reconciliation required. Error: %s"
-                    % (user_id, rollback_error),
+                    "email_change_rollback_failed reconciliation_required=true",
                 )
                 raise RowndEmailChangeError(
                     "CONFLICT",

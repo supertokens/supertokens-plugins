@@ -52,6 +52,7 @@ class RowndTelemetryConfig:
 class RowndPluginKwargs(TypedDict, total=False):
     rownd_app_key: Optional[str]
     rownd_app_secret: Optional[str]
+    rownd_app_id: Optional[str]
     disable_rownd_user_migration: bool
     api_base_path: str
     api_domain: str
@@ -172,3 +173,4 @@ class RowndPluginConfig:
     email_change: RowndEmailChangeConfig = field(
         default_factory=lambda: {"max_session_age_seconds": 600, "retirement_mode": "observe"}
     )
+    rownd_app_id: Optional[str] = None

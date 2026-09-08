@@ -24,7 +24,7 @@ from supertokens_python.asyncio import (
     get_user_id_mapping,
     list_users_by_account_info as supertokens_list_users_by_account_info,
 )
-from supertokens_python.interfaces import GetUserIdMappingOkResult
+from supertokens_python.interfaces import GetUserIdMappingOkResult, UnknownMappingError
 from supertokens_python.recipe.accountlinking import asyncio as accountlinking_asyncio
 from supertokens_python.recipe.emailverification import (
     asyncio as emailverification_asyncio,
@@ -34,6 +34,7 @@ from supertokens_python.recipe.multitenancy import asyncio as multitenancy_async
 from supertokens_python.recipe.passwordless import asyncio as passwordless_asyncio
 from supertokens_python.recipe.session import asyncio as session_asyncio
 from supertokens_python.recipe.thirdparty import asyncio as thirdparty_asyncio
+from supertokens_python.recipe.thirdparty.interfaces import ManuallyCreateOrUpdateUserOkResult
 from supertokens_python.recipe.thirdparty.types import ThirdPartyInfo
 from supertokens_python.recipe.usermetadata import asyncio as usermetadata_asyncio
 from supertokens_python.types.base import AccountInfoInput
@@ -74,6 +75,7 @@ from supertokens_rownd.types import (
 )
 
 from conftest import MockRowndClient, auth_headers, make_client, session_headers
+from test_import_transport import ImportStream
 
 pytestmark = pytest.mark.asyncio
 
@@ -367,6 +369,69 @@ async def test_non_expiring_legacy_token_migrates_through_both_aliases(
     assert metadata.metadata["rownd_migration_complete"] is True
 
 
+@pytest.mark.parametrize("reference", ["Session", "UserMetadata"])
+async def test_migrate_native_reference_requires_core_mapping_capability(
+    core_url: str, rownd_client: MockRowndClient, reference: str,
+) -> None:
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "mapping-reference-%s" % uuid.uuid4()
+    google_id = "google-" + rownd_user_id
+    provider = await thirdparty_asyncio.manually_create_or_update_user(
+        tenant_id="public",
+        third_party_id="google",
+        third_party_user_id=google_id,
+        email=rownd_user_id + "@example.com",
+        is_verified=True,
+        user_context={},
+    )
+    assert isinstance(provider, ManuallyCreateOrUpdateUserOkResult)
+    assert provider.created_new_recipe_user
+    target_id = provider.user.id
+    profile = {
+        "data": {"user_id": rownd_user_id, "google_id": google_id},
+        "verified_data": {"google_id": True},
+    }
+    metadata = {"native_preferences": {"language": "en", "notifications": False}}
+    native_session = None
+    if reference == "Session":
+        native_session = await session_asyncio.create_new_session_without_request_response(
+            "public", provider.recipe_user_id, {}, {"native": True}, True,
+        )
+    else:
+        await usermetadata_asyncio.update_user_metadata(target_id, metadata)
+    original_handles = await session_asyncio.get_all_session_handles_for_user(target_id)
+    assert len(original_handles) == (1 if reference == "Session" else 0)
+    original_user_count = await get_user_count()
+
+    assert isinstance(await get_user_id_mapping(target_id, "SUPERTOKENS"), UnknownMappingError)
+    assert isinstance(await get_user_id_mapping(rownd_user_id, "EXTERNAL"), UnknownMappingError)
+
+    # This SDK represents Core HTTP errors as Exception, including mapping HTTP 400.
+    with pytest.raises(Exception, match=r"/recipe/userid/map'.*status code: 400") as rejected:
+        await create_user_id_mapping(target_id, rownd_user_id, force=False, user_context={})
+    assert "UserId is already in use in %s recipe" % reference in str(rejected.value)
+
+    response = migrate_rownd_user(client, rownd_client, rownd_user_id, profile)
+
+    assert isinstance(await get_user_id_mapping(target_id, "SUPERTOKENS"), UnknownMappingError)
+    assert isinstance(await get_user_id_mapping(rownd_user_id, "EXTERNAL"), UnknownMappingError)
+    assert await get_user_count() == original_user_count
+    assert await get_user(rownd_user_id) is None
+    assert await get_user(target_id) is not None
+    assert set(await session_asyncio.get_all_session_handles_for_user(target_id)) == set(original_handles)
+    assert await session_asyncio.get_all_session_handles_for_user(rownd_user_id) == []
+    if native_session is not None:
+        preserved = await session_asyncio.get_session_information(native_session.get_handle())
+        assert preserved is not None
+        assert preserved.user_id == target_id
+        assert preserved.session_data_in_database == {"native": True}
+    else:
+        assert (await usermetadata_asyncio.get_user_metadata(target_id)).metadata == metadata
+    for header in ("st-access-token", "st-refresh-token", "front-token", "set-cookie", "anti-csrf"):
+        assert header not in response.headers
+    assert_migration_error(response, "CORE_CAPABILITY_REQUIRED", 503, False, "mapping")
+
+
 async def test_migrate_user_successfully(core_url: str, rownd_client: MockRowndClient):
     rownd_client.user_id = "py-migrate-user"
     rownd_client.user_info = {
@@ -547,13 +612,13 @@ async def test_migrate_missing_rownd_user_returns_auth_error(
 async def test_migrate_bulk_import_500_returns_error(
     core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch
 ):
-    async def post(self, url: str, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if str(url).endswith("/bulk-import/import"):
+    async def send(self, request: httpx.Request, *args, **kwargs):
+        if request.url.path == "/bulk-import/import":
             return httpx.Response(500, text="Internal Server Error")
-        return await original_post(self, url, *args, **kwargs)
+        return await original_send(self, request, *args, **kwargs)
 
-    original_post = httpx.AsyncClient.post
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    original_send = httpx.AsyncClient.send
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
     client = make_client(core_url, rownd_client)
 
     res = migrate_rownd_user(
@@ -575,16 +640,16 @@ async def test_migrate_bulk_import_500_returns_error(
 async def test_migrate_bulk_import_mixed_errors_returns_error(
     core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch
 ):
-    async def post(self, url: str, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if str(url).endswith("/bulk-import/import"):
+    async def send(self, request: httpx.Request, *args, **kwargs):
+        if request.url.path == "/bulk-import/import":
             return httpx.Response(
                 400,
                 json={"errors": ["E006: duplicate identity", "E007: invalid user"]},
             )
-        return await original_post(self, url, *args, **kwargs)
+        return await original_send(self, request, *args, **kwargs)
 
-    original_post = httpx.AsyncClient.post
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    original_send = httpx.AsyncClient.send
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
     client = make_client(core_url, rownd_client)
 
     res = migrate_rownd_user(
@@ -607,13 +672,13 @@ async def test_migrate_bulk_import_mixed_errors_returns_error(
 async def test_migrate_bulk_import_malformed_json_returns_error(
     core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch
 ):
-    async def post(self, url: str, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if str(url).endswith("/bulk-import/import"):
+    async def send(self, request: httpx.Request, *args, **kwargs):
+        if request.url.path == "/bulk-import/import":
             return httpx.Response(200, content=b"not-json")
-        return await original_post(self, url, *args, **kwargs)
+        return await original_send(self, request, *args, **kwargs)
 
-    original_post = httpx.AsyncClient.post
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    original_send = httpx.AsyncClient.send
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
     client = make_client(core_url, rownd_client)
 
     res = migrate_rownd_user(
@@ -635,13 +700,13 @@ async def test_migrate_bulk_import_malformed_json_returns_error(
 async def test_migrate_bulk_import_missing_user_returns_error(
     core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch
 ):
-    async def post(self, url: str, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if str(url).endswith("/bulk-import/import"):
+    async def send(self, request: httpx.Request, *args, **kwargs):
+        if request.url.path == "/bulk-import/import":
             return httpx.Response(200, json={"status": "OK"})
-        return await original_post(self, url, *args, **kwargs)
+        return await original_send(self, request, *args, **kwargs)
 
-    original_post = httpx.AsyncClient.post
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    original_send = httpx.AsyncClient.send
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
     client = make_client(core_url, rownd_client)
 
     res = migrate_rownd_user(
@@ -658,6 +723,84 @@ async def test_migrate_bulk_import_missing_user_returns_error(
     )
 
     assert_migration_error(res, "MIGRATION_INCOMPLETE", 503, True, "state_inspect")
+
+
+@pytest.mark.parametrize(("committed", "failure", "inspection_available"), [
+    (False, "timeout", True), (True, "timeout", True),
+    (False, "slow", True), (True, "slow", True),
+    (False, "oversize", True), (True, "oversize", True),
+    (True, "response-loss", True), (True, "response-loss", False),
+])
+async def test_bulk_import_transport_uncertainty_requires_fresh_inspection(
+    core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch,
+    committed: bool, failure: str, inspection_available: bool,
+) -> None:
+    client = make_client(core_url, rownd_client)
+    rownd_user_id = "import-transport-" + str(uuid.uuid4())
+    initial_count = await get_user_count()
+    original_send = httpx.AsyncClient.send
+    events: list[str] = []
+    streams: list[ImportStream] = []
+    monkeypatch.setattr(impl, "_BULK_IMPORT_TOTAL_TIMEOUT_SECONDS", 1.0, raising=False)
+    monkeypatch.setattr(impl, "_BULK_IMPORT_MAX_RESPONSE_BYTES", 4096, raising=False)
+
+    async def send(self, request: httpx.Request, *args, **kwargs):
+        if request.url.path != "/bulk-import/import":
+            if request.method == "GET" and "import" in events:
+                if not inspection_available:
+                    raise httpx.ReadTimeout("private inspection failure", request=request)
+                result = await original_send(self, request, *args, **kwargs)
+                events.append("inspect")
+                return result
+            return await original_send(self, request, *args, **kwargs)
+        if "import" in events:
+            assert events[-1] == "inspect", "Never repeat an uncertain write without readback"
+        events.append("import")
+        if committed:
+            result = await original_send(self, request, *args, **{**kwargs, "stream": False})
+            assert result.status_code == 200, result.text
+            assert result.json()["status"] == "OK", result.text
+        if failure == "timeout":
+            raise httpx.ReadTimeout("private import timeout", request=request)
+        if failure == "response-loss":
+            raise httpx.RemoteProtocolError("private lost response", request=request)
+        stream = (
+            ImportStream([b" "] * 20 + [b'{"status":"OK","user":{"id":"private"}}'], 0.1)
+            if failure == "slow" else ImportStream([b"x" * 4097] * 2)
+        )
+        streams.append(stream)
+        return httpx.Response(200, stream=stream)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    response = migrate_rownd_user(client, rownd_client, rownd_user_id, {
+        "data": {"user_id": rownd_user_id, "email": rownd_user_id + "@example.com"},
+        "verified_data": {"email": True},
+    })
+    monkeypatch.setattr(httpx.AsyncClient, "send", original_send)
+
+    assert events.count("import") == (1 if committed else 2)
+    assert all(stream.closed and stream.reads < len(stream.chunks) for stream in streams)
+    assert await get_user_count() == initial_count + int(committed)
+    if committed and inspection_available:
+        assert response.status_code == 200, response.text
+        assert response.json() == {"status": "OK"}
+        session = await session_asyncio.get_session_without_request_response(
+            response.headers["st-access-token"],
+        )
+        assert session is not None and session.get_user_id() == rownd_user_id
+        user = await get_user(rownd_user_id)
+        assert user is not None and len(user.login_methods) == 1
+        mapping = await get_user_id_mapping(rownd_user_id, "EXTERNAL")
+        assert isinstance(mapping, GetUserIdMappingOkResult)
+        metadata = await usermetadata_asyncio.get_user_metadata(mapping.supertokens_user_id)
+        assert metadata.metadata["rownd_migration_complete"] is True
+    else:
+        reason = "MIGRATION_INCOMPLETE" if failure == "oversize" else "CORE_UNAVAILABLE"
+        assert_migration_error(response, reason, 503, True, "state_inspect")
+        assert "private" not in response.text
+        for header in ("st-access-token", "st-refresh-token", "front-token", "set-cookie"):
+            assert header not in response.headers
+        assert await session_asyncio.get_all_session_handles_for_user(rownd_user_id) == []
 
 
 async def test_migrate_phone_user_successfully(core_url: str, rownd_client: MockRowndClient):
@@ -890,14 +1033,14 @@ async def test_migrate_reconciles_cross_recipe_primary_email_owner(
     assert getattr(primary, "status", "OK") == "OK"
 
     bulk_import_calls: list[str] = []
-    original_post = httpx.AsyncClient.post
+    original_send = httpx.AsyncClient.send
 
-    async def post(self, url: str, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if str(url).endswith("/bulk-import/import"):
-            bulk_import_calls.append(str(url))
-        return await original_post(self, url, *args, **kwargs)
+    async def send(self, request: httpx.Request, *args, **kwargs):
+        if request.url.path == "/bulk-import/import":
+            bulk_import_calls.append(str(request.url))
+        return await original_send(self, request, *args, **kwargs)
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
     user_info = {
         "auth_level": "verified",
         "data": {
@@ -948,14 +1091,14 @@ async def test_migrate_fails_closed_for_cross_recipe_owner_without_mutual_verifi
     assert getattr(primary, "status", "OK") == "OK"
 
     bulk_import_calls: list[str] = []
-    original_post = httpx.AsyncClient.post
+    original_send = httpx.AsyncClient.send
 
-    async def post(self, url: str, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if str(url).endswith("/bulk-import/import"):
-            bulk_import_calls.append(str(url))
-        return await original_post(self, url, *args, **kwargs)
+    async def send(self, request: httpx.Request, *args, **kwargs):
+        if request.url.path == "/bulk-import/import":
+            bulk_import_calls.append(str(request.url))
+        return await original_send(self, request, *args, **kwargs)
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
     res = migrate_rownd_user(
         client,
         rownd_client,
@@ -1362,7 +1505,7 @@ async def test_migration_finalization_failure_keeps_created_method_and_mapping(
     assert mapping.supertokens_user_id == provider.user.id
 
 
-async def test_failed_unverification_keeps_linked_methods_without_mapping(
+async def test_native_metadata_blocks_mapping_without_losing_existing_methods(
     core_url: str, rownd_client: MockRowndClient
 ):
     client = make_client(core_url, rownd_client)
@@ -1401,7 +1544,7 @@ async def test_failed_unverification_keeps_linked_methods_without_mapping(
         },
     )
 
-    assert_migration_error(res, "MIGRATION_INCOMPLETE", 503, True, "state_inspect")
+    assert_migration_error(res, "CORE_CAPABILITY_REQUIRED", 503, False, "mapping")
     user = await get_user(existing.user.id)
     assert user is not None
     assert len(user.login_methods) >= 1
@@ -1878,12 +2021,12 @@ async def test_concurrent_fresh_migrations_recover_bulk_import_race(
     invocation_lock = threading.Lock()
     import_count = 0
     import_responses: list[tuple[int, str]] = []
-    original_post = httpx.AsyncClient.post
+    original_send = httpx.AsyncClient.send
 
-    async def controlled_post(self, url: str, *args: Any, **kwargs: Any):
+    async def controlled_send(self, request: httpx.Request, *args: Any, **kwargs: Any):
         nonlocal import_count
-        if not str(url).endswith("/bulk-import/import"):
-            return await original_post(self, url, *args, **kwargs)
+        if request.url.path != "/bulk-import/import":
+            return await original_send(self, request, *args, **kwargs)
         with invocation_lock:
             import_count += 1
             invocation = import_count
@@ -1891,7 +2034,8 @@ async def test_concurrent_fresh_migrations_recover_bulk_import_race(
             if not await asyncio.to_thread(both_at_import.wait, 10):
                 raise RuntimeError("Second migration did not reach bulk import")
             try:
-                response = await original_post(self, url, *args, **kwargs)
+                response = await original_send(self, request, *args, **kwargs)
+                await response.aread()
                 import_responses.append((response.status_code, response.text))
                 return response
             finally:
@@ -1900,12 +2044,13 @@ async def test_concurrent_fresh_migrations_recover_bulk_import_race(
             both_at_import.set()
             if not await asyncio.to_thread(winner_finished.wait, 10):
                 raise RuntimeError("Winning bulk import did not finish")
-            response = await original_post(self, url, *args, **kwargs)
+            response = await original_send(self, request, *args, **kwargs)
+            await response.aread()
             import_responses.append((response.status_code, response.text))
             return response
         raise RuntimeError("Unexpected additional bulk import")
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", controlled_post)
+    monkeypatch.setattr(httpx.AsyncClient, "send", controlled_send)
 
     def migrate():
         return client.post(
@@ -2522,8 +2667,12 @@ async def test_app_config_unknown_sub_brand_returns_error(
 
     res = client.get("/auth/plugin/rownd/app-config?app_variant_id=unknown")
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "ERROR", "message": "Unknown Rownd app variant: unknown"}
+    assert res.status_code == 400
+    assert res.json() == {
+        "status": "ERROR",
+        "reason": "UNKNOWN_APP_VARIANT",
+        "message": "Unknown Rownd app variant: unknown",
+    }
 
 
 async def test_app_config_returns_sign_in_methods_from_plugin_config(

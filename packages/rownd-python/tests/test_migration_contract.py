@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from types import SimpleNamespace
@@ -216,6 +217,7 @@ async def invoke_migration(
     migration_state: Optional[JsonDict] = None,
     response: Optional[FakeResponse] = None,
     use_real_repository: bool = False,
+    enable_debug_logs: bool = False,
 ) -> tuple[FakeResponse, CapturingTelemetry]:
     async def migrate(*args: Any, **kwargs: Any) -> str:
         if migration_state is not None:
@@ -231,7 +233,9 @@ async def invoke_migration(
     response = response or FakeResponse()
     telemetry = telemetry_client or CapturingTelemetry()
     await handle_migrate(
-        RowndPluginConfig(rownd_app_key="key", rownd_app_secret="secret"),
+        RowndPluginConfig(
+            rownd_app_key="key", rownd_app_secret="secret", enable_debug_logs=enable_debug_logs
+        ),
         client or FakeRowndClient(),
         telemetry,
         SupertokensConfig("http://localhost:3567"),
@@ -240,6 +244,129 @@ async def invoke_migration(
         {},
     )
     return response, telemetry
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enable_debug_logs", [False, True])
+@pytest.mark.parametrize("delivery", ["capturing", "noop", "failing"])
+@pytest.mark.parametrize("outcome", ["success", "early", "typed", "unknown", "response_failure"])
+async def test_local_terminal_summary_is_once_and_independent_of_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    enable_debug_logs: bool,
+    delivery: str,
+    outcome: str,
+) -> None:
+    local_record_counts: list[int] = []
+
+    class Telemetry(CapturingTelemetry):
+        async def record_event(self, event: JsonDict) -> None:
+            local_record_counts.append(len(caplog.records))
+            if delivery == "failing":
+                raise RuntimeError("private telemetry token")
+            if delivery == "noop":
+                await implementation.telemetry.NoopTelemetryClient().record_event(event)
+            else:
+                await super().record_event(event)
+
+    error = (
+        MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "mapping")
+        if outcome == "typed"
+        else RuntimeError("private database response") if outcome == "unknown" else None
+    )
+    with caplog.at_level(logging.INFO, logger="supertokens_rownd"):
+        response, telemetry = await invoke_migration(
+            monkeypatch,
+            authorization=None if outcome == "early" else "Bearer token",
+            repository_error=error,
+            response=FakeResponse(fail_json_count=int(outcome == "response_failure")),
+            telemetry_client=Telemetry(),
+            enable_debug_logs=enable_debug_logs,
+        )
+
+    assert response.body is not None
+    assert local_record_counts == [1]
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    success = outcome == "success"
+    assert response.status_code == {
+        "success": 200, "early": 401, "typed": 422, "unknown": 500, "response_failure": 500
+    }[outcome]
+    assert record.levelno == (logging.INFO if success else logging.WARNING)
+    operation_id = record.getMessage().split("operationId=", 1)[1].split()[0]
+    uuid.UUID(operation_id)
+    stage = "session_create" if success else response.body["stage"]
+    reason = "none" if success else response.body["reason"]
+    retryable = False if success else response.body["retryable"]
+    assert record.getMessage() == (
+        "RowndMigrationPlugin: Migration terminal: "
+        f"operationId={operation_id} outcome={'success' if success else 'error'} "
+        f"stage={stage} reason={reason} retryable={retryable}"
+    )
+    assert record.exc_info is None
+    assert record.stack_info is None
+    if not success:
+        assert response.body["operationId"] == operation_id
+    if delivery == "capturing":
+        assert len(telemetry.events) == 1
+        assert telemetry.events[0]["operationId"] == operation_id
+    else:
+        assert telemetry.events == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "typed", "stage_subclass", "unknown", "query"])
+async def test_local_terminal_summary_omits_hostile_input(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, outcome: str
+) -> None:
+    hostile = "private-token user@example.com rownd-user st-user\r\nFORGED\x00\x1b[31m" + "x" * 10000
+
+    class HostileError(Exception):
+        def __str__(self) -> str:
+            raise AssertionError("Exception text must not be read")
+
+    class HostileStage(str):
+        def __str__(self) -> str:
+            return hostile
+
+    HostileError.__name__ = hostile.replace("\x00", "")
+    if outcome == "query":
+        monkeypatch.setattr(FakeRequest, "get_query_param", lambda *_args: hostile)
+    with caplog.at_level(logging.INFO, logger="supertokens_rownd"):
+        await invoke_migration(
+            monkeypatch,
+            authorization="Bearer private-token",
+            repository_error=(
+                MigrationError(
+                    MigrationErrorReason.MAPPING_CONFLICT,
+                    cast(Any, HostileStage("mapping") if outcome == "stage_subclass" else hostile),
+                    HostileError(hostile),
+                )
+                if outcome in {"typed", "stage_subclass"}
+                else HostileError(hostile) if outcome == "unknown" else None
+            ),
+            migration_state={
+                "attempt_count": hostile,
+                "path": hostile,
+                "target_source": hostile,
+                "blocked_identity_type": hostile,
+                "unresolved_mutation": hostile,
+                "rowndUserId": hostile,
+            },
+            enable_debug_logs=True,
+        )
+
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert len(record.getMessage()) < 250
+    for secret in ("private-token", "user@example.com", "rownd-user", "st-user", "FORGED", "\x00", "\x1b"):
+        assert secret not in str(record.__dict__)
+    assert record.exc_info is None
+    assert record.stack_info is None
+    if outcome in {"typed", "stage_subclass", "unknown"}:
+        assert "stage=state_inspect" in record.getMessage()
+    if outcome == "unknown":
+        assert "reason=INTERNAL_ERROR" in record.getMessage()
 
 
 @pytest.mark.parametrize("reason", list(MigrationErrorReason))
@@ -719,7 +846,9 @@ async def test_success_response_adapter_failure_emits_only_terminal_error(
 @pytest.mark.asyncio
 async def test_cancellation_during_migration_emits_one_cancelled_event(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="supertokens_rownd")
     class BlockingClient(FakeRowndClient):
         def __init__(self) -> None:
             super().__init__()
@@ -746,13 +875,35 @@ async def test_cancellation_during_migration_emits_one_cancelled_event(
     assert telemetry_client.events[0]["stage"] == "token_validate"
     assert telemetry_client.events[0]["httpStatus"] == 499
     assert "reason" not in telemetry_client.events[0]
+    assert len(caplog.records) == 1
+    assert "outcome=cancelled stage=token_validate reason=none retryable=True" in caplog.text
+    assert "499" not in caplog.records[0].getMessage().split(" outcome=", 1)[1]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("delivery", ["capturing", "noop", "failing"])
+@pytest.mark.parametrize("authorization", [None, "Bearer token"])
 async def test_cancellation_during_response_construction_emits_one_cancelled_event(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    authorization: Optional[str],
+    delivery: str,
 ) -> None:
-    telemetry_client = CapturingTelemetry()
+    caplog.set_level(logging.INFO, logger="supertokens_rownd")
+    calls: list[JsonDict] = []
+
+    class Telemetry(CapturingTelemetry):
+        async def record_event(self, event: JsonDict) -> None:
+            calls.append(event)
+            assert len(caplog.records) == 1
+            if delivery == "failing":
+                raise RuntimeError("private telemetry token")
+            if delivery == "noop":
+                await implementation.telemetry.NoopTelemetryClient().record_event(event)
+            else:
+                await super().record_event(event)
+
+    telemetry_client = Telemetry()
     response = FakeResponse(cancel_json_count=1)
 
     with pytest.raises(asyncio.CancelledError):
@@ -760,14 +911,24 @@ async def test_cancellation_during_response_construction_emits_one_cancelled_eve
             monkeypatch,
             telemetry_client=telemetry_client,
             response=response,
+            authorization=authorization,
         )
 
-    assert response.status_code == 200
+    stage = "request_parse" if authorization is None else "session_create"
+    assert response.status_code == (401 if authorization is None else 200)
     assert response.body is None
-    assert len(telemetry_client.events) == 1
-    assert telemetry_client.events[0]["outcome"] == "cancelled"
-    assert telemetry_client.events[0]["stage"] == "session_create"
-    assert telemetry_client.events[0]["httpStatus"] == 499
+    assert len(calls) == 1
+    assert calls[0]["outcome"] == "cancelled"
+    assert calls[0]["stage"] == stage
+    assert calls[0]["httpStatus"] == 499
+    assert "reason" not in calls[0]
+    assert telemetry_client.events == (calls if delivery == "capturing" else [])
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.INFO
+    assert f"operationId={calls[0]['operationId']}" in caplog.text
+    assert f"outcome=cancelled stage={stage} reason=none retryable=True" in caplog.text
+    assert "499" not in caplog.records[0].getMessage().split(" outcome=", 1)[1]
+    assert "private telemetry token" not in caplog.text
 
 
 @pytest.mark.asyncio

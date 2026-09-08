@@ -440,6 +440,8 @@ class RowndClient:
         return data
 
     async def _fetch_app_id(self) -> str:
+        if self.config.rownd_app_id is not None:
+            return self.config.rownd_app_id
         cache = self._app_id_cache
         if cache is not None and self._monotonic() < cache.expires_at:
             return cache.app_id

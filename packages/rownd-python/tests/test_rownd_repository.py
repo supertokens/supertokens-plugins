@@ -5,7 +5,7 @@ import base64
 import json
 import time
 from collections import Counter
-from typing import Callable, Optional
+from typing import Callable, Optional, cast
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from supertokens_rownd.errors import RowndPluginError
+import supertokens_rownd.plugin as plugin
 from supertokens_rownd.rownd_repository import (
     RowndAPIError,
     RowndAPIErrorReason,
@@ -23,10 +24,11 @@ from supertokens_rownd.rownd_repository import (
     RowndTokenValidationReason,
 )
 import supertokens_rownd.telemetry.create_telemetry_client as telemetry
-from supertokens_rownd.types import JsonDict, RowndPluginConfig
+from supertokens_rownd.types import JsonDict, RowndPluginConfig, RowndPluginKwargs
 
 
 APP_ID = "app-id"
+CONFIGURED_APP_ID = "327677849595019856"
 USER_ID = "rownd-user-id"
 
 
@@ -132,6 +134,208 @@ def _client_with_clock(
         transport=transport,
         monotonic=monotonic,
     )
+
+
+@pytest.mark.parametrize("as_kwargs", [False, True])
+@pytest.mark.parametrize(
+    "app_id",
+    [None, CONFIGURED_APP_ID, "app_123", "app-id", "opaque.~:id@!$&'()*+,;="],
+)
+def test_factory_accepts_url_segment_app_id(app_id: Optional[str], as_kwargs: bool) -> None:
+    kwargs: RowndPluginKwargs = {
+        "rownd_app_key": "app-key",
+        "rownd_app_secret": "app-secret",
+        "rownd_app_id": app_id,
+    }
+    if as_kwargs:
+        assert plugin.init(**kwargs) is not None
+    else:
+        config = RowndPluginConfig(**kwargs)
+        assert plugin.init(config) is not None
+        assert config.rownd_app_id == app_id
+
+
+@pytest.mark.parametrize("as_kwargs", [False, True])
+@pytest.mark.parametrize(
+    "app_id",
+    [
+        "", " ", " app-id", "app-id ", "app id", "app\t-id", "app-id\n",
+        "app\r-id", "app\x00-id", "app\x7f-id", ".", "..", "app/id", "app\\id",
+        "app?id", "app#id", "%2e%2e", "app%2fid", "app%252fid", "app%5cid",
+        "https://other.example/app", "app\u00a0id", "app\ud800", 123, False, [], {},
+    ],
+)
+def test_factory_rejects_unsafe_app_id_before_side_effects(
+    monkeypatch: pytest.MonkeyPatch, app_id: object, as_kwargs: bool,
+) -> None:
+    activate = Mock()
+    create_telemetry = Mock()
+    create_client = Mock()
+    monkeypatch.setattr(plugin, "set_active_rownd_config", activate)
+    monkeypatch.setattr(plugin, "create_telemetry_client", create_telemetry)
+    monkeypatch.setattr(plugin, "RowndClient", create_client)
+    kwargs: RowndPluginKwargs = {
+        "rownd_app_key": "app-key",
+        "rownd_app_secret": "app-secret",
+        "rownd_app_id": cast(str, app_id),
+    }
+    with pytest.raises(ValueError, match="rownd_app_id"):
+        if as_kwargs:
+            plugin.init(**kwargs)
+        else:
+            plugin.init(RowndPluginConfig(**kwargs))
+    activate.assert_not_called()
+    create_telemetry.assert_not_called()
+    create_client.assert_not_called()
+
+
+@pytest.fixture
+def differing_sub_identity() -> tuple[Ed25519PrivateKey, JsonDict, JsonDict]:
+    key = Ed25519PrivateKey.generate()
+    claims: JsonDict = {
+        "sub": "global-rownd-user-id",
+        "https://auth.rownd.io/app_user_id": USER_ID,
+    }
+    profile: JsonDict = {
+        "rownd_user": "global-rownd-user-id",
+        "data": {"user_id": USER_ID, "email": "user@example.com"},
+        "verified_data": {"email": "user@example.com"},
+    }
+    return key, claims, profile
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "configured_app_id", [None, CONFIGURED_APP_ID, "opaque.~:id@!$&'()*+,;="],
+)
+@pytest.mark.parametrize("omit_claims", [(), ("exp",)])
+async def test_app_id_source_preserves_signed_app_user_profile_identity(
+    differing_sub_identity: tuple[Ed25519PrivateKey, JsonDict, JsonDict],
+    configured_app_id: Optional[str],
+    omit_claims: tuple[str, ...],
+) -> None:
+    key, claims, profile = differing_sub_identity
+    app_id = configured_app_id if configured_app_id is not None else APP_ID
+    claims["aud"] = "app:%s" % app_id
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    transport.app_config_status = 503 if configured_app_id is not None else 200
+    profile_path = "/applications/%s/users/%s/data" % (app_id, USER_ID)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == profile_path:
+            transport.calls[request.url.path] += 1
+            assert not request.url.query
+            assert not request.url.fragment
+            assert request.headers["x-rownd-app-key"] == "app-key"
+            assert request.headers["x-rownd-app-secret"] == "app-secret"
+            return httpx.Response(200, json=profile)
+        return await transport.handle_async_request(request)
+
+    client = RowndClient(
+        RowndPluginConfig(
+            rownd_app_key="app-key",
+            rownd_app_secret="app-secret",
+            rownd_app_id=configured_app_id,
+            app_config={"app": {"id": "untrusted-id"}, "id": "untrusted-id"},
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    token = _token("A", key, claims=claims, omit_claims=omit_claims)
+    assert await client.fetch_optional_user_info(USER_ID) == profile
+    for _ in range(2):
+        user_id = await client.validate_token(token)
+        assert user_id == USER_ID
+        assert user_id != claims["sub"]
+        assert await client.fetch_user_info(user_id) == profile
+    expected_calls = Counter({
+        "/hub/auth/.well-known/oauth-authorization-server": 1,
+        "/jwks": 1,
+        profile_path: 3,
+    })
+    if configured_app_id is None:
+        expected_calls["/hub/app-config"] = 1
+    assert transport.calls == expected_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured_app_id", [None, CONFIGURED_APP_ID])
+async def test_subject_cannot_replace_missing_namespaced_identity(
+    differing_sub_identity: tuple[Ed25519PrivateKey, JsonDict, JsonDict],
+    configured_app_id: Optional[str],
+) -> None:
+    key, claims, _ = differing_sub_identity
+    claims["aud"] = "app:%s" % (configured_app_id or APP_ID)
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    client = _client(transport)
+    client.config.rownd_app_id = configured_app_id
+
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await client.validate_token(
+            _token("A", key, claims=claims, omit_claims=("https://auth.rownd.io/app_user_id",))
+        )
+
+    assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_CLAIMS_INVALID
+    assert transport.calls["/hub/app-config"] == (1 if configured_app_id is None else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 404, 503])
+async def test_configured_app_id_profile_failure_does_not_fall_back_to_discovery(
+    status_code: int,
+) -> None:
+    calls: list[str] = []
+    profile_path = "/applications/%s/users/%s/data" % (CONFIGURED_APP_ID, USER_ID)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/hub/app-config":
+            return httpx.Response(200, json={"app": {"id": APP_ID}})
+        return httpx.Response(status_code)
+
+    client = _client(httpx.MockTransport(handler))
+    client.config.rownd_app_id = CONFIGURED_APP_ID
+    for _ in range(2):
+        if status_code == 404:
+            assert await client.fetch_optional_user_info(USER_ID) is None
+        else:
+            with pytest.raises(RowndAPIError) as exc_info:
+                await client.fetch_optional_user_info(USER_ID)
+            assert exc_info.value.reason is (
+                RowndAPIErrorReason.CREDENTIALS_REJECTED
+                if status_code == 401
+                else RowndAPIErrorReason.UNAVAILABLE
+            )
+    assert calls == [profile_path, profile_path]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured_app_id", [None, CONFIGURED_APP_ID])
+async def test_untrusted_app_config_and_token_cannot_choose_expected_audience(
+    configured_app_id: Optional[str],
+) -> None:
+    key = Ed25519PrivateKey.generate()
+    transport = RowndTransport({"keys": [_jwk("A", key)]})
+    client = RowndClient(
+        RowndPluginConfig(
+            rownd_app_key="app-key",
+            rownd_app_secret="app-secret",
+            rownd_app_id=configured_app_id,
+            app_config={"app": {"id": "untrusted-id"}, "id": "untrusted-id"},
+        ),
+        transport=transport,
+    )
+    other_app_id = APP_ID if configured_app_id is not None else CONFIGURED_APP_ID
+    for audience in ["app:untrusted-id", "app:%s" % other_app_id]:
+        with pytest.raises(RowndTokenValidationError) as exc_info:
+            await client.validate_token(_token("A", key, claims={"aud": audience}))
+        assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_CLAIMS_INVALID
+    expected_calls = Counter({
+        "/hub/auth/.well-known/oauth-authorization-server": 1,
+        "/jwks": 1,
+    })
+    if configured_app_id is None:
+        expected_calls["/hub/app-config"] = 1
+    assert transport.calls == expected_calls
 
 
 @pytest.mark.asyncio
@@ -490,27 +694,39 @@ async def test_required_token_claims_are_typed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("configured_app_id", [None, CONFIGURED_APP_ID])
 @pytest.mark.parametrize("omit_claims", [(), ("exp",)])
 async def test_discovery_issuer_is_required_and_validated_only_when_available(
-    omit_claims: tuple[str, ...],
+    omit_claims: tuple[str, ...], configured_app_id: Optional[str],
 ) -> None:
     key = Ed25519PrivateKey.generate()
     transport = RowndTransport({"keys": [_jwk("A", key)]})
-    assert await _client(transport).validate_token(
-        _token("A", key, omit_claims=omit_claims)
-    ) == USER_ID
-
-    transport.discovery["issuer"] = "https://issuer.example"
-    with pytest.raises(RowndTokenValidationError) as exc_info:
-        await _client(transport).validate_token(_token("A", key, omit_claims=omit_claims))
-    assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_CLAIMS_INVALID
-
+    client = _client(transport)
+    client.config.rownd_app_id = configured_app_id
+    claims: JsonDict = {"aud": "app:%s" % (configured_app_id or APP_ID)}
     assert (
-        await _client(transport).validate_token(
-            _token("A", key, claims={"iss": "https://issuer.example"}, omit_claims=omit_claims)
-        )
+        await client.validate_token(_token("A", key, claims=claims, omit_claims=omit_claims))
         == USER_ID
     )
+
+    transport.discovery["issuer"] = "https://issuer.example"
+    client = _client(transport)
+    client.config.rownd_app_id = configured_app_id
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await client.validate_token(_token("A", key, claims=claims, omit_claims=omit_claims))
+    assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_CLAIMS_INVALID
+
+    claims["iss"] = "https://wrong.example"
+    with pytest.raises(RowndTokenValidationError) as exc_info:
+        await client.validate_token(_token("A", key, claims=claims, omit_claims=omit_claims))
+    assert exc_info.value.reason is RowndTokenValidationReason.TOKEN_CLAIMS_INVALID
+
+    claims["iss"] = "https://issuer.example"
+    assert (
+        await client.validate_token(_token("A", key, claims=claims, omit_claims=omit_claims))
+        == USER_ID
+    )
+    assert transport.calls["/hub/app-config"] == (2 if configured_app_id is None else 0)
 
 
 @pytest.mark.asyncio

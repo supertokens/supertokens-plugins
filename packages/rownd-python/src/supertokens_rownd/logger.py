@@ -8,7 +8,8 @@ _logger = logging.getLogger("supertokens_rownd")
 
 def log_debug(config: RowndPluginConfig, message: str) -> None:
     if config.enable_debug_logs:
-        print("RowndMigrationPlugin: %s" % message)
+        # The plugin flag opts in; an INFO-configured application need not also enable DEBUG.
+        _logger.info("RowndMigrationPlugin: %s", message)
 
 
 def log_warning(config: RowndPluginConfig, message: str) -> None:
