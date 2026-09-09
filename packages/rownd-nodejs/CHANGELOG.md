@@ -1,5 +1,12 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.7.3
+
+### Patch Changes
+
+- 0f866c9: Recover when simultaneous lazy migrations race to import the same new Rownd user.
+- Allow more permissive account linking
+
 ## 0.7.2
 
 ### Patch Changes

@@ -22,8 +22,7 @@ export default defineConfig([
       bulkImportFailures: "scripts/bulkImportFailures.ts",
       bulkImportValidate: "scripts/bulkImportValidate.ts",
       setupCoreInstance: "scripts/setupCoreInstance.ts",
-      generateAppConfig: "scripts/generateAppConfig.ts",
-      reconcileLinkedMetadata: "scripts/reconcileLinkedMetadata.ts",
+      generateAppConfig: "scripts/generateAppConfig.ts"
     },
     format: ["cjs"],
     dts: false,
