@@ -1178,9 +1178,9 @@ function hasVerifiedMatchingEmailLoginMethod(
   const normalizedEmail = accountInfo.email.toLowerCase();
   const thirdParty = accountInfo.thirdParty;
 
-  if (
+  const hasConflictingProviderIdentity =
     accountInfo.recipeId === "thirdparty" &&
-    thirdParty &&
+    thirdParty !== undefined &&
     user.loginMethods.some((method) => {
       const existingThirdParty = method.thirdParty;
       return (
@@ -1189,10 +1189,7 @@ function hasVerifiedMatchingEmailLoginMethod(
         existingThirdParty?.id === thirdParty.id &&
         existingThirdParty.userId !== thirdParty.userId
       );
-    })
-  ) {
-    return false;
-  }
+    });
 
   return user.loginMethods.some((method) => {
     if (
@@ -1202,6 +1199,11 @@ function hasVerifiedMatchingEmailLoginMethod(
       method.email?.toLowerCase() !== normalizedEmail
     ) {
       return false;
+    }
+
+    // A verified passwordless email can anchor linking despite a historical provider identity.
+    if (hasConflictingProviderIdentity) {
+      return method.recipeId === "passwordless";
     }
 
     if (method.recipeId !== accountInfo.recipeId) {

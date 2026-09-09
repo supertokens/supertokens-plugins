@@ -744,39 +744,168 @@ describe("rownd-nodejs plugin", () => {
       ).resolves.toBeUndefined();
     });
 
-    it("does not link a different identity from the same provider", async () => {
+    it.each([
+      "verified passwordless",
+      "unverified passwordless",
+      "cross-tenant passwordless",
+      "different passwordless email",
+      "no passwordless",
+      "conflicting canonical email",
+    ])("checks same-provider linking with %s", async (scenario) => {
       const email = "same-provider-link-target@example.com";
+      const recipeUserId = (id: string) => ({ getAsString: () => id });
+      vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({
+        status: "UNKNOWN_MAPPING_ERROR",
+      });
+      vi.spyOn(UserMetadata, "getUserMetadata").mockImplementation(
+        async (userId) => ({
+          status: "OK",
+          metadata:
+            scenario === "conflicting canonical email" &&
+            userId === "same-provider-user"
+              ? { rownd_email_recipe_user_ids: { public: "canonical-method" } }
+              : {},
+        }),
+      );
 
-      await expect(
-        shouldLinkRowndAccounts([
-          {
-            recipeId: "thirdparty",
-            email,
-            thirdParty: { id: "google", userId: "second-google-user" },
-          },
-          {
-            loginMethods: [
-              {
-                recipeId: "passwordless",
-                email,
-                verified: true,
-                tenantIds: ["public"],
-              },
-              {
-                recipeId: "thirdparty",
-                email,
-                verified: true,
-                tenantIds: ["public"],
-                thirdParty: { id: "google", userId: "first-google-user" },
-              },
-            ],
-          },
-          undefined,
-          "public",
-          {},
-        ] as any),
-      ).resolves.toBeUndefined();
+      const decision = await shouldLinkRowndAccounts([
+        {
+          recipeId: "thirdparty",
+          email,
+          thirdParty: { id: "google", userId: "second-google-user" },
+        },
+        {
+          id: "same-provider-user",
+          loginMethods: [
+            ...(scenario === "no passwordless"
+              ? []
+              : [
+                  {
+                    recipeId: "passwordless",
+                    recipeUserId: recipeUserId("passwordless-method"),
+                    email:
+                      scenario === "different passwordless email"
+                        ? "other@example.com"
+                        : email.toUpperCase(),
+                    verified: scenario !== "unverified passwordless",
+                    tenantIds: [
+                      scenario === "cross-tenant passwordless"
+                        ? "other"
+                        : "public",
+                    ],
+                  },
+                ]),
+            {
+              recipeId: "thirdparty",
+              recipeUserId: recipeUserId("google-method"),
+              email,
+              verified: true,
+              tenantIds: ["public"],
+              thirdParty: { id: "google", userId: "first-google-user" },
+            },
+            ...(scenario === "conflicting canonical email"
+              ? [
+                  {
+                    recipeId: "passwordless",
+                    recipeUserId: recipeUserId("canonical-method"),
+                    email: "canonical@example.com",
+                    verified: true,
+                    tenantIds: ["public"],
+                  },
+                ]
+              : []),
+          ],
+        },
+        undefined,
+        "public",
+        {},
+      ] as any);
+
+      if (scenario === "verified passwordless") {
+        expect(decision).toEqual({
+          shouldAutomaticallyLink: true,
+          shouldRequireVerification: true,
+        });
+      } else if (scenario === "conflicting canonical email") {
+        expect(decision).toEqual({
+          shouldAutomaticallyLink: false,
+          shouldRequireVerification: false,
+        });
+      } else {
+        expect(decision).toBeUndefined();
+      }
     });
+
+    it.each([true, false])(
+      "retries an existing conflicting Google identity with incoming verification %s",
+      async (isVerified) => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const email = `same-provider-${randomUUID()}@example.com`;
+        const passwordless = await Passwordless.signInUp({
+          tenantId: "public",
+          email,
+        });
+        const primary = await AccountLinking.createPrimaryUser(
+          passwordless.recipeUserId,
+        );
+        expect(primary.status).toBe("OK");
+        if (primary.status !== "OK") {
+          throw new Error("failed to create primary user");
+        }
+
+        const oldGoogle = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          randomUUID(),
+          email,
+          true,
+        );
+        expect(oldGoogle.status).toBe("OK");
+        if (oldGoogle.status !== "OK") {
+          throw new Error("failed to create old Google identity");
+        }
+        expect(oldGoogle.user.id).toBe(primary.user.id);
+
+        const providerUserId = randomUUID();
+        const standalone = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          providerUserId,
+          email,
+          isVerified,
+          undefined,
+          { rowndDisableAutomaticAccountLinking: true },
+        );
+        expect(standalone.status).toBe("OK");
+        if (standalone.status !== "OK") {
+          throw new Error("failed to create standalone Google identity");
+        }
+        expect(standalone.user.isPrimaryUser).toBe(false);
+
+        const retried = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          providerUserId,
+          email,
+          isVerified,
+        );
+        expect(retried.status).toBe("OK");
+        if (retried.status !== "OK") {
+          throw new Error("failed to retry Google sign-in");
+        }
+        expect(retried.user.id).toBe(
+          isVerified ? primary.user.id : standalone.user.id,
+        );
+        const updatedPrimary = await SuperTokens.getUser(primary.user.id);
+        expect(updatedPrimary?.loginMethods).toHaveLength(isVerified ? 3 : 2);
+        const updatedStandalone = await SuperTokens.getUser(standalone.user.id);
+        expect(updatedStandalone?.id).toBe(
+          isVerified ? primary.user.id : standalone.user.id,
+        );
+      },
+    );
 
     it("uses the Rownd profile email instead of a stale Apple email without a canonical marker", async () => {
       const appleRecipeUserId = {
