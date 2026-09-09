@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 0.2.2
+
+### Patch Changes
+
+- Improve errors
+
 ## 0.2.1
 
 ### Patch Changes
