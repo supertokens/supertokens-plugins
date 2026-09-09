@@ -2558,6 +2558,50 @@ def test_core_outage_recognizes_httpx_transport_error() -> None:
     )
 
 
+@pytest.mark.parametrize("method", ["GET", "POST", "PUT", "DELETE"])
+@pytest.mark.parametrize("status", [500, 503, 599])
+def test_core_outage_recognizes_verified_sdk_envelope(method: str, status: int) -> None:
+    error = Exception(
+        "SuperTokens core threw an error for a %s request to path: "
+        "'/recipe/userid/map' with status code: %s and message: private\nbody" % (method, status)
+    )
+    assert repository._is_recognizable_core_outage(error)
+    assert not repository._is_non_auth_mapping_rejection(error)
+
+
+@pytest.mark.parametrize("message", [
+    "Core unavailable: status code: 503",
+    "E027: Core is unavailable",
+    "prefix SuperTokens core threw an error for a POST request to path: "
+    "'/recipe/userid/map' with status code: 500 and message: down",
+    "SuperTokens core threw an error for a PATCH request to path: "
+    "'/recipe/userid/map' with status code: 500 and message: down",
+    "SuperTokens core threw an error for a POST request to path: "
+    "'https://core/recipe/userid/map' with status code: 500 and message: down",
+    "SuperTokens core threw an error for a POST request to path: "
+    "'/recipe/userid/map' with status code: 5000 and message: down",
+    "SuperTokens core threw an error for a POST request to path: "
+    "'/recipe/userid/map' with status code: 400 and message: status code: 503",
+])
+def test_core_outage_does_not_infer_from_unverified_text(message: str) -> None:
+    assert not repository._is_recognizable_core_outage(Exception(message))
+
+
+def test_sdk_envelope_requires_exact_exception_type_and_one_argument() -> None:
+    message = (
+        "SuperTokens core threw an error for a POST request to path: "
+        "'/recipe/userid/map' with status code: 500 and message: down"
+    )
+    assert not repository._is_recognizable_core_outage(RuntimeError(message))
+    assert not repository._is_recognizable_core_outage(Exception(message, "other"))
+
+
+def test_core_outage_handles_cyclic_exception_chains() -> None:
+    error = RuntimeError("unknown")
+    error.__cause__ = error
+    assert not repository._is_recognizable_core_outage(error)
+
+
 @pytest.mark.parametrize("status", [400, 404, 499])
 def test_core_outage_rejects_httpx_client_status_errors(status: int) -> None:
     request = httpx.Request("GET", "http://core")
@@ -2850,14 +2894,12 @@ class MappingSafetyArrangement:
         monkeypatch.setattr(repository, "get_user_id_mapping", get_mapping)
         monkeypatch.setattr(repository, "create_user_id_mapping", create_mapping)
 
-    async def create(self, narrow_capability=None, retry_state=None) -> bool:
+    async def create(self) -> bool:
         return await repository._create_rownd_user_id_mapping(
             self.fresh,
             self.target,
             {},
             self.read_source,
-            retry_state or repository._MappingRetryState(),
-            narrow_capability,
         )
 
     def assert_unforced(self) -> None:
@@ -2866,6 +2908,14 @@ class MappingSafetyArrangement:
 
 class StructuralMappingError(RuntimeError):
     status = "NON_AUTH_RECIPE_USER_ID_REFERENCE_ERROR"
+
+
+def core_mapping_rejection(recipe: str = "Session", ending: str = "\n") -> Exception:
+    return Exception(
+        "SuperTokens core threw an error for a POST request to path: "
+        "'/recipe/userid/map' with status code: 400 and message: "
+        "UserId is already in use in %s recipe%s" % (recipe, ending)
+    )
 
 
 @pytest.mark.asyncio
@@ -2920,31 +2970,29 @@ async def test_mapping_preflight_rejects_collisions_without_writing(
 
 
 @pytest.mark.asyncio
-async def test_mapping_exact_non_auth_result_uses_one_narrow_attempt(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("recipe", ["Session", "UserMetadata"])
+async def test_mapping_verified_rejection_recovers_exact_race(
+    monkeypatch: pytest.MonkeyPatch, recipe: str,
 ) -> None:
     arranged = MappingSafetyArrangement(
-        monkeypatch, create_result=repository._NonAuthRecipeUserIdReferenceError()
+        monkeypatch, create_error=core_mapping_rejection(recipe),
+        on_create=lambda: setattr(arranged, "mapped", True),
     )
-    narrow_calls = 0
 
-    async def narrow(*_args: Any):
-        nonlocal narrow_calls
-        narrow_calls += 1
-        arranged.mapped = True
-        return CreateUserIdMappingOkResult()
-
-    assert await arranged.create(narrow) is True
-    assert narrow_calls == 1
+    assert await arranged.create() is True
+    assert len(arranged.create_calls) == 1
     arranged.assert_unforced()
 
 
 @pytest.mark.asyncio
-async def test_mapping_exact_non_auth_result_requires_unavailable_capability(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("recipe", ["Session", "UserMetadata"])
+@pytest.mark.parametrize("ending", ["", "\n"])
+async def test_mapping_verified_rejection_requires_unavailable_capability(
+    monkeypatch: pytest.MonkeyPatch, recipe: str, ending: str,
 ) -> None:
+    failure = core_mapping_rejection(recipe, ending)
     arranged = MappingSafetyArrangement(
-        monkeypatch, create_result=repository._NonAuthRecipeUserIdReferenceError()
+        monkeypatch, create_error=failure,
     )
 
     with pytest.raises(MigrationError) as raised:
@@ -2952,6 +3000,9 @@ async def test_mapping_exact_non_auth_result_requires_unavailable_capability(
 
     assert raised.value.reason is MigrationErrorReason.CORE_CAPABILITY_REQUIRED
     assert raised.value.stage == "mapping"
+    assert raised.value.retryable is False
+    assert raised.value.__cause__ is failure
+    assert len(arranged.create_calls) == 1
     arranged.assert_unforced()
 
 
@@ -2962,23 +3013,31 @@ async def test_mapping_exact_non_auth_result_requires_unavailable_capability(
         RuntimeError("generic failure"),
         KeyError("does_external_user_id_exist"),
         StructuralMappingError("not a typed SDK result"),
+        RuntimeError(str(core_mapping_rejection())),
+        Exception("UserId is already in use in Session recipe"),
+        core_mapping_rejection("EmailPassword"),
+        core_mapping_rejection("ThirdParty"),
+        core_mapping_rejection("Unknown"),
+        core_mapping_rejection("session"),
+        core_mapping_rejection(ending="\n\n"),
+        core_mapping_rejection(ending=" extra"),
+        Exception("prefix " + str(core_mapping_rejection())),
+        Exception(str(core_mapping_rejection()).replace("POST", "GET")),
+        Exception(str(core_mapping_rejection()).replace("400", "500")),
+        Exception(str(core_mapping_rejection()).replace("/userid/map", "/userid/map/other")),
+        Exception(str(core_mapping_rejection()).replace("already in use", "not found")),
+        Exception(str(core_mapping_rejection()), "extra argument"),
     ],
 )
-async def test_mapping_thrown_failures_never_authorize_narrow_attempt(
+async def test_mapping_unverified_failures_propagate_unchanged(
     monkeypatch: pytest.MonkeyPatch, failure: Exception
 ) -> None:
     arranged = MappingSafetyArrangement(monkeypatch, create_error=failure)
-    narrow_calls = 0
-
-    async def narrow(*_args: Any):
-        nonlocal narrow_calls
-        narrow_calls += 1
-
     with pytest.raises(BaseException) as raised:
-        await arranged.create(narrow)
+        await arranged.create()
 
     assert raised.value is failure
-    assert narrow_calls == 0
+    assert len(arranged.create_calls) == 1
     arranged.assert_unforced()
 
 
@@ -2990,50 +3049,19 @@ async def test_mapping_thrown_failures_never_authorize_narrow_attempt(
         SimpleNamespace(status="UNKNOWN_SUPERTOKENS_USER_ID_ERROR"),
     ],
 )
-async def test_mapping_generic_results_never_authorize_narrow_attempt(
+async def test_mapping_generic_results_do_not_require_capability(
     monkeypatch: pytest.MonkeyPatch, result: object
 ) -> None:
     arranged = MappingSafetyArrangement(monkeypatch, create_result=result)
-    narrow_calls = 0
-
-    async def narrow(*_args: Any):
-        nonlocal narrow_calls
-        narrow_calls += 1
-
     with pytest.raises(RuntimeError):
-        await arranged.create(narrow)
+        await arranged.create()
 
-    assert narrow_calls == 0
+    assert len(arranged.create_calls) == 1
     arranged.assert_unforced()
 
 
 @pytest.mark.asyncio
-async def test_mapping_shares_narrow_retry_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    arranged = MappingSafetyArrangement(
-        monkeypatch, create_result=repository._NonAuthRecipeUserIdReferenceError()
-    )
-    retry_state = repository._MappingRetryState()
-    narrow_calls = 0
-
-    async def narrow(*_args: Any):
-        nonlocal narrow_calls
-        narrow_calls += 1
-        return SimpleNamespace(status="UNKNOWN_SUPERTOKENS_USER_ID_ERROR")
-
-    with pytest.raises(RuntimeError):
-        await arranged.create(narrow, retry_state)
-    with pytest.raises(MigrationError) as raised:
-        await arranged.create(narrow, retry_state)
-
-    assert raised.value.reason is MigrationErrorReason.MIGRATION_INCOMPLETE
-    assert narrow_calls == 1
-    arranged.assert_unforced()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("topology_change", ["internal", "target_removed"])
+@pytest.mark.parametrize("topology_change", ["internal", "external", "target_removed"])
 async def test_mapping_second_preflight_rejects_topology_change(
     monkeypatch: pytest.MonkeyPatch, topology_change: str
 ) -> None:
@@ -3042,25 +3070,64 @@ async def test_mapping_second_preflight_rejects_topology_change(
     def change_topology() -> None:
         if topology_change == "internal":
             arranged.internal_external = "foreign-external"
+        elif topology_change == "external":
+            arranged.external_target = "foreign"
         else:
             arranged.target_exists = False
 
     arranged = MappingSafetyArrangement(
         monkeypatch,
-        create_result=repository._NonAuthRecipeUserIdReferenceError(),
+        create_error=core_mapping_rejection(),
         on_create=change_topology,
     )
-    narrow_calls = 0
-
-    async def narrow(*_args: Any):
-        nonlocal narrow_calls
-        narrow_calls += 1
-
     with pytest.raises(MigrationError) as raised:
-        await arranged.create(narrow)
+        await arranged.create()
 
     assert raised.value.reason is MigrationErrorReason.MAPPING_CONFLICT
-    assert narrow_calls == 0
+    assert len(arranged.create_calls) == 1
+    arranged.assert_unforced()
+
+
+@pytest.mark.asyncio
+async def test_mapping_verified_rejection_does_not_hide_failed_postcondition_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arranged = MappingSafetyArrangement(monkeypatch, create_error=core_mapping_rejection())
+    failure = TimeoutError("mapping inspection unavailable")
+
+    async def fail_lookup(*_args: Any):
+        raise failure
+
+    monkeypatch.setattr(repository, "get_user_id_mapping", fail_lookup)
+    with pytest.raises(TimeoutError) as raised:
+        await arranged.create()
+
+    assert raised.value is failure
+    assert len(arranged.create_calls) == 1
+    arranged.assert_unforced()
+
+
+@pytest.mark.asyncio
+async def test_mapping_verified_rejection_rechecks_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arranged = MappingSafetyArrangement(monkeypatch, create_error=core_mapping_rejection())
+
+    async def read_source():
+        if arranged.create_calls:
+            changed = cast(JsonDict, {"data": {"user_id": "changed"}, "verified_data": {}})
+            return repository.FreshMigrationSource(
+                changed, create_rownd_identity_snapshot(changed, "tenant-a")
+            )
+        return arranged.fresh
+
+    arranged.read_source = read_source
+    with pytest.raises(MigrationError) as raised:
+        await arranged.create()
+
+    assert raised.value.reason is MigrationErrorReason.MIGRATION_INCOMPLETE
+    assert raised.value.retryable is True
+    assert len(arranged.create_calls) == 1
     arranged.assert_unforced()
 
 
@@ -3124,16 +3191,10 @@ async def test_mapping_second_preflight_rejects_reparented_identity(
         nonlocal reparented
         create_calls.append(kwargs)
         reparented = True
-        return repository._NonAuthRecipeUserIdReferenceError()
+        raise core_mapping_rejection()
 
     async def no_mapping(*_args: Any):
         return SimpleNamespace(status="UNKNOWN_MAPPING_ERROR")
-
-    narrow_calls = 0
-
-    async def narrow(*_args: Any):
-        nonlocal narrow_calls
-        narrow_calls += 1
 
     monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
     monkeypatch.setattr(repository, "create_user_id_mapping", create_mapping)
@@ -3145,12 +3206,10 @@ async def test_mapping_second_preflight_rejects_reparented_identity(
             target,
             {},
             read_source,
-            repository._MappingRetryState(),
-            narrow,
         )
 
     assert raised.value.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
-    assert narrow_calls == 0
+    assert len(create_calls) == 1
     assert all(call["force"] is False for call in create_calls)
 
 

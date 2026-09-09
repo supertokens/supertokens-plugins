@@ -21,6 +21,44 @@
 
 ### Patch Changes
 
+- Classify verified Session/UserMetadata user-ID mapping rejections as `CORE_CAPABILITY_REQUIRED`
+  (HTTP 503, `retryable: false`, `stage: "mapping"`), compatibility-tested with Python SDK
+  0.31.3 and Core 12.0.10. No automatic reference repair, forced mapping, or session revocation
+  is attempted to unblock mapping. Other errors retain existing handling; exact bidirectional
+  mapping races still recover. Recognition is limited to the verified rejection formats.
+- Return HTTP 400 with `reason: "UNKNOWN_APP_VARIANT"` for unknown app-config variants,
+  preserving the existing message. Valid and omitted variants are unchanged.
+- Document existing unreleased behavior: missing Rownd users return `ROWND_USER_NOT_FOUND`
+  (HTTP 401, `retryable: false`) on both migration routes, replacing the old successful no-op.
+- Recognize the verified Python SDK 0.31.3 HTTP 5xx exception envelope as retryable
+  `CORE_UNAVAILABLE` (503) when reconciliation cannot establish completion; do not infer
+  outages from arbitrary exception text or broaden Session/UserMetadata rejection matching.
+- Bound Core bulk-import transport with 5-second operation/inactivity timeouts, a practical
+  15-second total deadline, and a streamed 1 MiB response limit. Refuse non-identity
+  compression before decoding and redact import error bodies. Clear request-local Core
+  call caches on all exits; uncertain writes require fresh reconciliation, not blind
+  transport retries. Duplicate recovery remains restricted to the verified E006 contract.
+- Add optional validated `rownd_app_id` for audience and profile lookup, bypassing authenticated
+  app-ID discovery only when configured. Omission retains cached discovery; configured-ID
+  failures do not fall back. Token validation and namespaced app-user identity remain required.
+- Route opt-in debug diagnostics through standard Python logging at INFO. Emit sanitized
+  local migration terminal summaries independently of debug/telemetry settings (errors at
+  WARNING, success/cancellation at INFO); omit exception details from guest/bypass failure
+  logs and request values from unknown-variant warnings. Email-change rollback failures emit
+  fixed reconciliation-required warnings without user IDs or exception text. Legacy guest
+  telemetry is unchanged.
+- Bind guard-mode Passwordless consume markers and returned sessions to the request tenant.
+  Independently validate the result owner and session user ID against the checked owner
+  through mapping-aware comparison. Deny invalid evidence; track the SDK's boolean targeted
+  revocation and explicit response-clear queueing separately, never inferring clearing from
+  mutator-list growth. A fresh read confirming an already-absent session avoids collateral
+  logout. Fallback revocation remains scoped to linked accounts in the request
+  tenant; uncleared queued mutators fail closed and cancellation propagates.
+- Release integration reminder: both migration aliases use non-2xx errors, not successful
+  no-ops. Clients must honor HTTP status, `reason`, and `retryable`; cancellation's 499 is
+  telemetry-only, never a fabricated HTTP response. Test coverage is not production recovery
+  approval. No browser/mobile client changes or end-to-end rotation proof are included;
+  further investigation and release qualification are still required.
 - Reject decoded token key IDs containing lone Unicode surrogates as `TOKEN_MALFORMED`
   (401) before network/cache work or sampled JWKS diagnostics, preventing encoding errors
   from becoming internal failures. Valid Unicode key IDs and cache policy are unchanged.

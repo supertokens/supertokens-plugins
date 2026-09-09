@@ -1447,7 +1447,7 @@ async def test_raw_bulk_import_clears_active_context_on_unknown_write_outcome(
         async def __aexit__(self, *args: Any):
             return None
 
-        async def post(self, *args: Any, **kwargs: Any):
+        def stream(self, *args: Any, **kwargs: Any):
             raise RuntimeError("connection lost")
 
     monkeypatch.setattr(impl.httpx, "AsyncClient", lambda **kwargs: FailingClient())

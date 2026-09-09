@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import Any, Dict, Optional, cast
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from supertokens_python.recipe.accountlinking.types import (
@@ -10,7 +11,8 @@ from supertokens_python.recipe.accountlinking.types import (
     ShouldNotAutomaticallyLink,
 )
 from supertokens_python.recipe.thirdparty.types import ThirdPartyInfo
-from supertokens_python.types import LoginMethod, User
+from supertokens_python.recipe.session.session_class import Session
+from supertokens_python.types import LoginMethod, RecipeUserId, User
 
 from supertokens_rownd import plugin
 import supertokens_rownd.config as rownd_config
@@ -100,6 +102,26 @@ def make_guard_config() -> RowndPluginConfig:
         rownd_app_key="app-key",
         rownd_app_secret="secret",
         email_change={"retirement_mode": "guard"},
+    )
+
+
+def make_passwordless_returned_session(
+    revoke: AsyncMock, tenant_id: str = "public", user_id: str = "owner"
+) -> Session:
+    return Session(
+        recipe_implementation=cast(Any, SimpleNamespace(revoke_session=revoke)),
+        config=cast(Any, SimpleNamespace()),
+        access_token="sensitive-access-token",
+        front_token="sensitive-front-token",
+        refresh_token=None,
+        anti_csrf_token=None,
+        session_handle="sensitive-session-handle",
+        user_id=user_id,
+        recipe_user_id=RecipeUserId("canonical"),
+        user_data_in_access_token={},
+        req_res_info=cast(Any, SimpleNamespace(transfer_method="header", request=FakeRequest())),
+        access_token_updated=True,
+        tenant_id=tenant_id,
     )
 
 
@@ -1256,6 +1278,597 @@ async def test_passwordless_recipe_consume_observe_mode_ignores_classification_f
     assert cast(Any, result).status == "ORIGINAL"
 
 
+@pytest.mark.parametrize("guard_mode", [True, False], ids=["guard", "observe"])
+@pytest.mark.parametrize("session_tenant", ["public", "other-tenant"])
+@pytest.mark.parametrize("sdk_owner", ["owner", "external-owner"])
+@pytest.mark.parametrize("stored_email", ["user@example.com", ""], ids=["email", "phone"])
+async def test_passwordless_consume_api_binds_returned_session_to_request_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+    guard_mode: bool,
+    session_tenant: str,
+    sdk_owner: str,
+    stored_email: str,
+):
+    class FakeOk:
+        user = SimpleNamespace(id=sdk_owner)
+        recipe_user_id = RecipeUserId("canonical")
+
+    revoke = AsyncMock(return_value=True)
+    returned_session = make_passwordless_returned_session(revoke, session_tenant, sdk_owner)
+    queued_credentials = SimpleNamespace(type="access-token")
+    returned_session.response_mutators.append(cast(Any, queued_credentials))
+    clear = SimpleNamespace(type="clear-session")
+    monkeypatch.setattr(plugin, "clear_session_response_mutator", lambda *_args: clear)
+    monkeypatch.setattr(
+        "supertokens_python.recipe.session.session_class.clear_session_response_mutator",
+        lambda *_args: clear,
+    )
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_session", revoke)
+    revoke_all = AsyncMock(return_value=[])
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+    record = AsyncMock()
+    refresh = AsyncMock()
+    monkeypatch.setattr(plugin, "record_rownd_app_variant_for_user", record)
+    monkeypatch.setattr(plugin, "_refresh_rownd_session_claims_or_revoke", refresh)
+    resolve_owner = AsyncMock(return_value="owner")
+    monkeypatch.setattr(
+        supertokens_repository, "freshly_resolve_sdk_user_id_to_internal", resolve_owner
+    )
+    authorize = AsyncMock(
+        return_value=EmailCredentialAuthorization(
+            EmailCredentialState.ALLOW, EmailCredentialReason.CANONICAL, "owner", "canonical"
+        )
+    )
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", authorize)
+    monkeypatch.setattr(
+        supertokens_repository,
+        "resolve_passwordless_device_email",
+        AsyncMock(return_value=stored_email),
+    )
+    monkeypatch.setattr(plugin, "ConsumeCodeOkResult", FakeOk)
+    config = make_guard_config() if guard_mode else make_config()
+    recipe = plugin._passwordless_function_override(config)(
+        cast(Any, SimpleNamespace(consume_code=AsyncMock(return_value=FakeOk())))
+    )
+    contexts: list[Dict[str, Any]] = []
+
+    async def consume_api(*args: Any):
+        context = args[-1]
+        assert "rowndPasswordlessConsumePostcheck" not in context
+        contexts.append(context)
+        consumed = await recipe.consume_code(
+            args[0], args[1], args[2], args[3], args[4], args[5], args[6], context
+        )
+        assert isinstance(consumed, FakeOk)
+        if guard_mode:
+            assert context["rowndPasswordlessConsumePostcheck"].tenant_id == "public"
+        return SimpleNamespace(status="OK", user=consumed.user, session=returned_session)
+
+    overridden = plugin._passwordless_api_override(config)(
+        cast(Any, SimpleNamespace(create_code_post=None, consume_code_post=consume_api))
+    )
+    caller_context = {"rowndPasswordlessConsumePostcheck": "stale-marker"}
+    result = await overridden.consume_code_post(
+        "pre", None, None, "link", None, None, "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())), caller_context,
+    )
+
+    assert caller_context["rowndPasswordlessConsumePostcheck"] == "stale-marker"
+    assert all(call.args[0] == "public" for call in authorize.await_args_list)
+    assert authorize.await_count == ((2 if guard_mode else 1) if stored_email else 0)
+    if guard_mode and session_tenant != "public":
+        assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
+        revoke.assert_awaited_once_with("sensitive-session-handle", contexts[0])
+        assert returned_session.response_mutators == [queued_credentials, clear]
+        record.assert_not_awaited()
+        refresh.assert_not_awaited()
+    else:
+        assert result.status == "OK"
+        revoke.assert_not_awaited()
+        assert returned_session.response_mutators == [queued_credentials]
+        record.assert_awaited_once()
+        refresh.assert_awaited_once()
+        if guard_mode and sdk_owner == "external-owner" and stored_email:
+            assert [call.args for call in resolve_owner.await_args_list] == [
+                (sdk_owner, contexts[0]), (sdk_owner, contexts[0])
+            ]
+    revoke_all.assert_not_awaited()
+
+
+@pytest.mark.parametrize("guard_mode", [True, False], ids=["guard", "observe"])
+@pytest.mark.parametrize("result_owner", ["owner", "external-owner"])
+@pytest.mark.parametrize("session_owner", ["owner", "external-owner", "foreign", "external-foreign"])
+async def test_passwordless_consume_binds_returned_session_primary_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    guard_mode: bool,
+    result_owner: str,
+    session_owner: str,
+):
+    revoke = AsyncMock(return_value=True)
+    returned_session = make_passwordless_returned_session(revoke, user_id=session_owner)
+    credentials = Mock()
+    clear = Mock()
+    returned_session.response_mutators.append(credentials)
+    clear_factory = Mock(return_value=clear)
+    monkeypatch.setattr(plugin, "clear_session_response_mutator", clear_factory)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_session", revoke)
+    revoke_all = AsyncMock(return_value=[])
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+    record = AsyncMock()
+    refresh = AsyncMock()
+    monkeypatch.setattr(plugin, "record_rownd_app_variant_for_user", record)
+    monkeypatch.setattr(plugin, "_refresh_rownd_session_claims_or_revoke", refresh)
+
+    async def resolve_owner(sdk_user_id: str, _context: Any):
+        return {"external-owner": "owner", "external-foreign": "foreign"}.get(
+            sdk_user_id, sdk_user_id
+        )
+
+    resolve = AsyncMock(side_effect=resolve_owner)
+    monkeypatch.setattr(supertokens_repository, "freshly_resolve_sdk_user_id_to_internal", resolve)
+    contexts: list[Dict[str, Any]] = []
+
+    async def consume_api(*args: Any):
+        context = args[-1]
+        contexts.append(context)
+        context["rowndPasswordlessConsumePostcheck"] = plugin._PasswordlessConsumePostcheck(
+            "owner", "canonical", "public"
+        )
+        return SimpleNamespace(
+            status="OK", user=SimpleNamespace(id=result_owner), session=returned_session
+        )
+
+    config = make_guard_config() if guard_mode else make_config()
+    overridden = plugin._passwordless_api_override(config)(
+        cast(Any, SimpleNamespace(create_code_post=None, consume_code_post=consume_api))
+    )
+    result = await overridden.consume_code_post(
+        "pre", None, None, "link", None, None, "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())), {},
+    )
+
+    if guard_mode and session_owner in {"foreign", "external-foreign"}:
+        assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
+        revoke.assert_awaited_once_with("sensitive-session-handle", contexts[0])
+        assert returned_session.response_mutators == [credentials, clear]
+        assert returned_session.req_res_info is not None
+        clear_factory.assert_called_once_with(
+            returned_session.config, "header", returned_session.req_res_info.request
+        )
+        record.assert_not_awaited()
+        refresh.assert_not_awaited()
+    else:
+        assert result.status == "OK"
+        revoke.assert_not_awaited()
+        clear_factory.assert_not_called()
+        assert returned_session.response_mutators == [credentials]
+        record.assert_awaited_once()
+        refresh.assert_awaited_once()
+    revoke_all.assert_not_awaited()
+    if not guard_mode:
+        resolve.assert_not_awaited()
+    else:
+        expected_resolutions = [
+            owner for owner in (result_owner, session_owner) if owner != "owner"
+        ]
+        assert [call.args for call in resolve.await_args_list] == [
+            (owner, contexts[0]) for owner in expected_resolutions
+        ]
+
+
+@pytest.mark.parametrize("outcome", [
+    "removed", "absent", "present", "lookup_error", "false_info",
+    "invalid_none", "invalid_zero", "invalid_one", "invalid_empty", "invalid_mock",
+])
+@pytest.mark.parametrize("clear_succeeds", [True, False])
+async def test_passwordless_cleanup_confirms_absence_before_preserving_sibling_session(
+    monkeypatch: pytest.MonkeyPatch, outcome: str, clear_succeeds: bool
+):
+    target_handle = "sensitive-session-handle"
+    sibling_handle = "sibling-B"
+    active_handles = {sibling_handle}
+    if outcome != "absent":
+        active_handles.add(target_handle)
+    contexts: list[Dict[str, Any]] = []
+
+    async def revoke(handle: str, context: Dict[str, Any]):
+        assert handle == target_handle
+        contexts.append(context)
+        context["_default"].update({
+            "coreCallCache": {handle: "stale-present"},
+            "core_call_cache": {handle: None},
+            "keep": "value",
+        })
+        if outcome == "removed":
+            active_handles.remove(handle)
+            return True
+        return {
+            "invalid_none": None, "invalid_zero": 0, "invalid_one": 1,
+            "invalid_empty": "", "invalid_mock": Mock(),
+        }.get(outcome, False)
+
+    async def get_info(handle: str, context: Dict[str, Any]):
+        assert handle == target_handle
+        assert context is contexts[0]
+        assert context["_default"]["coreCallCache"] == {}
+        assert context["_default"]["core_call_cache"] == {}
+        assert context["_default"]["keep"] == "value"
+        if outcome == "lookup_error":
+            raise RuntimeError("sensitive-lookup-error")
+        if outcome == "false_info":
+            return False
+        return SimpleNamespace(session_handle=handle) if handle in active_handles else None
+
+    async def revoke_all(user_id: str, linked: bool, tenant_id: str, context: Dict[str, Any]):
+        assert (user_id, linked, tenant_id) == ("owner", True, "public")
+        assert context is contexts[0]
+        removed = list(active_handles)
+        active_handles.clear()
+        return removed
+
+    revoke_mock = AsyncMock(side_effect=revoke)
+    read_mock = AsyncMock(side_effect=get_info)
+    fallback = AsyncMock(side_effect=revoke_all)
+    returned_session = make_passwordless_returned_session(revoke_mock)
+    credentials = Mock()
+    clear = Mock()
+    returned_session.response_mutators.append(credentials)
+    clear_factory = Mock(return_value=clear)
+    if not clear_succeeds:
+        clear_factory.side_effect = RuntimeError("sensitive-clear-error")
+    monkeypatch.setattr(plugin, "clear_session_response_mutator", clear_factory)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_session", revoke_mock)
+    monkeypatch.setattr(plugin.session_asyncio, "get_session_information", read_mock)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", fallback)
+    warning = Mock()
+    monkeypatch.setattr(plugin, "log_warning", warning)
+    overridden = plugin._passwordless_api_override(make_guard_config())(
+        cast(Any, SimpleNamespace(
+            create_code_post=None,
+            consume_code_post=AsyncMock(return_value=SimpleNamespace(
+                status="OK", user=SimpleNamespace(id="owner"), session=returned_session
+            )),
+        ))
+    )
+
+    if clear_succeeds:
+        result = await overridden.consume_code_post(
+            "pre", None, None, "link", None, None, "public",
+            cast(Any, SimpleNamespace(request=FakeRequest())), {},
+        )
+        assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
+    else:
+        with pytest.raises(RuntimeError, match="^Passwordless consume session cleanup failed$"):
+            await overridden.consume_code_post(
+                "pre", None, None, "link", None, None, "public",
+                cast(Any, SimpleNamespace(request=FakeRequest())), {},
+            )
+
+    if clear_succeeds and outcome in {"removed", "absent"}:
+        assert active_handles == {sibling_handle}
+        fallback.assert_not_awaited()
+        warning.assert_not_called()
+    else:
+        fallback.assert_awaited_once()
+        assert active_handles == set()
+    assert read_mock.await_count == (1 if outcome in {
+        "absent", "present", "lookup_error", "false_info"
+    } else 0)
+    assert returned_session.response_mutators == (
+        [credentials, clear] if clear_succeeds else [credentials]
+    )
+    assert revoke_mock.await_count == 1
+    clear_factory.assert_called_once()
+
+
+@pytest.mark.parametrize("revoke_outcome", ["success", "false", "exception", "invalid_mock"])
+@pytest.mark.parametrize("fallback_outcome", ["success", "empty", "exception"])
+async def test_passwordless_consume_cleanup_reports_unconfirmed_revocation(
+    monkeypatch: pytest.MonkeyPatch, revoke_outcome: str, fallback_outcome: str
+):
+    revoke = AsyncMock(return_value=revoke_outcome == "success")
+    if revoke_outcome == "invalid_mock":
+        revoke.return_value = Mock()
+    if revoke_outcome == "exception":
+        revoke.side_effect = RuntimeError("sensitive-targeted-error")
+    returned_session = make_passwordless_returned_session(revoke)
+    credentials = Mock()
+    clear = Mock()
+    returned_session.response_mutators.append(credentials)
+    monkeypatch.setattr(plugin, "clear_session_response_mutator", lambda *_args: clear)
+    monkeypatch.setattr(
+        "supertokens_python.recipe.session.session_class.clear_session_response_mutator",
+        lambda *_args: clear,
+    )
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_session", revoke)
+    monkeypatch.setattr(
+        plugin.session_asyncio, "get_session_information", AsyncMock(return_value=SimpleNamespace())
+    )
+    revoke_all = AsyncMock(
+        return_value=["sensitive-session-handle"] if fallback_outcome == "success" else []
+    )
+    if fallback_outcome == "exception":
+        revoke_all.side_effect = RuntimeError("sensitive-fallback-error")
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+    warning = Mock()
+    monkeypatch.setattr(plugin, "log_warning", warning)
+    config = make_guard_config()
+    config.enable_debug_logs = False
+    overridden = plugin._passwordless_api_override(config)(
+        cast(Any, SimpleNamespace(
+            create_code_post=None,
+            consume_code_post=AsyncMock(return_value=SimpleNamespace(
+                status="OK", user=SimpleNamespace(id="sensitive-owner"), session=returned_session
+            )),
+        ))
+    )
+
+    result = await overridden.consume_code_post(
+        "pre", None, None, "link", None, None, "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())), {},
+    )
+
+    assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
+    assert returned_session.response_mutators == [credentials, clear]
+    assert revoke.await_count == 1
+    expected_codes = []
+    if revoke_outcome == "success":
+        revoke_all.assert_not_awaited()
+    else:
+        revoke_all.assert_awaited_once_with(
+            "sensitive-owner", True, "public", revoke.call_args.args[1]
+        )
+        expected_codes.append(
+            "targeted_revoke_failed" if revoke_outcome == "exception"
+            else "targeted_revoke_unconfirmed"
+        )
+        if fallback_outcome != "success":
+            expected_codes.append(
+                "account_revoke_failed" if fallback_outcome == "exception"
+                else "account_revoke_unconfirmed"
+            )
+    assert [call.args for call in warning.call_args_list] == [
+        (config, "Passwordless consume session cleanup: code=" + code)
+        for code in expected_codes
+    ]
+
+
+@pytest.mark.parametrize("fault", [
+    "stale_marker", "tuple_marker", "namespace_marker", "mock_marker", "mock_owner", "mock_recipe",
+    "mock_marker_tenant", "foreign_marker_tenant", "missing_session_tenant",
+    "null_session_tenant", "mock_session_tenant", "tenant_lookup_error",
+    "invalid_session", "foreign_owner", "missing_session_owner_getter",
+    "null_session_owner", "empty_session_owner", "mock_session_owner",
+    "session_owner_getter_error", "session_owner_mapping_error", "markerless_broken_owner_getter",
+])
+async def test_passwordless_consume_api_rejects_invalid_post_session_evidence(
+    monkeypatch: pytest.MonkeyPatch, fault: str
+):
+    revoke = AsyncMock(return_value=True)
+    returned_session: Any = make_passwordless_returned_session(revoke)
+    marker: Any = plugin._PasswordlessConsumePostcheck("owner", "canonical", "public")
+    if fault == "tuple_marker":
+        marker = tuple(marker)
+    elif fault == "namespace_marker":
+        marker = SimpleNamespace(owner_user_id="owner", recipe_user_id="canonical", tenant_id="public")
+    elif fault == "mock_marker":
+        marker = Mock(spec=plugin._PasswordlessConsumePostcheck)
+    elif fault == "mock_owner":
+        marker = marker._replace(owner_user_id=Mock())
+    elif fault == "mock_recipe":
+        marker = marker._replace(recipe_user_id=Mock())
+    elif fault == "mock_marker_tenant":
+        marker = marker._replace(tenant_id=Mock())
+    elif fault == "foreign_marker_tenant":
+        marker = marker._replace(tenant_id="other-tenant")
+        returned_session.tenant_id = "other-tenant"
+    elif fault == "missing_session_tenant":
+        returned_session.get_tenant_id = None
+    elif fault == "null_session_tenant":
+        returned_session.tenant_id = None
+    elif fault == "mock_session_tenant":
+        returned_session.get_tenant_id = Mock()
+    elif fault == "tenant_lookup_error":
+        returned_session.get_tenant_id = Mock(side_effect=RuntimeError("sensitive-tenant-error"))
+    elif fault == "invalid_session":
+        returned_session = SimpleNamespace(
+            get_tenant_id=lambda _context: "public",
+            get_recipe_user_id=lambda _context: RecipeUserId("canonical"),
+            get_handle=lambda _context: "sensitive-session-handle",
+            config=returned_session.config,
+            req_res_info=returned_session.req_res_info,
+            response_mutators=[],
+        )
+    elif fault == "foreign_owner":
+        marker = marker._replace(owner_user_id="other-owner")
+    elif fault == "missing_session_owner_getter":
+        returned_session.get_user_id = None
+    elif fault == "null_session_owner":
+        returned_session.user_id = None
+    elif fault == "empty_session_owner":
+        returned_session.user_id = ""
+    elif fault == "mock_session_owner":
+        returned_session.get_user_id = Mock()
+    elif fault == "session_owner_getter_error":
+        returned_session.get_user_id = Mock(side_effect=RuntimeError("sensitive-owner-error"))
+    elif fault == "session_owner_mapping_error":
+        returned_session.user_id = "external-owner"
+    elif fault == "markerless_broken_owner_getter":
+        returned_session.get_user_id = Mock(side_effect=AssertionError("must not read owner"))
+    clear = Mock()
+    monkeypatch.setattr(plugin, "clear_session_response_mutator", lambda *_args: clear)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_session", revoke)
+    revoke_all = AsyncMock(return_value=[])
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+    resolve_owner = AsyncMock(return_value="owner")
+    if fault == "session_owner_mapping_error":
+        resolve_owner.side_effect = RuntimeError("sensitive-owner-mapping-error")
+    monkeypatch.setattr(
+        supertokens_repository, "freshly_resolve_sdk_user_id_to_internal", resolve_owner
+    )
+    record = AsyncMock()
+    refresh = AsyncMock()
+    monkeypatch.setattr(plugin, "record_rownd_app_variant_for_user", record)
+    monkeypatch.setattr(plugin, "_refresh_rownd_session_claims_or_revoke", refresh)
+
+    async def consume_api(*args: Any):
+        assert "rowndPasswordlessConsumePostcheck" not in args[-1]
+        if fault not in {"stale_marker", "markerless_broken_owner_getter"}:
+            args[-1]["rowndPasswordlessConsumePostcheck"] = marker
+        return SimpleNamespace(status="OK", user=SimpleNamespace(id="owner"), session=returned_session)
+
+    overridden = plugin._passwordless_api_override(make_guard_config())(
+        cast(Any, SimpleNamespace(create_code_post=None, consume_code_post=consume_api))
+    )
+    result = await overridden.consume_code_post(
+        "pre", None, None, "link", None, None, "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {"rowndPasswordlessConsumePostcheck": marker},
+    )
+
+    assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
+    assert returned_session.response_mutators == [clear]
+    revoke.assert_awaited_once()
+    revoke_all.assert_not_awaited()
+    record.assert_not_awaited()
+    refresh.assert_not_awaited()
+    if fault == "markerless_broken_owner_getter":
+        owner_getter = returned_session.get_user_id
+        assert isinstance(owner_getter, Mock)
+        owner_getter.assert_not_called()
+
+
+@pytest.mark.parametrize("phase", [
+    "original", "session_owner_getter", "session_owner_mapping", "targeted_revoke",
+    "absence_lookup", "account_revoke",
+])
+async def test_passwordless_consume_cancellation_propagates_without_success(
+    monkeypatch: pytest.MonkeyPatch, phase: str
+):
+    cancellation = asyncio.CancelledError()
+    revoke = AsyncMock(return_value=False)
+    revoke_all = AsyncMock(side_effect=cancellation)
+    if phase == "targeted_revoke":
+        revoke.side_effect = cancellation
+    returned_session = make_passwordless_returned_session(revoke)
+    if phase == "session_owner_getter":
+        monkeypatch.setattr(returned_session, "get_user_id", Mock(side_effect=cancellation))
+    elif phase == "session_owner_mapping":
+        returned_session.user_id = "external-owner"
+        monkeypatch.setattr(
+            supertokens_repository, "freshly_resolve_sdk_user_id_to_internal",
+            AsyncMock(side_effect=cancellation),
+        )
+    credentials = Mock()
+    clear = Mock()
+    returned_session.response_mutators.append(credentials)
+    monkeypatch.setattr(plugin, "clear_session_response_mutator", lambda *_args: clear)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_session", revoke)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+    read_info = AsyncMock(return_value=SimpleNamespace())
+    if phase == "absence_lookup":
+        read_info.side_effect = cancellation
+    monkeypatch.setattr(plugin.session_asyncio, "get_session_information", read_info)
+    async def consume_api(*args: Any):
+        if phase in {"session_owner_getter", "session_owner_mapping"}:
+            args[-1]["rowndPasswordlessConsumePostcheck"] = plugin._PasswordlessConsumePostcheck(
+                "owner", "canonical", "public"
+            )
+        return SimpleNamespace(status="OK", user=SimpleNamespace(id="owner"), session=returned_session)
+
+    original = AsyncMock(side_effect=consume_api)
+    if phase == "original":
+        original.side_effect = cancellation
+    record = AsyncMock()
+    refresh = AsyncMock()
+    monkeypatch.setattr(plugin, "record_rownd_app_variant_for_user", record)
+    monkeypatch.setattr(plugin, "_refresh_rownd_session_claims_or_revoke", refresh)
+    overridden = plugin._passwordless_api_override(make_guard_config())(
+        cast(Any, SimpleNamespace(create_code_post=None, consume_code_post=original))
+    )
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await overridden.consume_code_post(
+            "pre", None, None, "link", None, None, "public",
+            cast(Any, SimpleNamespace(request=FakeRequest())), {},
+        )
+
+    assert exc_info.value is cancellation
+    cleanup_started = phase in {"targeted_revoke", "absence_lookup", "account_revoke"}
+    assert returned_session.response_mutators == (
+        [credentials, clear] if cleanup_started else [credentials]
+    )
+    assert revoke.await_count == (1 if cleanup_started else 0)
+    assert revoke_all.await_count == (1 if phase == "account_revoke" else 0)
+    assert read_info.await_count == (1 if phase in {"absence_lookup", "account_revoke"} else 0)
+    record.assert_not_awaited()
+    refresh.assert_not_awaited()
+
+
+@pytest.mark.parametrize("growth_phase", ["targeted_revoke", "account_revoke"])
+@pytest.mark.parametrize("initial_credentials", [True, False])
+@pytest.mark.parametrize("clear_succeeds", [True, False])
+async def test_passwordless_cleanup_requires_explicit_clear_not_arbitrary_mutator_growth(
+    monkeypatch: pytest.MonkeyPatch,
+    growth_phase: str,
+    initial_credentials: bool,
+    clear_succeeds: bool,
+):
+    returned_session = make_passwordless_returned_session(AsyncMock())
+    credentials = Mock()
+    unrelated_mutator = Mock()
+    clear = Mock()
+    if initial_credentials:
+        returned_session.response_mutators.append(credentials)
+
+    async def revoke(*_args: Any):
+        if growth_phase == "targeted_revoke":
+            returned_session.response_mutators.append(unrelated_mutator)
+            return True
+        return False
+
+    async def revoke_all(*_args: Any):
+        if growth_phase == "account_revoke":
+            returned_session.response_mutators.append(unrelated_mutator)
+        return ["sensitive-session-handle"]
+
+    clear_factory = Mock(return_value=clear)
+    if not clear_succeeds:
+        clear_factory.side_effect = RuntimeError("sensitive-clear-error")
+    monkeypatch.setattr(plugin, "clear_session_response_mutator", clear_factory)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_session", revoke)
+    fallback = AsyncMock(side_effect=revoke_all)
+    monkeypatch.setattr(
+        plugin.session_asyncio, "get_session_information", AsyncMock(return_value=SimpleNamespace())
+    )
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", fallback)
+    overridden = plugin._passwordless_api_override(make_guard_config())(
+        cast(Any, SimpleNamespace(
+            create_code_post=None,
+            consume_code_post=AsyncMock(return_value=SimpleNamespace(
+                status="OK", user=SimpleNamespace(id="owner"), session=returned_session
+            )),
+        ))
+    )
+
+    if clear_succeeds:
+        result = await overridden.consume_code_post(
+            "pre", None, None, "link", None, None, "public",
+            cast(Any, SimpleNamespace(request=FakeRequest())), {},
+        )
+        assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
+    else:
+        with pytest.raises(RuntimeError, match="^Passwordless consume session cleanup failed$"):
+            await overridden.consume_code_post(
+                "pre", None, None, "link", None, None, "public",
+                cast(Any, SimpleNamespace(request=FakeRequest())), {},
+            )
+    assert any(mutator is unrelated_mutator for mutator in returned_session.response_mutators)
+    assert any(mutator is clear for mutator in returned_session.response_mutators) is clear_succeeds
+    clear_factory.assert_called_once()
+    assert fallback.await_count == (1 if not clear_succeeds or growth_phase == "account_revoke" else 0)
+
+
 async def test_passwordless_consume_api_missing_postcheck_revokes_and_denies(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1270,8 +1883,8 @@ async def test_passwordless_consume_api_missing_postcheck_revokes_and_denies(
             self.response_mutators: list[Any] = []
             self.config = SimpleNamespace()
 
-        async def revoke_session(self, _context: Any):
-            raise RuntimeError("targeted revoke failed")
+        def get_handle(self, _context: Any):
+            return "returned-handle"
 
         def get_recipe_user_id(self, _context: Any):
             return SimpleNamespace(get_as_string=lambda: "recipe-user")
@@ -1296,6 +1909,8 @@ async def test_passwordless_consume_api_missing_postcheck_revokes_and_denies(
     monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
 
     diagnostic_configs: list[RowndPluginConfig] = []
+    revoke = AsyncMock(side_effect=RuntimeError("targeted revoke failed"))
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_session", revoke)
 
     def capture_warning(warning_config: RowndPluginConfig, message: str):
         diagnostic_configs.append(warning_config)
@@ -1324,7 +1939,9 @@ async def test_passwordless_consume_api_missing_postcheck_revokes_and_denies(
     assert revoked_all == [("owner", "public")]
     assert [mutator.type for mutator in returned_session.response_mutators] == ["clear-session"]
     assert any("code=account_revoke_failed" in diagnostic for diagnostic in diagnostics)
-    assert diagnostic_configs == [config]
+    assert diagnostic_configs == [config, config]
+    assert revoke.await_count == 1
+    assert any("code=targeted_revoke_failed" in diagnostic for diagnostic in diagnostics)
     assert config.enable_debug_logs is False
     assert all("targeted revoke failed" not in diagnostic for diagnostic in diagnostics)
     assert all("fallback revoke failed" not in diagnostic for diagnostic in diagnostics)
@@ -1343,8 +1960,8 @@ async def test_passwordless_consume_api_without_queued_credentials_denies_when_c
             self.response_mutators: list[Any] = []
             self.config = SimpleNamespace()
 
-        async def revoke_session(self, _context: Any):
-            return None
+        def get_handle(self, _context: Any):
+            return "returned-handle"
 
         def get_recipe_user_id(self, _context: Any):
             return SimpleNamespace(get_as_string=lambda: "recipe-user")
@@ -1358,6 +1975,7 @@ async def test_passwordless_consume_api_without_queued_credentials_denies_when_c
 
     async def revoke_all(user_id: str, _linked: bool, tenant_id: Optional[str], _context: Any):
         revoked_all.append((user_id, tenant_id))
+        return ["returned-handle"]
 
     def fail_clear_mutator(*_args: Any):
         raise RuntimeError("cannot construct clear mutator")
@@ -1365,6 +1983,9 @@ async def test_passwordless_consume_api_without_queued_credentials_denies_when_c
     monkeypatch.setattr(plugin, "SessionContainer", FakeReturnedSession)
     monkeypatch.setattr(plugin, "clear_session_response_mutator", fail_clear_mutator)
     monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_session", AsyncMock(return_value=True))
+    warning = Mock()
+    monkeypatch.setattr(plugin, "log_warning", warning)
     overridden = plugin._passwordless_api_override(make_guard_config())(
         cast(Any, SimpleNamespace(create_code_post=None, consume_code_post=consume_api))
     )
@@ -1384,6 +2005,9 @@ async def test_passwordless_consume_api_without_queued_credentials_denies_when_c
     assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
     assert revoked_all == [("owner", "public")]
     assert returned_session.response_mutators == []
+    assert [call.args[1] for call in warning.call_args_list] == [
+        "Passwordless consume session cleanup: code=response_clear_failed"
+    ]
 
 
 async def test_passwordless_consume_api_with_queued_credentials_raises_when_clear_mutator_fails(
@@ -1400,8 +2024,8 @@ async def test_passwordless_consume_api_with_queued_credentials_raises_when_clea
             self.response_mutators: list[Any] = [queued_access_token]
             self.config = SimpleNamespace()
 
-        async def revoke_session(self, _context: Any):
-            return None
+        def get_handle(self, _context: Any):
+            return "returned-handle"
 
         def get_recipe_user_id(self, _context: Any):
             return SimpleNamespace(get_as_string=lambda: "recipe-user")
@@ -1415,6 +2039,7 @@ async def test_passwordless_consume_api_with_queued_credentials_raises_when_clea
 
     async def revoke_all(user_id: str, _linked: bool, tenant_id: Optional[str], _context: Any):
         revoked_all.append((user_id, tenant_id))
+        return ["returned-handle"]
 
     def fail_clear_mutator(*_args: Any):
         raise RuntimeError("sensitive clear-mutator failure")
@@ -1422,6 +2047,9 @@ async def test_passwordless_consume_api_with_queued_credentials_raises_when_clea
     monkeypatch.setattr(plugin, "SessionContainer", FakeReturnedSession)
     monkeypatch.setattr(plugin, "clear_session_response_mutator", fail_clear_mutator)
     monkeypatch.setattr(plugin.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_session", AsyncMock(return_value=True))
+    warning = Mock()
+    monkeypatch.setattr(plugin, "log_warning", warning)
     overridden = plugin._passwordless_api_override(make_guard_config())(
         cast(Any, SimpleNamespace(create_code_post=None, consume_code_post=consume_api))
     )
@@ -1442,6 +2070,9 @@ async def test_passwordless_consume_api_with_queued_credentials_raises_when_clea
     assert "sensitive clear-mutator failure" not in str(exc_info.value)
     assert revoked_all == [("owner", "public")]
     assert returned_session.response_mutators == [queued_access_token]
+    assert [call.args[1] for call in warning.call_args_list] == [
+        "Passwordless consume session cleanup: code=response_clear_failed"
+    ]
 
 
 async def test_passwordless_consume_api_rejects_marker_recipe_mismatch(
@@ -1451,10 +2082,11 @@ async def test_passwordless_consume_api_rejects_marker_recipe_mismatch(
         req_res_info = None
         response_mutators: list[Any] = []
         config = SimpleNamespace()
-        revoked = False
+        def get_handle(self, _context: Any):
+            return "returned-handle"
 
-        async def revoke_session(self, _context: Any):
-            self.revoked = True
+        def get_tenant_id(self, _context: Any):
+            return "public"
 
         def get_recipe_user_id(self, _context: Any):
             return SimpleNamespace(get_as_string=lambda: "returned-recipe")
@@ -1464,13 +2096,18 @@ async def test_passwordless_consume_api_rejects_marker_recipe_mismatch(
     async def consume_api(*args: Any, **_kwargs: Any):
         context = cast(Dict[str, Any], args[-1])
         context["rowndPasswordlessConsumePostcheck"] = plugin._PasswordlessConsumePostcheck(
-            "owner", "different-recipe"
+            "owner", "different-recipe", "public"
         )
         return SimpleNamespace(
             status="OK", user=SimpleNamespace(id="owner"), session=returned_session
         )
 
     monkeypatch.setattr(plugin, "SessionContainer", FakeReturnedSession)
+    revoke = AsyncMock(return_value=True)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_session", revoke)
+    monkeypatch.setattr(
+        plugin.session_asyncio, "revoke_all_sessions_for_user", AsyncMock(return_value=[])
+    )
     monkeypatch.setattr(
         supertokens_repository,
         "sdk_user_id_matches_internal_target",
@@ -1493,7 +2130,7 @@ async def test_passwordless_consume_api_rejects_marker_recipe_mismatch(
     )
 
     assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
-    assert returned_session.revoked is True
+    assert revoke.await_count == 1
 
 
 @pytest.mark.parametrize(

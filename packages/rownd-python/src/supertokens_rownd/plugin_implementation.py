@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
-from typing import Optional, cast
+from typing import Optional, cast, get_args
 
 from supertokens_python import SupertokensConfig, is_recipe_initialized
 from supertokens_python.framework.request import BaseRequest
@@ -19,7 +20,7 @@ from . import supertokens_repository as repository
 from . import utils
 from .constants import GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID
 from .errors import MigrationError, MigrationErrorReason, RowndEmailChangeError, RowndPluginError
-from .logger import log_debug
+from .logger import log_debug, log_warning
 from .migration import create_rownd_identity_snapshot
 from .rownd_repository import (
     RowndAPIError,
@@ -28,6 +29,9 @@ from .rownd_repository import (
     RowndTokenValidationReason,
 )
 from .types import JsonDict, MigrationStage, RowndClientProtocol, RowndPluginConfig, RowndTelemetryClient
+
+
+_logger = logging.getLogger(__name__)
 
 
 _TOKEN_REASON_MAP = {
@@ -90,8 +94,8 @@ async def handle_validate_passwordless_confirmation_bypass(
         )
         utils.assert_allowed_bypass_redirect_path(config, normalized_redirect_to_path)
         return utils.json_response(response, {"status": "OK", "bypass": True})
-    except Exception as err:
-        log_debug(config, "Passwordless confirmation bypass validation failed: %s" % err)
+    except Exception:
+        log_debug(config, "code=confirmation_bypass_failed")
         return utils.json_response(response, {"status": "ERROR", "bypass": False})
 
 
@@ -101,9 +105,12 @@ async def handle_app_config(
     app_variant_id = utils.get_requested_app_variant_id_from_request(request)
     app_config = rownd_config.build_app_config(config, app_variant_id)
     if app_config is None:
+        message = "Unknown Rownd app variant: %s" % app_variant_id
+        log_warning(config, "Unknown Rownd app variant")
         return utils.json_response(
             response,
-            {"status": "ERROR", "message": "Unknown Rownd app variant: %s" % app_variant_id},
+            {"status": "ERROR", "reason": "UNKNOWN_APP_VARIANT", "message": message},
+            400,
         )
     return utils.json_response(response, {"status": "OK", **app_config})
 
@@ -145,7 +152,7 @@ async def handle_guest_login(
             response, {"status": "OK", "createdNewRecipeUser": result.created_new_recipe_user}
         )
     except Exception as err:
-        log_debug(config, "Guest login failed: %s" % err)
+        log_debug(config, "code=guest_login_failed")
         await telemetry.record_error(telemetry_client, started_at, err, tenant_id)
         return utils.json_response(response, {"status": "ERROR", "message": "Guest login failed"})
 
@@ -268,11 +275,6 @@ async def handle_migrate(
             if isinstance(err, MigrationError)
             else MigrationError(MigrationErrorReason.INTERNAL_ERROR, stage, err)
         )
-        log_debug(
-            config,
-            "Migration failed. operationId: %s, stage: %s, reason: %s"
-            % (operation_id, migration_error.stage, migration_error.reason.value),
-        )
         terminal_http_status = migration_error.http_status
         terminal_retryable = migration_error.retryable
         terminal_reason = migration_error.reason
@@ -289,12 +291,26 @@ async def handle_migrate(
             terminal_reason = None
             raise
     finally:
+        terminal_stage = migration_error.stage if migration_error is not None else stage
+        # Reject custom string rendering as well as values outside the closed stage set.
+        if type(terminal_stage) is not str or terminal_stage not in get_args(MigrationStage):
+            terminal_stage = stage
+        _logger.log(
+            logging.WARNING if terminal_outcome == "error" else logging.INFO,
+            "RowndMigrationPlugin: Migration terminal: "
+            "operationId=%s outcome=%s stage=%s reason=%s retryable=%s",
+            operation_id,
+            terminal_outcome,
+            terminal_stage,
+            terminal_reason.value if terminal_reason is not None else "none",
+            terminal_retryable,
+        )
         await telemetry.record_migration_terminal(
             telemetry_client,
             started_at,
             operation_id,
             terminal_outcome,
-            migration_error.stage if migration_error is not None else stage,
+            terminal_stage,
             terminal_http_status,
             terminal_retryable,
             migration_state,

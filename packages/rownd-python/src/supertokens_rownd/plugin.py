@@ -4,7 +4,7 @@ import math
 import re
 import warnings
 from collections.abc import Callable
-from typing import Any, Generic, NamedTuple, Optional, TypeVar, cast
+from typing import Any, Generic, Literal, NamedTuple, Optional, TypeVar, cast
 from typing_extensions import Unpack
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
@@ -146,6 +146,12 @@ TemplateVarsT = TypeVar("TemplateVarsT")
 class _PasswordlessConsumePostcheck(NamedTuple):
     owner_user_id: str
     recipe_user_id: str
+    tenant_id: str
+
+
+class _PasswordlessSessionCleanup(NamedTuple):
+    revocation: Literal["removed", "absent", "unknown"]
+    clear_queued: bool
 
 
 def _log_passwordless_authorization_diagnostic(
@@ -357,24 +363,32 @@ def _append_clear_session_response_mutator(returned_session: Any) -> bool:
 
 
 async def _revoke_and_clear_returned_session(
-    returned_session: Any, user_context: UserContext
-) -> bool:
-    response_mutators = getattr(returned_session, "response_mutators", None)
-    mutator_count = len(response_mutators) if isinstance(response_mutators, list) else None
-    revoke_succeeded = False
+    config: RowndPluginConfig, returned_session: Any, user_context: UserContext
+) -> _PasswordlessSessionCleanup:
+    revocation: Literal["removed", "absent", "unknown"] = "unknown"
     try:
-        await returned_session.revoke_session(user_context)
-        revoke_succeeded = True
+        # SessionContainer.revoke_session discards the SDK's boolean result.
+        handle = returned_session.get_handle(user_context)
+        revoke_result = await session_asyncio.revoke_session(handle, user_context)
+        if revoke_result is True:
+            revocation = "removed"
+        elif revoke_result is False:
+            # An already-absent target must not log out unrelated sibling sessions.
+            utils.clear_supertokens_core_call_cache(user_context)
+            if await session_asyncio.get_session_information(handle, user_context) is None:
+                revocation = "absent"
     except Exception:
-        pass
-    clear_succeeded = (
-        mutator_count is not None
-        and isinstance(response_mutators, list)
-        and len(response_mutators) > mutator_count
-    )
-    if not clear_succeeded:
+        log_warning(config, "Passwordless consume session cleanup: code=targeted_revoke_failed")
+    else:
+        if revocation == "unknown":
+            log_warning(
+                config, "Passwordless consume session cleanup: code=targeted_revoke_unconfirmed"
+            )
+    finally:
         clear_succeeded = _append_clear_session_response_mutator(returned_session)
-    return revoke_succeeded and clear_succeeded
+        if not clear_succeeded:
+            log_warning(config, "Passwordless consume session cleanup: code=response_clear_failed")
+    return _PasswordlessSessionCleanup(revocation, clear_succeeded)
 
 
 class RowndEmailDeliveryOverride(Generic[TemplateVarsT], EmailDeliveryInterface[TemplateVarsT]):
@@ -1089,8 +1103,13 @@ def _passwordless_api_override(config: RowndPluginConfig):
                         isinstance(user_id, str)
                         and isinstance(returned_session, SessionContainer)
                         and isinstance(marker, _PasswordlessConsumePostcheck)
+                        and isinstance(marker.owner_user_id, str)
                         and bool(marker.owner_user_id)
+                        and isinstance(marker.recipe_user_id, str)
                         and bool(marker.recipe_user_id)
+                        and isinstance(marker.tenant_id, str)
+                        and bool(marker.tenant_id)
+                        and marker.tenant_id == tenant_id
                     )
                     if marker_valid:
                         checked_marker = cast(_PasswordlessConsumePostcheck, marker)
@@ -1098,12 +1117,22 @@ def _passwordless_api_override(config: RowndPluginConfig):
                         checked_user_id = cast(str, user_id)
                         try:
                             marker_valid = (
-                                checked_session.get_recipe_user_id(context).get_as_string()
+                                checked_session.get_tenant_id(context) == checked_marker.tenant_id
+                                and checked_session.get_recipe_user_id(context).get_as_string()
                                 == checked_marker.recipe_user_id
                                 and await supertokens_repository.sdk_user_id_matches_internal_target(
                                     checked_user_id, checked_marker.owner_user_id, context
                                 )
                             )
+                            if marker_valid:
+                                session_user_id = checked_session.get_user_id(context)
+                                marker_valid = (
+                                    isinstance(session_user_id, str)
+                                    and bool(session_user_id)
+                                    and await supertokens_repository.sdk_user_id_matches_internal_target(
+                                        session_user_id, checked_marker.owner_user_id, context
+                                    )
+                                )
                         except Exception:
                             marker_valid = False
                     if not marker_valid:
@@ -1111,16 +1140,20 @@ def _passwordless_api_override(config: RowndPluginConfig):
                         mutator_count = (
                             len(response_mutators) if isinstance(response_mutators, list) else 0
                         )
-                        targeted_revoked = (
-                            await _revoke_and_clear_returned_session(returned_session, context)
+                        cleanup = (
+                            await _revoke_and_clear_returned_session(
+                                config, returned_session, context
+                            )
                             if returned_session is not None
-                            else False
+                            else _PasswordlessSessionCleanup("unknown", False)
                         )
-                        if not targeted_revoked:
+                        if cleanup.revocation == "unknown" or not cleanup.clear_queued:
                             if isinstance(user_id, str):
                                 try:
-                                    await session_asyncio.revoke_all_sessions_for_user(
-                                        user_id, True, tenant_id, context
+                                    revoked_handles = (
+                                        await session_asyncio.revoke_all_sessions_for_user(
+                                            user_id, True, tenant_id, context
+                                        )
                                     )
                                 except Exception:
                                     log_warning(
@@ -1128,17 +1161,24 @@ def _passwordless_api_override(config: RowndPluginConfig):
                                         "Passwordless consume session cleanup: "
                                         "code=account_revoke_failed",
                                     )
+                                else:
+                                    if not revoked_handles:
+                                        log_warning(
+                                            config,
+                                            "Passwordless consume session cleanup: "
+                                            "code=account_revoke_unconfirmed",
+                                        )
                             else:
                                 log_warning(
                                     config,
                                     "Passwordless consume session cleanup: "
                                     "code=account_revoke_unavailable",
                                 )
-                        clear_queued = (
-                            isinstance(response_mutators, list)
-                            and len(response_mutators) > mutator_count
-                        )
-                        if mutator_count > 0 and not clear_queued:
+                        response_mutators = getattr(returned_session, "response_mutators", None)
+                        if not cleanup.clear_queued and (
+                            mutator_count > 0
+                            or (isinstance(response_mutators, list) and len(response_mutators) > 0)
+                        ):
                             raise RuntimeError(
                                 "Passwordless consume session cleanup failed"
                             ) from None
@@ -1241,7 +1281,7 @@ def _passwordless_function_override(config: RowndPluginConfig):
                 if isinstance(result, ConsumeCodeOkResult):
                     user_context["rowndPasswordlessConsumePostcheck"] = (
                         _PasswordlessConsumePostcheck(
-                            result.user.id, result.recipe_user_id.get_as_string()
+                            result.user.id, result.recipe_user_id.get_as_string(), tenant_id
                         )
                     )
                 return result
@@ -1281,7 +1321,7 @@ def _passwordless_function_override(config: RowndPluginConfig):
             if not after.allowed:
                 return ConsumeCodeRestartFlowError()
             user_context["rowndPasswordlessConsumePostcheck"] = _PasswordlessConsumePostcheck(
-                cast(str, after.owner_user_id), result.recipe_user_id.get_as_string()
+                cast(str, after.owner_user_id), result.recipe_user_id.get_as_string(), tenant_id
             )
             return result
 
@@ -1571,6 +1611,15 @@ def _normalise_path(path: str) -> str:
 
 
 def _validate_config(config: RowndPluginConfig) -> None:
+    app_id = config.rownd_app_id
+    # RFC 3986 path-segment characters, excluding escapes and dot-segment traversal.
+    if app_id is not None and (
+        not isinstance(app_id, str)
+        or re.fullmatch(r"[A-Za-z0-9._~!$&'()*+,;=:@-]+", app_id) is None
+        or app_id in {".", ".."}
+    ):
+        raise ValueError("rownd_app_id must be a nonempty string safe as a URL path segment")
+
     for field_name, field_config in config.schema.items():
         resolve_session_claim_name(field_name, field_config)
 
