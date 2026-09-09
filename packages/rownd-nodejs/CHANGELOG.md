@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.7.4
+
+### Patch Changes
+
+- Add option to bypass email verification
+
 ## 0.7.3
 
 ### Patch Changes
