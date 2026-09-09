@@ -543,9 +543,25 @@ export async function reconcileRowndUserWithExistingLoginMethods(
   stUser: SuperTokensUserImport,
   tenantId: string,
   userContext: JsonRecord,
+  options?: { repairUser: SuperTokensUser },
 ) {
   if (!stUser.externalUserId) {
     throw new Error("Migrated Rownd user has no external user ID");
+  }
+
+  const repairUser = options?.repairUser;
+  // Completed migrations only need missing passwordless methods; existing state is authoritative.
+  const importMethods = repairUser
+    ? stUser.loginMethods.filter(
+      (method) =>
+        method.recipeId === "passwordless" &&
+          !repairUser.loginMethods.some((existing) =>
+            matchesImportLoginMethod(existing, method),
+          ),
+    )
+    : stUser.loginMethods;
+  if (repairUser && importMethods.length === 0) {
+    return true;
   }
 
   clearSuperTokensCoreCallCache(userContext);
@@ -560,14 +576,14 @@ export async function reconcileRowndUserWithExistingLoginMethods(
   };
 
   const inspections = await Promise.all(
-    stUser.loginMethods.map((method) =>
+    importMethods.map((method) =>
       inspectImportMethod(method, tenantId, userContext),
     ),
   );
   const matches = inspections.flatMap(({ reconciliationMatch }) =>
     reconciliationMatch ? [reconciliationMatch] : [],
   );
-  if (matches.length === 0) {
+  if (!repairUser && matches.length === 0) {
     if (inspections.some(({ owners }) => owners.length > 0)) {
       throw new Error(
         "Migrated account information is reserved by an existing SuperTokens user and cannot be safely reconciled",
@@ -579,7 +595,12 @@ export async function reconcileRowndUserWithExistingLoginMethods(
   const thirdPartyMatches = inspections.flatMap(({ importMethod, match }) =>
     importMethod.recipeId === "thirdparty" && match ? [match] : [],
   );
-  const target = thirdPartyMatches[0] ?? matches[0]!;
+  const target = repairUser
+    ? { user: repairUser, loginMethod: repairUser.loginMethods[0] }
+    : thirdPartyMatches[0] ?? matches[0]!;
+  if (!target.loginMethod) {
+    throw new Error("Migrated user has no login methods");
+  }
   const targetSuperTokensUserId = await resolveUserId(target.user.id);
   const inspectedOwners = await Promise.all(
     inspections.flatMap(({ importMethod, owners }) =>
@@ -595,7 +616,12 @@ export async function reconcileRowndUserWithExistingLoginMethods(
     ({ superTokensUserId }) => superTokensUserId !== targetSuperTokensUserId,
   );
   const canLinkVerifiedEmailOwners =
-    thirdPartyMatches.length > 0 &&
+    (thirdPartyMatches.length > 0 ||
+      repairUser?.loginMethods.some(
+        (method) =>
+          method.recipeId === "thirdparty" &&
+          method.tenantIds.includes(tenantId),
+      )) &&
     inspectedOwners
       .filter(({ importMethod }) => importMethod.recipeId === "thirdparty")
       .every(
@@ -778,11 +804,13 @@ export async function reconcileRowndUserWithExistingLoginMethods(
       }
     }
   }
-  await UserMetadata.updateUserMetadata(
-    primaryUserId,
-    stUser.userMetadata,
-    userContext,
-  );
+  if (!repairUser) {
+    await UserMetadata.updateUserMetadata(
+      primaryUserId,
+      stUser.userMetadata,
+      userContext,
+    );
+  }
 
   return true;
 }

@@ -372,6 +372,20 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
           `User migrated successfully. tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,
         );
       } else {
+        await reconcileRowndUserWithExistingLoginMethods(
+          mapRowndUserToSuperTokens(
+            rowndUser,
+            tenantId === PUBLIC_TENANT_ID ? undefined : tenantId,
+          ),
+          tenantId,
+          resolved.userContext,
+          { repairUser: user },
+        );
+        clearSuperTokensCoreCallCache(resolved.userContext);
+        user = await SuperTokens.getUser(rowndUserId, resolved.userContext);
+        if (!user) {
+          throw new Error("Repaired migrated user could not be resolved");
+        }
         superTokensUserId = user.id;
         recipeUserId = user.loginMethods[0]?.recipeUserId;
         logDebugMessage(

@@ -3953,9 +3953,8 @@ describe("rownd-nodejs plugin", () => {
           auth_level: "verified",
           data: {
             user_id: rowndUserId,
-            email: `${rowndUserId}@example.com`,
           },
-          verified_data: { email: true },
+          verified_data: {},
         });
         const req = {
           getHeaderValue: (key: string) =>
@@ -4000,6 +3999,156 @@ describe("rownd-nodejs plugin", () => {
           {},
           {},
           userContext,
+        );
+      });
+
+      it.each(["missing", "existing unverified"])(
+        "repairs completed migrations with %s passwordless without resetting existing state",
+        async (scenario) => {
+          const { server: s, port } = await setup(
+            importCoreConnectionURI,
+            undefined,
+            {
+              enableEmailVerification: true,
+            },
+          );
+          server = s;
+          testPORT = port;
+          const rowndUserId = `completed-repair-${randomUUID()}`;
+          const email = `${rowndUserId}@example.com`;
+          const googleId = randomUUID();
+          const provider = await ThirdParty.manuallyCreateOrUpdateUser(
+            "public",
+            "google",
+            googleId,
+            email,
+            true,
+          );
+          if (provider.status !== "OK") {
+            throw new Error("failed to create provider");
+          }
+          const primary = await AccountLinking.createPrimaryUser(
+            provider.recipeUserId,
+          );
+          expect(primary.status).toBe("OK");
+          await createRowndUserIdMapping(provider.user.id, rowndUserId, {});
+          if (scenario === "existing unverified") {
+            const passwordless = await Passwordless.signInUp({
+              tenantId: "public",
+              email,
+            });
+            expect(passwordless.user.id).toBe(rowndUserId);
+            await EmailVerification.unverifyEmail(
+              passwordless.recipeUserId,
+              email,
+            );
+          }
+          const metadata = {
+            rownd_migration_complete: true,
+            first_name: "Current name",
+            original_rownd_user: {
+              data: { user_id: rowndUserId, email, first_name: "Current name" },
+            },
+          };
+          await UserMetadata.updateUserMetadata(provider.user.id, metadata);
+          mockRowndClient.validateToken.mockResolvedValue({
+            user_id: rowndUserId,
+          });
+          mockRowndClient.fetchUserInfo.mockResolvedValue({
+            data: {
+              user_id: rowndUserId,
+              email,
+              google_id: "different-historical-google",
+              first_name: "Stale name",
+            },
+            verified_data: { email: true },
+          });
+
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const response = await fetch(
+              `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+              {
+                method: "POST",
+                headers: { Authorization: "Bearer some-token" },
+              },
+            );
+            await expect(response.json()).resolves.toEqual({ status: "OK" });
+            const user = await SuperTokens.getUser(rowndUserId);
+            expect(user?.loginMethods).toHaveLength(2);
+            expect(user?.loginMethods).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  recipeId: "thirdparty",
+                  thirdParty: { id: "google", userId: googleId },
+                  verified: true,
+                }),
+                expect.objectContaining({
+                  recipeId: "passwordless",
+                  email,
+                  verified: scenario === "missing",
+                }),
+              ]),
+            );
+            await expect(
+              UserMetadata.getUserMetadata(provider.user.id),
+            ).resolves.toMatchObject({ metadata });
+          }
+        },
+      );
+
+      it("refuses completed migration repair when the passwordless owner is another primary user", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        testPORT = port;
+        const rowndUserId = `conflicting-repair-${randomUUID()}`;
+        const email = `${rowndUserId}@example.com`;
+        const provider = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public",
+          "google",
+          randomUUID(),
+          `other-${email}`,
+          true,
+        );
+        if (provider.status !== "OK") {
+          throw new Error("failed to create provider");
+        }
+        await AccountLinking.createPrimaryUser(provider.recipeUserId);
+        await createRowndUserIdMapping(provider.user.id, rowndUserId, {});
+        await UserMetadata.updateUserMetadata(provider.user.id, {
+          rownd_migration_complete: true,
+        });
+        const passwordless = await Passwordless.signInUp({
+          tenantId: "public",
+          email,
+        });
+        expect(
+          (await AccountLinking.createPrimaryUser(passwordless.recipeUserId))
+            .status,
+        ).toBe("OK");
+        mockRowndClient.validateToken.mockResolvedValue({
+          user_id: rowndUserId,
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          data: { user_id: rowndUserId, email },
+          verified_data: { email: true },
+        });
+
+        const response = await fetch(
+          `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
+          {
+            method: "POST",
+            headers: { Authorization: "Bearer some-token" },
+          },
+        );
+        await expect(response.json()).resolves.toEqual({
+          status: "ERROR",
+          message: "Migration failed",
+        });
+        expect(
+          (await SuperTokens.getUser(rowndUserId))?.loginMethods,
+        ).toHaveLength(1);
+        expect((await SuperTokens.getUser(passwordless.user.id))?.id).toBe(
+          passwordless.user.id,
         );
       });
 
