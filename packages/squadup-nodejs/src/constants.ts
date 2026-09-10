@@ -1,4 +1,7 @@
+import { version } from "../package.json";
+
 export const PLUGIN_ID = "supertokens-plugin-squadup";
+export const PLUGIN_VERSION = version;
 export const PLUGIN_SDK_VERSION = ["23.0.0", "23.0.1", ">=23.0.1"];
 export const HANDLE_BASE_PATH = "/plugin/squadup";
 
