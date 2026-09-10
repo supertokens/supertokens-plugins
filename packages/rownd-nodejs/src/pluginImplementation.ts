@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { MigrationTelemetry } from "./telemetry/migrationTelemetry";
 import SuperTokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
@@ -289,7 +290,11 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
     _session: SuperTokensSession,
     userContext: SuperTokensUserContext,
   ) => {
-    const startedAt = Date.now();
+    const telemetry = new MigrationTelemetry(deps.telemetryClient.recordEvent);
+    const operationContext = createDerivedUserContext(userContext, {
+      rowndMigrationRequestId: telemetry.requestId,
+      rowndMigrationTelemetry: telemetry,
+    });
     let tenantId: string | undefined;
     let rowndUserId: string | undefined;
     let superTokensUserId: string | undefined;
@@ -298,41 +303,52 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       Parameters<typeof Session.createNewSession>[3] | undefined;
 
     try {
+      res.setHeader("x-rownd-migration-request-id", telemetry.requestId, false);
       if (!deps.stConfig.supertokens) {
         throw new Error("Supertokens config not found");
       }
 
       tenantId = resolveTenantId(req);
+      telemetry.tenantId = tenantId;
       const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
         tenantId,
         request: req,
-        userContext,
+        userContext: operationContext,
       });
 
+      telemetry.stage = "request_validation";
       const parsed = await parseRequest(req);
       const appVariantId = getRequestedAppVariantIdFromRequest(req);
       assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
+      telemetry.stage = "token_validation";
       rowndUserId = await validateRowndToken(parsed.token);
+      telemetry.rowndUserId = rowndUserId;
+      telemetry.stage = "rownd_lookup";
       const rowndUser = await fetchOptionalRowndUserInfo(rowndUserId);
 
       if (!rowndUser) {
+        telemetry.emit("terminal", "rownd_user_not_found", "skipped");
         logDebugMessage(
           `Skipping migration because user does not exist in Rownd. tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,
         );
         return { status: "OK" as const };
       }
 
+      telemetry.stage = "supertokens_lookup";
       user = await SuperTokens.getUser(rowndUserId, resolved.userContext);
+      telemetry.superTokensUserId = user?.id;
       const existingMetadata = user
         ? await getUserMetadata(user.id, resolved.userContext)
         : undefined;
 
       if (!user || existingMetadata?.rownd_migration_complete !== true) {
+        telemetry.stage = "user_mapping";
         const stUserImport = mapRowndUserToSuperTokens(
           rowndUser,
           tenantId === PUBLIC_TENANT_ID ? undefined : tenantId,
         );
 
+        telemetry.stage = "reconciliation";
         const reconciled = await reconcileRowndUserWithExistingLoginMethods(
           stUserImport,
           tenantId,
@@ -343,12 +359,15 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
             throw new Error("Incomplete migrated user could not be reconciled");
           }
           try {
+            telemetry.stage = "bulk_import";
             await importUser(stUserImport, deps.stConfig.supertokens);
+            telemetry.emit("transition", "bulk_import_completed");
           } catch (importError) {
             if (!isBulkImportDuplicateIdentityError(importError)) {
               throw importError;
             }
             // Another migration may have completed after the initial reconciliation.
+            telemetry.stage = "duplicate_import_reconciliation";
             const recovered =
               await reconcileRowndUserWithExistingLoginMethods(
                 stUserImport,
@@ -360,6 +379,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
             }
           }
         }
+        telemetry.stage = "imported_user_lookup";
         clearSuperTokensCoreCallCache(resolved.userContext);
         user = await SuperTokens.getUser(rowndUserId, resolved.userContext);
         if (!user) {
@@ -372,6 +392,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
           `User migrated successfully. tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,
         );
       } else {
+        telemetry.stage = "repair";
         await reconcileRowndUserWithExistingLoginMethods(
           mapRowndUserToSuperTokens(
             rowndUser,
@@ -381,6 +402,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
           resolved.userContext,
           { repairUser: user },
         );
+        telemetry.stage = "repaired_user_lookup";
         clearSuperTokensCoreCallCache(resolved.userContext);
         user = await SuperTokens.getUser(rowndUserId, resolved.userContext);
         if (!user) {
@@ -393,6 +415,8 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         );
       }
 
+      telemetry.superTokensUserId = superTokensUserId;
+      telemetry.stage = "app_variant_metadata";
       if (superTokensUserId) {
         await recordRowndAppVariantForUser(
           superTokensUserId,
@@ -402,15 +426,21 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         );
       }
 
+      telemetry.stage = "recipe_selection";
       const tenantLoginMethod = user?.loginMethods.find((method) =>
         method.tenantIds.includes(tenantId!),
       );
       recipeUserId = tenantLoginMethod?.recipeUserId ?? recipeUserId;
+      telemetry.recipeUserId = recipeUserId?.getAsString();
+      telemetry.recipeId = user?.loginMethods.find(
+        (method) => method.recipeUserId.getAsString() === telemetry.recipeUserId,
+      )?.recipeId;
 
       if (!recipeUserId) {
         throw new Error("User not found or has no login methods");
       }
 
+      telemetry.stage = "tenant_association";
       if (user) {
         await associateUserLoginMethodsToTenant(
           user,
@@ -419,6 +449,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         );
       }
 
+      telemetry.stage = "session_creation";
       await Session.createNewSession(
         req,
         res,
@@ -431,28 +462,12 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         resolved.userContext,
       );
 
-      logDebugMessage(
-        `Session migrated successfully. tenantId: ${tenantId}, userId: ${superTokensUserId}`,
-      );
-
-      deps.telemetryClient.recordSuccess({
-        outcome: "success",
-        durationMs: Date.now() - startedAt,
-        tenantId,
-        rowndUserId,
-        superTokensUserId,
-      });
+      telemetry.sessionCreated = true;
+      telemetry.emit("terminal", "session_created");
 
       return { status: "OK" as const };
     } catch (error) {
-      logDebugMessage(`Migration failed. Error: ${getErrorMessage(error)}`);
-      deps.telemetryClient.recordError({
-        error,
-        startedAt,
-        tenantId,
-        rowndUserId,
-        superTokensUserId,
-      });
+      telemetry.emit("terminal", "stage_failed", "error", error);
       return {
         status: "ERROR" as const,
         message:

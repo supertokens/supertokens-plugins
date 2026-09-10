@@ -3914,6 +3914,59 @@ describe("rownd-nodejs plugin", () => {
 
   describe("endpoints", () => {
     describe("POST /migrate", () => {
+      it.each(["success", "skipped", "session failure"])("correlates terminal telemetry for %s", async (scenario) => {
+        const events: Parameters<RowndTelemetryClient["recordEvent"]>[0][] = [];
+        const { server: s, port } = await setup(importCoreConnectionURI, {
+          telemetry: { provider: "custom", factory: () => ({ recordEvent: (event) => { events.push(event); } }) },
+        });
+        server = s;
+        testPORT = port;
+        const rowndUserId = `telemetry-${randomUUID()}`;
+        mockRowndClient.validateToken.mockResolvedValue({ user_id: rowndUserId });
+        if (scenario === "skipped") {
+          mockRowndClient.fetchUserInfo.mockResolvedValue(undefined);
+        } else {
+          mockRowndClient.fetchUserInfo.mockResolvedValue({
+            data: { user_id: rowndUserId, email: `${rowndUserId}@example.com` },
+            verified_data: { email: true },
+          });
+        }
+        if (scenario === "session failure") {
+          vi.spyOn(Session, "createNewSession").mockRejectedValue(new TypeError("Session storage unavailable"));
+        }
+        const response = await fetch(`http://localhost:${port}/auth/plugin/rownd/migrate`, {
+          method: "POST", headers: { Authorization: "Bearer private-token", "st-auth-mode": "header" },
+        });
+        expect(await response.json()).toMatchObject({ status: scenario === "session failure" ? "ERROR" : "OK" });
+        const terminal = events.filter((event) => event.eventType === "terminal");
+        expect(terminal).toHaveLength(1);
+        expect(terminal[0]).toMatchObject({
+          requestId: response.headers.get("x-rownd-migration-request-id"),
+          result: scenario === "session failure" ? "error" : scenario,
+          sessionCreated: scenario === "success",
+          rowndUserId, tenantId: "public", pluginVersion: "0.7.4",
+          durationMs: expect.any(Number),
+          stageDurationMs: expect.any(Number),
+        });
+        expect(terminal[0].requestId).toMatch(/^[0-9a-f-]{36}$/);
+        if (scenario === "session failure") {
+          expect(terminal[0]).toMatchObject({
+            error: { name: "TypeError", message: "Session storage unavailable" },
+          });
+        }
+        if (scenario !== "skipped") {
+          expect(events).toContainEqual(expect.objectContaining({ eventType: "transition", reason: "bulk_import_completed" }));
+          expect(terminal[0]).toMatchObject({ stage: "session_creation", recipeId: "passwordless", recipeUserId: expect.any(String) });
+          expect(await SuperTokens.getUser(rowndUserId)).toBeDefined();
+        } else {
+          expect(events).toHaveLength(1);
+          expect(terminal[0].reason).toBe("rownd_user_not_found");
+        }
+        expect(new Set(events.map((event) => event.requestId)).size).toBe(1);
+        expect(JSON.stringify(events)).not.toMatch(/private-token|secret-token|@example.com/);
+        expect(response.headers.has("st-access-token")).toBe(scenario === "success");
+      });
+
       it("uses the requested tenant for association and session creation", async () => {
         const tenantId = "migration-tenant";
         const rowndUserId = `rownd-${randomUUID()}`;
@@ -3962,7 +4015,7 @@ describe("rownd-nodejs plugin", () => {
           getKeyValueFromQuery: (key: string) =>
             key === "tenantId" ? tenantId : undefined,
         } as any;
-        const res = {} as any;
+        const res = { setHeader: vi.fn() } as any;
         const userContext = { requestId: "migration-request" };
 
         const result = await handleMigrate({
@@ -3974,6 +4027,7 @@ describe("rownd-nodejs plugin", () => {
             supertokens: { connectionURI: "http://core.example.com" },
           } as any,
           telemetryClient: {
+            recordEvent: vi.fn(),
             recordSuccess: vi.fn(),
             recordError: vi.fn(),
           },
@@ -3983,12 +4037,12 @@ describe("rownd-nodejs plugin", () => {
         expect(associateUserToTenant).toHaveBeenCalledWith(
           tenantId,
           recipeUserId,
-          userContext,
+          expect.objectContaining(userContext),
         );
         expect(associateUserToTenant).toHaveBeenCalledWith(
           tenantId,
           secondRecipeUserId,
-          userContext,
+          expect.objectContaining(userContext),
         );
         expect(associateUserToTenant).toHaveBeenCalledTimes(2);
         expect(createNewSession).toHaveBeenCalledWith(
@@ -3998,7 +4052,7 @@ describe("rownd-nodejs plugin", () => {
           recipeUserId,
           {},
           {},
-          userContext,
+          expect.objectContaining(userContext),
         );
       });
 
@@ -4964,9 +5018,15 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("links existing provider and passwordless users for a Rownd-verified email", async () => {
+        const events: Parameters<RowndTelemetryClient["recordEvent"]>[0][] = [];
         const { server: s, port } = await setup(
           importCoreConnectionURI,
-          undefined,
+          {
+            telemetry: {
+              provider: "custom",
+              factory: () => ({ recordEvent: (event) => { events.push(event); } }),
+            },
+          },
           { enableEmailVerification: true },
         );
         server = s;
@@ -5029,6 +5089,17 @@ describe("rownd-nodejs plugin", () => {
           accessToken!,
         );
         expect(session.getUserId()).toBe(rowndUserId);
+        expect(events.filter((event) => event.reason === "account_link_completed")).toEqual([
+          expect.objectContaining({
+            eventType: "transition",
+            recipeId: "passwordless",
+            recipeUserId: passwordlessUser.recipeUserId.getAsString(),
+          }),
+        ]);
+        expect(events.find((event) => event.eventType === "terminal")).toMatchObject({
+          recipeUserId: session.getRecipeUserId().getAsString(),
+          result: "success",
+        });
         await expect(
           SuperTokens.getUserIdMapping({
             userId: rowndUserId,
@@ -5958,7 +6029,7 @@ describe("rownd-nodejs plugin", () => {
           },
         );
         expect(await res.json()).toEqual({ status: "OK" });
-        expect(telemetryAttempts).toBe(1);
+        expect(telemetryAttempts).toBeGreaterThanOrEqual(2);
       });
 
       it("prevent creation of duplicate users", async () => {

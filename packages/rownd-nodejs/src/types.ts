@@ -750,7 +750,20 @@ export type RowndClientDomains = {
   browser?: string;
 } & Record<string, string>;
 
-export type RowndTelemetryEvent =
+export interface RowndMigrationTelemetryDetails {
+  requestId?: string;
+  eventType?: "terminal" | "transition";
+  result?: "success" | "skipped" | "error";
+  stage?: string;
+  stageDurationMs?: number;
+  reason?: string;
+  pluginVersion?: string;
+  recipeId?: string;
+  recipeUserId?: string;
+  sessionCreated?: boolean;
+}
+
+export type RowndTelemetryEvent = RowndMigrationTelemetryDetails & (
   | {
       outcome: "success";
       durationMs: number;
@@ -768,7 +781,7 @@ export type RowndTelemetryEvent =
         message: string;
         name?: string;
       };
-    };
+    });
 
 export interface RowndTelemetryClient {
   recordEvent: (event: RowndTelemetryEvent) => Promise<void> | void;

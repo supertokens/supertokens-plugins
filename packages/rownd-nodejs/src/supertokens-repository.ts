@@ -1,4 +1,5 @@
 import SuperTokens from "supertokens-node";
+import { migrationTelemetry } from "./telemetry/migrationTelemetry";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
 import EmailVerification from "supertokens-node/recipe/emailverification";
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
@@ -325,6 +326,9 @@ export async function createMissingLoginMethod(
         `Failed to create migrated third-party login method: ${result.status}`,
       );
     }
+    if (result.createdNewRecipeUser) {
+      migrationTelemetry(userContext)?.emit("transition", "login_method_created");
+    }
     if (
       !result.createdNewRecipeUser &&
       !(await sdkUserIdMatchesInternalTarget(
@@ -356,6 +360,9 @@ export async function createMissingLoginMethod(
         userContext: operationContext,
       });
 
+    if (result.createdNewRecipeUser) {
+      migrationTelemetry(userContext)?.emit("transition", "login_method_created");
+    }
     if (
       !result.createdNewRecipeUser &&
       !(await sdkUserIdMatchesInternalTarget(
@@ -659,6 +666,11 @@ export async function reconcileRowndUserWithExistingLoginMethods(
     );
   }
   let mappingAlreadyExists = targetSuperTokensUserId === stUser.externalUserId;
+  const telemetry = migrationTelemetry(userContext);
+  if (telemetry) {
+    telemetry.superTokensUserId = targetSuperTokensUserId;
+    telemetry.stage = "id_mapping";
+  }
   if (!mappingAlreadyExists) {
     clearSuperTokensCoreCallCache(userContext);
     mappingAlreadyExists = await assertRowndUserIdCanBeMapped(
@@ -672,14 +684,19 @@ export async function reconcileRowndUserWithExistingLoginMethods(
         stUser.externalUserId,
         userContext,
       );
+      telemetry?.emit("transition", "id_mapping_completed");
     }
   }
+  if (telemetry) telemetry.stage = "primary_user";
   const primaryUserId = await ensurePrimaryUser(
     target.user,
     target.loginMethod.recipeUserId,
     targetSuperTokensUserId,
     userContext,
   );
+  if (!target.user.isPrimaryUser) {
+    telemetry?.emit("transition", "primary_user_ensured");
+  }
   const foreignRecipeUserIds = new Map(
     foreignOwners.map(({ loginMethod }) => [
       loginMethod.recipeUserId.getAsString(),
@@ -687,6 +704,7 @@ export async function reconcileRowndUserWithExistingLoginMethods(
     ]),
   );
   for (const recipeUserId of foreignRecipeUserIds.values()) {
+    if (telemetry) telemetry.stage = "account_linking";
     const linkResult = await AccountLinking.linkAccounts(
       recipeUserId,
       primaryUserId,
@@ -697,6 +715,19 @@ export async function reconcileRowndUserWithExistingLoginMethods(
         `Failed to link migrated login method: ${linkResult.status}`,
       );
     }
+    telemetry?.emit(
+      "transition",
+      "account_link_completed",
+      "success",
+      undefined,
+      {
+        recipeUserId: recipeUserId.getAsString(),
+        recipeId: foreignOwners.find(
+          ({ loginMethod }) =>
+            loginMethod.recipeUserId.getAsString() === recipeUserId.getAsString(),
+        )?.loginMethod.recipeId,
+      },
+    );
   }
   for (const { importMethod, match } of inspections) {
     let recipeUserId: SuperTokensLoginMethod["recipeUserId"];
@@ -718,6 +749,7 @@ export async function reconcileRowndUserWithExistingLoginMethods(
       effectiveImportMethod = verifiedMatchingEmailMethod
         ? { ...importMethod, isVerified: true }
         : importMethod;
+      if (telemetry) telemetry.stage = "login_method_creation";
       ({ recipeUserId } = await createMissingLoginMethod(
         effectiveImportMethod,
         tenantId,
@@ -746,6 +778,7 @@ export async function reconcileRowndUserWithExistingLoginMethods(
           userContext,
         ))
       ) {
+        if (telemetry) telemetry.stage = "account_linking";
         const linkResult = await AccountLinking.linkAccounts(
           recipeUserId,
           primaryUserId,
@@ -764,9 +797,22 @@ export async function reconcileRowndUserWithExistingLoginMethods(
             `Failed to link migrated login method: ${linkResult.status}`,
           );
         }
+        if (linkResult.status === "OK") {
+          telemetry?.emit(
+            "transition",
+            "account_link_completed",
+            "success",
+            undefined,
+            {
+              recipeUserId: recipeUserId.getAsString(),
+              recipeId: currentLoginMethod.recipeId,
+            },
+          );
+        }
       }
     }
 
+    if (telemetry) telemetry.stage = "email_verification";
     if (
       effectiveImportMethod.recipeId === "passwordless" &&
       effectiveImportMethod.email &&
@@ -805,11 +851,13 @@ export async function reconcileRowndUserWithExistingLoginMethods(
     }
   }
   if (!repairUser) {
+    if (telemetry) telemetry.stage = "migration_metadata";
     await UserMetadata.updateUserMetadata(
       primaryUserId,
       stUser.userMetadata,
       userContext,
     );
+    telemetry?.emit("transition", "migration_metadata_written");
   }
 
   return true;
@@ -895,6 +943,10 @@ export async function recordRowndAppVariantForUser(
       },
     },
     operationContext,
+  );
+  migrationTelemetry(operationContext)?.emit(
+    "transition",
+    "app_variant_metadata_written",
   );
 }
 
