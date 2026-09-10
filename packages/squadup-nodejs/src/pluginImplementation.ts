@@ -13,7 +13,11 @@ import type {
   SquadUpTenantContext,
   SquadUpTicketAvailabilityWindow,
 } from "./types";
-import { logDebugMessage } from "./logger";
+import {
+  logSquadUpFailure,
+  SquadUpResponseValidationError,
+  type SquadUpFailureStage,
+} from "./diagnostics";
 import { createEmailCache } from "./email-cache";
 
 type Request = Parameters<PluginRouteHandler["handler"]>[0];
@@ -37,6 +41,8 @@ export function handleListTickets(config: SquadUpPluginNormalisedConfig) {
     );
     if (typeof pageSize !== "number") return pageSize;
     const context = { tenantId: session.getTenantId(), userContext };
+    const startedAt = Date.now();
+    let stage: SquadUpFailureStage = "credential_resolution";
     try {
       const apiKey = config.resolveApiKey
         ? await config.resolveApiKey(context)
@@ -49,6 +55,7 @@ export function handleListTickets(config: SquadUpPluginNormalisedConfig) {
         };
       if (typeof apiKey !== "string" || !apiKey.trim())
         throw new Error("Invalid credentials");
+      stage = "email_lookup";
       const email = await getEmail(context.tenantId, session.getUserId(), () =>
         getEmailFromSession(session, context.userContext),
       );
@@ -58,8 +65,15 @@ export function handleListTickets(config: SquadUpPluginNormalisedConfig) {
           message: "User does not have a supported verified email",
         };
       return listTickets(config, email, apiKey, context, pageSize);
-    } catch {
-      logDebugMessage("Failed to prepare SquadUp ticket request");
+    } catch (error) {
+      logSquadUpFailure(
+        {
+          stage,
+          tenantId: context.tenantId,
+          durationMs: Date.now() - startedAt,
+        },
+        error,
+      );
       return {
         status: "ERROR",
         message: "Failed to prepare SquadUp ticket request",
@@ -93,6 +107,9 @@ export async function listTickets(
   pageSize = config.defaultPageSize,
 ): Promise<ListTicketsResult> {
   let attendees: JSONValue[];
+  const startedAt = Date.now();
+  let stage: SquadUpFailureStage = "upstream_request";
+  let upstreamStatus: number | undefined;
   try {
     const url = new URL("/api/v3/attendees/search", config.baseUrl);
     url.searchParams.set("access_token", apiKey);
@@ -104,15 +121,33 @@ export async function listTickets(
       },
       body: JSON.stringify({ email, page_size: pageSize }),
     });
+    upstreamStatus = response.status;
     if (response.status === 404) return { status: "OK", events: [] };
+    stage = "upstream_http";
     if (!response.ok) throw new Error("Upstream request failed");
+    stage = "response_json";
     const body: unknown = await response.json();
-    if (!isObject(body) || !Array.isArray(body.attendees))
-      throw new Error("Invalid attendees");
+    stage = "response_validation";
+    if (!isObject(body))
+      throw new SquadUpResponseValidationError("response", "object", body);
+    if (!Array.isArray(body.attendees))
+      throw new SquadUpResponseValidationError(
+        "attendees",
+        "array",
+        body.attendees,
+      );
     attendees = body.attendees;
     validateAttendees(attendees);
-  } catch {
-    logDebugMessage("Failed to list SquadUp tickets");
+  } catch (error) {
+    logSquadUpFailure(
+      {
+        stage,
+        tenantId: context.tenantId,
+        durationMs: Date.now() - startedAt,
+        upstreamStatus,
+      },
+      error,
+    );
     return {
       status: "ERROR",
       message: "Failed to list SquadUp tickets",
@@ -128,8 +163,16 @@ export async function listTickets(
         context,
       ),
     };
-  } catch {
-    logDebugMessage("Failed to apply SquadUp ticket visibility policy");
+  } catch (error) {
+    logSquadUpFailure(
+      {
+        stage: "visibility_policy",
+        tenantId: context.tenantId,
+        durationMs: Date.now() - startedAt,
+        upstreamStatus,
+      },
+      error,
+    );
     return {
       status: "ERROR",
       message: "Failed to apply SquadUp ticket visibility policy",
@@ -143,52 +186,35 @@ function isObject(value: unknown): value is JSONObject {
 }
 
 function validateAttendees(attendees: JSONValue[]): void {
-  for (const attendee of attendees) {
-    if (
-      !isObject(attendee) ||
-      !isObject(attendee.event) ||
-      !Array.isArray(attendee.attendee_guests)
-    )
-      throw new Error("Invalid attendee");
-    const event = attendee.event;
-    if (
-      !optionalString(event.start_at) ||
-      ![event.id, event.name, event.end_at, event.location_type].every(
-        (value) => typeof value === "string",
-      ) ||
-      !isObject(event.image) ||
-      ![event.image.thumbnail_url, event.image.default_url].every(
-        nullableString,
-      ) ||
-      !isObject(event.location) ||
-      typeof event.location.name !== "string" ||
-      typeof event.location.address_line_1 !== "string"
-    )
-      throw new Error("Invalid event");
-    for (const guest of attendee.attendee_guests) {
-      if (!isObject(guest) || !isObject(guest.ticket))
-        throw new Error("Invalid ticket");
-      const ticket = guest.ticket;
-      if (
-        typeof ticket.id !== "string" ||
-        typeof ticket.type !== "string" ||
-        !optionalString(ticket.pdf_url) ||
-        !optionalString(ticket.qrcode_str) ||
-        (ticket.event !== undefined &&
-          ticket.event !== null &&
-          (!isObject(ticket.event) || !optionalString(ticket.event.start_at)))
-      )
-        throw new Error("Invalid ticket fields");
+  for (const [index, attendee] of attendees.entries()) {
+    const path = `attendees[${index}]`;
+    if (!isObject(attendee))
+      throw new SquadUpResponseValidationError(path, "object", attendee);
+    if (!isObject(attendee.event))
+      throw new SquadUpResponseValidationError(
+        `${path}.event`,
+        "object",
+        attendee.event,
+      );
+    if (!Array.isArray(attendee.attendee_guests))
+      throw new SquadUpResponseValidationError(
+        `${path}.attendee_guests`,
+        "array",
+        attendee.attendee_guests,
+      );
+    for (const [guestIndex, guest] of attendee.attendee_guests.entries()) {
+      const guestPath = `${path}.attendee_guests[${guestIndex}]`;
+      if (!isObject(guest))
+        throw new SquadUpResponseValidationError(guestPath, "object", guest);
+      if (!isObject(guest.ticket))
+        throw new SquadUpResponseValidationError(
+          `${guestPath}.ticket`,
+          "object",
+          guest.ticket,
+        );
     }
   }
 }
-function nullableString(value: unknown) {
-  return value === null || typeof value === "string";
-}
-function optionalString(value: unknown) {
-  return value === undefined || nullableString(value);
-}
-
 function parseEventStart(value: JSONValue | undefined): number {
   if (typeof value !== "string") return NaN;
   const match =

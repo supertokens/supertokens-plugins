@@ -100,7 +100,49 @@ normalized impossible dates, and the unknown offset `-00:00` are rejected.
 Fractional seconds are supported beyond millisecond precision; visibility rounds
 up to the next millisecond when necessary so truncation cannot reveal tickets early.
 
+### Debugging failures
+
+For a local test with a real token from SSM, build the plugin and run from this package:
+
+```sh
+npm run build
+node scripts/diagnose.cjs --tenant <tenantId> --email <email> --profile st-admin
+```
+
+Pass `--token '<token>'` to supply a token directly and skip AWS entirely. This does
+not update SSM. A literal token can appear in shell history and process arguments.
+
+The runner reads `/managed-backend-api/production/tenants/<tenantId>/squadup-token`
+from SSM in `us-east-2` (override with `--environment` and `--region`). It needs the
+AWS CLI and an authenticated profile with SSM/KMS read access. It uses a local
+session/email fixture and makes a real SquadUp request through the built plugin;
+it does not test SuperTokens authentication or the ECS task role. Normal output includes
+HTTP status, event count, and safe plugin failure diagnostics. The local runner prints
+raw setup errors and their causes for troubleshooting; redact sensitive values before
+sharing those errors. Successful response bodies and supplied tokens are not printed.
+
+Set `enableDebugLogs: true` to write failure diagnostics to stderr. Each failure includes
+`tenantId`, `stage`, and `durationMs`, plus `upstreamStatus` when a response was received.
+Validation failures include the first failing schema `field`, `expectedType`, and
+`actualType`; network failures include an allowlisted `transportCode` when available.
+Stages distinguish credential resolution, email lookup, upstream transport/HTTP, JSON
+parsing, response validation, and visibility-policy failures. No request/response
+bodies, email addresses, URLs, QR codes, raw exception messages, or user context are logged.
+HTTP 404 remains a successful empty list and is not logged as a failure.
+
+Example: `{"stage":"response_validation","tenantId":"tenant-a","durationMs":150,"upstreamStatus":200,"field":"attendees[0].attendee_guests","expectedType":"array","actualType":"object"}`.
+
+These are stderr debug logs, not OpenTelemetry spans. Consumers must collect stderr
+to see them; the existing public API error responses remain sanitized.
+
 ### Responses
+
+Event and ticket metadata passes through as returned by SquadUp: no required IDs,
+names, types, images, or locations, and no field-type enforcement or ID conversion.
+Unknown fields and null values are preserved. The plugin only checks the objects
+and arrays it traverses: `attendees`, each attendee's `event` and `attendee_guests`,
+and each guest's `ticket`. It assembles event `tickets` arrays and applies the
+configured QR/PDF visibility policy; unknown dates hide QR/PDF without rejecting metadata.
 
 | HTTP | Meaning                                                                         |
 | ---- | ------------------------------------------------------------------------------- |
@@ -116,4 +158,4 @@ SquadUp HTTP 404 means no tickets exist for the email and returns HTTP 200 with
 
 Error responses contain `status` and a sanitized `message`. Successful upstream responses
 must contain an attendees array with event and guest/ticket objects. Fields used
-by the plugin and required response metadata are validated before mapping.
+for traversal are checked before mapping; metadata fields are not validated.
