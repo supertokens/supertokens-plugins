@@ -11,6 +11,8 @@
   ],
   "scripts": {
     "build": "tsup",
+    "prepack": "npm run build && node scripts/verify-package.cjs",
+    "test:package": "node scripts/verify-package.cjs",
     "lint": "eslint ./src --ext .ts",
     "test": "TEST_MODE=testing vitest run --pool=forks"
   },
