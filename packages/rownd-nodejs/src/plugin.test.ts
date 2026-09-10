@@ -3981,16 +3981,31 @@ describe("rownd-nodejs plugin", () => {
           .mockResolvedValue({ status: "OK", wasAlreadyAssociated: false });
         const createNewSession = vi
           .spyOn(Session, "createNewSession")
-          .mockResolvedValue({} as any);
+          .mockResolvedValue({
+            getUserId: () => rowndUserId,
+            getRecipeUserId: () => recipeUserId,
+            getTenantId: () => tenantId,
+          } as any);
         vi.spyOn(UserMetadata, "getUserMetadata").mockResolvedValue({
           status: "OK",
           metadata: { rownd_migration_complete: true },
+        });
+        vi.spyOn(UserMetadata, "updateUserMetadata").mockResolvedValue({
+          status: "OK",
+          metadata: { rownd_migration_target: rowndUserId },
         });
         vi.spyOn(SuperTokens, "getUser").mockResolvedValue({
           id: rowndUserId,
           tenantIds: [],
           loginMethods: [
-            { recipeUserId, tenantIds: [] },
+            {
+              recipeId: "thirdparty",
+              recipeUserId,
+              tenantIds: [],
+              thirdParty: { id: "google", userId: "migration-google-user" },
+              hasSameThirdPartyInfoAs: ({ id, userId }: { id: string; userId: string }) =>
+                id === "google" && userId === "migration-google-user",
+            },
             { recipeUserId: secondRecipeUserId, tenantIds: [] },
           ],
         } as any);
@@ -4006,6 +4021,7 @@ describe("rownd-nodejs plugin", () => {
           auth_level: "verified",
           data: {
             user_id: rowndUserId,
+            google_id: "migration-google-user",
           },
           verified_data: {},
         });
@@ -4047,7 +4063,7 @@ describe("rownd-nodejs plugin", () => {
         expect(associateUserToTenant).toHaveBeenCalledTimes(2);
         expect(createNewSession).toHaveBeenCalledWith(
           req,
-          res,
+          expect.objectContaining({ setHeader: expect.any(Function) }),
           tenantId,
           recipeUserId,
           {},

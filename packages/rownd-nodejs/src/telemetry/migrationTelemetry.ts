@@ -10,6 +10,8 @@ export class MigrationTelemetry {
   private stageStartedAt = this.startedAt;
   tenantId?: string;
   rowndUserId?: string;
+  canonicalRowndUserId?: string;
+  conflictingRowndUserId?: string;
   superTokensUserId?: string;
   recipeId?: string;
   recipeUserId?: string;
@@ -44,6 +46,8 @@ export class MigrationTelemetry {
       stage: this.stage,
       tenantId: this.tenantId,
       rowndUserId: this.rowndUserId,
+      canonicalRowndUserId: this.canonicalRowndUserId,
+      conflictingRowndUserId: this.conflictingRowndUserId,
       superTokensUserId: this.superTokensUserId,
       recipeId: this.recipeId,
       recipeUserId: this.recipeUserId,

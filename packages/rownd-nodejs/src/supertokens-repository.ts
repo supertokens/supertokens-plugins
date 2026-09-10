@@ -1,5 +1,11 @@
 import SuperTokens from "supertokens-node";
 import { migrationTelemetry } from "./telemetry/migrationTelemetry";
+import {
+  assertMigrationMapping,
+  assertMigrationSourceActive,
+  getMigrationTarget,
+  retireDuplicateMapping,
+} from "./migration-mapping";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
 import EmailVerification from "supertokens-node/recipe/emailverification";
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
@@ -48,6 +54,7 @@ import {
   type RowndPendingVerification,
   getCombinedUserMetadata,
   getRawUserMetadata,
+  mergeMissingValues,
   inspectLinkedUserMetadata,
   updatePrimaryUserMetadata,
 } from "./rownd-compatibility";
@@ -518,11 +525,12 @@ export async function createRowndUserIdMapping(
   superTokensUserId: string,
   rowndUserId: string,
   userContext: JsonRecord,
+  force = false,
 ) {
   const result = await SuperTokens.createUserIdMapping({
     superTokensUserId,
     externalUserId: rowndUserId,
-    force: false,
+    force,
     userContext,
   });
   if (result.status === "USER_ID_MAPPING_ALREADY_EXISTS_ERROR") {
@@ -552,22 +560,80 @@ export async function reconcileRowndUserWithExistingLoginMethods(
   userContext: JsonRecord,
   options?: { repairUser: SuperTokensUser },
 ) {
+  let lastError: unknown;
+  const targetBinding: { internalUserId?: string; retryMapping?: boolean } = {};
+  for (let attempt = 0; attempt < 3; attempt++) {
+    clearSuperTokensCoreCallCache(userContext);
+    try {
+      return await reconcileRowndUserOnce(
+        stUser, tenantId, userContext, targetBinding, options,
+      );
+    } catch (error) {
+      lastError = error;
+      if (!targetBinding.retryMapping) throw error;
+    }
+  }
+  throw lastError;
+}
+
+async function reconcileRowndUserOnce(
+  stUser: SuperTokensUserImport,
+  tenantId: string,
+  userContext: JsonRecord,
+  targetBinding: { internalUserId?: string; retryMapping?: boolean },
+  options?: { repairUser: SuperTokensUser },
+) {
   if (!stUser.externalUserId) {
     throw new Error("Migrated Rownd user has no external user ID");
   }
+  targetBinding.retryMapping = false;
 
-  const repairUser = options?.repairUser;
-  // Completed migrations only need missing passwordless methods; existing state is authoritative.
-  const importMethods = repairUser
-    ? stUser.loginMethods.filter(
-      (method) =>
-        method.recipeId === "passwordless" &&
-          !repairUser.loginMethods.some((existing) =>
-            matchesImportLoginMethod(existing, method),
-          ),
-    )
-    : stUser.loginMethods;
+  const requestedMetadata = await assertMigrationSourceActive(
+    stUser.externalUserId, userContext,
+  );
+  const externalMapping = await SuperTokens.getUserIdMapping({
+    userId: stUser.externalUserId,
+    userIdType: "EXTERNAL",
+    userContext,
+  });
+  const pinnedId = externalMapping.status === "OK"
+    ? externalMapping.superTokensUserId
+    : getMigrationTarget(requestedMetadata);
+  const mappedUser = await SuperTokens.getUser(
+    pinnedId ?? stUser.externalUserId, userContext,
+  );
+  const currentUser = mappedUser ?? options?.repairUser;
+  const repairMetadata = currentUser
+    ? await getUserMetadata(currentUser.id, userContext)
+    : undefined;
+  const originalRowndUserId = repairMetadata?.original_rownd_user?.data?.user_id;
+  if (mappedUser && pinnedId === undefined && originalRowndUserId !== stUser.externalUserId &&
+      !mappedUser.loginMethods.some((method) => stUser.loginMethods.some(
+        (expected) => matchesImportLoginMethod(method, expected),
+      ))) {
+    throw new Error("Rownd user ID collides with an unrelated internal account");
+  }
+  const repairUser = currentUser &&
+    (options?.repairUser || repairMetadata?.rownd_migration_complete === true) &&
+    (originalRowndUserId === undefined || originalRowndUserId === stUser.externalUserId)
+    ? currentUser : undefined;
+  const canonicalEmailId = repairMetadata
+    ? getCanonicalEmailRecipeUserId(repairMetadata, tenantId)
+    : undefined;
+  // Native contact changes and existing provider replacements remain authoritative.
+  // Completion is not permission to skip newly added provider identities.
+  const importMethods = stUser.loginMethods.filter(
+    (method) =>
+      !(method.recipeId === "passwordless" && method.email && canonicalEmailId) &&
+        !repairUser?.loginMethods.some((existing) =>
+          matchesImportLoginMethod(existing, method) ||
+          (method.recipeId === "thirdparty" &&
+            existing.thirdParty?.id === method.thirdPartyId),
+        ),
+  );
   if (repairUser && importMethods.length === 0) {
+    const internalId = await resolveSuperTokensUserId(repairUser.id, userContext);
+    await assertMigrationMapping(internalId, stUser.externalUserId, userContext);
     return true;
   }
 
@@ -590,7 +656,7 @@ export async function reconcileRowndUserWithExistingLoginMethods(
   const matches = inspections.flatMap(({ reconciliationMatch }) =>
     reconciliationMatch ? [reconciliationMatch] : [],
   );
-  if (!repairUser && matches.length === 0) {
+  if (!mappedUser && !repairUser && matches.length === 0) {
     if (inspections.some(({ owners }) => owners.length > 0)) {
       throw new Error(
         "Migrated account information is reserved by an existing SuperTokens user and cannot be safely reconciled",
@@ -602,13 +668,35 @@ export async function reconcileRowndUserWithExistingLoginMethods(
   const thirdPartyMatches = inspections.flatMap(({ importMethod, match }) =>
     importMethod.recipeId === "thirdparty" && match ? [match] : [],
   );
-  const target = repairUser
-    ? { user: repairUser, loginMethod: repairUser.loginMethods[0] }
+  const preferredUser = mappedUser ?? repairUser;
+  const target = preferredUser
+    ? { user: preferredUser, loginMethod: preferredUser.loginMethods[0] }
     : thirdPartyMatches[0] ?? matches[0]!;
   if (!target.loginMethod) {
     throw new Error("Migrated user has no login methods");
   }
   const targetSuperTokensUserId = await resolveUserId(target.user.id);
+  if (targetBinding.internalUserId !== undefined &&
+      targetBinding.internalUserId !== targetSuperTokensUserId) {
+    throw new Error(
+      "Failed to map migrated Rownd user ID: the reconciliation target changed",
+    );
+  }
+  targetBinding.internalUserId = targetSuperTokensUserId;
+  // SDK recipe IDs may also be externalized. Pin internal recipe IDs before any
+  // mapping is removed, otherwise an old B snapshot becomes an unknown user ID.
+  const inspectedMethods = [target.loginMethod, ...inspections.flatMap(
+    ({ owners }) => owners.map(({ loginMethod }) => loginMethod),
+  )];
+  const internalRecipeUserIds = new Map(await Promise.all(
+    inspectedMethods.map(async (method) => [
+      method.recipeUserId.getAsString(),
+      SuperTokens.convertToRecipeUserId(
+        await resolveUserId(method.recipeUserId.getAsString()),
+      ),
+    ] as const),
+  ),
+  );
   const inspectedOwners = await Promise.all(
     inspections.flatMap(({ importMethod, owners }) =>
       owners.map(async ({ user, loginMethod }) => ({
@@ -622,6 +710,11 @@ export async function reconcileRowndUserWithExistingLoginMethods(
   const foreignOwners = inspectedOwners.filter(
     ({ superTokensUserId }) => superTokensUserId !== targetSuperTokensUserId,
   );
+  const isExactProviderOwner = (
+    { importMethod, loginMethod, user }: typeof foreignOwners[number],
+  ) =>
+    importMethod.recipeId === "thirdparty" &&
+    matchesImportLoginMethod(loginMethod, importMethod) && !user.isPrimaryUser;
   const canLinkVerifiedEmailOwners =
     (thirdPartyMatches.length > 0 ||
       repairUser?.loginMethods.some(
@@ -632,29 +725,41 @@ export async function reconcileRowndUserWithExistingLoginMethods(
     inspectedOwners
       .filter(({ importMethod }) => importMethod.recipeId === "thirdparty")
       .every(
-        ({ superTokensUserId }) =>
-          superTokensUserId === targetSuperTokensUserId,
-      ) &&
-    foreignOwners.every(
-      ({ importMethod, loginMethod, user }) =>
-        importMethod.recipeId === "passwordless" &&
-        importMethod.email !== undefined &&
-        importMethod.isVerified &&
-        loginMethod.recipeId === "passwordless" &&
-        loginMethod.hasSameEmailAs(importMethod.email) &&
-        !user.isPrimaryUser,
-    );
-  if (foreignOwners.length > 0 && !canLinkVerifiedEmailOwners) {
+        (owner) =>
+          owner.superTokensUserId === targetSuperTokensUserId ||
+          isExactProviderOwner(owner),
+      );
+  const canLinkForeignOwners = foreignOwners.every(
+    (owner) => isExactProviderOwner(owner) || (
+      canLinkVerifiedEmailOwners &&
+      owner.importMethod.recipeId === "passwordless" &&
+      owner.importMethod.email !== undefined &&
+      owner.importMethod.isVerified &&
+      owner.loginMethod.recipeId === "passwordless" &&
+      owner.loginMethod.hasSameEmailAs(owner.importMethod.email) &&
+      !owner.user.isPrimaryUser
+    ),
+  );
+  if (!canLinkForeignOwners) {
     throw new Error(
       "A migrated login method belongs to a different SuperTokens user",
     );
   }
   for (const foreignOwner of foreignOwners) {
+    targetBinding.retryMapping = true;
+    await retireDuplicateMapping({
+      source: stUser,
+      ownerInternalId: foreignOwner.superTokensUserId,
+      targetInternalId: targetSuperTokensUserId,
+      tenantId,
+      userContext,
+    });
     await assertUserIsNotMappedToAnotherRowndUser(
       foreignOwner.superTokensUserId,
       stUser.externalUserId,
       userContext,
     );
+    targetBinding.retryMapping = false;
   }
   const unsupportedMethod = inspections.find(
     ({ importMethod, match }) =>
@@ -672,6 +777,14 @@ export async function reconcileRowndUserWithExistingLoginMethods(
     telemetry.stage = "id_mapping";
   }
   if (!mappingAlreadyExists) {
+    targetBinding.retryMapping = true;
+    await retireDuplicateMapping({
+      source: stUser,
+      ownerInternalId: targetSuperTokensUserId,
+      targetInternalId: targetSuperTokensUserId,
+      tenantId,
+      userContext,
+    });
     clearSuperTokensCoreCallCache(userContext);
     mappingAlreadyExists = await assertRowndUserIdCanBeMapped(
       targetSuperTokensUserId,
@@ -683,34 +796,47 @@ export async function reconcileRowndUserWithExistingLoginMethods(
         targetSuperTokensUserId,
         stUser.externalUserId,
         userContext,
+        getMigrationTarget(await getRawUserMetadata(stUser.externalUserId, userContext)) === targetSuperTokensUserId,
       );
       telemetry?.emit("transition", "id_mapping_completed");
     }
   }
+  targetBinding.retryMapping = false;
+  await assertMigrationMapping(
+    targetSuperTokensUserId, stUser.externalUserId, userContext,
+  );
   if (telemetry) telemetry.stage = "primary_user";
   const primaryUserId = await ensurePrimaryUser(
     target.user,
-    target.loginMethod.recipeUserId,
+    internalRecipeUserIds.get(target.loginMethod.recipeUserId.getAsString())!,
     targetSuperTokensUserId,
     userContext,
   );
   if (!target.user.isPrimaryUser) {
     telemetry?.emit("transition", "primary_user_ensured");
   }
-  const foreignRecipeUserIds = new Map(
+  const foreignRecipeUsers = new Map(
     foreignOwners.map(({ loginMethod }) => [
-      loginMethod.recipeUserId.getAsString(),
-      loginMethod.recipeUserId,
+      internalRecipeUserIds.get(loginMethod.recipeUserId.getAsString())!.getAsString(),
+      {
+        recipeUserId: internalRecipeUserIds.get(loginMethod.recipeUserId.getAsString())!,
+        recipeId: loginMethod.recipeId,
+      },
     ]),
   );
-  for (const recipeUserId of foreignRecipeUserIds.values()) {
+  for (const { recipeUserId, recipeId } of foreignRecipeUsers.values()) {
     if (telemetry) telemetry.stage = "account_linking";
+    await assertMigrationMapping(primaryUserId, stUser.externalUserId, userContext);
+    await assertUserIsNotMappedToAnotherRowndUser(recipeUserId.getAsString(), stUser.externalUserId, userContext);
     const linkResult = await AccountLinking.linkAccounts(
       recipeUserId,
       primaryUserId,
       userContext,
     );
-    if (linkResult.status !== "OK") {
+    clearSuperTokensCoreCallCache(userContext);
+    const freshOwner = await SuperTokens.getUser(recipeUserId.getAsString(), userContext);
+    const linkedToTarget = freshOwner && await sdkUserIdMatchesInternalTarget(freshOwner.id, primaryUserId, userContext);
+    if (!linkedToTarget) {
       throw new Error(
         `Failed to link migrated login method: ${linkResult.status}`,
       );
@@ -722,10 +848,7 @@ export async function reconcileRowndUserWithExistingLoginMethods(
       undefined,
       {
         recipeUserId: recipeUserId.getAsString(),
-        recipeId: foreignOwners.find(
-          ({ loginMethod }) =>
-            loginMethod.recipeUserId.getAsString() === recipeUserId.getAsString(),
-        )?.loginMethod.recipeId,
+        recipeId,
       },
     );
   }
@@ -734,7 +857,7 @@ export async function reconcileRowndUserWithExistingLoginMethods(
     let currentLoginMethod: SuperTokensLoginMethod;
     let effectiveImportMethod: ImportLoginMethod = importMethod;
     if (match) {
-      recipeUserId = match.loginMethod.recipeUserId;
+      recipeUserId = internalRecipeUserIds.get(match.loginMethod.recipeUserId.getAsString())!;
       currentLoginMethod = match.loginMethod;
     } else {
       const verifiedMatchingEmailMethod =
@@ -852,12 +975,25 @@ export async function reconcileRowndUserWithExistingLoginMethods(
   }
   if (!repairUser) {
     if (telemetry) telemetry.stage = "migration_metadata";
+    const currentMetadata = await getRawUserMetadata(primaryUserId, userContext);
     await UserMetadata.updateUserMetadata(
       primaryUserId,
-      stUser.userMetadata,
+      {
+        ...mergeMissingValues(currentMetadata, stUser.userMetadata),
+        original_rownd_user: stUser.userMetadata.original_rownd_user,
+        rownd_migration_complete: true,
+      },
       userContext,
     );
     telemetry?.emit("transition", "migration_metadata_written");
+  }
+
+  await assertMigrationMapping(primaryUserId, stUser.externalUserId, userContext);
+  const finalUser = await SuperTokens.getUser(primaryUserId, userContext);
+  if (!finalUser || !(await sdkUserIdMatchesInternalTarget(finalUser.id, primaryUserId, userContext)) ||
+      importMethods.some((method) => !finalUser.loginMethods.some((existing) =>
+        existing.tenantIds.includes(tenantId) && matchesImportLoginMethod(existing, method)))) {
+    throw new Error("Migrated login method postcondition failed");
   }
 
   return true;

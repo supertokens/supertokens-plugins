@@ -1,9 +1,11 @@
 import { randomUUID } from "crypto";
 import { MigrationTelemetry } from "./telemetry/migrationTelemetry";
+import { assertMigrationMapping, assertMigrationSourceActive } from "./migration-mapping";
 import SuperTokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
+import UserMetadata from "supertokens-node/recipe/usermetadata";
 import type {
   PluginRouteHandler,
   SuperTokensPublicConfig,
@@ -322,7 +324,11 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
       telemetry.stage = "token_validation";
       rowndUserId = await validateRowndToken(parsed.token);
+      if (typeof rowndUserId !== "string" || !rowndUserId.trim()) {
+        throw new Error("Validated Rownd token has no user ID");
+      }
       telemetry.rowndUserId = rowndUserId;
+      await assertMigrationSourceActive(rowndUserId, resolved.userContext);
       telemetry.stage = "rownd_lookup";
       const rowndUser = await fetchOptionalRowndUserInfo(rowndUserId);
 
@@ -332,6 +338,9 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
           `Skipping migration because user does not exist in Rownd. tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,
         );
         return { status: "OK" as const };
+      }
+      if (rowndUser.data?.user_id !== rowndUserId) {
+        throw new Error("Rownd profile does not match the validated token user ID");
       }
 
       telemetry.stage = "supertokens_lookup";
@@ -450,9 +459,38 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       }
 
       telemetry.stage = "session_creation";
-      await Session.createNewSession(
+      const freshSource = await fetchOptionalRowndUserInfo(rowndUserId);
+      if (!freshSource || freshSource.data?.user_id !== rowndUserId ||
+          JSON.stringify(mapRowndUserToSuperTokens(freshSource, tenantId).loginMethods) !==
+          JSON.stringify(mapRowndUserToSuperTokens(rowndUser, tenantId).loginMethods)) {
+        throw new Error("Rownd source identity changed before session creation");
+      }
+      clearSuperTokensCoreCallCache(resolved.userContext);
+      const finalMapping = await SuperTokens.getUserIdMapping({
+        userId: rowndUserId, userIdType: "EXTERNAL", userContext: resolved.userContext,
+      });
+      const internalUserId = finalMapping.status === "OK" ? finalMapping.superTokensUserId : rowndUserId;
+      await assertMigrationMapping(internalUserId, rowndUserId, resolved.userContext);
+      await UserMetadata.updateUserMetadata(rowndUserId, {
+        rownd_migration_canonical_target: internalUserId,
+      }, resolved.userContext);
+      await assertMigrationMapping(internalUserId, rowndUserId, resolved.userContext);
+      // Keep newly issued credentials off the response until the actual session
+      // binding has been checked. Existing browser credentials are never cleared.
+      const responseWrites: Array<() => void> = [];
+      const sessionResponse: SuperTokensResponse = Object.create(res);
+      sessionResponse.setHeader = (...args) => {
+        responseWrites.push(() => res.setHeader(...args));
+      };
+      sessionResponse.removeHeader = (...args) => {
+        responseWrites.push(() => res.removeHeader(...args));
+      };
+      sessionResponse.setCookie = (...args) => {
+        responseWrites.push(() => res.setCookie(...args));
+      };
+      const createdSession = await Session.createNewSession(
         req,
-        res,
+        sessionResponse,
         tenantId,
         recipeUserId,
         {
@@ -461,8 +499,22 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         {},
         resolved.userContext,
       );
+      try {
+        if (createdSession.getUserId(resolved.userContext) !== rowndUserId ||
+            createdSession.getRecipeUserId(resolved.userContext).getAsString() !== recipeUserId.getAsString() ||
+            createdSession.getTenantId(resolved.userContext) !== tenantId) {
+          telemetry.canonicalRowndUserId = createdSession.getUserId(resolved.userContext);
+          throw new Error("Created session does not match the requested Rownd identity");
+        }
+        await assertMigrationMapping(internalUserId, rowndUserId, resolved.userContext);
+      } catch (error) {
+        await Promise.allSettled([Session.revokeSession(createdSession.getHandle(resolved.userContext), resolved.userContext)]);
+        throw error;
+      }
+      for (const write of responseWrites) write();
 
       telemetry.sessionCreated = true;
+      telemetry.canonicalRowndUserId = rowndUserId;
       telemetry.emit("terminal", "session_created");
 
       return { status: "OK" as const };

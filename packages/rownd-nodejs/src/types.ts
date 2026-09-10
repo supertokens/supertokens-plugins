@@ -751,6 +751,8 @@ export type RowndClientDomains = {
 } & Record<string, string>;
 
 export interface RowndMigrationTelemetryDetails {
+  canonicalRowndUserId?: string;
+  conflictingRowndUserId?: string;
   requestId?: string;
   eventType?: "terminal" | "transition";
   result?: "success" | "skipped" | "error";

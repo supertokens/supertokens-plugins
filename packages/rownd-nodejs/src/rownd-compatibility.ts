@@ -82,9 +82,17 @@ const INTERNAL_METADATA_FIELDS = new Set([
   "rownd_email_recipe_user_ids",
   "rownd_migration_complete",
   "rownd_pending_verification",
+  "rownd_migration_superseded",
+  "rownd_migration_target",
+  "rownd_migration_canonical_target",
+  "rownd_migration_reconciliation",
 ]);
 
 const LINKED_OPERATIONAL_METADATA_FIELDS = new Set([
+  "rownd_migration_superseded",
+  "rownd_migration_target",
+  "rownd_migration_canonical_target",
+  "rownd_migration_reconciliation",
   "rownd_email_recipe_user_id",
   "rownd_email_recipe_user_ids",
   "rownd_migration_complete",
@@ -111,7 +119,7 @@ function getOriginalRowndUserId(metadata: { original_rownd_user?: JsonValue }) {
     : undefined;
 }
 
-function mergeMissingValues(primary: JsonRecord, secondary: JsonRecord) {
+export function mergeMissingValues(primary: JsonRecord, secondary: JsonRecord) {
   const merged: JsonRecord = { ...primary };
 
   for (const [key, secondaryValue] of Object.entries(secondary)) {
@@ -364,23 +372,27 @@ export function mapRowndUserToSuperTokens(
     throw new Error("Rownd user has no user_id");
   }
 
-  if (rowndUserData.google_id) {
+  const googleId = rowndUserData.google_id ||
+    (typeof rowndUserVerifiedData.google_id === "string" ? rowndUserVerifiedData.google_id : undefined);
+  const appleId = rowndUserData.apple_id ||
+    (typeof rowndUserVerifiedData.apple_id === "string" ? rowndUserVerifiedData.apple_id : undefined);
+  if (googleId) {
     loginMethods.push({
       recipeId: "thirdparty",
       thirdPartyId: "google",
-      thirdPartyUserId: rowndUserData.google_id,
-      email: buildSuperTokensFakeEmail(rowndUserData.google_id, "google"),
+      thirdPartyUserId: googleId,
+      email: buildSuperTokensFakeEmail(googleId, "google"),
       isVerified: false,
       ...(tenantId ? { tenantIds: [tenantId] } : {}),
     });
   }
 
-  if (rowndUserData.apple_id) {
+  if (appleId) {
     loginMethods.push({
       recipeId: "thirdparty",
       thirdPartyId: "apple",
-      thirdPartyUserId: rowndUserData.apple_id,
-      email: buildSuperTokensFakeEmail(rowndUserData.apple_id, "apple"),
+      thirdPartyUserId: appleId,
+      email: buildSuperTokensFakeEmail(appleId, "apple"),
       isVerified: false,
       ...(tenantId ? { tenantIds: [tenantId] } : {}),
     });
@@ -440,7 +452,8 @@ export function mapRowndUserToSuperTokens(
 
 export function buildRowndUserMetadata(rowndUser: RowndUser): JSONObject {
   const metadata: JsonRecord = {
-    ...((rowndUser.meta || {}) as JsonRecord),
+    ...Object.fromEntries(Object.entries((rowndUser.meta || {}) as JsonRecord)
+      .filter(([key]) => !isInternalMetadataField(key))),
     original_rownd_user: rowndUser as unknown as JsonValue,
     rownd_migration_complete: true,
   };
