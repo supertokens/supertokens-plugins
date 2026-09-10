@@ -101,6 +101,10 @@ export async function listTickets(
       }),
     });
 
+    if (!response.ok) {
+      throw new Error(`SquadUp request failed with status ${response.status}`);
+    }
+
     const body = (await response.json()) as { attendees?: SquadUpAttendee[] };
 
     return {
@@ -115,9 +119,8 @@ export async function listTickets(
       `Failed to list SquadUp tickets: ${(err as Error).message}`,
     );
     return {
-      status: "ERROR",
-      message: "Failed to list SquadUp tickets",
-      code: 502,
+      status: "OK",
+      events: [],
     };
   }
 }

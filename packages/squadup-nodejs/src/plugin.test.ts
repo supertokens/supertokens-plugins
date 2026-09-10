@@ -142,17 +142,32 @@ describe("squadup-nodejs plugin", () => {
     });
   });
 
-  it("returns ERROR for non-404 SquadUp failures", async () => {
+  it("returns no events for SquadUp HTTP failures", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(new Response("", { status: 500 })),
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ message: "Internal server error" }), {
+          status: 500,
+        }),
+      ),
     );
 
     await expect(
       listTickets(baseConfig, "error@example.com"),
-    ).resolves.toMatchObject({
-      status: "ERROR",
-      message: "Failed to list SquadUp tickets",
+    ).resolves.toEqual({
+      status: "OK",
+      events: [],
+    });
+  });
+
+  it("returns no events when the SquadUp request fails", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("Network error")));
+
+    await expect(
+      listTickets(baseConfig, "error@example.com"),
+    ).resolves.toEqual({
+      status: "OK",
+      events: [],
     });
   });
 
