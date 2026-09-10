@@ -39,6 +39,7 @@ import {
   resolvePluginConfigSnapshot,
 } from "./config";
 import type { SuperTokensUserImport } from "./types";
+import { fetchOptionalRowndUserInfo } from "./rownd-repository";
 import {
   buildRowndSessionClaimPayload,
   getEffectiveAuthLevel,
@@ -49,6 +50,7 @@ import {
   isInternalMetadataField,
   isSuperTokensFakeEmail,
   mapMethod,
+  mapRowndUserToSuperTokens,
   type RowndCompatUserResponse,
   type RowndMetadata,
   type RowndPendingVerification,
@@ -715,7 +717,18 @@ async function reconcileRowndUserOnce(
   ) =>
     importMethod.recipeId === "thirdparty" &&
     matchesImportLoginMethod(loginMethod, importMethod) && !user.isPrimaryUser;
-  const canLinkVerifiedEmailOwners =
+  const isExactPhoneOwner = (
+    { importMethod, loginMethod, user }: typeof foreignOwners[number],
+  ) =>
+    preferredUser !== undefined &&
+    preferredUser.loginMethods.some((method) => method.tenantIds.includes(tenantId)) &&
+    importMethod.recipeId === "passwordless" &&
+    importMethod.email === undefined &&
+    importMethod.phoneNumber !== undefined &&
+    matchesImportLoginMethod(loginMethod, importMethod) &&
+    loginMethod.tenantIds.includes(tenantId) &&
+    !user.isPrimaryUser && user.loginMethods.length === 1;
+  const canLinkProviderEmailOwners =
     (thirdPartyMatches.length > 0 ||
       repairUser?.loginMethods.some(
         (method) =>
@@ -729,21 +742,60 @@ async function reconcileRowndUserOnce(
           owner.superTokensUserId === targetSuperTokensUserId ||
           isExactProviderOwner(owner),
       );
+  const canonicalPhoneAnchor = preferredUser?.loginMethods.find(
+    (method) => method.recipeId === "passwordless" &&
+      method.phoneNumber !== undefined && method.tenantIds.includes(tenantId) &&
+      stUser.loginMethods.some((expected) =>
+        expected.recipeId === "passwordless" && expected.email === undefined &&
+        matchesImportLoginMethod(method, expected)),
+  );
+  const isExactVerifiedEmailOwner = (
+    { importMethod, loginMethod, user }: typeof foreignOwners[number],
+  ) =>
+    importMethod.recipeId === "passwordless" &&
+    importMethod.email !== undefined && importMethod.isVerified &&
+    loginMethod.recipeId === "passwordless" &&
+    loginMethod.hasSameEmailAs(importMethod.email) && !user.isPrimaryUser;
   const canLinkForeignOwners = foreignOwners.every(
-    (owner) => isExactProviderOwner(owner) || (
-      canLinkVerifiedEmailOwners &&
-      owner.importMethod.recipeId === "passwordless" &&
-      owner.importMethod.email !== undefined &&
-      owner.importMethod.isVerified &&
-      owner.loginMethod.recipeId === "passwordless" &&
-      owner.loginMethod.hasSameEmailAs(owner.importMethod.email) &&
-      !owner.user.isPrimaryUser
+    (owner) => isExactProviderOwner(owner) || isExactPhoneOwner(owner) || (
+      (canLinkProviderEmailOwners || canonicalPhoneAnchor !== undefined) &&
+      isExactVerifiedEmailOwner(owner)
     ),
   );
   if (!canLinkForeignOwners) {
     throw new Error(
       "A migrated login method belongs to a different SuperTokens user",
     );
+  }
+  const phoneOwners = foreignOwners.filter(isExactPhoneOwner);
+  const phoneAnchoredEmailOwners = canonicalPhoneAnchor && !canLinkProviderEmailOwners
+    ? foreignOwners.filter(isExactVerifiedEmailOwner) : [];
+  const currentProfileOwners = [...phoneOwners, ...phoneAnchoredEmailOwners];
+  if (currentProfileOwners.length > 0) {
+    // Current token-bound profile data authorizes linking; stale verified_data
+    // neither authorizes mapping retirement nor changes stored verification.
+    const freshSource = await fetchOptionalRowndUserInfo(stUser.externalUserId);
+    if (!freshSource || freshSource.data?.user_id !== stUser.externalUserId ||
+        phoneOwners.some(({ importMethod }) =>
+          importMethod.recipeId !== "passwordless" ||
+          freshSource.data.phone_number !== importMethod.phoneNumber)) {
+      throw new Error("Requested Rownd phone identity changed before linking");
+    }
+    if (phoneAnchoredEmailOwners.length > 0) {
+      const freshMethods = mapRowndUserToSuperTokens(freshSource, tenantId).loginMethods;
+      if (freshSource.data.phone_number !== canonicalPhoneAnchor?.phoneNumber ||
+          phoneAnchoredEmailOwners.some(({ loginMethod }) => !freshMethods.some(
+            (method) => method.recipeId === "passwordless" && method.email !== undefined &&
+              method.isVerified && loginMethod.hasSameEmailAs(method.email),
+          ))) {
+        throw new Error("Requested Rownd phone-anchored email identity changed before linking");
+      }
+    }
+    for (const owner of currentProfileOwners) {
+      await assertUserIsNotMappedToAnotherRowndUser(
+        owner.superTokensUserId, stUser.externalUserId, userContext,
+      );
+    }
   }
   for (const foreignOwner of foreignOwners) {
     targetBinding.retryMapping = true;

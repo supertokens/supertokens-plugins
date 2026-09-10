@@ -1,5 +1,5 @@
 import express from "express";
-import { randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import type { Server } from "node:http";
 import {
   afterAll,
@@ -13,6 +13,7 @@ import {
 } from "vitest";
 import SuperTokens from "supertokens-node";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
+import Multitenancy from "supertokens-node/recipe/multitenancy";
 import Passwordless from "supertokens-node/recipe/passwordless";
 import Session from "supertokens-node/recipe/session";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
@@ -1031,6 +1032,278 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
     await expectRejectedMigration(await requestMigration(fixture.tokenB));
     await migrate(fixture.tokenA, fixture.canonicalId);
     await expectCanonicalMapping(fixture.canonicalId, internalId);
+  });
+
+  async function seedPhoneOwner(completed = true, phoneTenantId = "public") {
+    const fixture = duplicateProfiles();
+    const phoneNumber = `+1806${randomInt(1000000, 10000000)}`;
+    const oldPhoneNumber = `+1986${randomInt(1000000, 10000000)}`;
+    const profile = fixture.profiles.get(fixture.canonicalId)!;
+    profile.data.phone_number = phoneNumber;
+    profile.verified_data = { phone_number: oldPhoneNumber };
+    const googleInternalId = await createMappedProvider("google", fixture.googleId, fixture.canonicalId);
+    await AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(googleInternalId));
+    if (completed) {
+      await UserMetadata.updateUserMetadata(googleInternalId, {
+        rownd_migration_complete: true,
+        original_rownd_user: { data: { user_id: fixture.canonicalId, google_id: fixture.googleId } },
+      });
+    }
+    const phone = await Passwordless.signInUp({
+      tenantId: phoneTenantId, phoneNumber,
+      userContext: { rowndDisableAutomaticAccountLinking: true },
+    });
+    const phoneInternalId = phone.recipeUserId.getAsString();
+    await UserMetadata.updateUserMetadata(phoneInternalId, { phonePreference: "keep" });
+    return { ...fixture, phoneNumber, oldPhoneNumber, googleInternalId, phoneInternalId };
+  }
+
+  it.each([
+    { verification: "stale", completed: true },
+    { verification: "missing", completed: true },
+    { verification: "stale", completed: false },
+  ])("links current-profile phone into canonical Google A ($verification verified_data, completed=$completed)", async ({ verification, completed }) => {
+    const fixture = await seedPhoneOwner(completed);
+    if (verification === "missing") delete fixture.profiles.get(fixture.canonicalId)!.verified_data!.phone_number;
+    const googleBefore = (await SuperTokens.getUser(fixture.googleInternalId))!.loginMethods[0]!.toJson();
+    const phoneBefore = (await SuperTokens.getUser(fixture.phoneInternalId))!.loginMethods[0]!.toJson();
+    expect(phoneBefore.verified).toBe(true);
+    const deleteMapping = vi.spyOn(SuperTokens, "deleteUserIdMapping");
+
+    await migrate(fixture.tokenA, fixture.canonicalId);
+
+    await expectCanonicalMapping(fixture.canonicalId, fixture.googleInternalId);
+    const user = await SuperTokens.getUser(fixture.canonicalId);
+    expect(user?.isPrimaryUser).toBe(true);
+    expect(user?.loginMethods.map((method) => method.toJson())).toEqual(expect.arrayContaining([googleBefore, phoneBefore]));
+    expect(user?.loginMethods).toHaveLength(2);
+    await expect(SuperTokens.getUser(fixture.phoneInternalId)).resolves.toMatchObject({ id: fixture.canonicalId });
+    await expect(UserMetadata.getUserMetadata(fixture.phoneInternalId)).resolves.toMatchObject({ metadata: { phonePreference: "keep" } });
+    expect(deleteMapping).not.toHaveBeenCalled();
+    await migrate(fixture.tokenA, fixture.canonicalId);
+    expect((await SuperTokens.getUser(fixture.canonicalId))?.loginMethods).toHaveLength(2);
+  });
+
+  it.each([
+    "foreign primary", "mapped phone", "fresh changed phone", "fresh wrong ID",
+    "fresh absent", "fresh 404", "fresh 500", "fresh timeout",
+  ])("rejects current-profile phone reconciliation before mutation for %s", async (failure) => {
+    const fixture = await seedPhoneOwner();
+    if (failure === "foreign primary") {
+      await AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(fixture.phoneInternalId));
+    } else if (failure === "mapped phone") {
+      await SuperTokens.createUserIdMapping({
+        superTokensUserId: fixture.phoneInternalId, externalUserId: fixture.duplicateId, force: true,
+      });
+      fixture.profiles.get(fixture.duplicateId)!.data.phone_number = fixture.phoneNumber;
+    } else {
+      let sourceReads = 0;
+      mockRowndClient.fetchUserInfo.mockImplementation(async ({ user_id }: { user_id: string }) => {
+        if (user_id !== fixture.canonicalId || ++sourceReads === 1) return fixture.profiles.get(user_id);
+        if (failure === "fresh absent") return undefined;
+        if (failure === "fresh 404") throw rowndHTTPError(404);
+        if (failure === "fresh 500") throw rowndHTTPError(500);
+        if (failure === "fresh timeout") throw new Error("Request timed out");
+        const profile = structuredClone(fixture.profiles.get(user_id)!);
+        if (failure === "fresh wrong ID") profile.data.user_id = fixture.duplicateId;
+        if (failure === "fresh changed phone") profile.data.phone_number = fixture.oldPhoneNumber;
+        return profile;
+      });
+    }
+    const snapshot = () => Promise.all([
+      fixture.googleInternalId, fixture.phoneInternalId, fixture.canonicalId, fixture.duplicateId,
+    ].map(async (id) => ({
+      user: (await SuperTokens.getUser(id))?.toJson(),
+      metadata: await UserMetadata.getUserMetadata(id),
+      mapping: await SuperTokens.getUserIdMapping({ userId: id }),
+    })));
+    const before = await snapshot();
+    const mutations = [
+      vi.spyOn(SuperTokens, "createUserIdMapping"),
+      vi.spyOn(SuperTokens, "deleteUserIdMapping"),
+      vi.spyOn(AccountLinking, "createPrimaryUser"),
+      vi.spyOn(AccountLinking, "linkAccounts"),
+      vi.spyOn(UserMetadata, "updateUserMetadata"),
+      vi.spyOn(Passwordless, "signInUp"),
+    ];
+
+    await expectRejectedMigration(await requestMigration(fixture.tokenA));
+
+    for (const mutation of mutations) expect(mutation).not.toHaveBeenCalled();
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it.each(["old verified phone", "other tenant"])("excludes %s owner from current-profile phone linking", async (excludedOwner) => {
+    const tenantId = excludedOwner === "other tenant" ? `tenant-${randomUUID()}` : "public";
+    if (tenantId !== "public") {
+      await expect(Multitenancy.createOrUpdateTenant(tenantId, { firstFactors: ["otp-phone"] }))
+        .resolves.toMatchObject({ status: "OK" });
+    }
+    const fixture = await seedPhoneOwner(true, tenantId);
+    if (excludedOwner === "old verified phone") {
+      const profile = fixture.profiles.get(fixture.canonicalId)!;
+      profile.data.phone_number = fixture.oldPhoneNumber;
+      profile.verified_data!.phone_number = fixture.phoneNumber;
+    }
+    const ownerBefore = (await SuperTokens.getUser(fixture.phoneInternalId))?.toJson();
+    const linking = vi.spyOn(AccountLinking, "linkAccounts");
+
+    await migrate(fixture.tokenA, fixture.canonicalId);
+
+    expect((await SuperTokens.getUser(fixture.phoneInternalId))?.toJson()).toEqual(ownerBefore);
+    expect(linking.mock.calls.some(([id]) => id.getAsString() === fixture.phoneInternalId)).toBe(false);
+    const user = await SuperTokens.getUser(fixture.canonicalId);
+    expect(user?.loginMethods).toHaveLength(2);
+    expect(user?.loginMethods.find((method) => method.recipeId === "passwordless"))
+      .toMatchObject({ phoneNumber: fixture.profiles.get(fixture.canonicalId)!.data.phone_number, tenantIds: ["public"] });
+  });
+
+  it("reconciles an exact standalone Google provider into canonical phone-only A", async () => {
+    const fixture = duplicateProfiles();
+    const phoneNumber = `+1806${randomInt(1000000, 10000000)}`;
+    fixture.profiles.get(fixture.canonicalId)!.data.phone_number = phoneNumber;
+    const phone = await Passwordless.signInUp({ tenantId: "public", phoneNumber });
+    const phoneInternalId = phone.recipeUserId.getAsString();
+    await SuperTokens.createUserIdMapping({ superTokensUserId: phoneInternalId, externalUserId: fixture.canonicalId });
+    await AccountLinking.createPrimaryUser(phone.recipeUserId);
+    await UserMetadata.updateUserMetadata(phoneInternalId, {
+      rownd_migration_complete: true,
+      original_rownd_user: { data: { user_id: fixture.canonicalId, phone_number: phoneNumber } },
+    });
+    const google = await ThirdParty.manuallyCreateOrUpdateUser(
+      "public", "google", fixture.googleId, `${randomUUID()}@example.com`, true,
+      undefined, { rowndDisableAutomaticAccountLinking: true },
+    );
+    if (google.status !== "OK") throw new Error("Could not seed standalone Google owner");
+    const phoneBefore = (await SuperTokens.getUser(phoneInternalId))!.loginMethods[0]!.toJson();
+    const googleBefore = google.user.loginMethods[0]!.toJson();
+
+    await migrate(fixture.tokenA, fixture.canonicalId);
+
+    await expectCanonicalMapping(fixture.canonicalId, phoneInternalId);
+    const user = await SuperTokens.getUser(fixture.canonicalId);
+    expect(user?.loginMethods.map((method) => method.toJson())).toEqual(expect.arrayContaining([phoneBefore, googleBefore]));
+    expect(user?.loginMethods).toHaveLength(2);
+    await expect(SuperTokens.getUser(google.recipeUserId.getAsString())).resolves.toMatchObject({ id: fixture.canonicalId });
+  });
+
+  async function seedCanonicalPhone(completed = true) {
+    const fixture = duplicateProfiles();
+    const phoneNumber = `+1639${randomInt(1000000, 10000000)}`;
+    const email = `${randomUUID()}@example.com`;
+    const profile = fixture.profiles.get(fixture.canonicalId)!;
+    profile.data = { user_id: fixture.canonicalId, email, phone_number: phoneNumber };
+    profile.verified_data = { email, phone_number: phoneNumber };
+    const phone = await Passwordless.signInUp({ tenantId: "public", phoneNumber });
+    const phoneInternalId = phone.recipeUserId.getAsString();
+    await SuperTokens.createUserIdMapping({ superTokensUserId: phoneInternalId, externalUserId: fixture.canonicalId });
+    if (completed) {
+      await UserMetadata.updateUserMetadata(phoneInternalId, {
+        rownd_migration_complete: true,
+        original_rownd_user: { data: { user_id: fixture.canonicalId, phone_number: phoneNumber } },
+      });
+    }
+    return { ...fixture, phoneInternalId, phoneNumber, email, profile };
+  }
+
+  it.each([true, false])("links verified email B into canonical phone-only A without a provider (completed=%s)", async (completed) => {
+    const fixture = await seedCanonicalPhone(completed);
+    const email = await Passwordless.signInUp({ tenantId: "public", email: fixture.email });
+    const emailInternalId = email.recipeUserId.getAsString();
+    const phoneBefore = (await SuperTokens.getUser(fixture.phoneInternalId))!.loginMethods[0]!.toJson();
+    const emailBefore = email.user.loginMethods[0]!.toJson();
+    expect((await SuperTokens.getUser(fixture.canonicalId))?.isPrimaryUser).toBe(false);
+    const deleteMapping = vi.spyOn(SuperTokens, "deleteUserIdMapping");
+
+    await migrate(fixture.tokenA, fixture.canonicalId);
+
+    await expectCanonicalMapping(fixture.canonicalId, fixture.phoneInternalId);
+    const user = await SuperTokens.getUser(fixture.canonicalId);
+    expect(user?.isPrimaryUser).toBe(true);
+    expect(user?.loginMethods).toHaveLength(2);
+    expect(user?.loginMethods.map((method) => method.toJson())).toEqual(expect.arrayContaining([phoneBefore, emailBefore]));
+    await expect(SuperTokens.getUser(emailInternalId)).resolves.toMatchObject({ id: fixture.canonicalId });
+    expect(deleteMapping).not.toHaveBeenCalled();
+    await migrate(fixture.tokenA, fixture.canonicalId);
+    expect((await SuperTokens.getUser(fixture.canonicalId))?.loginMethods).toHaveLength(2);
+  });
+
+  it("creates an absent verified email method under canonical phone-only A", async () => {
+    const fixture = await seedCanonicalPhone();
+    const phoneBefore = (await SuperTokens.getUser(fixture.phoneInternalId))!.loginMethods[0]!.toJson();
+
+    await migrate(fixture.tokenA, fixture.canonicalId);
+
+    await expectCanonicalMapping(fixture.canonicalId, fixture.phoneInternalId);
+    const user = await SuperTokens.getUser(fixture.canonicalId);
+    expect(user?.loginMethods).toHaveLength(2);
+    expect(user?.loginMethods.map((method) => method.toJson())).toContainEqual(phoneBefore);
+    expect(user?.loginMethods.find((method) => method.email === fixture.email))
+      .toMatchObject({ recipeId: "passwordless", verified: true, tenantIds: ["public"] });
+  });
+
+  it.each([
+    "unverified email", "mismatched phone anchor", "foreign primary", "mapped email",
+    "fresh wrong ID", "fresh changed phone", "fresh changed email", "fresh unverified email", "fresh absent",
+  ])("rejects phone-anchored email linking before mutation for %s", async (failure) => {
+    const fixture = await seedCanonicalPhone();
+    const email = await Passwordless.signInUp({ tenantId: "public", email: fixture.email });
+    const emailInternalId = email.recipeUserId.getAsString();
+    if (failure === "unverified email") delete fixture.profile.verified_data!.email;
+    if (failure === "mismatched phone anchor") fixture.profile.data.phone_number = `+1986${randomInt(1000000, 10000000)}`;
+    if (failure === "foreign primary") await AccountLinking.createPrimaryUser(email.recipeUserId);
+    if (failure === "mapped email") {
+      await SuperTokens.createUserIdMapping({ superTokensUserId: emailInternalId, externalUserId: fixture.duplicateId });
+    }
+    if (failure.startsWith("fresh")) {
+      let sourceReads = 0;
+      mockRowndClient.fetchUserInfo.mockImplementation(async ({ user_id }: { user_id: string }) => {
+        if (user_id !== fixture.canonicalId || ++sourceReads === 1) return fixture.profiles.get(user_id);
+        if (failure === "fresh absent") return undefined;
+        const profile = structuredClone(fixture.profile);
+        if (failure === "fresh wrong ID") profile.data.user_id = fixture.duplicateId;
+        if (failure === "fresh changed phone") profile.data.phone_number = "+19862058624";
+        if (failure === "fresh changed email") profile.data.email = "other@example.com";
+        if (failure === "fresh unverified email") delete profile.verified_data!.email;
+        return profile;
+      });
+    }
+    const snapshot = () => Promise.all([
+      fixture.phoneInternalId, emailInternalId, fixture.canonicalId, fixture.duplicateId,
+    ].map(async (id) => ({
+      user: (await SuperTokens.getUser(id))?.toJson(),
+      metadata: await UserMetadata.getUserMetadata(id),
+      mapping: await SuperTokens.getUserIdMapping({ userId: id }),
+    })));
+    const before = await snapshot();
+    const mutations = [
+      vi.spyOn(SuperTokens, "createUserIdMapping"),
+      vi.spyOn(SuperTokens, "deleteUserIdMapping"),
+      vi.spyOn(AccountLinking, "createPrimaryUser"),
+      vi.spyOn(AccountLinking, "linkAccounts"),
+      vi.spyOn(UserMetadata, "updateUserMetadata"),
+      vi.spyOn(Passwordless, "signInUp"),
+    ];
+
+    await expectRejectedMigration(await requestMigration(fixture.tokenA));
+
+    for (const mutation of mutations) expect(mutation).not.toHaveBeenCalled();
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("excludes another tenant's email owner from phone-anchored email linking", async () => {
+    const fixture = await seedCanonicalPhone();
+    const tenantId = `tenant-${randomUUID()}`;
+    await Multitenancy.createOrUpdateTenant(tenantId, { firstFactors: ["link-email"] });
+    const email = await Passwordless.signInUp({ tenantId, email: fixture.email });
+    const ownerBefore = email.user.toJson();
+
+    await migrate(fixture.tokenA, fixture.canonicalId);
+
+    expect((await SuperTokens.getUser(email.recipeUserId.getAsString()))?.toJson()).toEqual(ownerBefore);
+    const user = await SuperTokens.getUser(fixture.canonicalId);
+    expect(user?.loginMethods).toHaveLength(2);
+    expect(user?.loginMethods.find((method) => method.email === fixture.email)).toMatchObject({ tenantIds: ["public"] });
   });
 
   async function seedMixedOwners() {
