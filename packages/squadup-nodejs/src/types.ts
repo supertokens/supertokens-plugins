@@ -1,8 +1,4 @@
-import type {
-  JSONValue,
-  JSONObject,
-  UserContext,
-} from "supertokens-node/types";
+import type { JSONObject, UserContext } from "supertokens-node/types";
 
 export type SquadUpTenantContext = {
   tenantId: string;
@@ -41,28 +37,9 @@ export type SquadUpPluginNormalisedConfig = SquadUpCredentials & {
   enableDebugLogs?: boolean;
 };
 
-export type SquadUpTicketData = {
-  id: string;
-  type: string;
-  qrcode_str: string | null;
-  pdf_url: string | null;
-  [key: string]: JSONValue;
-};
+export type SquadUpTicketData = JSONObject;
 
 export type SquadUpEventData = JSONObject & {
-  id: string;
-  name: string;
-  start_at?: string | null;
-  end_at: string;
-  image: {
-    thumbnail_url: string | null;
-    default_url: string | null;
-  };
-  location: {
-    name: string;
-    address_line_1: string;
-  };
-  location_type: string;
   tickets: SquadUpTicketData[];
 };
 

@@ -621,6 +621,217 @@ describe("per-ticket visibility", () => {
 });
 
 describe("upstream and HTTP contract", () => {
+  it.each([undefined, null, "General Admission"])(
+    "accepts optional ticket type %j with numeric IDs",
+    async (type) => {
+      const upstreamTicket: JSONObject = {
+        ...ticket("2026-05-15T12:00:00Z"),
+        id: 123,
+      };
+      const entry = attendee([upstreamTicket]);
+      if (type === undefined) delete upstreamTicket.type;
+      else upstreamTicket.type = type;
+      if (
+        typeof entry.event !== "object" ||
+        entry.event === null ||
+        Array.isArray(entry.event)
+      )
+        throw new Error("Invalid fixture");
+      entry.event.id = 456;
+      fetchMock.mockResolvedValue(upstream({ attendees: [entry] }));
+      const result = await call(handleListTickets(baseConfig));
+      expect(result.status).toBe("OK");
+      if (result.status !== "OK") throw new Error("Expected tickets");
+      expect(result.events[0].tickets[0].type).toBe(type);
+      if (type === undefined)
+        expect(result.events[0].tickets[0]).not.toHaveProperty("type");
+      expect(result.events[0].tickets[0].id).toBe(123);
+      expect(logDebugMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it("passes through arbitrary metadata and preserves visibility filtering", async () => {
+    const event = {
+      id: 123,
+      image: null,
+      location: { custom: true },
+      start_at: "2026-05-15T12:00:00Z",
+      extra: [1, "two"],
+    };
+    const rawTicket = {
+      id: 456,
+      type: { custom: "value" },
+      qrcode_str: "qr",
+      pdf_url: "https://private-pdf",
+      extra: { nested: [true, null] },
+    };
+    fetchMock.mockImplementation(async () =>
+      upstream({
+        attendees: [{ event, attendee_guests: [{ ticket: rawTicket }] }],
+      }),
+    );
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-15T12:00:00Z"));
+    expect(await call(handleListTickets(baseConfig))).toEqual({
+      status: "OK",
+      events: [{ ...event, tickets: [rawTicket] }],
+    });
+    vi.setSystemTime(new Date("2026-05-14T12:00:00Z"));
+    expect(await call(handleListTickets(baseConfig))).toEqual({
+      status: "OK",
+      events: [
+        {
+          ...event,
+          tickets: [{ ...rawTicket, qrcode_str: null, pdf_url: null }],
+        },
+      ],
+    });
+    expect(logDebugMessage).not.toHaveBeenCalled();
+  });
+  it.each([123, "00123"])(
+    "preserves upstream event and ticket IDs %j",
+    async (id) => {
+      const entry = attendee([{ ...ticket("2026-05-15T12:00:00Z"), id }]);
+      if (
+        typeof entry.event !== "object" ||
+        entry.event === null ||
+        Array.isArray(entry.event)
+      )
+        throw new Error("Invalid fixture");
+      entry.event.id = id;
+      fetchMock.mockResolvedValue(upstream({ attendees: [entry] }));
+      const result = await call(handleListTickets(baseConfig));
+      expect(result.status).toBe("OK");
+      if (result.status !== "OK") throw new Error("Expected tickets");
+      expect(result.events[0].id).toBe(id);
+      expect(result.events[0].tickets[0].id).toBe(id);
+      expect(logDebugMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([true, null, {}, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "does not enforce ID field types: %j",
+    async (id) => {
+      const entry = attendee([ticket()]);
+      if (
+        typeof entry.event !== "object" ||
+        entry.event === null ||
+        Array.isArray(entry.event)
+      )
+        throw new Error("Invalid fixture");
+      entry.event.id = id;
+      for (const candidate of [entry, attendee([{ ...ticket(), id }])]) {
+        fetchMock.mockResolvedValue(upstream({ attendees: [candidate] }));
+        expect(await call(handleListTickets(baseConfig))).toMatchObject({
+          status: "OK",
+        });
+      }
+    },
+  );
+  function diagnostic(): Record<string, unknown> {
+    const calls = vi.mocked(logDebugMessage).mock.calls;
+    expect(calls).toHaveLength(1);
+    const message = calls[0][0];
+    expect(message).toMatch(/^SquadUp request failed /);
+    return JSON.parse(
+      message.slice("SquadUp request failed ".length),
+    ) as Record<string, unknown>;
+  }
+
+  it("reports upstream HTTP status without response data", async () => {
+    fetchMock.mockResolvedValue(upstream({ error: "sensitive-response" }, 401));
+    await call(handleListTickets(baseConfig));
+    expect(diagnostic()).toMatchObject({
+      stage: "upstream_http",
+      tenantId: "tenant-a",
+      upstreamStatus: 401,
+      durationMs: expect.any(Number),
+    });
+    expect(JSON.stringify(vi.mocked(logDebugMessage).mock.calls)).not.toContain(
+      "sensitive-response",
+    );
+  });
+
+  it("distinguishes invalid JSON from HTTP errors", async () => {
+    fetchMock.mockResolvedValue(
+      new Response("sensitive-invalid-json", { status: 200 }),
+    );
+    await call(handleListTickets(baseConfig));
+    expect(diagnostic()).toMatchObject({
+      stage: "response_json",
+      upstreamStatus: 200,
+    });
+    expect(JSON.stringify(vi.mocked(logDebugMessage).mock.calls)).not.toContain(
+      "sensitive-invalid-json",
+    );
+  });
+
+  it("reports failing top-level field types", async () => {
+    fetchMock.mockResolvedValue(upstream({ attendees: null }));
+    await call(handleListTickets(baseConfig));
+    expect(diagnostic()).toMatchObject({
+      stage: "response_validation",
+      upstreamStatus: 200,
+      field: "attendees",
+      expectedType: "array",
+      actualType: "null",
+    });
+  });
+
+  it("identifies nested schema failures and excludes ticket data and user context", async () => {
+    const entry = {
+      event: {},
+      attendee_guests: [
+        {
+          ticket: {
+            qrcode_str: "sensitive-qr",
+            pdf_url: "https://private-pdf",
+          },
+        },
+        { ticket: "sensitive-qr" },
+      ],
+    };
+    fetchMock.mockResolvedValue(upstream({ attendees: [entry] }));
+    await handleListTickets(baseConfig)(request(), {}, session(), {
+      private: "sensitive-context",
+    });
+    expect(diagnostic()).toMatchObject({
+      stage: "response_validation",
+      upstreamStatus: 200,
+      field: "attendees[0].attendee_guests[1].ticket",
+      expectedType: "object",
+      actualType: "string",
+    });
+    const logs = JSON.stringify(vi.mocked(logDebugMessage).mock.calls);
+    for (const value of [
+      "sensitive-qr",
+      "private-pdf",
+      "sensitive-context",
+      "user@example.com",
+      "static-key",
+    ]) {
+      expect(logs).not.toContain(value);
+    }
+  });
+
+  it.each(["UND_ERR_CONNECT_TIMEOUT", "sensitive-code"])(
+    "only logs allowlisted transport codes: %s",
+    async (code) => {
+      fetchMock.mockRejectedValue(
+        new Error("sensitive-message", {
+          cause: { code, message: "sensitive-cause" },
+        }),
+      );
+      await call(handleListTickets(baseConfig));
+      expect(diagnostic()).toMatchObject({ stage: "upstream_request" });
+      expect(diagnostic().transportCode).toBe(
+        code === "UND_ERR_CONNECT_TIMEOUT" ? code : undefined,
+      );
+      expect(
+        JSON.stringify(vi.mocked(logDebugMessage).mock.calls),
+      ).not.toContain("sensitive");
+    },
+  );
   it.each(["", "Not Found", JSON.stringify({ error: "No tickets" })])(
     "returns no tickets for a SquadUp 404 with body %j",
     async (body) => {
@@ -642,14 +853,26 @@ describe("upstream and HTTP contract", () => {
     {},
     { attendees: {} },
     { attendees: [null] },
-    { attendees: [{ event: {}, attendee_guests: [] }] },
-    { attendees: [attendee([{ ...ticket(), pdf_url: 42 }])] },
-    { attendees: [attendee([{ ...ticket(), event: "bad" }])] },
+    { attendees: [{ event: "bad", attendee_guests: [] }] },
+    { attendees: [{ event: {}, attendee_guests: {} }] },
+    { attendees: [{ event: {}, attendee_guests: [null] }] },
   ])("rejects invalid upstream shape %o", async (body) => {
     fetchMock.mockResolvedValue(upstream(body));
     expect(await call(handleListTickets(baseConfig))).toMatchObject({
       code: 502,
     });
+  });
+  it("accepts empty event and ticket metadata", async () => {
+    fetchMock.mockResolvedValue(
+      upstream({
+        attendees: [{ event: {}, attendee_guests: [{ ticket: {} }] }],
+      }),
+    );
+    expect(await call(handleListTickets(baseConfig))).toEqual({
+      status: "OK",
+      events: [{ tickets: [{ pdf_url: null, qrcode_str: null }] }],
+    });
+    expect(logDebugMessage).not.toHaveBeenCalled();
   });
   it("sanitizes transport and invalid JSON failures", async () => {
     fetchMock.mockRejectedValueOnce(
