@@ -1,18 +1,43 @@
-import type { JSONValue } from "supertokens-node/types";
+import type {
+  JSONValue,
+  JSONObject,
+  UserContext,
+} from "supertokens-node/types";
 
-export type SquadUpPluginConfig = {
-  apiKey: string;
+export type SquadUpTenantContext = {
+  tenantId: string;
+  userContext: UserContext;
+};
+export type SquadUpApiKeyResolver = (
+  context: SquadUpTenantContext,
+) => Promise<string | undefined>;
+export type SquadUpCredentials =
+  | { apiKey: string; resolveApiKey?: never }
+  | { apiKey?: never; resolveApiKey: SquadUpApiKeyResolver };
+export type SquadUpTicketAvailabilityWindow =
+  | number
+  | ((
+      context: SquadUpTenantContext & {
+        event: JSONObject;
+        ticket: JSONObject;
+      },
+    ) => number);
+
+export type SquadUpPluginConfig = SquadUpCredentials & {
   baseUrl?: string;
   defaultPageSize?: number;
-  ticketAvailabilityWindowMs?: number;
+  maxPageSize?: number;
+  emailCache?: false | { ttlMs?: number; maxEntries?: number };
+  ticketAvailabilityWindowMs?: SquadUpTicketAvailabilityWindow;
   enableDebugLogs?: boolean;
 };
 
-export type SquadUpPluginNormalisedConfig = {
-  apiKey: string;
+export type SquadUpPluginNormalisedConfig = SquadUpCredentials & {
   baseUrl: string;
   defaultPageSize: number;
-  ticketAvailabilityWindowMs: number;
+  maxPageSize: number;
+  emailCache: false | { ttlMs: number; maxEntries: number };
+  ticketAvailabilityWindowMs: SquadUpTicketAvailabilityWindow;
   enableDebugLogs?: boolean;
 };
 
@@ -24,10 +49,10 @@ export type SquadUpTicketData = {
   [key: string]: JSONValue;
 };
 
-export type SquadUpEventData = {
+export type SquadUpEventData = JSONObject & {
   id: string;
   name: string;
-  start_at: string;
+  start_at?: string | null;
   end_at: string;
   image: {
     thumbnail_url: string | null;
@@ -39,7 +64,6 @@ export type SquadUpEventData = {
   };
   location_type: string;
   tickets: SquadUpTicketData[];
-  [key: string]: JSONValue;
 };
 
 export type SquadUpTicketsResponse = {
