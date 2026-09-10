@@ -102,6 +102,10 @@ up to the next millisecond when necessary so truncation cannot reveal tickets ea
 
 ### Debugging failures
 
+Packing/publishing runs `prepack` to rebuild the package and smoke-test both compiled
+entrypoints, including the embedded version, numeric IDs, missing metadata, and upstream
+404 handling. Run `npm run build && npm run test:package` to verify artifacts locally.
+
 For a local test with a real token from SSM, build the plugin and run from this package:
 
 ```sh
