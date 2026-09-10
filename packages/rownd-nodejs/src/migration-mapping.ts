@@ -167,7 +167,7 @@ export async function retireDuplicateMapping(input: {
   }
   if (mapping.status !== "OK" && !isRecord(plan)) return;
   // A competing reservation is not ownership. If the old mapping is gone, its
-  // persisted ID is only a hint: verify both profiles and the provider again.
+  // persisted ID is only a hint: verify the source, duplicate if present, and provider again.
   const previousExternalId = isRecord(plan) && typeof plan.previousExternalUserId === "string"
     ? plan.previousExternalUserId : undefined;
   const duplicateId = mapping.status === "OK" ? mapping.externalUserId : previousExternalId;
@@ -187,10 +187,19 @@ export async function retireDuplicateMapping(input: {
     );
   }
   const [duplicate, freshSource] = await Promise.all([
-    fetchOptionalRowndUserInfo(duplicateId),
+    fetchOptionalRowndUserInfo(duplicateId).catch((error: unknown) => {
+      // @rownd/node propagates Got's HTTPError. Only a definitive missing duplicate
+      // permits source-only proof; requested-user failures must still propagate.
+      if (
+        isRecord(error) && error.name === "HTTPError" &&
+        error.code === "ERR_NON_2XX_3XX_RESPONSE" &&
+        isRecord(error.response) && error.response.statusCode === 404
+      ) return undefined;
+      throw error;
+    }),
     fetchOptionalRowndUserInfo(requestedId),
   ]);
-  if (!duplicate || duplicate.data?.user_id !== duplicateId) {
+  if (duplicate && duplicate.data?.user_id !== duplicateId) {
     throw new Error("Duplicate Rownd profile could not be verified");
   }
   if (!freshSource || freshSource.data?.user_id !== requestedId) {
@@ -200,12 +209,17 @@ export async function retireDuplicateMapping(input: {
     freshSource,
     tenantId,
   ).loginMethods;
-  const duplicateMethods = mapRowndUserToSuperTokens(
-    duplicate,
-    tenantId,
-  ).loginMethods;
+  const duplicateMethods = duplicate
+    ? mapRowndUserToSuperTokens(duplicate, tenantId).loginMethods
+    : undefined;
   clearSuperTokensCoreCallCache(userContext);
   const owner = await SuperTokens.getUser(ownerInternalId, userContext);
+  if (!duplicate && (
+    freshSource.state !== "enabled" || freshSource.auth_level !== "verified" ||
+    !owner || owner.isPrimaryUser || owner.loginMethods.length !== 1
+  )) {
+    throw new Error("Missing duplicate Rownd profile requires a verified source and standalone provider owner");
+  }
   const exactProof = source.loginMethods.some(
     (method) =>
       method.recipeId === "thirdparty" &&
@@ -216,12 +230,12 @@ export async function retireDuplicateMapping(input: {
           fresh.thirdPartyId === method.thirdPartyId &&
           fresh.thirdPartyUserId === method.thirdPartyUserId,
       ) &&
-      duplicateMethods.some(
+      (duplicateMethods ? duplicateMethods.some(
         (other) =>
           other.recipeId === "thirdparty" &&
           other.thirdPartyId === method.thirdPartyId &&
           other.thirdPartyUserId === method.thirdPartyUserId,
-      ) &&
+      ) : freshSource.verified_data?.[`${method.thirdPartyId}_id`] === method.thirdPartyUserId) &&
       owner?.loginMethods.some(
         (existing) =>
           existing.tenantIds.includes(tenantId) &&

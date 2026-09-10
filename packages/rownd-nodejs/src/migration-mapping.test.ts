@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SuperTokens from "supertokens-node";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
-import { assertMigrationSourceActive } from "./migration-mapping";
+import { assertMigrationSourceActive, retireDuplicateMapping } from "./migration-mapping";
 import { mapRowndUserToSuperTokens } from "./rownd-compatibility";
 import { setRowndClient } from "./rownd-repository";
 import { reconcileRowndUserWithExistingLoginMethods } from "./supertokens-repository";
+import type { RowndUser } from "./types";
 import type { JsonRecord } from "./utils";
 
 describe("durable duplicate mapping recovery", () => {
@@ -185,6 +186,57 @@ describe("durable duplicate mapping recovery", () => {
     await expect(
       reconcileRowndUserWithExistingLoginMethods(source, "public", {}),
     ).rejects.toThrow("exact provider");
+    expect(externalId).toBe("B");
+    expect(SuperTokens.deleteUserIdMapping).not.toHaveBeenCalled();
+    expect(UserMetadata.updateUserMetadata).not.toHaveBeenCalled();
+  });
+
+  async function missingDuplicate() {
+    const freshSource: RowndUser = {
+      ...profile("A"), state: "enabled", auth_level: "verified",
+      verified_data: { google_id: "google-subject" },
+    };
+    const owner = (await SuperTokens.getUser(internalId))!;
+    owner.isPrimaryUser = false;
+    vi.mocked(SuperTokens.getUser).mockResolvedValue(owner);
+    setRowndClient({
+      validateToken: async () => ({ user_id: "A" }),
+      fetchUserInfo: async ({ user_id }) => user_id === "A" ? freshSource : undefined,
+    });
+    return { owner, freshSource };
+  }
+
+  it("retires an absent duplicate profile with freshly verified exact standalone ownership", async () => {
+    await missingDuplicate();
+
+    await retireDuplicateMapping({ source, ownerInternalId: internalId, targetInternalId: internalId, tenantId: "public", userContext: {} });
+
+    expect(externalId).toBeUndefined();
+    expect(SuperTokens.deleteUserIdMapping).toHaveBeenCalledTimes(1);
+    expect(metadata.get("B")).toMatchObject({ rownd_migration_superseded: { rowndUserId: "A", targetUserId: internalId } });
+  });
+
+  it.each([
+    "foreign primary", "foreign multi-method owner", "wrong tenant", "wrong Core provider",
+    "unverified auth level", "disabled source", "boolean verification", "contradictory verification",
+    "elected duplicate", "different canonical target",
+  ])("rejects absent duplicate profile with %s before mutation", async (failure) => {
+    const { owner, freshSource } = await missingDuplicate();
+    if (failure === "foreign primary") owner.isPrimaryUser = true;
+    if (failure === "foreign multi-method owner") owner.loginMethods.push({ ...owner.loginMethods[0]!, thirdParty: { id: "apple", userId: "unrelated-apple" } });
+    if (failure === "wrong tenant") owner.loginMethods[0]!.tenantIds = ["other"];
+    if (failure === "wrong Core provider") owner.loginMethods[0]!.hasSameThirdPartyInfoAs = () => false;
+    if (failure === "unverified auth level") freshSource.auth_level = "instant";
+    if (failure === "disabled source") freshSource.state = "disabled";
+    if (failure === "boolean verification") freshSource.verified_data!.google_id = true;
+    if (failure === "contradictory verification") freshSource.verified_data!.google_id = "another-subject";
+    if (failure === "elected duplicate") metadata.set("B", { rownd_migration_canonical_target: internalId });
+    if (failure === "different canonical target") metadata.set("A", { rownd_migration_canonical_target: "other-target" });
+
+    await expect(retireDuplicateMapping({
+      source, ownerInternalId: internalId, targetInternalId: "apple-target", tenantId: "public", userContext: {},
+    })).rejects.toThrow();
+
     expect(externalId).toBe("B");
     expect(SuperTokens.deleteUserIdMapping).not.toHaveBeenCalled();
     expect(UserMetadata.updateUserMetadata).not.toHaveBeenCalled();

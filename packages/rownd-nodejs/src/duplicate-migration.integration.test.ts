@@ -95,16 +95,26 @@ function duplicateProfiles(appleId?: string) {
   return { canonicalId, duplicateId, googleId, tokenA, tokenB, profiles };
 }
 
+function rowndHTTPError(statusCode: number) {
+  const error = Object.assign(new Error(`Response code ${statusCode}`), {
+    name: "HTTPError",
+    code: "ERR_NON_2XX_3XX_RESPONSE",
+  });
+  // Got 11 (used by @rownd/node) exposes response as a non-enumerable property.
+  return Object.defineProperty(error, "response", { value: { statusCode } });
+}
+
 async function createMappedProvider(
   providerId: string,
   providerUserId: string,
   rowndId: string,
+  email = `${randomUUID()}@example.com`,
 ) {
   const result = await ThirdParty.manuallyCreateOrUpdateUser(
     "public",
     providerId,
     providerUserId,
-    `${randomUUID()}@example.com`,
+    email,
     true,
     undefined,
     { rowndDisableAutomaticAccountLinking: true },
@@ -401,6 +411,113 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
     expect(user?.loginMethods.some((method) => method.email === oldEmail)).toBe(false);
     await expect(UserMetadata.getUserMetadata(appleInternalId)).resolves.toMatchObject({ metadata });
     await expectRejectedMigration(await requestMigration(fixture.tokenB));
+  });
+
+  async function seedMissingDuplicate() {
+    const appleId = `002006.${randomUUID()}`;
+    const fixture = duplicateProfiles(appleId);
+    const profile = fixture.profiles.get(fixture.canonicalId)!;
+    profile.verified_data = { google_id: fixture.googleId, apple_id: appleId };
+    const relayEmail = `${randomUUID()}@privaterelay.appleid.com`;
+    const appleInternalId = await createMappedProvider("apple", appleId, fixture.canonicalId, relayEmail);
+    await AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(appleInternalId));
+    const googleInternalId = await createMappedProvider("google", fixture.googleId, fixture.duplicateId);
+    fixture.profiles.delete(fixture.duplicateId);
+    mockRowndClient.fetchUserInfo.mockImplementation(async ({ user_id }: { user_id: string }) => {
+      if (user_id === fixture.duplicateId) throw rowndHTTPError(404);
+      return fixture.profiles.get(user_id);
+    });
+    return { ...fixture, appleId, appleInternalId, googleInternalId, relayEmail };
+  }
+
+  it("repairs Apple A with verified Google proof when duplicate Rownd B returns HTTPError 404", async () => {
+    const fixture = await seedMissingDuplicate();
+    expect((await SuperTokens.getUser(fixture.googleInternalId))?.isPrimaryUser).toBe(false);
+    expect((await SuperTokens.getUser(fixture.canonicalId))?.loginMethods).toHaveLength(1);
+
+    const response = await requestMigration(fixture.tokenA);
+    const session = await expectSuccessfulMigration(response, fixture.canonicalId);
+
+    expect(session.getUserId()).toBe(fixture.canonicalId);
+    const claims = JSON.parse(Buffer.from(response.headers.get("st-access-token")!.split(".")[1]!, "base64url").toString());
+    expect(claims.sub).toBe(fixture.canonicalId);
+    await expectCanonicalMapping(fixture.canonicalId, fixture.appleInternalId);
+    await expect(SuperTokens.getUserIdMapping({ userId: fixture.duplicateId, userIdType: "EXTERNAL" }))
+      .resolves.toEqual({ status: "UNKNOWN_MAPPING_ERROR" });
+    const user = await SuperTokens.getUser(fixture.canonicalId);
+    expect(user?.isPrimaryUser).toBe(true);
+    expect(user?.loginMethods).toHaveLength(2);
+    expect(user?.loginMethods).toEqual(expect.arrayContaining([
+      expect.objectContaining({ thirdParty: { id: "apple", userId: fixture.appleId }, email: fixture.relayEmail }),
+      expect.objectContaining({ thirdParty: { id: "google", userId: fixture.googleId }, tenantIds: ["public"] }),
+    ]));
+    await expect(SuperTokens.getUser(fixture.googleInternalId)).resolves.toMatchObject({ id: fixture.canonicalId });
+    expect(user?.loginMethods.find((method) => method.thirdParty?.id === "google")?.recipeUserId.getAsString())
+      .toBe(fixture.googleInternalId);
+    expect(telemetryEvents).toContainEqual(expect.objectContaining({ reason: "duplicate_mapping_retired" }));
+    await expect(UserMetadata.getUserMetadata(fixture.duplicateId)).resolves.toMatchObject({
+      metadata: { rownd_migration_superseded: { rowndUserId: fixture.canonicalId, targetUserId: fixture.appleInternalId } },
+    });
+    await migrate(fixture.tokenA, fixture.canonicalId);
+    await expectRejectedMigration(await requestMigration(fixture.tokenB));
+  });
+
+  it.each([
+    "duplicate 403", "duplicate 500", "duplicate timeout", "duplicate ambiguous 404",
+    "requested 404", "fresh requested 404", "fresh requested 403", "fresh requested 500",
+    "fresh requested timeout", "fresh requested absent", "fresh requested wrong ID",
+    "fresh requested wrong provider", "fresh requested unverified provider", "fresh requested contradictory proof",
+  ])("rejects missing-duplicate repair without mutation on %s", async (failure) => {
+    const fixture = await seedMissingDuplicate();
+    let sourceReads = 0;
+    mockRowndClient.fetchUserInfo.mockImplementation(async ({ user_id }: { user_id: string }) => {
+      const isDuplicate = user_id === fixture.duplicateId;
+      if (!isDuplicate) sourceReads++;
+      const shouldFail = isDuplicate ? failure.startsWith("duplicate") :
+        failure === "requested 404" || (failure.startsWith("fresh requested") && sourceReads > 1);
+      if (shouldFail) {
+        if (failure.endsWith("ambiguous 404")) throw new Error("Rownd request failed: 404");
+        if (failure.endsWith("timeout")) throw Object.assign(new Error("Request timed out"), { name: "TimeoutError", code: "ETIMEDOUT" });
+        if (failure.endsWith("404")) throw rowndHTTPError(404);
+        if (failure.endsWith("403")) throw rowndHTTPError(403);
+        if (failure.endsWith("500")) throw rowndHTTPError(500);
+        if (failure.endsWith("absent")) return undefined;
+        const profile = structuredClone(fixture.profiles.get(fixture.canonicalId)!);
+        if (failure.endsWith("wrong ID")) profile.data.user_id = fixture.duplicateId;
+        if (failure.endsWith("wrong provider")) {
+          profile.data.google_id = "another-google-subject";
+          profile.verified_data!.google_id = "another-google-subject";
+        }
+        if (failure.endsWith("unverified provider")) delete profile.verified_data!.google_id;
+        if (failure.endsWith("contradictory proof")) profile.verified_data!.google_id = "another-google-subject";
+        return profile;
+      }
+      if (isDuplicate) throw rowndHTTPError(404);
+      return fixture.profiles.get(user_id);
+    });
+    const ids = [fixture.appleInternalId, fixture.googleInternalId, fixture.canonicalId, fixture.duplicateId];
+    const snapshot = () => Promise.all(ids.map(async (id) => ({
+      user: (await SuperTokens.getUser(id))?.toJson(),
+      metadata: await UserMetadata.getUserMetadata(id),
+      mapping: await SuperTokens.getUserIdMapping({ userId: id }),
+    })));
+    const before = await snapshot();
+    const mutations = [
+      vi.spyOn(SuperTokens, "createUserIdMapping"),
+      vi.spyOn(SuperTokens, "deleteUserIdMapping"),
+      vi.spyOn(AccountLinking, "createPrimaryUser"),
+      vi.spyOn(AccountLinking, "linkAccounts"),
+      vi.spyOn(UserMetadata, "updateUserMetadata"),
+      vi.spyOn(ThirdParty, "manuallyCreateOrUpdateUser"),
+      vi.spyOn(Passwordless, "signInUp"),
+    ];
+
+    await expectRejectedMigration(await requestMigration(fixture.tokenA));
+
+    for (const mutation of mutations) expect(mutation).not.toHaveBeenCalled();
+    expect(await snapshot()).toEqual(before);
+    await expectCanonicalMapping(fixture.canonicalId, fixture.appleInternalId);
+    await expectCanonicalMapping(fixture.duplicateId, fixture.googleInternalId);
   });
 
   it("repairs duplicate Google B to token A and rejects token B after SDK reinitialization without changing A", async () => {
