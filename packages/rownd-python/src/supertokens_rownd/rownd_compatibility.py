@@ -673,8 +673,7 @@ def map_rownd_user_to_supertokens(
                 **({"tenantIds": [tenant_id]} if tenant_id else {}),
             }
         )
-    if len(login_methods) > 1:
-        login_methods[0]["isPrimary"] = True
+    login_methods[0]["isPrimary"] = True
     return {
         "externalUserId": data["user_id"],
         "loginMethods": login_methods,

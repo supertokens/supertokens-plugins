@@ -290,6 +290,14 @@ retains its legacy payload and delivery path and is outside this migration contr
 
 ### Migration and compatibility behavior
 
+New-user import payloads from both the Rownd mapper and online migration builder set
+the first login method's `isPrimary: true`, including single-method users. The target
+Core must have the primary-user/account-linking feature enabled even for these singleton
+imports; SDK recipe initialization alone does not enable the Core feature. Standalone
+missing-identity additions remain nonprimary (`isPrimary` is omitted) so they can be
+linked to the existing target. `MAKE_PRIMARY` recovery for existing nonprimary targets
+is unchanged.
+
 Online migration accepts eligible `data.email`, `data.google_id`, and `data.apple_id`
 without historical `verified_data` markers. Eligibility is separate from email
 verification (EV): `verified_data.email` must be `true` or match the current `data.email`

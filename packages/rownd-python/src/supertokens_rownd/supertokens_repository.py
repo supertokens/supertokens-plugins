@@ -1992,7 +1992,7 @@ def _build_online_migration_import(source: FreshMigrationSource) -> JsonDict:
                 cast(JsonDict, bridge_user), tenant_id, migration_complete=False
             ).get("loginMethods")
         )
-    if len(login_methods) > 1 and not any(method.get("isPrimary") for method in login_methods):
+    if login_methods:
         login_methods[0]["isPrimary"] = True
     return cast(
         JsonDict,

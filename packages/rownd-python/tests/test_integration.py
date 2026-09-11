@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from typing import Any, Optional, cast
 from urllib.parse import parse_qs, urlparse
 
+from supertokens_python import SupertokensConfig
 from supertokens_python.asyncio import (
     create_user_id_mapping,
     get_user,
@@ -609,6 +610,48 @@ async def test_migrate_missing_rownd_user_returns_auth_error(
     assert await get_user("py-missing-rownd-user") is None
 
 
+async def test_root_import_primary_conflict_does_not_retry_as_nonprimary(
+    core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    make_client(core_url, rownd_client)
+    user_id = "primary-conflict-" + str(uuid.uuid4())
+    email = user_id + "@example.com"
+    owner = await thirdparty_asyncio.manually_create_or_update_user(
+        "public", "apple", user_id, email, True, user_context={},
+    )
+    assert isinstance(owner, ManuallyCreateOrUpdateUserOkResult)
+    primary = await accountlinking_asyncio.create_primary_user(owner.recipe_user_id, {})
+    assert getattr(primary, "status", "OK") == "OK"
+    count_before = await get_user_count()
+    profile = {"data": {"user_id": user_id, "email": email}, "verified_data": {"email": True}}
+    payload = impl._build_online_migration_import(impl.FreshMigrationSource(
+        cast(Any, profile), create_rownd_identity_snapshot(cast(Any, profile), "public")
+    ))
+    original_send = httpx.AsyncClient.send
+    import_errors: list[str] = []
+
+    async def send(self, request: httpx.Request, *args, **kwargs):
+        response = await original_send(self, request, *args, **kwargs)
+        if request.url.path == "/bulk-import/import":
+            methods = json.loads(request.content)["loginMethods"]
+            assert [method.get("isPrimary") for method in methods] == [True]
+            assert response.status_code == 400
+            await response.aread()
+            import_errors.append(response.text)
+        return response
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    with pytest.raises(impl._BulkImportError, match="Bulk import failed with status 400"):
+        await impl.import_user(payload, SupertokensConfig(core_url), {})
+    assert len(import_errors) == 1
+    assert "E027:" in import_errors[0]
+    assert await get_user(user_id) is None
+    assert await get_user_count() == count_before
+    unchanged = await get_user(owner.user.id)
+    assert unchanged is not None and unchanged.is_primary_user
+    assert len(unchanged.login_methods) == 1
+
+
 async def test_migrate_bulk_import_500_returns_error(
     core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch
 ):
@@ -803,6 +846,53 @@ async def test_bulk_import_transport_uncertainty_requires_fresh_inspection(
         assert await session_asyncio.get_all_session_handles_for_user(rownd_user_id) == []
 
 
+@pytest.mark.parametrize("kind", [
+    "email", "phone_number", "google_id", "apple_id", "guest", "instant", "filtered_phone",
+])
+async def test_singleton_root_import_is_primary_before_recovery(
+    core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    client = make_client(core_url, rownd_client)
+    user_id = "singleton-" + str(uuid.uuid4())
+    data: dict[str, Any] = {"user_id": user_id}
+    if kind in {"email", "filtered_phone"}:
+        data["email"] = user_id + "@example.com"
+    elif kind in {"google_id", "apple_id"}:
+        data[kind] = user_id
+    if kind in {"phone_number", "filtered_phone"}:
+        data["phone_number"] = "+1555%07d" % (uuid.uuid4().int % 10000000)
+    original_import = impl.import_user
+    imported_ids: list[str] = []
+
+    async def inspect_import(payload, *args):
+        assert [method.get("isPrimary", False) for method in payload["loginMethods"]] == [True]
+        imported = await original_import(payload, *args)
+        imported_id = imported["id"]
+        assert isinstance(imported_id, str)
+        imported_ids.append(imported_id)
+        user = await get_user(imported_id)
+        assert user is not None and user.is_primary_user
+        assert len(user.login_methods) == 1
+        return imported
+
+    make_primary = AsyncMock(wraps=impl.ensure_primary_user)
+    monkeypatch.setattr(impl, "import_user", inspect_import)
+    monkeypatch.setattr(impl, "ensure_primary_user", make_primary)
+    response = migrate_rownd_user(client, rownd_client, user_id, {
+        "data": data, "auth_level": kind if kind in {"guest", "instant"} else "verified",
+        "verified_data": {"phone_number": kind == "phone_number"},
+    })
+    assert response.status_code == 200, response.text
+    assert response.headers.get("st-access-token")
+    assert len(imported_ids) == 1
+    make_primary.assert_not_called()
+    user = await get_user(user_id)
+    assert user is not None and user.is_primary_user
+    if kind == "filtered_phone":
+        assert user.login_methods[0].email == data["email"]
+        assert user.login_methods[0].phone_number is None
+
+
 async def test_migrate_phone_user_successfully(core_url: str, rownd_client: MockRowndClient):
     client = make_client(core_url, rownd_client)
 
@@ -828,6 +918,7 @@ async def test_migrate_phone_user_successfully(core_url: str, rownd_client: Mock
 @pytest.mark.parametrize("verified", [False, True])
 async def test_migrate_padded_verified_identity_converges(
     core_url: str, rownd_client: MockRowndClient, field: str, repair: bool, verified: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     client = make_client(core_url, rownd_client)
     user_id = "padded-" + str(uuid.uuid4())
@@ -870,6 +961,23 @@ async def test_migrate_padded_verified_identity_converges(
             for mutation in before.mutations
         )
 
+    original_import = impl.import_user
+
+    async def inspect_import(payload, *args):
+        methods = payload["loginMethods"]
+        if repair:
+            assert "externalUserId" not in payload
+            assert all("isPrimary" not in method for method in methods)
+        else:
+            assert [method.get("isPrimary", False) for method in methods] == [True]
+        imported = await original_import(payload, *args)
+        imported_id = imported["id"]
+        assert isinstance(imported_id, str)
+        standalone = await get_user(imported_id)
+        assert standalone is not None and standalone.is_primary_user is (not repair)
+        return imported
+
+    monkeypatch.setattr(impl, "import_user", inspect_import)
     response = migrate_rownd_user(client, rownd_client, user_id, profile)
     assert response.status_code == 200, response.text
     assert response.json() == {"status": "OK"}
@@ -2320,10 +2428,11 @@ async def test_concurrent_fresh_migrations_recover_bulk_import_race(
     assert import_count == 2
     assert import_responses[0][0] == 200
     assert import_responses[1][0] == 400
+    # Core checks primary-account conflicts before duplicate recipe identities.
     assert all(
-        isinstance(error, str) and error.startswith("E006:")
+        isinstance(error, str) and error.startswith("E027:")
         for error in cast(dict[str, Any], json.loads(import_responses[1][1]))["errors"]
-    )
+    ), import_responses[1][1]
     assert [response.json() for response in responses] == [
         {"status": "OK"},
         {"status": "OK"},
@@ -2343,7 +2452,7 @@ async def test_concurrent_fresh_migrations_recover_bulk_import_race(
     )
     assert await get_user_count(tenant_id="public") == initial_count + 1
     user = await get_user(rownd_user_id)
-    assert user is not None
+    assert user is not None and user.is_primary_user
     assert len(user.login_methods) == 1
     assert user.login_methods[0].recipe_id == "passwordless"
     assert user.login_methods[0].email == email

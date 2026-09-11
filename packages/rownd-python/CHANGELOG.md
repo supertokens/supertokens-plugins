@@ -27,6 +27,10 @@
 
 ### Patch Changes
 
+- Mark the first login method `isPrimary: true` in mapper and online new-user imports,
+  including single-method users. Core's primary-user/account-linking feature must be enabled
+  even for singleton imports. Standalone missing-identity additions still omit `isPrimary`
+  for later linking; existing-target `MAKE_PRIMARY` recovery is unchanged.
 - Preserve app-variant membership in its existing metadata location without fabricating
   Rownd identity or verification fields; accept attributes-only wrappers as non-provenance.
 - Migrate eligible emails and Google/Apple identifiers without historical `verified_data`.

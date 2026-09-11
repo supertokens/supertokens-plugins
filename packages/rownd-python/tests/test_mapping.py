@@ -1242,7 +1242,7 @@ def test_maps_email_passwordless_user():
 
     assert mapped["externalUserId"] == "user-1"
     assert mapped["loginMethods"] == [
-        {"recipeId": "passwordless", "email": "a@example.com", "isVerified": True}
+        {"recipeId": "passwordless", "email": "a@example.com", "isVerified": True, "isPrimary": True}
     ]
     user_metadata = as_json_dict(mapped["userMetadata"])
     assert user_metadata["first_name"] == "Ada"
@@ -1285,6 +1285,7 @@ def test_maps_login_methods_to_requested_tenant():
             "email": "a@example.com",
             "isVerified": True,
             "tenantIds": ["customer-a"],
+            "isPrimary": True,
         }
     ]
 
@@ -1350,6 +1351,7 @@ def test_maps_guest_user():
             "thirdPartyUserId": "guest-1",
             "email": "guest-1@anonymous.local",
             "isVerified": False,
+            "isPrimary": True,
         }
     ]
 
@@ -1370,6 +1372,7 @@ def test_maps_instant_user():
             "thirdPartyUserId": "instant-1",
             "email": "instant-1@anonymous.local",
             "isVerified": False,
+            "isPrimary": True,
         }
     ]
 
@@ -1382,7 +1385,10 @@ def test_maps_missing_verified_data_as_unverified_email_user():
     assert mapped == {
         "externalUserId": "rownd-missing-verified-data",
         "loginMethods": [
-            {"recipeId": "passwordless", "email": "missing@example.com", "isVerified": False}
+            {
+                "recipeId": "passwordless", "email": "missing@example.com",
+                "isVerified": False, "isPrimary": True,
+            }
         ],
         "userMetadata": {
             "original_rownd_user": {
@@ -1396,6 +1402,23 @@ def test_maps_missing_verified_data_as_unverified_email_user():
         migration_complete=True,
     )
     assert as_json_dict(completed["userMetadata"])["rownd_migration_complete"] is True
+
+
+@pytest.mark.parametrize("data,auth_level", [
+    ({"email": "single@example.com"}, "verified"),
+    ({"phone_number": "+15555550123"}, "verified"),
+    ({"google_id": "google-single"}, "verified"),
+    ({"apple_id": "apple-single"}, "verified"),
+    ({}, "guest"),
+    ({}, "instant"),
+])
+def test_singleton_root_import_has_exactly_one_primary(data: dict, auth_level: str):
+    mapped = map_rownd_user_to_supertokens({
+        "data": {"user_id": "singleton", **data}, "auth_level": auth_level,
+    })
+    methods = cast(list[dict], mapped["loginMethods"])
+    assert len(methods) == 1
+    assert [method.get("isPrimary", False) for method in methods] == [True]
 
 
 def test_preserves_rownd_app_variants_in_metadata():

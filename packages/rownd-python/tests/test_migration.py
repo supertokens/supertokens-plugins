@@ -120,6 +120,37 @@ def test_online_import_preserves_eligible_identities_without_verification(auth_l
     assert cast(dict, payload["userMetadata"])["original_rownd_user"] == original
 
 
+@pytest.mark.parametrize("data,expected_methods", [
+    ({"email": "single@example.com"}, ["single@example.com"]),
+    ({"phone_number": "+15555550123"}, ["+15555550123"]),
+    ({"google_id": "google-single"}, ["google"]),
+    ({"apple_id": "apple-single"}, ["apple"]),
+    ({}, ["guest"]),
+    ({"phone_number": "+15555550123", "email": "filtered@example.com"}, ["filtered@example.com"]),
+    ({"google_id": "google-single", "apple_id": "apple-single"}, ["google", "apple"]),
+    ({"google_id": "google-single", "apple_id": "apple-single", "email": "multi@example.com"},
+     ["google", "apple", "multi@example.com"]),
+])
+def test_online_root_import_selects_first_final_method_as_primary(
+    data: dict, expected_methods: list[str],
+) -> None:
+    profile: JsonDict = {
+        "data": {"user_id": "rownd-1", **data}, "auth_level": "guest",
+        "verified_data": {"phone_number": "phone_number" in data and len(data) == 1},
+    }
+    original = deepcopy(profile)
+    payload = repository._build_online_migration_import(repository.FreshMigrationSource(
+        profile, create_rownd_identity_snapshot(profile, "tenant-a", schema=PHONE_SCHEMA)
+    ))
+    methods = cast(list[dict[str, Any]], payload["loginMethods"])
+    assert [method.get("thirdPartyId", method.get("phoneNumber", method.get("email")))
+            for method in methods] == expected_methods
+    assert [method.get("isPrimary", False) for method in methods] == [
+        True, *([False] * (len(methods) - 1))
+    ]
+    assert profile == original
+
+
 def source(**data: Any):
     verified_data = {
         key: True for key in ("email", "phone_number", "google_id", "apple_id") if key in data
@@ -4050,8 +4081,10 @@ async def test_identity_create_response_loss_converges_through_real_repair_branc
     async def read_snapshot(*_args: Any):
         return cast(Any, object())
 
-    async def create_then_lose_response(*_args: Any, **_kwargs: Any):
+    async def create_then_lose_response(payload: JsonDict, *_args: Any, **_kwargs: Any):
         nonlocal created, calls
+        assert "externalUserId" not in payload
+        assert all("isPrimary" not in method for method in cast(list[dict], payload["loginMethods"]))
         calls += 1
         created = True
         raise TimeoutError("identity-create response lost")
