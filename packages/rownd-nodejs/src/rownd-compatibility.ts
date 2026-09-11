@@ -15,7 +15,7 @@ import {
 import { getConfigForUserContext, getPluginConfig } from "./config";
 import {
   isSyntheticEmail,
-  resolveCanonicalEmailForTenant,
+  resolveEmailForAuthentication,
   SUPERTOKENS_FAKE_EMAIL_DOMAIN,
 } from "./canonical-email";
 import type {
@@ -904,7 +904,7 @@ export async function shouldLinkRowndAccounts(
   );
   let canonicalMatches = await Promise.all(
     verifiedMatches.map((user) =>
-      hasCanonicalEmailForTenant(user, email, tenantId, userContext),
+      hasAuthenticationEmailForTenant(user, email, tenantId, userContext),
     ),
   );
   if (
@@ -930,7 +930,7 @@ export async function shouldLinkRowndAccounts(
     );
     canonicalMatches = await Promise.all(
       verifiedMatches.map((user) =>
-        hasCanonicalEmailForTenant(user, email, tenantId, userContext),
+        hasAuthenticationEmailForTenant(user, email, tenantId, userContext),
       ),
     );
   }
@@ -975,7 +975,7 @@ export async function doesRowndAccountInfoExist(input: {
 
   const matches = await Promise.all(
     users.map((user) =>
-      hasCanonicalEmailForTenant(
+      hasAuthenticationEmailForTenant(
         user,
         input.email!,
         input.tenantId,
@@ -986,7 +986,7 @@ export async function doesRowndAccountInfoExist(input: {
   return matches.some(Boolean);
 }
 
-async function hasCanonicalEmailForTenant(
+async function hasAuthenticationEmailForTenant(
   user: NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>,
   email: string,
   tenantId: string,
@@ -995,7 +995,12 @@ async function hasCanonicalEmailForTenant(
   if (isSyntheticEmail(email)) return false;
   const metadata = (await inspectLinkedUserMetadata(user.id, userContext, user))
     .combinedMetadata;
-  const canonical = resolveCanonicalEmailForTenant({ user, metadata, tenantId });
+  const canonical = resolveEmailForAuthentication({
+    user,
+    metadata,
+    tenantId,
+    email,
+  });
   if (canonical.status === "NO_EMAIL") return undefined;
   return (
     canonical.status === "SELECTED" &&

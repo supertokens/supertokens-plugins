@@ -176,8 +176,12 @@ When `auth.useExplicitSignUpFlow` is enabled, a valid `intent: "sign_in" |
 requests opts into explicit behavior. The plugin carries validated intent through
 `userContext` and adds it to generated magic links as `rowndAuthIntent`. Omitting
 `intent` preserves legacy combined sign-in/up behavior; a supplied malformed
-value returns `GENERAL_ERROR`. Explicit `sign_in` accepts only the tenant's
-canonical email. A retired old email returns `SIGN_IN_UP_NOT_ALLOWED` with reason
+value returns `GENERAL_ERROR`. Explicit canonical email pointers restrict sign-in
+to the selected method in that tenant. Without an explicit pointer or retirement
+plan, a historical `original_rownd_user.data.email` preference does not prevent
+sign-in through another verified Passwordless email already attached to the same
+user in that tenant. Ambiguous contacts without a usable preference still fail
+closed. A retired old email returns `SIGN_IN_UP_NOT_ALLOWED` with reason
 `No existing account found` before a code is sent. Explicit `sign_up` may reuse
 that email after cleanup succeeds. `rowndAuthIntent` is propagation metadata, not
 cryptographic proof or authorization. This policy is implemented only by the

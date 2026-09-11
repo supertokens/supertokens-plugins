@@ -3920,17 +3920,25 @@ describe("rownd-nodejs plugin", () => {
       async function createLegacyAppleAccount(options?: {
         secondRealEmail?: boolean;
         originalEmail?: boolean;
+        syntheticDuplicate?: boolean;
+        mappedRowndId?: boolean;
+        otp?: boolean;
       }) {
         const links: string[] = [];
+        const codes: string[] = [];
         const { server: s, port } = await setup(coreConnectionURI, {
           appConfig: { auth: { useExplicitSignUpFlow: true } },
           crossDeviceConfirmationBypass: { allowedRedirectPaths: ["/profile"] },
-        }, { passwordlessLinks: links });
+        }, {
+          passwordlessLinks: links,
+          passwordlessCodes: codes,
+          passwordlessFlowType: options?.otp ? "USER_INPUT_CODE_AND_MAGIC_LINK" : "MAGIC_LINK",
+        });
         server = s;
         testPORT = port;
         const appleId = randomUUID();
         const fakeEmail = buildExpectedFakeEmail(appleId, "apple");
-        const email = `legacy-${randomUUID()}@icloud.com`;
+        const email = `legacy-${randomUUID()}@privaterelay.appleid.com`;
         const apple = await ThirdParty.manuallyCreateOrUpdateUser(
           "public", "apple", appleId, fakeEmail, false,
         );
@@ -3952,17 +3960,77 @@ describe("rownd-nodejs plugin", () => {
             method.recipeUserId, primary.user.id,
           )).status).toBe("OK");
         }
-        await UserMetadata.updateUserMetadata(primary.user.id, {
+        if (options?.syntheticDuplicate && options.secondRealEmail) {
+          const synthetic = await Passwordless.signInUp({
+            tenantId: "public", email: fakeEmail,
+            userContext: { rowndDisableAutomaticAccountLinking: true },
+          });
+          expect((await AccountLinking.linkAccounts(synthetic.recipeUserId, primary.user.id)).status).toBe("OK");
+        }
+        const userId = options?.mappedRowndId ? `user_${randomUUID()}` : primary.user.id;
+        if (options?.mappedRowndId) {
+          await createRowndUserIdMapping(primary.user.id, userId, {});
+        }
+        await UserMetadata.updateUserMetadata(userId, {
           original_rownd_user: {
             data: {
-              user_id: primary.user.id,
+              user_id: userId,
               ...(options?.originalEmail === false ? {} : { email }),
             },
             verified_data: { email },
           },
         });
-        return { links, email, fakeEmail, otherEmail, real, other, apple, userId: primary.user.id };
+        return { links, codes, email, fakeEmail, otherEmail, real, other, apple, userId };
       }
+
+      it.each([true, false])("authenticates the attached Gmail using the bypass helper despite a relay snapshot (synthetic duplicate: %s)", async (syntheticDuplicate) => {
+        const account = await createLegacyAppleAccount({ secondRealEmail: true, syntheticDuplicate, mappedRowndId: true });
+        const metadataBefore = await UserMetadata.getUserMetadata(account.userId);
+        expect(metadataBefore.metadata).not.toHaveProperty("rownd_email_recipe_user_id");
+        expect(metadataBefore.metadata).not.toHaveProperty("rownd_email_recipe_user_ids");
+        expect(metadataBefore.metadata).not.toHaveProperty("rownd_pending_verification");
+        const bypass = await createMagicLinkWithConfirmationBypass({ email: account.otherEmail, redirectToPath: "/profile" });
+        const consumed = await consumePasswordlessLink(bypass, "sign_in");
+        expect(await consumed.json()).toMatchObject({ status: "OK", user: { id: account.userId } });
+        const session = await Session.getSessionWithoutRequestResponse(consumed.headers.get("st-access-token")!);
+        expect(session!.getUserId()).toBe(account.userId);
+        expect(session!.getRecipeUserId().getAsString()).toBe(account.other.recipeUserId.getAsString());
+        expect(await UserMetadata.getUserMetadata(account.userId)).toEqual(metadataBefore);
+        expect(mockRowndClient.fetchUserInfo).not.toHaveBeenCalled();
+      });
+
+      describe.each([true, false])("attached Gmail HTTP authentication (synthetic duplicate: %s)", (syntheticDuplicate) => {
+        it.each([
+          { otp: false, intent: "sign_in" as const },
+          { otp: false, intent: undefined },
+          { otp: true, intent: "sign_in" as const },
+          { otp: true, intent: undefined },
+        ])("creates, resends and consumes with $otp OTP and $intent intent despite a relay snapshot", async ({ otp, intent }) => {
+          const account = await createLegacyAppleAccount({ secondRealEmail: true, syntheticDuplicate, mappedRowndId: true, otp });
+          const metadataBefore = await UserMetadata.getUserMetadata(account.userId);
+          const created = await (await requestPasswordlessCode(account.otherEmail, intent)).json();
+          expect(created).toMatchObject({ status: "OK" });
+          const headers = { rid: "passwordless", "content-type": "application/json", "fdi-version": "1.18", "st-auth-mode": "header" };
+          const resent = await fetch(`http://localhost:${testPORT}/auth/signinup/code/resend`, {
+            method: "POST", headers,
+            body: JSON.stringify({ deviceId: created.deviceId, preAuthSessionId: created.preAuthSessionId, intent }),
+          });
+          expect(await resent.json()).toMatchObject({ status: "OK" });
+          expect(account.links).toHaveLength(2);
+          const consumed = otp
+            ? await fetch(`http://localhost:${testPORT}/auth/signinup/code/consume`, {
+              method: "POST", headers,
+              body: JSON.stringify({ deviceId: created.deviceId, preAuthSessionId: created.preAuthSessionId, userInputCode: account.codes[1], intent }),
+            })
+            : await consumePasswordlessLink(account.links[1]!, intent);
+          expect(await consumed.json()).toMatchObject({ status: "OK", user: { id: account.userId }, createdNewRecipeUser: false });
+          const session = await Session.getSessionWithoutRequestResponse(consumed.headers.get("st-access-token")!);
+          expect(session!.getUserId()).toBe(account.userId);
+          expect(session!.getRecipeUserId().getAsString()).toBe(account.other.recipeUserId.getAsString());
+          expect(await UserMetadata.getUserMetadata(account.userId)).toEqual(metadataBefore);
+          expect(mockRowndClient.fetchUserInfo).not.toHaveBeenCalled();
+        });
+      });
 
       it.each([true, false])("creates and consumes the real contact with a synthetic Passwordless duplicate (snapshot: %s)", async (originalEmail) => {
         const account = await createLegacyAppleAccount({ originalEmail });
@@ -4011,7 +4079,7 @@ describe("rownd-nodejs plugin", () => {
         expect(account.links).toHaveLength(0);
       });
 
-      it.each(["ambiguous", "missing canonical", "synthetic canonical", "wrong tenant canonical"])("fails closed for %s in HTTP, consume validation, and bypass creation", async (scenario) => {
+      it.each(["ambiguous", "missing canonical", "synthetic canonical", "wrong tenant canonical", "malformed canonical map", "null canonical"])("fails closed for %s in HTTP, consume validation, and bypass creation", async (scenario) => {
         const account = await createLegacyAppleAccount({ secondRealEmail: scenario === "ambiguous", originalEmail: false });
         let pointer = "missing-method";
         if (scenario === "wrong tenant canonical") {
@@ -4026,8 +4094,8 @@ describe("rownd-nodejs plugin", () => {
         }
         if (scenario !== "ambiguous") {
           await UserMetadata.updateUserMetadata(account.userId, {
-            rownd_email_recipe_user_ids: {
-              public: scenario === "synthetic canonical" ? account.other.recipeUserId.getAsString() : pointer,
+            rownd_email_recipe_user_ids: scenario === "malformed canonical map" ? "invalid" : {
+              public: scenario === "null canonical" ? null : scenario === "synthetic canonical" ? account.other.recipeUserId.getAsString() : pointer,
             },
           });
         }
@@ -4045,7 +4113,7 @@ describe("rownd-nodejs plugin", () => {
         expect(account.links).toHaveLength(0);
       });
 
-      it.each(["snapshot", "explicit pointer"])("uses a valid %s to choose among genuine contacts", async (choice) => {
+      it.each(["snapshot", "explicit pointer"])("restricts alternative contacts only for an explicit canonical choice (%s)", async (choice) => {
         const account = await createLegacyAppleAccount({ secondRealEmail: true });
         if (choice === "explicit pointer") {
           await UserMetadata.updateUserMetadata(account.userId, {
@@ -4053,11 +4121,59 @@ describe("rownd-nodejs plugin", () => {
           });
         }
         const email = choice === "snapshot" ? account.email : account.otherEmail;
-        const retiredEmail = choice === "snapshot" ? account.otherEmail : account.email;
+        const alternativeEmail = choice === "snapshot" ? account.otherEmail : account.email;
         expect(await (await requestPasswordlessCode(email, "sign_in")).json()).toMatchObject({ status: "OK" });
         expect(await (await consumePasswordlessLink(account.links[0]!, "sign_in")).json()).toMatchObject({ status: "OK", user: { id: account.userId } });
-        expect(await (await requestPasswordlessCode(retiredEmail, "sign_in")).json()).toMatchObject({ status: "SIGN_IN_UP_NOT_ALLOWED" });
-        await expect(createMagicLinkWithConfirmationBypass({ email: retiredEmail, redirectToPath: "/profile" })).rejects.toThrow();
+        if (choice === "explicit pointer") {
+          expect(await (await requestPasswordlessCode(alternativeEmail, "sign_in")).json()).toMatchObject({ status: "SIGN_IN_UP_NOT_ALLOWED" });
+          await expect(createMagicLinkWithConfirmationBypass({ email: alternativeEmail, redirectToPath: "/profile" })).rejects.toThrow();
+        } else {
+          expect(await (await requestPasswordlessCode(alternativeEmail, "sign_in")).json()).toMatchObject({ status: "OK" });
+          expect(await (await consumePasswordlessLink(account.links[1]!, "sign_in")).json()).toMatchObject({ status: "OK", user: { id: account.userId } });
+        }
+      });
+
+      it.each([
+        { otp: false, restriction: "canonical" },
+        { otp: true, restriction: "canonical" },
+        { otp: false, restriction: "COMMITTING" },
+        { otp: true, restriction: "COMMITTING" },
+      ])("rejects stale Gmail challenges after $restriction retirement (OTP: $otp)", async ({ otp, restriction }) => {
+        const account = await createLegacyAppleAccount({ secondRealEmail: true, otp });
+        const created = await (await requestPasswordlessCode(account.otherEmail, "sign_in")).json();
+        expect(created).toMatchObject({ status: "OK" });
+        await UserMetadata.updateUserMetadata(account.userId, restriction === "canonical" ? {
+          rownd_email_recipe_user_ids: { public: account.real.recipeUserId.getAsString() },
+        } : {
+          rownd_pending_verification: [{
+            id: randomUUID(), field: "email", value: account.email,
+            created_at: new Date().toISOString(), tenantId: "public",
+            purpose: "UPDATE_PASSWORDLESS", status: "COMMITTING",
+            initiatingSessionHandle: "expired-session",
+            verificationRecipeUserId: account.other.recipeUserId.getAsString(),
+            targetCanonicalRecipeUserId: account.real.recipeUserId.getAsString(),
+            retiredMethods: [{ recipeUserId: account.other.recipeUserId.getAsString(), email: account.otherEmail }],
+          }],
+        });
+        const headers = { rid: "passwordless", "content-type": "application/json", "fdi-version": "1.18", "st-auth-mode": "header" };
+        const consumed = otp
+          ? await fetch(`http://localhost:${testPORT}/auth/signinup/code/consume`, {
+            method: "POST", headers,
+            body: JSON.stringify({ deviceId: created.deviceId, preAuthSessionId: created.preAuthSessionId, userInputCode: account.codes[0], intent: "sign_in" }),
+          })
+          : await consumePasswordlessLink(account.links[0]!, "sign_in");
+        expect(await consumed.json()).toMatchObject({ status: "SIGN_IN_UP_NOT_ALLOWED" });
+        expect(consumed.headers.get("st-access-token")).toBeNull();
+        expect(await validateConsumedPasswordlessEmail({
+          userId: account.userId, email: account.otherEmail, tenantId: "public", createdNewRecipeUser: false,
+        })).toEqual({ status: "REJECT" });
+        const resent = await fetch(`http://localhost:${testPORT}/auth/signinup/code/resend`, {
+          method: "POST", headers,
+          body: JSON.stringify({ deviceId: created.deviceId, preAuthSessionId: created.preAuthSessionId, intent: "sign_in" }),
+        });
+        expect(await resent.json()).toMatchObject({ status: "RESTART_FLOW_ERROR" });
+        expect(account.links).toHaveLength(1);
+        await expect(createMagicLinkWithConfirmationBypass({ email: account.otherEmail, redirectToPath: "/profile" })).rejects.toThrow();
       });
 
       it("keeps COMMITTING target and retired-method rules for bypass and HTTP magic links", async () => {
@@ -13711,6 +13827,8 @@ async function setup(
     emailVerificationMode?: "OPTIONAL" | "REQUIRED";
     emailVerificationLinks?: string[];
     passwordlessLinks?: string[];
+    passwordlessCodes?: string[];
+    passwordlessFlowType?: "MAGIC_LINK" | "USER_INPUT_CODE_AND_MAGIC_LINK";
     passwordlessContactMethod?: "EMAIL" | "PHONE" | "EMAIL_OR_PHONE";
   },
 ): Promise<{ server: Server; port: number }> {
@@ -13740,13 +13858,14 @@ async function setup(
           UserMetadata.init(),
           Passwordless.init({
             contactMethod: options?.passwordlessContactMethod ?? "EMAIL",
-            flowType: "MAGIC_LINK",
+            flowType: options?.passwordlessFlowType ?? "MAGIC_LINK",
             emailDelivery: options?.passwordlessLinks
               ? {
                   override: (originalImplementation) => ({
                     ...originalImplementation,
                     sendEmail: async (input) => {
                       options.passwordlessLinks?.push(input.urlWithLinkCode);
+                      if (input.userInputCode) options.passwordlessCodes?.push(input.userInputCode);
                     },
                   }),
                 }

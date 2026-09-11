@@ -1,9 +1,14 @@
-import { GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID } from "./constants";
+import {
+  GUEST_AUTH_METHOD_ID,
+  INSTANT_AUTH_METHOD_ID,
+  PUBLIC_TENANT_ID,
+} from "./constants";
 import type {
   RowndMetadata,
   SuperTokensLoginMethod,
   SuperTokensUser,
 } from "./rownd-compatibility";
+import { isJsonRecord } from "./utils";
 
 export const SUPERTOKENS_FAKE_EMAIL_DOMAIN = "stfakeemail.supertokens.com";
 
@@ -15,7 +20,12 @@ export function isSyntheticEmail(email: unknown): boolean {
 }
 
 export type CanonicalEmailResolution =
-  | { status: "SELECTED"; email: string; recipeUserIds: string[] }
+  | {
+      status: "SELECTED";
+      email: string;
+      recipeUserIds: string[];
+      source: "EXPLICIT" | "INFERRED";
+    }
   | { status: "NO_EMAIL" | "AMBIGUOUS" | "INVALID_CANONICAL" };
 
 export function resolveCanonicalEmailForTenant(input: {
@@ -26,7 +36,19 @@ export function resolveCanonicalEmailForTenant(input: {
   passwordlessOnly?: boolean;
 }): CanonicalEmailResolution {
   const { user, metadata, tenantId } = input;
+  if (
+    metadata.rownd_email_recipe_user_ids !== undefined &&
+    !isJsonRecord(metadata.rownd_email_recipe_user_ids)
+  ) {
+    return { status: "INVALID_CANONICAL" };
+  }
   const scopedPointer = metadata.rownd_email_recipe_user_ids?.[tenantId];
+  if (
+    scopedPointer !== undefined &&
+    (typeof scopedPointer !== "string" || !scopedPointer)
+  ) {
+    return { status: "INVALID_CANONICAL" };
+  }
   const pointer =
     scopedPointer ??
     (metadata.rownd_email_recipe_user_ids === undefined
@@ -49,6 +71,7 @@ export function resolveCanonicalEmailForTenant(input: {
     if (method?.tenantIds.includes(tenantId) && isContactMethod(method)) {
       return {
         status: "SELECTED",
+        source: "EXPLICIT",
         email: method.email!.trim().toLowerCase(),
         recipeUserIds: [method.recipeUserId.getAsString()],
       };
@@ -95,9 +118,54 @@ export function resolveCanonicalEmailForTenant(input: {
 
   return {
     status: "SELECTED",
+    source: "INFERRED",
     email,
     recipeUserIds: candidates
       .filter((method) => method.email!.trim().toLowerCase() === email)
       .map((method) => method.recipeUserId.getAsString()),
   };
+}
+
+export function resolveEmailForAuthentication(
+  input: Parameters<typeof resolveCanonicalEmailForTenant>[0] & { email: string },
+): CanonicalEmailResolution {
+  const canonical = resolveCanonicalEmailForTenant(input);
+  if (canonical.status !== "SELECTED" || canonical.source === "EXPLICIT") {
+    return canonical;
+  }
+
+  const pending = input.metadata.rownd_pending_verification;
+  if (
+    pending !== undefined &&
+    (!Array.isArray(pending) ||
+      pending.some(
+        (plan) =>
+          isJsonRecord(plan) &&
+          (plan.tenantId ?? PUBLIC_TENANT_ID) === input.tenantId &&
+          (plan.status === "COMMITTING" ||
+            "targetCanonicalRecipeUserId" in plan ||
+            "retiredMethods" in plan),
+      ))
+  ) {
+    return canonical;
+  }
+
+  // A migration snapshot is a display preference, not proof that another attached method was retired.
+  const email = input.email.trim().toLowerCase();
+  const methods = input.user.loginMethods.filter(
+    (method) =>
+      method.recipeId === "passwordless" &&
+      method.verified &&
+      method.tenantIds.includes(input.tenantId) &&
+      method.email?.trim().toLowerCase() === email &&
+      !isSyntheticEmail(email),
+  );
+  return methods.length > 0
+    ? {
+      status: "SELECTED",
+      source: "INFERRED",
+      email,
+      recipeUserIds: methods.map((method) => method.recipeUserId.getAsString()),
+    }
+    : canonical;
 }

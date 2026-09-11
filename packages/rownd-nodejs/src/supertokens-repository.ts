@@ -41,7 +41,7 @@ import {
 } from "./constants";
 import { RowndEmailChangeError, RowndPluginError } from "./errors";
 import { logDebugMessage } from "./logger";
-import { resolveCanonicalEmailForTenant } from "./canonical-email";
+import { resolveEmailForAuthentication } from "./canonical-email";
 import {
   assertRowndAppVariantIsConfigured,
   getConfigForUserContext,
@@ -3304,9 +3304,10 @@ export async function prepareEmailForPasswordlessAuth(input: {
     }
     const committingPlan = committingPlans[0];
     if (!committingPlan) {
-      const canonical = resolveCanonicalEmailForTenant({
+      const canonical = resolveEmailForAuthentication({
         user,
         metadata,
+        email: normalizedEmail,
         tenantId: input.tenantId,
         passwordlessOnly: true,
       });
@@ -3486,9 +3487,10 @@ export async function validateConsumedPasswordlessEmail(input: {
       : ({ status: "REJECT" } as const);
   }
 
-  const canonical = resolveCanonicalEmailForTenant({
+  const canonical = resolveEmailForAuthentication({
     user: owner,
     metadata,
+    email: input.email,
     tenantId: input.tenantId,
     passwordlessOnly: true,
   });
