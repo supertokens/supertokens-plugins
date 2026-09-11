@@ -1,4 +1,4 @@
-import type { RowndMigrationEmailRetirement, SuperTokensUserImport } from "./types";
+import type { RowndMigrationEmailRetirement, RowndUser, SuperTokensUserImport } from "./types";
 import { isDeepStrictEqual } from "node:util";
 import SuperTokens from "supertokens-node";
 import Passwordless from "supertokens-node/recipe/passwordless";
@@ -6,9 +6,88 @@ import Session from "supertokens-node/recipe/session";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import type { RowndMetadata, RowndPendingVerification, SuperTokensUser } from "./rownd-compatibility";
 import { getCombinedUserMetadata, isSuperTokensFakeEmail, mapRowndUserToSuperTokens } from "./rownd-compatibility";
-import { fetchOptionalRowndUserInfo } from "./rownd-repository";
-import { assertMigrationMapping } from "./migration-mapping";
+import { fetchOptionalRowndUserInfo, validateRowndToken } from "./rownd-repository";
+import { assertMigrationMapping, assertMigrationSourceActive } from "./migration-mapping";
+import { migrationTelemetry } from "./telemetry/migrationTelemetry";
 import { clearSuperTokensCoreCallCache, isRecord, type JsonRecord } from "./utils";
+
+type AuthenticatedMigration = Readonly<{
+  rowndUserId: string;
+  tenantId: string;
+  email?: string;
+  identities: string;
+}>;
+
+const authenticatedMigrations = new WeakMap<SuperTokensUserImport, AuthenticatedMigration>();
+
+export function isRowndMigrationProfileActive(profile: RowndUser) {
+  // Older Rownd fetch responses omit state; explicit inactive states still deny migration.
+  return profile.state === undefined || profile.state === "enabled";
+}
+
+function migrationIdentities(source: SuperTokensUserImport) {
+  return JSON.stringify(source.loginMethods.map((method) =>
+    method.recipeId === "passwordless" && method.email !== undefined
+      ? { ...method, email: method.email.toLowerCase(), isVerified: false } : method));
+}
+
+// Only this token-validating factory can mint contact ownership proof. Import
+// flags, userContext values, and arbitrary fetched profiles cannot reproduce it.
+export async function authenticateRowndMigration(token: string, tenantId: string, userContext: JsonRecord) {
+  if (!tenantId) throw new Error("Authenticated Rownd migration requires a tenant");
+  const rowndUserId = await validateRowndToken(token);
+  if (typeof rowndUserId !== "string" || !rowndUserId.trim()) {
+    throw new Error("Validated Rownd token has no user ID");
+  }
+  const telemetry = migrationTelemetry(userContext);
+  if (telemetry) telemetry.rowndUserId = rowndUserId;
+  await assertMigrationSourceActive(rowndUserId, userContext);
+  if (telemetry) telemetry.stage = "rownd_lookup";
+  const rowndUser = await fetchOptionalRowndUserInfo(rowndUserId);
+  if (!rowndUser) return { rowndUserId };
+  if (rowndUser.data?.user_id !== rowndUserId || !isRowndMigrationProfileActive(rowndUser)) {
+    throw new Error("Rownd profile does not match an enabled validated token user ID");
+  }
+  const source = mapRowndUserToSuperTokens(structuredClone(rowndUser), tenantId);
+  const email = typeof rowndUser.data.email === "string" && rowndUser.data.email.trim() &&
+    !isSuperTokensFakeEmail(rowndUser.data.email.toLowerCase())
+    ? rowndUser.data.email.toLowerCase() : undefined;
+  authenticatedMigrations.set(source, Object.freeze({
+    rowndUserId, tenantId, email, identities: migrationIdentities(source),
+  }));
+  for (const method of source.loginMethods) {
+    if (method.recipeId === "passwordless" && email && method.email?.toLowerCase() === email) {
+      method.isVerified = true;
+    }
+  }
+  return { rowndUserId, source };
+}
+
+export function getAuthenticatedMigrationEmail(source: SuperTokensUserImport, tenantId: string) {
+  const proof = authenticatedMigrations.get(source);
+  if (!proof) return undefined;
+  if (proof.rowndUserId !== source.externalUserId || proof.tenantId !== tenantId ||
+      proof.identities !== migrationIdentities(source)) {
+    throw new Error("Authenticated Rownd migration binding changed");
+  }
+  return proof.email;
+}
+
+export async function assertAuthenticatedMigrationSource(source: SuperTokensUserImport, tenantId: string) {
+  const proof = authenticatedMigrations.get(source);
+  if (!proof) return undefined;
+  getAuthenticatedMigrationEmail(source, tenantId);
+  const fresh = await fetchOptionalRowndUserInfo(proof.rowndUserId);
+  assertAuthenticatedProfile(fresh, proof);
+  return fresh;
+}
+
+function assertAuthenticatedProfile(fresh: RowndUser | undefined, proof: AuthenticatedMigration): asserts fresh is RowndUser {
+  if (!fresh || !isRowndMigrationProfileActive(fresh) || fresh.data?.user_id !== proof.rowndUserId ||
+      migrationIdentities(mapRowndUserToSuperTokens(fresh, proof.tenantId)) !== proof.identities) {
+    throw new Error("Rownd source identity changed before migration completion");
+  }
+}
 
 export type MigrationEmailPlan = RowndPendingVerification & {
   migrationSource: RowndMigrationEmailRetirement["source"];
@@ -139,10 +218,11 @@ export async function validateCurrentRowndEmailReconciliation(input: {
   }
   const snapshotMethods = mapRowndUserToSuperTokens(snapshot!, tenantId).loginMethods;
   const verifiedProvider = snapshot!.verified_data?.[`${plan.migrationSource.providerId}_id`];
-  if ((typeof verifiedProvider === "string" && verifiedProvider !== plan.migrationSource.providerUserId) ||
+  if (!isRowndMigrationProfileActive(snapshot!) ||
+       (typeof verifiedProvider === "string" && verifiedProvider !== plan.migrationSource.providerUserId) ||
       !snapshotMethods.some((method) => method.recipeId === "thirdparty" &&
       provider.hasSameThirdPartyInfoAs({ id: method.thirdPartyId, userId: method.thirdPartyUserId })) ||
-      !snapshotMethods.some((method) => method.recipeId === "passwordless" && method.isVerified &&
+       !snapshotMethods.some((method) => method.recipeId === "passwordless" &&
         method.email?.toLowerCase() === plan.value.toLowerCase())) {
     throw new Error("Current Rownd email cleanup source changed");
   }
@@ -260,12 +340,13 @@ export async function prepareCurrentRowndEmailReconciliation(
     const field = `${provider.thirdParty!.id}_id`;
     const currentSubject = fresh?.data[field] ?? fresh?.verified_data?.[field];
     const verifiedSubject = fresh?.verified_data?.[field];
-    if (!fresh || fresh.data.user_id !== source.externalUserId ||
+    if (!fresh || !isRowndMigrationProfileActive(fresh) || fresh.data.user_id !== source.externalUserId ||
         typeof fresh.data.email !== "string" || fresh.data.email.toLowerCase() !== email ||
         currentSubject !== provider.thirdParty!.userId ||
         (typeof verifiedSubject === "string" && verifiedSubject !== currentSubject) ||
-        !mapRowndUserToSuperTokens(fresh, tenantId).loginMethods.some((method) =>
-          method.recipeId === "passwordless" && method.email?.toLowerCase() === email && method.isVerified)) {
+        !(getAuthenticatedMigrationEmail(source, tenantId) === email ||
+          mapRowndUserToSuperTokens(fresh, tenantId).loginMethods.some((method) =>
+            method.recipeId === "passwordless" && method.email?.toLowerCase() === email && method.isVerified))) {
       throw new Error("Current Rownd email or provider identity changed before reconciliation");
     }
   };

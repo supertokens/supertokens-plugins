@@ -2,11 +2,13 @@ import SuperTokens from "supertokens-node";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import {
   getRawUserMetadata,
+  isInternalMetadataField,
   mapRowndUserToSuperTokens,
   mergeMissingValues,
 } from "./rownd-compatibility";
 import { fetchOptionalRowndUserInfo } from "./rownd-repository";
 import { migrationTelemetry } from "./telemetry/migrationTelemetry";
+import { assertAuthenticatedMigrationSource, getAuthenticatedMigrationEmail, isRowndMigrationProfileActive } from "./migration-email";
 import type { SuperTokensUserImport } from "./types";
 import {
   clearSuperTokensCoreCallCache,
@@ -214,6 +216,15 @@ export async function retireDuplicateMapping(input: {
     : undefined;
   clearSuperTokensCoreCallCache(userContext);
   const owner = await SuperTokens.getUser(ownerInternalId, userContext);
+  const authenticatedEmail = getAuthenticatedMigrationEmail(source, tenantId);
+  const hasContactProof = () => authenticatedEmail !== undefined &&
+    isRowndMigrationProfileActive(freshSource) && freshSource.data.email?.toLowerCase() === authenticatedEmail &&
+    duplicate !== undefined && isRowndMigrationProfileActive(duplicate) && duplicate.data.email?.toLowerCase() === authenticatedEmail &&
+    owner !== undefined && !owner.isPrimaryUser && owner.loginMethods.length === 1 &&
+    owner.loginMethods[0]!.recipeId === "passwordless" &&
+    owner.loginMethods[0]!.tenantIds.length === 1 &&
+    owner.loginMethods[0]!.tenantIds.includes(tenantId) &&
+    owner.loginMethods[0]!.hasSameEmailAs(authenticatedEmail);
   if (!duplicate && (
     freshSource.state !== "enabled" || freshSource.auth_level !== "verified" ||
     !owner || owner.isPrimaryUser || owner.loginMethods.length !== 1
@@ -245,13 +256,15 @@ export async function retireDuplicateMapping(input: {
           }),
       ),
   );
-  if (!exactProof)
+  const contactProof = hasContactProof();
+  if (!exactProof && !contactProof)
     throw new Error(
       "Duplicate Rownd mapping has no exact provider identity proof",
     );
   if (ownerInternalId !== targetInternalId && owner?.isPrimaryUser) {
     throw new Error("Cannot safely merge a duplicate primary account");
   }
+  if (contactProof) await assertAuthenticatedMigrationSource(source, tenantId);
 
   await UserMetadata.updateUserMetadata(
     requestedId,
@@ -263,7 +276,9 @@ export async function retireDuplicateMapping(input: {
   await UserMetadata.updateUserMetadata(
     ownerInternalId,
     {
-      ...mergeMissingValues(ownerMetadata, duplicateMetadata),
+      ...mergeMissingValues(ownerMetadata, contactProof
+        ? Object.fromEntries(Object.entries(duplicateMetadata).filter(([key]) => !isInternalMetadataField(key)))
+        : duplicateMetadata),
       rownd_migration_reconciliation: {
         rowndUserId: requestedId,
         targetUserId: targetInternalId,
@@ -323,6 +338,22 @@ export async function retireDuplicateMapping(input: {
       freshInternal.externalUserId !== duplicateId
     ) {
       throw new Error("Duplicate mapping changed before retirement");
+    }
+    if (contactProof) {
+      await assertAuthenticatedMigrationSource(source, tenantId);
+      clearSuperTokensCoreCallCache(userContext);
+      const latestOwner = await SuperTokens.getUser(ownerInternalId, userContext);
+      const latestDuplicate = await fetchOptionalRowndUserInfo(duplicateId);
+      if (!latestOwner || latestOwner.id !== owner!.id || latestOwner.isPrimaryUser ||
+          latestOwner.loginMethods.length !== 1 ||
+          latestOwner.loginMethods[0]!.recipeId !== "passwordless" ||
+          latestOwner.loginMethods[0]!.tenantIds.length !== 1 ||
+          !latestOwner.loginMethods[0]!.tenantIds.includes(tenantId) ||
+          !latestOwner.loginMethods[0]!.hasSameEmailAs(authenticatedEmail!) ||
+          !latestDuplicate || !isRowndMigrationProfileActive(latestDuplicate) || latestDuplicate.data.user_id !== duplicateId ||
+          latestDuplicate.data.email?.toLowerCase() !== authenticatedEmail) {
+        throw new Error("Duplicate Rownd contact ownership changed before retirement");
+      }
     }
     // Never delete by internal ID: another worker may already have installed A.
     // Core has no compare-and-delete API. Another migration or external writer

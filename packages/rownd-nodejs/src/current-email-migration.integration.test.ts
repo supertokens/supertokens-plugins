@@ -317,8 +317,50 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
     expect((await SuperTokens.getUser(fixture.separate!.recipeUserId.getAsString()))!.toJson()).toEqual(ownerBefore);
   });
 
+  it.each(["missing", "false", "stale"])("trusts authenticated current email with %s verification data and instant auth", async (verification) => {
+    const fixture = await seed(true);
+    fixture.current.auth_level = "instant";
+    fixture.current.verified_data = verification === "missing" ? {} : {
+      email: verification === "false" ? false : fixture.relayEmail,
+    };
+    rownd.fetchUserInfo.mockResolvedValue(fixture.current);
+    expect(mapRowndUserToSuperTokens(fixture.current, "public").loginMethods.find(
+      (method) => method.recipeId === "passwordless" && method.email === fixture.email,
+    )).toMatchObject({ isVerified: false });
+    await migrate(fixture);
+    await expectCanonical(fixture);
+    await migrate(fixture);
+    await expectCanonical(fixture);
+  });
+
+  it("resumes authenticated email cleanup from its independent checkpoint after restart with stale verification flags", async () => {
+    const fixture = await seed(true);
+    fixture.current.auth_level = "instant";
+    fixture.current.verified_data = {};
+    const removal = vi.spyOn(Multitenancy, "disassociateUserFromTenant").mockRejectedValueOnce(new Error("Pause authenticated cleanup"));
+    const interrupted = await fetch(`${baseUrl}/auth/plugin/rownd/migrate`, {
+      method: "POST", headers: { Authorization: "Bearer fixture-token", "st-auth-mode": "header", rid: "session", "fdi-version": "1.18" },
+    });
+    expect(interrupted.status).toBe(400);
+    expect(interrupted.headers.get("st-access-token")).toBeNull();
+    removal.mockRestore();
+    const metadata = (await UserMetadata.getUserMetadata(fixture.internalId)).metadata;
+    const snapshot = metadata.original_rownd_user as unknown as RowndUser;
+    snapshot.auth_level = "instant";
+    snapshot.verified_data = { email: fixture.relayEmail };
+    await UserMetadata.updateUserMetadata(fixture.internalId, { original_rownd_user: snapshot });
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    resetST();
+    await startServer();
+    rownd.fetchUserInfo.mockClear();
+    await expect(prepareEmailForPasswordlessAuth({ email: fixture.email, tenantId: "public", reconcileTarget: true, userContext: {} })).resolves.toEqual({ status: "ALLOW" });
+    expect(rownd.fetchUserInfo).not.toHaveBeenCalled();
+    await expectCanonical(fixture);
+    expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata.rownd_pending_verification).toEqual([]);
+  });
+
   it.each([
-    "changed email", "unverified email", "stale verified email", "changed provider", "contradictory provider",
+    "changed email", "disabled source", "changed provider", "contradictory provider",
     "wrong user", "absent", "source error", "foreign primary", "ambiguous first-party", "unknown synthetic",
   ])("rejects %s before changing credentials or metadata", async (failure) => {
     const fixture = await seed(true);
@@ -329,8 +371,7 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
     }
     const fresh = structuredClone(fixture.current);
     if (failure === "changed email") fresh.data.email = `${randomUUID()}@example.com`;
-    if (failure === "unverified email") fresh.verified_data.email = false;
-    if (failure === "stale verified email") fresh.verified_data.email = fixture.relayEmail;
+    if (failure === "disabled source") fresh.state = "disabled";
     if (failure === "changed provider") fresh.data.apple_id = randomUUID();
     if (failure === "contradictory provider") fresh.verified_data.apple_id = randomUUID();
     if (failure === "wrong user") fresh.data.user_id = randomUUID();

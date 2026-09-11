@@ -34,6 +34,7 @@ import UserRolesRaw from "supertokens-node/lib/build/recipe/userroles/recipe";
 import { GenericContainer, Network, Wait } from "testcontainers";
 import type { StartedNetwork, StartedTestContainer } from "testcontainers";
 import { init } from "./plugin";
+import { createMissingLoginMethod } from "./supertokens-repository";
 import type { RowndTelemetryEvent, RowndUser } from "./types";
 
 const mockRowndClient = {
@@ -286,9 +287,10 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
     vi.restoreAllMocks();
   });
 
-  function requestMigration(token: string) {
+  function requestMigration(token: string, signal?: AbortSignal) {
     return fetch(`${baseUrl}/auth/plugin/rownd/migrate`, {
       method: "POST",
+      signal,
       headers: {
         Authorization: `Bearer ${token}`,
         "st-auth-mode": "header",
@@ -351,6 +353,236 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
       externalUserId: rowndId,
     });
   }
+
+  describe("existing passwordless response ownership boundary", () => {
+    it("allows overlapping migrations of the same profile when the creator links before the existing response is checked", async () => {
+      const fixture = duplicateProfiles();
+      const email = `${randomUUID()}@example.com`;
+      const profile = fixture.profiles.get(fixture.canonicalId)!;
+      profile.data.email = email;
+      profile.verified_data = { google_id: fixture.googleId, email };
+      const primaryId = await createMappedProvider("google", fixture.googleId, fixture.canonicalId);
+      await expect(
+        AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(primaryId)),
+      ).resolves.toMatchObject({ status: "OK" });
+
+      function gate() {
+        let release!: () => void;
+        const promise = new Promise<void>((resolve) => { release = resolve; });
+        return { promise, release };
+      }
+      const secondEntered = gate();
+      const created = gate();
+      const existingCaptured = gate();
+      const linked = gate();
+      onLinkCommitted = linked.release;
+      const realSignInUp = Passwordless.signInUp;
+      let calls = 0;
+      let recipeUserId: string | undefined;
+      vi.spyOn(Passwordless, "signInUp").mockImplementation(async (input) => {
+        expect(input.email).toBe(email);
+        const call = ++calls;
+        if (call === 1) {
+          // Both real migrations must inspect the missing method before either creates it.
+          await secondEntered.promise;
+          const result = await realSignInUp(input);
+          expect(result.createdNewRecipeUser).toBe(true);
+          recipeUserId = result.recipeUserId.getAsString();
+          expect(result.user.id).toBe(recipeUserId);
+          created.release();
+          await existingCaptured.promise;
+          return result;
+        }
+        expect(call).toBe(2);
+        secondEntered.release();
+        await created.promise;
+        const snapshot = await realSignInUp(input);
+        expect(snapshot.createdNewRecipeUser).toBe(false);
+        expect(snapshot.user.id).toBe(recipeUserId);
+        expect(snapshot.user.isPrimaryUser).toBe(false);
+        existingCaptured.release();
+        // The first migration, not a simulated external actor, commits the link.
+        await linked.promise;
+        await expect(SuperTokens.getUser(recipeUserId!)).resolves.toMatchObject({
+          id: fixture.canonicalId,
+          isPrimaryUser: true,
+        });
+        return snapshot;
+      });
+
+      const signal = AbortSignal.timeout(10000);
+      const requests = [
+        requestMigration(fixture.tokenA, signal),
+        requestMigration(fixture.tokenA, signal),
+      ];
+      try {
+        const responses = await Promise.all(requests);
+        expect(calls).toBe(2);
+        await expectCanonicalMapping(fixture.canonicalId, primaryId);
+        expect((await SuperTokens.getUser(fixture.canonicalId))?.loginMethods).toHaveLength(2);
+        for (const response of responses) {
+          await expectSuccessfulMigration(response, fixture.canonicalId);
+        }
+      } finally {
+        secondEntered.release();
+        created.release();
+        existingCaptured.release();
+        linked.release();
+        await Promise.allSettled(requests);
+      }
+    }, 15000);
+
+    it.each(["intended", "foreign"] as const)(
+      "accepts only the intended current owner after a standalone response is linked (%s owner)",
+      async (owner) => {
+        const rowndId = `rownd-${randomUUID()}`;
+        const email = `${randomUUID()}@example.com`;
+        const primaryId = await createMappedProvider("google", randomUUID(), rowndId);
+        await expect(
+          AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(primaryId)),
+        ).resolves.toMatchObject({ status: "OK" });
+        const ownerRowndId = owner === "intended" ? rowndId : `foreign-${randomUUID()}`;
+        const ownerPrimaryId = owner === "intended"
+          ? primaryId
+          : await createMappedProvider("google", randomUUID(), ownerRowndId);
+        if (owner === "foreign") {
+          await expect(
+            AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(ownerPrimaryId)),
+          ).resolves.toMatchObject({ status: "OK" });
+        }
+        const standalone = await Passwordless.signInUp({
+          tenantId: "public",
+          email,
+          userContext: { rowndDisableAutomaticAccountLinking: true },
+        });
+        expect(standalone.createdNewRecipeUser).toBe(true);
+        const recipeUserId = standalone.recipeUserId.getAsString();
+        expect(standalone.user.id).toBe(recipeUserId);
+        const realSignInUp = Passwordless.signInUp;
+        vi.spyOn(Passwordless, "signInUp").mockImplementationOnce(async (input) => {
+          const snapshot = await realSignInUp(input);
+          expect(snapshot.createdNewRecipeUser).toBe(false);
+          expect(snapshot.user.id).toBe(recipeUserId);
+          expect(snapshot.user.isPrimaryUser).toBe(false);
+          // Force an external link between the real Core response and the ownership guard.
+          // This boundary test alone does not establish a same-plugin concurrency schedule.
+          await expect(
+            AccountLinking.linkAccounts(snapshot.recipeUserId, ownerPrimaryId),
+          ).resolves.toMatchObject({ status: "OK" });
+          await expect(SuperTokens.getUser(recipeUserId)).resolves.toMatchObject({
+            id: ownerRowndId,
+            isPrimaryUser: true,
+          });
+          return snapshot;
+        });
+
+        const creation = createMissingLoginMethod(
+          { recipeId: "passwordless", email, isVerified: true },
+          "public",
+          primaryId,
+          {},
+        );
+
+        if (owner === "intended") {
+          const result = await creation;
+          expect(result.createdNewRecipeUser).toBe(false);
+          expect(result.recipeUserId.getAsString()).toBe(recipeUserId);
+        } else {
+          await expect(creation).rejects.toThrow(
+            "Migrated passwordless login method belongs to another SuperTokens user",
+          );
+        }
+        await expectCanonicalMapping(rowndId, primaryId);
+        await expectCanonicalMapping(ownerRowndId, ownerPrimaryId);
+        const actualOwner = await SuperTokens.getUser(recipeUserId);
+        expect(actualOwner?.id).toBe(ownerRowndId);
+        expect(actualOwner?.loginMethods).toHaveLength(2);
+        if (owner === "foreign") {
+          expect((await SuperTokens.getUser(rowndId))?.loginMethods).toHaveLength(1);
+        }
+      },
+    );
+  });
+
+  describe("existing passwordless response ownership boundary fresh identity controls", () => {
+    it.each(
+      (["email", "phoneNumber"] as const).flatMap((contact) =>
+        (["unchanged", "identity changed", "tenant removed", "recipe deleted"] as const)
+          .map((change) => ({ contact, change })),
+      ),
+    )("checks the current $contact method when $change", async ({ contact, change }) => {
+      const rowndId = `rownd-${randomUUID()}`;
+      const primaryId = await createMappedProvider("google", randomUUID(), rowndId);
+      await expect(
+        AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(primaryId)),
+      ).resolves.toMatchObject({ status: "OK" });
+      const identity = contact === "email"
+        ? { email: `${randomUUID()}@example.com` }
+        : { phoneNumber: `+1415${randomInt(1000000, 9999999)}` };
+      const standalone = await Passwordless.signInUp({
+        tenantId: "public",
+        ...identity,
+        userContext: { rowndDisableAutomaticAccountLinking: true },
+      });
+      await expect(
+        AccountLinking.linkAccounts(standalone.recipeUserId, primaryId),
+      ).resolves.toMatchObject({ status: "OK" });
+      const recipeUserId = standalone.recipeUserId.getAsString();
+      const realSignInUp = Passwordless.signInUp;
+      vi.spyOn(Passwordless, "signInUp").mockImplementationOnce(async (input) => {
+        const snapshot = await realSignInUp(input);
+        expect(snapshot.createdNewRecipeUser).toBe(false);
+        expect(snapshot.user.id).toBe(rowndId);
+        // Prime the same request cache before mutating Core through a separate context.
+        await expect(SuperTokens.getUser(recipeUserId, input.userContext))
+          .resolves.toMatchObject({ id: rowndId });
+        if (change === "identity changed") {
+          await expect(Passwordless.updateUser({
+            recipeUserId: standalone.recipeUserId,
+            ...(contact === "email"
+              ? { email: `${randomUUID()}@example.com` }
+              : { phoneNumber: `+1416${randomInt(1000000, 9999999)}` }),
+          })).resolves.toMatchObject({ status: "OK" });
+        } else if (change === "tenant removed") {
+          await expect(Multitenancy.disassociateUserFromTenant("public", standalone.recipeUserId))
+            .resolves.toMatchObject({ status: "OK" });
+          const current = await SuperTokens.getUser(recipeUserId);
+          expect(current?.id).toBe(rowndId);
+          const currentMethod = current?.loginMethods.find((method) =>
+            method.recipeUserId.getAsString() === recipeUserId);
+          expect(currentMethod).toBeDefined();
+          expect(currentMethod?.tenantIds).not.toContain("public");
+        } else if (change === "recipe deleted") {
+          await expect(SuperTokens.deleteUser(recipeUserId, false))
+            .resolves.toMatchObject({ status: "OK" });
+          await expect(SuperTokens.getUser(recipeUserId)).resolves.toBeUndefined();
+        }
+        return snapshot;
+      });
+
+      const creation = createMissingLoginMethod(
+        {
+          recipeId: "passwordless",
+          ...identity,
+          ...(identity.email ? { email: ` ${identity.email.toUpperCase()} ` } : {}),
+          isVerified: true,
+        },
+        "public",
+        primaryId,
+        {},
+      );
+      if (change === "unchanged") {
+        const result = await creation;
+        expect(result.createdNewRecipeUser).toBe(false);
+        expect(result.recipeUserId.getAsString()).toBe(recipeUserId);
+      } else {
+        await expect(creation).rejects.toThrow(
+          "Migrated passwordless login method belongs to another SuperTokens user",
+        );
+      }
+      await expectCanonicalMapping(rowndId, primaryId);
+    });
+  });
 
   it("rejects a profile whose user ID differs from the validated token before changing mappings", async () => {
     const fixture = duplicateProfiles();
@@ -1242,15 +1474,45 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
       .toMatchObject({ recipeId: "passwordless", verified: true, tenantIds: ["public"] });
   });
 
+  it.each(["unverified email", "mismatched phone anchor", "fresh unverified email"])(
+    "links an authenticated email into mapped phone A despite %s, preserving its existing phone",
+    async (scenario) => {
+      const fixture = await seedCanonicalPhone();
+      const email = await Passwordless.signInUp({ tenantId: "public", email: fixture.email });
+      const oldPhone = (await SuperTokens.getUser(fixture.phoneInternalId))!.loginMethods[0]!.toJson();
+      if (scenario === "unverified email") delete fixture.profile.verified_data.email;
+      if (scenario === "mismatched phone anchor") fixture.profile.data.phone_number = `+1986${randomInt(1000000, 10000000)}`;
+      if (scenario === "fresh unverified email") {
+        let reads = 0;
+        mockRowndClient.fetchUserInfo.mockImplementation(async ({ user_id }: { user_id: string }) => {
+          const profile = fixture.profiles.get(user_id);
+          if (!profile || user_id !== fixture.canonicalId || ++reads === 1) return profile;
+          const fresh = structuredClone(profile);
+          delete fresh.verified_data.email;
+          return fresh;
+        });
+      }
+      // The existing Rownd mapping anchors A; email ownership no longer depends
+      // on using the old phone as proof. Neither old phone nor target ID is replaced.
+      await migrate(fixture.tokenA, fixture.canonicalId);
+      await expectCanonicalMapping(fixture.canonicalId, fixture.phoneInternalId);
+      const user = (await SuperTokens.getUser(fixture.canonicalId))!;
+      expect(user.loginMethods.map((method) => method.toJson())).toContainEqual(oldPhone);
+      expect(user.loginMethods.find((method) => method.email === fixture.email)).toMatchObject({ recipeId: "passwordless", verified: true });
+      expect(user.loginMethods.find((method) => method.email === fixture.email)!.recipeUserId.getAsString()).toBe(email.recipeUserId.getAsString());
+      expect(user.loginMethods).toHaveLength(scenario === "mismatched phone anchor" ? 3 : 2);
+      await migrate(fixture.tokenA, fixture.canonicalId);
+      expect((await SuperTokens.getUser(fixture.canonicalId))!.toJson()).toEqual(user.toJson());
+    },
+  );
+
   it.each([
-    "unverified email", "mismatched phone anchor", "foreign primary", "mapped email",
-    "fresh wrong ID", "fresh changed phone", "fresh changed email", "fresh unverified email", "fresh absent",
+    "foreign primary", "mapped email",
+    "fresh wrong ID", "fresh changed phone", "fresh changed email", "fresh absent",
   ])("rejects phone-anchored email linking before mutation for %s", async (failure) => {
     const fixture = await seedCanonicalPhone();
     const email = await Passwordless.signInUp({ tenantId: "public", email: fixture.email });
     const emailInternalId = email.recipeUserId.getAsString();
-    if (failure === "unverified email") delete fixture.profile.verified_data!.email;
-    if (failure === "mismatched phone anchor") fixture.profile.data.phone_number = `+1986${randomInt(1000000, 10000000)}`;
     if (failure === "foreign primary") await AccountLinking.createPrimaryUser(email.recipeUserId);
     if (failure === "mapped email") {
       await SuperTokens.createUserIdMapping({ superTokensUserId: emailInternalId, externalUserId: fixture.duplicateId });
@@ -1264,7 +1526,6 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
         if (failure === "fresh wrong ID") profile.data.user_id = fixture.duplicateId;
         if (failure === "fresh changed phone") profile.data.phone_number = "+19862058624";
         if (failure === "fresh changed email") profile.data.email = "other@example.com";
-        if (failure === "fresh unverified email") delete profile.verified_data!.email;
         return profile;
       });
     }
@@ -1363,13 +1624,28 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
     expect((await SuperTokens.getUser(fixture.canonicalId))?.loginMethods).toHaveLength(3);
   });
 
-  it.each(["unverified email", "foreign primary", "unrelated provider"] as const)(
+  it("reconciles mixed exact provider and standalone contact owners with no Rownd email verification marker", async () => {
+    const fixture = await seedMixedOwners();
+    delete fixture.profiles.get(fixture.canonicalId)!.verified_data.email;
+    await migrate(fixture.tokenA, fixture.canonicalId);
+    await expectCanonicalMapping(fixture.canonicalId, fixture.appleInternalId);
+    const user = (await SuperTokens.getUser(fixture.canonicalId))!;
+    expect(user.loginMethods).toHaveLength(3);
+    expect(user.loginMethods.map((method) => method.recipeUserId.getAsString()).sort()).toEqual([fixture.canonicalId, ...fixture.recipeIds.slice(1)].sort());
+    expect(user.loginMethods.find((method) => method.recipeId === "passwordless")).toMatchObject({ email: fixture.email, verified: true });
+    for (const [index, id] of fixture.recipeIds.entries()) {
+      expect((await SuperTokens.getUser(id))!.id).toBe(fixture.canonicalId);
+      expect((await UserMetadata.getUserMetadata(id)).metadata).toMatchObject({ [`ownerPreference${index}`]: "keep" });
+    }
+    await migrate(fixture.tokenA, fixture.canonicalId);
+    expect((await SuperTokens.getUser(fixture.canonicalId))!.toJson()).toEqual(user.toJson());
+  });
+
+  it.each(["foreign primary", "unrelated provider"] as const)(
     "rejects mixed owners before any mutation when one owner has %s",
     async (ineligibleOwner) => {
       const fixture = await seedMixedOwners();
-      if (ineligibleOwner === "unverified email") {
-        delete fixture.profiles.get(fixture.canonicalId)!.verified_data!.email;
-      } else if (ineligibleOwner === "foreign primary") {
+      if (ineligibleOwner === "foreign primary") {
         await AccountLinking.createPrimaryUser(fixture.google.recipeUserId);
         await SuperTokens.createUserIdMapping({
           superTokensUserId: fixture.google.recipeUserId.getAsString(),

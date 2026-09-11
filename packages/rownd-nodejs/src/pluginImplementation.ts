@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { MigrationTelemetry } from "./telemetry/migrationTelemetry";
-import { assertMigrationMapping, assertMigrationSourceActive } from "./migration-mapping";
+import { assertMigrationMapping } from "./migration-mapping";
+import { authenticateRowndMigration, assertAuthenticatedMigrationSource } from "./migration-email";
 import { resolveCanonicalEmailForTenant } from "./canonical-email";
 import SuperTokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
@@ -16,7 +17,6 @@ import {
   GUEST_AUTH_METHOD_ID,
   INSTANT_AUTH_METHOD_ID,
   NATIVE_EMAIL_VERIFICATION_UPGRADE_REQUIRED_MESSAGE,
-  PUBLIC_TENANT_ID,
 } from "./constants";
 import { RowndEmailChangeError, RowndPluginError } from "./errors";
 import { logDebugMessage } from "./logger";
@@ -35,12 +35,7 @@ import {
   buildRowndAudience,
   canUpdateUserDataField,
   isInternalMetadataField,
-  mapRowndUserToSuperTokens,
 } from "./rownd-compatibility";
-import {
-  fetchOptionalRowndUserInfo,
-  validateRowndToken,
-} from "./rownd-repository";
 import {
   getUserById,
   getUserMetadata,
@@ -324,24 +319,16 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       const appVariantId = getRequestedAppVariantIdFromRequest(req);
       assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
       telemetry.stage = "token_validation";
-      rowndUserId = await validateRowndToken(parsed.token);
-      if (typeof rowndUserId !== "string" || !rowndUserId.trim()) {
-        throw new Error("Validated Rownd token has no user ID");
-      }
-      telemetry.rowndUserId = rowndUserId;
-      await assertMigrationSourceActive(rowndUserId, resolved.userContext);
-      telemetry.stage = "rownd_lookup";
-      const rowndUser = await fetchOptionalRowndUserInfo(rowndUserId);
+      const authenticated = await authenticateRowndMigration(parsed.token, tenantId, resolved.userContext);
+      rowndUserId = authenticated.rowndUserId;
+      const stUserImport = authenticated.source;
 
-      if (!rowndUser) {
+      if (!stUserImport) {
         telemetry.emit("terminal", "rownd_user_not_found", "skipped");
         logDebugMessage(
           `Skipping migration because user does not exist in Rownd. tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,
         );
         return { status: "OK" as const };
-      }
-      if (rowndUser.data?.user_id !== rowndUserId) {
-        throw new Error("Rownd profile does not match the validated token user ID");
       }
 
       telemetry.stage = "supertokens_lookup";
@@ -352,12 +339,6 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         : undefined;
 
       if (!user || existingMetadata?.rownd_migration_complete !== true) {
-        telemetry.stage = "user_mapping";
-        const stUserImport = mapRowndUserToSuperTokens(
-          rowndUser,
-          tenantId === PUBLIC_TENANT_ID ? undefined : tenantId,
-        );
-
         telemetry.stage = "reconciliation";
         const reconciled = await reconcileRowndUserWithExistingLoginMethods(
           stUserImport,
@@ -404,10 +385,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       } else {
         telemetry.stage = "repair";
         await reconcileRowndUserWithExistingLoginMethods(
-          mapRowndUserToSuperTokens(
-            rowndUser,
-            tenantId === PUBLIC_TENANT_ID ? undefined : tenantId,
-          ),
+          stUserImport,
           tenantId,
           resolved.userContext,
           { repairUser: user },
@@ -460,12 +438,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       }
 
       telemetry.stage = "session_creation";
-      const freshSource = await fetchOptionalRowndUserInfo(rowndUserId);
-      if (!freshSource || freshSource.data?.user_id !== rowndUserId ||
-          JSON.stringify(mapRowndUserToSuperTokens(freshSource, tenantId).loginMethods) !==
-          JSON.stringify(mapRowndUserToSuperTokens(rowndUser, tenantId).loginMethods)) {
-        throw new Error("Rownd source identity changed before session creation");
-      }
+      await assertAuthenticatedMigrationSource(stUserImport, tenantId);
       clearSuperTokensCoreCallCache(resolved.userContext);
       const finalMapping = await SuperTokens.getUserIdMapping({
         userId: rowndUserId, userIdType: "EXTERNAL", userContext: resolved.userContext,
