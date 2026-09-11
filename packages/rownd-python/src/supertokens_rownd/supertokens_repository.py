@@ -3123,7 +3123,10 @@ async def resolve_pending_email_verification_token(
     ):
         return {"status": "INVALID_PENDING"}
 
-    metadata = await get_raw_user_metadata(session_user_id, user_context)
+    mapping = await get_primary_user_mapping(session_user_id, user_context)
+    metadata = await get_raw_user_metadata(
+        mapping.supertokens_user_id if mapping else session_user_id, user_context
+    )
     pending_verification = next(
         (
             verification
@@ -3283,6 +3286,37 @@ async def complete_pending_email_verification(
                 user_id, pending_verification, recipe_user_id, normalized_email, user_context
             )
 
+        async def inspect_verified_email_metadata(canonical_id: str) -> Tuple[JsonDict, JsonDict]:
+            inspection = await inspect_linked_user_metadata(user_id, user_context)
+            target = cast(JsonDict, inspection["primary_metadata"])
+            combined = cast(JsonDict, inspection["combined_metadata"])
+            mapping = await get_primary_user_mapping(user_id, user_context)
+            mapped_linked_rownd_user_id = None
+            # Validate raw linked snapshots too; combining can hide conflicting IDs or shapes.
+            for method in current_user.login_methods:
+                linked_id = method.recipe_user_id.get_as_string()
+                if linked_id == primary_metadata_user_id:
+                    continue
+                linked_metadata = await get_raw_user_metadata(linked_id, user_context)
+                build_verified_email_metadata(
+                    linked_metadata,
+                    normalized_email, canonical_id, tenant_id, combined,
+                )
+                if (
+                    mapping is not None
+                    and mapping.supertokens_user_id == inspection["primary_user_id"]
+                    and linked_id == inspection["rownd_metadata_source_user_id"]
+                    and get_original_rownd_user_id(linked_metadata) == mapping.external_user_id
+                ):
+                    mapped_linked_rownd_user_id = mapping.external_user_id
+            return target, build_verified_email_metadata(
+                target, normalized_email, canonical_id, tenant_id, combined,
+                mapped_linked_rownd_user_id=mapped_linked_rownd_user_id,
+            )
+
+        # Validate the prospective profile before revoking sessions or adding credentials.
+        await inspect_verified_email_metadata(recipe_user_id.get_as_string())
+
         completion_phase = "COMMITTING"
         await mark_pending_email_verification_status(
             user_id, cast(str, pending_verification["id"]), "COMMITTING", user_context
@@ -3295,7 +3329,7 @@ async def complete_pending_email_verification(
             )
         initiating_recipe_user_id = initiating_login_method.recipe_user_id
         await session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context)
-        committing_metadata = await get_raw_user_metadata(user_id, user_context)
+        committing_metadata = await get_raw_user_metadata(primary_metadata_user_id, user_context)
         committing_verification = next(
             (
                 item
@@ -3364,18 +3398,18 @@ async def complete_pending_email_verification(
         canonical_email_recipe_user_id = passwordless_user.recipe_user_id.get_as_string()
 
         await session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context)
-        final_metadata_inspection = await inspect_linked_user_metadata(user_id, user_context)
-        target_metadata = cast(JsonDict, final_metadata_inspection["primary_metadata"])
-        combined_metadata = cast(JsonDict, final_metadata_inspection["combined_metadata"])
-        updated_metadata = build_verified_email_metadata(
-            target_metadata,
-            user_id,
-            normalized_email,
+        target_metadata, updated_metadata = await inspect_verified_email_metadata(
             canonical_email_recipe_user_id,
-            tenant_id,
-            combined_metadata,
         )
-        await update_primary_user_metadata(user_id, updated_metadata, user_context)
+        # Unchanged top-level nulls are values, not metadata-patch deletion requests.
+        await update_primary_user_metadata(
+            user_id,
+            {
+                key: value for key, value in updated_metadata.items()
+                if key not in target_metadata or value != target_metadata[key]
+            },
+            user_context,
+        )
         completion_phase = "COMPLETED"
 
         async def rollback_on_session_replacement_failure() -> None:
@@ -4139,7 +4173,10 @@ async def ensure_stable_primary_user(
 async def remove_pending_email_verification(
     user_id: str, pending_id: str, user_context: UserContext
 ) -> None:
-    metadata = await get_raw_user_metadata(user_id, user_context)
+    mapping = await get_primary_user_mapping(user_id, user_context)
+    metadata = await get_raw_user_metadata(
+        mapping.supertokens_user_id if mapping else user_id, user_context
+    )
     await update_primary_user_metadata(
         user_id,
         {
@@ -4154,7 +4191,10 @@ async def remove_pending_email_verification(
 async def mark_pending_email_verification_status(
     user_id: str, pending_id: str, status: str, user_context: UserContext
 ) -> None:
-    metadata = await get_raw_user_metadata(user_id, user_context)
+    mapping = await get_primary_user_mapping(user_id, user_context)
+    metadata = await get_raw_user_metadata(
+        mapping.supertokens_user_id if mapping else user_id, user_context
+    )
     await update_primary_user_metadata(
         user_id,
         {
@@ -4199,40 +4239,42 @@ async def reject_inactive_pending_email_verification(
 
 def build_verified_email_metadata(
     metadata: JsonDict,
-    user_id: str,
     email: str,
     canonical_email_recipe_user_id: str,
     tenant_id: str,
     fallback_metadata: Optional[JsonDict] = None,
+    *,
+    mapped_linked_rownd_user_id: Optional[str] = None,
 ) -> JsonDict:
     fallback_metadata = fallback_metadata or {}
-    compatibility_user = (
-        as_json_dict(metadata.get("original_rownd_user"))
-        or as_json_dict(fallback_metadata.get("original_rownd_user"))
-        or {
-            "state": "enabled",
-            "auth_level": "verified",
-            "data": {"user_id": user_id},
-            "verified_data": {},
-            "groups": [],
-            "meta": {},
-        }
-    )
-    compatibility_data = as_json_dict(compatibility_user.get("data"))
-    return {
+    compatibility_user: Optional[JsonDict] = None
+    original_id: Optional[str] = None
+    # The inspected fallback carries selected-source authority and merged variants.
+    # Only independently resolved mapped-linked authority may supersede a valid raw primary.
+    for candidate in (metadata, fallback_metadata):
+        if "original_rownd_user" not in candidate:
+            continue
+        original = candidate["original_rownd_user"]
+        validation = validate_migration_metadata({"original_rownd_user": original})
+        if not validation.valid or not isinstance(original, dict) or any(
+            key in original and not isinstance(original[key], dict)
+            for key in ("attributes", "verified_data")
+        ):
+            raise RowndEmailChangeError("CONFLICT", 409, "the account has malformed Rownd metadata")
+        candidate_id = get_original_rownd_user_id(candidate)
+        if candidate_id is not None:
+            if (
+                original_id is not None and candidate_id != original_id
+                and candidate_id != mapped_linked_rownd_user_id
+            ):
+                raise RowndEmailChangeError(
+                    "CONFLICT", 409, "the account has conflicting Rownd metadata"
+                )
+            original_id = candidate_id
+            compatibility_user = original
+
+    updated_metadata: JsonDict = {
         **metadata,
-        "original_rownd_user": {
-            **compatibility_user,
-            "data": {
-                **compatibility_data,
-                "user_id": compatibility_data.get("user_id") or user_id,
-                "email": email,
-            },
-            "verified_data": {
-                **as_json_dict(compatibility_user.get("verified_data")),
-                "email": email,
-            },
-        },
         "rownd_email_recipe_user_id": canonical_email_recipe_user_id,
         "rownd_email_recipe_user_ids": {
             **as_json_dict(fallback_metadata.get("rownd_email_recipe_user_ids")),
@@ -4243,3 +4285,12 @@ def build_verified_email_metadata(
             item for item in get_pending_verifications(metadata) if item.get("field") != "email"
         ],
     }
+    if compatibility_user is not None:
+        updated_metadata["original_rownd_user"] = {
+            **compatibility_user,
+            "data": {**as_json_dict(compatibility_user.get("data")), "email": email},
+            "verified_data": {
+                **as_json_dict(compatibility_user.get("verified_data")), "email": email,
+            },
+        }
+    return updated_metadata

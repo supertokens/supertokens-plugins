@@ -27,6 +27,7 @@ from supertokens_rownd.constants import (
     RESERVED_SESSION_CLAIMS,
     ROWND_JWT_CLAIMS,
 )
+from supertokens_rownd.errors import RowndEmailChangeError
 from supertokens_rownd.types import RowndPluginConfig
 from supertokens_rownd.types import (
     EmailCredentialAuthorization,
@@ -3677,6 +3678,9 @@ async def test_pending_verification_binding_is_checked_before_token_use(
         supertokens_repository.session_asyncio, "get_session_information", get_session_information
     )
     monkeypatch.setattr(supertokens_repository, "get_raw_user_metadata", get_user_metadata)
+    monkeypatch.setattr(
+        supertokens_repository, "get_primary_user_mapping", AsyncMock(return_value=None)
+    )
 
     result = await supertokens_repository.resolve_pending_email_verification_token(
         "raw-token", "pending-id", "public", cast(Any, session), {}
@@ -4133,6 +4137,122 @@ async def test_normal_user_route_forwards_exact_context(monkeypatch: pytest.Monk
     await impl.handle_get_user(
         make_config(), cast(Any, ContextSession()), cast(Any, response), parent
     )
+
+
+@pytest.mark.parametrize("original", [None, {"attributes": {"rownd:app_variants": ["native"]}}])
+async def test_verified_email_metadata_does_not_create_provenance(original: Any):
+    metadata = {
+        "ordinary": {"keep": [False, None]},
+        "rownd_email_recipe_user_ids": {"tenant-b": "other-credential"},
+        **({"original_rownd_user": original} if original is not None else {}),
+    }
+    before = deepcopy(metadata)
+    result = supertokens_repository.build_verified_email_metadata(
+        metadata, "new@example.com", "new-credential", "public", deepcopy(metadata)
+    )
+    assert result == {
+        **before,
+        "rownd_email_recipe_user_id": "new-credential",
+        "rownd_email_recipe_user_ids": {
+            "tenant-b": "other-credential", "public": "new-credential",
+        },
+        "rownd_pending_verification": [],
+    }
+    assert metadata == before
+    assert migration.validate_migration_metadata(result).valid
+    assert supertokens_repository.get_original_rownd_user_id(result) is None
+
+
+@pytest.mark.parametrize("original_id", ["rownd-user", "native-user", "  exact-rownd-id  "])
+@pytest.mark.parametrize("linked_source", [False, True])
+async def test_verified_email_metadata_preserves_selected_provenance(
+    original_id: str, linked_source: bool,
+):
+    original = {
+        "data": {"user_id": original_id, "email": "old@example.com", "custom": {"keep": None}},
+        "verified_data": {"email": "old@example.com", "google_id": True},
+        "attributes": {"rownd:app_variants": ["source"]},
+        "meta": {"created": "unchanged"},
+    }
+    primary = {
+        "original_rownd_user": (
+            {"attributes": {"rownd:app_variants": ["native"]}} if linked_source else original
+        ),
+        "ordinary": {"keep": True},
+    }
+    linked = {"original_rownd_user": original, "linked_only": "do-not-copy"}
+    before = deepcopy((primary, linked))
+    inspection = supertokens_repository.combine_linked_metadata(
+        "native-user", primary, [("linked-user", linked)] if linked_source else [], original_id
+    )
+    assert inspection["rownd_metadata_source_user_id"] == (
+        "linked-user" if linked_source else "native-user"
+    )
+    result = supertokens_repository.build_verified_email_metadata(
+        primary, "new@example.com", "new-credential", "public",
+        cast(Dict[str, Any], inspection["combined_metadata"]),
+    )
+    assert result["original_rownd_user"] == {
+        **original,
+        "data": {**original["data"], "email": "new@example.com"},
+        "verified_data": {"email": "new@example.com", "google_id": True},
+        "attributes": {"rownd:app_variants": ["source", "native"] if linked_source else ["source"]},
+    }
+    assert result["ordinary"] == primary["ordinary"]
+    assert "linked_only" not in result
+    assert (primary, linked) == before
+
+
+@pytest.mark.parametrize("authority", [None, "unrelated-rownd", "linked-rownd"])
+async def test_verified_email_metadata_requires_mapping_authority_for_primary_replacement(
+    authority: Optional[str],
+):
+    primary: Dict[str, Any] = {"original_rownd_user": {"data": {"user_id": "primary-rownd"}}}
+    linked: Dict[str, Any] = {"original_rownd_user": {"data": {"user_id": "linked-rownd"}}}
+    inspection = supertokens_repository.combine_linked_metadata(
+        "primary", primary, [("linked", linked)], "linked-rownd"
+    )
+    assert inspection["rownd_metadata_source_user_id"] == "linked"
+    before = deepcopy(inspection)
+    if authority == "linked-rownd":
+        result = supertokens_repository.build_verified_email_metadata(
+            primary, "new@example.com", "new-credential", "public",
+            cast(Dict[str, Any], inspection["combined_metadata"]),
+            mapped_linked_rownd_user_id=authority,
+        )
+        assert result["original_rownd_user"] == {
+            "data": {"user_id": "linked-rownd", "email": "new@example.com"},
+            "verified_data": {"email": "new@example.com"},
+        }
+    else:
+        with pytest.raises(RowndEmailChangeError, match="conflicting Rownd metadata"):
+            supertokens_repository.build_verified_email_metadata(
+                primary, "new@example.com", "new-credential", "public",
+                cast(Dict[str, Any], inspection["combined_metadata"]),
+                mapped_linked_rownd_user_id=authority,
+            )
+    assert inspection == before
+
+
+@pytest.mark.parametrize("side", ["primary", "fallback"])
+@pytest.mark.parametrize("original", [
+    None, [], "invalid", {}, {"attributes": None}, {"data": {}},
+    {"data": {"email": "old@example.com"}}, {"data": {"user_id": ""}},
+    {"data": {"user_id": " "}}, {"data": {"user_id": 123}},
+    {"data": {"user_id": "rownd-user"}, "verified_data": []},
+    {"data": {"user_id": "rownd-user"}, "attributes": None},
+])
+async def test_verified_email_metadata_rejects_malformed_source(side: str, original: Any):
+    valid: Dict[str, Any] = {"original_rownd_user": {"data": {"user_id": "rownd-user"}}}
+    invalid = {"original_rownd_user": original}
+    primary, fallback = (invalid, valid) if side == "primary" else (valid, invalid)
+    before = deepcopy((primary, fallback))
+    with pytest.raises(RowndEmailChangeError, match="malformed Rownd metadata"):
+        supertokens_repository.build_verified_email_metadata(
+            primary, "new@example.com", "new-credential", "public", fallback,
+            mapped_linked_rownd_user_id="rownd-user",
+        )
+    assert (primary, fallback) == before
 
 
 async def test_session_claims_share_one_inspection_snapshot(monkeypatch: pytest.MonkeyPatch):
