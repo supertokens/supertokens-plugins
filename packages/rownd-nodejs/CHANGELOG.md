@@ -1,5 +1,29 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.7.8
+
+### Patch Changes
+
+- Fix import reconciliation
+
+## 0.7.7
+
+### Patch Changes
+
+- Fix reconciliation for phone login
+
+## 0.7.6
+
+### Patch Changes
+
+- Reconcile users during migration
+
+## 0.7.5
+
+### Patch Changes
+
+- Extend migration telemetry
+
 ## 0.7.4
 
 ### Patch Changes
