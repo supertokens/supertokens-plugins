@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 0.2.4
+
+### Patch Changes
+
+- Fix id mapping
+
 ## 0.2.3
 
 ### Patch Changes
