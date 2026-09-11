@@ -9,9 +9,9 @@
     "directory": "packages/profile-base-react"
   },
   "scripts": {
-    "build": "vite build && npm run pretty",
-    "pretty": "npx pretty-quick .",
-    "pretty-check": "npx pretty-quick --check ."
+    "build": "vite build",
+    "pretty": "prettier --write .",
+    "pretty-check": "prettier --check ."
   },
   "keywords": [
     "base-profile",
@@ -35,7 +35,6 @@
     "@storybook/react": "^9.1.7",
     "@types/react": "^17.0.20",
     "prettier": "3.6.2",
-    "pretty-quick": "^4.2.2",
     "typescript": "^5.8.3"
   },
   "browser": {
