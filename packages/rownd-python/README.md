@@ -335,6 +335,11 @@ Recording a variant preserves genuine Rownd metadata without synthesizing `data.
 or `verified_data`. An attributes-only wrapper is valid operational metadata, not identity
 provenance; malformed or conflicting identity metadata still blocks migration.
 
+Email-change completion no longer synthesizes a Rownd `data.user_id` from the SuperTokens
+user ID. Native attributes-only wrappers remain non-provenance, while genuine linked
+profiles retain their Rownd identity. Malformed or conflicting metadata returns the SDK
+`GENERAL_ERROR` response before credential additions or session revocation.
+
 After all Rownd users have migrated, retain the compatibility routes without Rownd credentials by configuring `disable_rownd_user_migration=True`. This removes both migration routes; when no app key is configured, it uses an internal app key for passwordless and verification-link rewriting.
 
 Passwordless resend requests preserve Rownd display, redirect, client-domain, app-variant, and OAuth context. Combined OTP and magic-link deliveries add the Hub `passwordlessFlowType=USER_INPUT_CODE_AND_MAGIC_LINK` parameter; OTP-only deliveries are left unchanged.

@@ -38,6 +38,7 @@ from supertokens_python.recipe.thirdparty import asyncio as thirdparty_asyncio
 from supertokens_python.recipe.thirdparty.interfaces import ManuallyCreateOrUpdateUserOkResult
 from supertokens_python.recipe.thirdparty.types import ThirdPartyInfo
 from supertokens_python.recipe.usermetadata import asyncio as usermetadata_asyncio
+from supertokens_python.types import RecipeUserId
 from supertokens_python.types.base import AccountInfoInput
 
 import supertokens_rownd.supertokens_repository as impl
@@ -4003,12 +4004,8 @@ async def test_user_email_update_stores_pending_verification(
     )
     assert canonical_method.recipe_user_id.get_as_string() != sign_in.recipe_user_id.get_as_string()
     metadata = await usermetadata_asyncio.get_user_metadata(user_id)
-    assert metadata.metadata["original_rownd_user"]["data"]["email"] == (
-        "new-email@example.com"
-    )
-    assert metadata.metadata["original_rownd_user"]["verified_data"]["email"] == (
-        "new-email@example.com"
-    )
+    assert "original_rownd_user" not in metadata.metadata
+    assert canonical_method.verified
     assert metadata.metadata["rownd_email_recipe_user_id"] == (
         canonical_method.recipe_user_id.get_as_string()
     )
@@ -4646,15 +4643,21 @@ async def test_email_change_uses_recorded_canonical_among_multiple_passwordless_
     }
 
 
+@pytest.mark.parametrize("native_variant", [False, True])
 async def test_email_change_finalization_uses_linked_rownd_metadata_without_copying_it(
-    memory_core_url: str, rownd_client: MockRowndClient
+    memory_core_url: str, rownd_client: MockRowndClient, native_variant: bool,
 ):
-    client = make_client(memory_core_url, rownd_client, enable_email_verification=True)
+    delivery_links: list[str] = []
+    client = make_client(
+        memory_core_url, rownd_client, enable_email_verification=True,
+        email_verification_links=delivery_links,
+    )
+    suffix = str(uuid.uuid4())
     primary_method = await passwordless_asyncio.signinup(
-        "public", "linked-metadata-primary@example.com", None, None, {}
+        "public", "linked-metadata-primary-" + suffix + "@example.com", None, None, {}
     )
     canonical_method = await passwordless_asyncio.signinup(
-        "public", "linked-metadata-canonical@example.com", None, None, {}
+        "public", "linked-metadata-canonical-" + suffix + "@example.com", None, None, {}
     )
     primary = await accountlinking_asyncio.create_primary_user(
         primary_method.recipe_user_id, {}
@@ -4669,14 +4672,18 @@ async def test_email_change_finalization_uses_linked_rownd_metadata_without_copy
         "auth_level": "verified",
         "data": {
             "user_id": "linked-rownd-user",
-            "email": "linked-metadata-canonical@example.com",
+            "email": canonical_method.user.emails[0],
             "first_name": "Linked",
             "profile": {"theme": "dark"},
         },
-        "verified_data": {"email": "linked-metadata-canonical@example.com"},
+        "verified_data": {"email": canonical_method.user.emails[0]},
         "groups": [{"id": "linked-group"}],
         "meta": {"created": "2026-01-01T00:00:00.000Z"},
     }
+    native_metadata = (
+        {"original_rownd_user": {"attributes": {"rownd:app_variants": ["native"]}}}
+        if native_variant else {}
+    )
     linked_recipe_user_id = canonical_method.recipe_user_id.get_as_string()
     await usermetadata_asyncio.update_user_metadata(
         linked_recipe_user_id,
@@ -4688,6 +4695,7 @@ async def test_email_change_finalization_uses_linked_rownd_metadata_without_copy
     await usermetadata_asyncio.update_user_metadata(
         primary_method.user.id,
         {
+            **native_metadata,
             "primary_only": "keep",
             "rownd_email_recipe_user_ids": {
                 "public": linked_recipe_user_id,
@@ -4698,7 +4706,7 @@ async def test_email_change_finalization_uses_linked_rownd_metadata_without_copy
     st_session = await session_asyncio.create_new_session_without_request_response(
         "public", primary_method.recipe_user_id, {}, {}, True
     )
-    target_email = "linked-metadata-target@example.com"
+    target_email = "linked-metadata-target-" + suffix + "@example.com"
 
     unchanged_response = client.put(
         "/auth/plugin/rownd/user",
@@ -4706,14 +4714,16 @@ async def test_email_change_finalization_uses_linked_rownd_metadata_without_copy
             **auth_headers(st_session.get_access_token()),
             "Content-Type": "application/json",
         },
-        json={"data": {"email": "linked-metadata-canonical@example.com"}},
+        json={"data": {"email": canonical_method.user.emails[0]}},
     )
     unchanged_primary = await usermetadata_asyncio.get_user_metadata(
         primary_method.user.id
     )
     assert unchanged_response.status_code == 200
     assert unchanged_response.json()["email_verification_pending"] is False
-    assert "original_rownd_user" not in unchanged_primary.metadata
+    assert unchanged_primary.metadata.get("original_rownd_user") == native_metadata.get(
+        "original_rownd_user"
+    )
     assert "linked_only" not in unchanged_primary.metadata
 
     response = client.put(
@@ -4727,20 +4737,22 @@ async def test_email_change_finalization_uses_linked_rownd_metadata_without_copy
 
     assert response.status_code == 200
     pending_primary = await usermetadata_asyncio.get_user_metadata(primary_method.user.id)
-    assert "original_rownd_user" not in pending_primary.metadata
+    assert pending_primary.metadata.get("original_rownd_user") == native_metadata.get(
+        "original_rownd_user"
+    )
     assert "linked_only" not in pending_primary.metadata
     pending = pending_primary.metadata["rownd_pending_verification"][0]
     assert pending["verificationRecipeUserId"] == linked_recipe_user_id
 
-    completion = await complete_pending_email_verification(
-        canonical_method.recipe_user_id,
-        target_email,
-        {},
-        "public",
-        st_session.get_handle(),
+    query = parse_qs(urlparse(delivery_links[-1]).query)
+    completion = client.post(
+        "/auth/user/email/verify?rowndPendingVerificationId=" + query["rowndPendingVerificationId"][0],
+        headers={**auth_headers(st_session.get_access_token()), "rid": "emailverification"},
+        json={"method": "token", "token": query["token"][0]},
     )
 
-    assert completion is not None
+    assert completion.json() == {"status": "OK"}
+    assert completion.headers.get("st-access-token")
     user = await get_user(primary_method.user.id)
     assert user is not None
     target_method = next(method for method in user.login_methods if method.email == target_email)
@@ -4755,6 +4767,9 @@ async def test_email_change_finalization_uses_linked_rownd_metadata_without_copy
     assert original["verified_data"] == {"email": target_email}
     assert original["groups"] == linked_snapshot["groups"]
     assert original["meta"] == linked_snapshot["meta"]
+    if native_variant:
+        assert original["attributes"] == {"rownd:app_variants": ["native"]}
+    assert target_method.verified
     assert primary_metadata["primary_only"] == "keep"
     assert primary_metadata["rownd_pending_verification"] == []
     assert primary_metadata["rownd_email_recipe_user_ids"] == {
@@ -4767,6 +4782,309 @@ async def test_email_change_finalization_uses_linked_rownd_metadata_without_copy
     ).metadata
     assert linked_metadata["original_rownd_user"] == linked_snapshot
     assert linked_metadata["linked_only"] == "do-not-copy"
+
+
+@pytest.mark.parametrize("profile", ["valid-stale-primary", "malformed-primary", "conflicting-linked"])
+async def test_mapped_profile_email_completion_uses_authoritative_linked_snapshot(
+    core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch, profile: str,
+):
+    links: list[str] = []
+    client = make_client(
+        core_url, rownd_client, enable_email_verification=True, email_verification_links=links,
+    )
+    suffix = str(uuid.uuid4())
+    rownd_id = "mapped-email-" + suffix
+    primary = await passwordless_asyncio.signinup("public", suffix + "@example.com", None)
+    native_id = primary.user.id
+    mapping = await create_user_id_mapping(native_id, rownd_id, force=False)
+    assert getattr(mapping, "status", "OK") == "OK"
+    linked = await passwordless_asyncio.signinup("public", "linked-" + suffix + "@example.com", None)
+    await accountlinking_asyncio.create_primary_user(primary.recipe_user_id)
+    await accountlinking_asyncio.link_accounts(linked.recipe_user_id, rownd_id)
+    linked_id = linked.recipe_user_id.get_as_string()
+    linked_snapshot = {
+        "data": {"user_id": rownd_id, "email": linked.user.emails[0], "name": "Linked"},
+        "verified_data": {"email": linked.user.emails[0]},
+        "attributes": {"rownd:app_variants": ["linked"]},
+    }
+    primary_snapshot = {
+        "data": {"user_id": "stale-" + suffix},
+        "attributes": {"rownd:app_variants": ["primary"]},
+    }
+    await usermetadata_asyncio.update_user_metadata(native_id, {
+        "original_rownd_user": primary_snapshot,
+        "ordinary": {"keep": None},
+        "rownd_email_recipe_user_ids": {"public": linked_id, "tenant-b": "other-credential"},
+    })
+    await usermetadata_asyncio.update_user_metadata(linked_id, {"original_rownd_user": linked_snapshot})
+    inspection = await impl.inspect_linked_user_metadata(rownd_id, {})
+    assert inspection["primary_user_id"] == native_id
+    assert inspection["rownd_metadata_source_user_id"] == linked_id
+    session = await session_asyncio.create_new_session_without_request_response(
+        "public", RecipeUserId(rownd_id), {}, {}, True
+    )
+    assert session.get_user_id() == rownd_id
+    target_email = "target-" + suffix + "@example.com"
+    update = client.put(
+        "/auth/plugin/rownd/user", headers=auth_headers(session.get_access_token()),
+        json={"data": {"email": target_email}},
+    )
+    assert update.status_code == 200, update.text
+    pending = (await usermetadata_asyncio.get_user_metadata(native_id)).metadata["rownd_pending_verification"][0]
+    assert pending["initiatingSessionHandle"] == session.get_handle()
+    assert pending["verificationRecipeUserId"] == linked_id
+    assert pending["tenantId"] == "public"
+    if profile == "malformed-primary":
+        primary_snapshot = {"data": {}, "attributes": {"rownd:app_variants": ["primary"]}}
+        await usermetadata_asyncio.update_user_metadata(native_id, {"original_rownd_user": primary_snapshot})
+    elif profile == "conflicting-linked":
+        other = await passwordless_asyncio.signinup("public", "other-" + suffix + "@example.com", None)
+        await accountlinking_asyncio.link_accounts(other.recipe_user_id, rownd_id)
+        await usermetadata_asyncio.update_user_metadata(other.recipe_user_id.get_as_string(), {
+            "original_rownd_user": {"data": {"user_id": "unresolved-" + suffix}},
+        })
+    get_raw = impl.get_raw_user_metadata
+
+    async def read_with_persisted_null(user_id: str, user_context=None):
+        metadata = await get_raw(user_id, user_context)
+        # The SDK's patch API cannot insert a top-level null; model that persisted read value.
+        return {**metadata, "unrelated_top_null": None} if user_id == native_id else metadata
+
+    monkeypatch.setattr(impl, "get_raw_user_metadata", read_with_persisted_null)
+    create = AsyncMock(wraps=passwordless_asyncio.signinup)
+    revoke = AsyncMock(wraps=session_asyncio.revoke_session)
+    revoke_all = AsyncMock(wraps=session_asyncio.revoke_all_sessions_for_user)
+    writer = AsyncMock(wraps=usermetadata_asyncio.update_user_metadata)
+    monkeypatch.setattr(passwordless_asyncio, "signinup", create)
+    monkeypatch.setattr(session_asyncio, "revoke_session", revoke)
+    monkeypatch.setattr(session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+    monkeypatch.setattr(usermetadata_asyncio, "update_user_metadata", writer)
+    query = parse_qs(urlparse(links[-1]).query)
+    session_information = await session_asyncio.get_session_information(session.get_handle())
+    assert session_information is not None and session_information.user_id == rownd_id
+    resolved = await impl.resolve_pending_email_verification_token(
+        query["token"][0], query["rowndPendingVerificationId"][0], "public", session, {}
+    )
+    assert resolved["status"] == "OK", resolved
+    completion = client.post(
+        "/auth/user/email/verify?rowndPendingVerificationId=" + query["rowndPendingVerificationId"][0],
+        headers={**auth_headers(session.get_access_token()), "rid": "emailverification"},
+        json={"method": "token", "token": query["token"][0]},
+    )
+    assert completion.status_code == 200
+    metadata = (await usermetadata_asyncio.get_user_metadata(native_id)).metadata
+    assert metadata["rownd_pending_verification"] == [], completion.text
+    assert metadata["ordinary"] == {"keep": None}
+    assert (await usermetadata_asyncio.get_user_metadata(linked_id)).metadata == {
+        "original_rownd_user": linked_snapshot,
+    }
+    if profile != "valid-stale-primary":
+        assert completion.json() == {
+            "status": "GENERAL_ERROR",
+            "message": "the account has %s Rownd metadata" % (
+                "malformed" if profile == "malformed-primary" else "conflicting"
+            ),
+        }
+        create.assert_not_awaited()
+        revoke.assert_not_awaited()
+        revoke_all.assert_not_awaited()
+        assert metadata["original_rownd_user"] == primary_snapshot
+        assert await session_asyncio.get_session_information(session.get_handle()) is not None
+        assert not await emailverification_asyncio.is_email_verified(linked.recipe_user_id, target_email)
+        return
+    assert completion.json() == {"status": "OK"}
+    replacement = await session_asyncio.get_session_without_request_response(completion.headers["st-access-token"])
+    assert replacement is not None and replacement.get_user_id() == rownd_id
+    assert await session_asyncio.get_session_information(session.get_handle()) is None
+    user = await get_user(rownd_id)
+    assert user is not None
+    canonical = next(method for method in user.login_methods if method.email == target_email)
+    assert canonical.verified
+    assert replacement.get_recipe_user_id().get_as_string() == canonical.recipe_user_id.get_as_string()
+    assert metadata["original_rownd_user"] == {
+        **linked_snapshot,
+        "data": {**linked_snapshot["data"], "email": target_email},
+        "verified_data": {"email": target_email},
+        "attributes": {"rownd:app_variants": ["linked", "primary"]},
+    }
+    assert metadata["rownd_email_recipe_user_ids"] == {
+        "public": canonical.recipe_user_id.get_as_string(), "tenant-b": "other-credential",
+    }
+    final_patch = next(
+        call.args[1] for call in writer.await_args_list if "original_rownd_user" in call.args[1]
+    )
+    assert set(final_patch) == {
+        "original_rownd_user", "rownd_email_recipe_user_id",
+        "rownd_email_recipe_user_ids", "rownd_pending_verification",
+    }
+    assert all("unrelated_top_null" not in call.args[1] for call in writer.await_args_list)
+
+
+@pytest.mark.parametrize("profile", ["absent", "variant", "existing-id"])
+async def test_marked_native_profile_email_completion_preserves_provenance_boundary(
+    core_url: str, rownd_client: MockRowndClient, profile: str,
+):
+    links: list[str] = []
+    client = make_client(
+        core_url, rownd_client, enable_email_verification=True, email_verification_links=links,
+        plugin_config={"sub_brands": {"native": {"id": "native-app"}}},
+    )
+    suffix = str(uuid.uuid4())
+    old_email = suffix + "@example.com"
+    new_email = "new-" + old_email
+    challenge = await passwordless_asyncio.create_code("public", email=old_email)
+    sign_in = client.post(
+        "/auth/signinup/code/consume" + ("?app_variant_id=native" if profile == "variant" else ""),
+        headers={"rid": "passwordless", **session_headers()},
+        json={"preAuthSessionId": challenge.pre_auth_session_id, "linkCode": challenge.link_code},
+    )
+    assert sign_in.json()["status"] == "OK"
+    session = await session_asyncio.get_session_without_request_response(
+        sign_in.headers["st-access-token"]
+    )
+    assert session is not None
+    user_id = session.get_user_id()
+    original = (
+        {"attributes": {"rownd:app_variants": ["native"]}} if profile == "variant" else None
+    )
+    if profile == "existing-id":
+        # A self-ID is not evidence that a persisted snapshot can safely be erased.
+        original = {
+            "data": {"user_id": user_id, "email": old_email},
+            "verified_data": {"email": old_email},
+        }
+        await usermetadata_asyncio.update_user_metadata(user_id, {"original_rownd_user": original})
+    before = (await usermetadata_asyncio.get_user_metadata(user_id)).metadata
+    assert before.get("original_rownd_user") == original
+    await usermetadata_asyncio.update_user_metadata(user_id, {
+        "ordinary": {"keep": [False, None]},
+        "rownd_email_recipe_user_ids": {"tenant-b": "other-credential"},
+    })
+    update = client.put(
+        "/auth/plugin/rownd/user", headers=auth_headers(session.get_access_token()),
+        json={"data": {"email": new_email}},
+    )
+    assert update.status_code == 200, update.text
+    query = parse_qs(urlparse(links[-1]).query)
+    completion = client.post(
+        "/auth/user/email/verify?rowndPendingVerificationId=" + query["rowndPendingVerificationId"][0],
+        headers={**auth_headers(session.get_access_token()), "rid": "emailverification"},
+        json={"method": "token", "token": query["token"][0]},
+    )
+    assert completion.json() == {"status": "OK"}
+    replacement = await session_asyncio.get_session_without_request_response(
+        completion.headers["st-access-token"]
+    )
+    assert replacement is not None and replacement.get_user_id() == user_id
+    assert replacement.get_handle() != session.get_handle()
+    assert await session_asyncio.get_session_information(session.get_handle()) is None
+    user = await get_user(user_id)
+    assert user is not None
+    canonical = next(method for method in user.login_methods if method.email == new_email)
+    assert canonical.verified
+    assert replacement.get_recipe_user_id().get_as_string() == canonical.recipe_user_id.get_as_string()
+    metadata = (await usermetadata_asyncio.get_user_metadata(user_id)).metadata
+    assert metadata["ordinary"] == {"keep": [False, None]}
+    assert metadata["rownd_pending_verification"] == []
+    assert metadata["rownd_email_recipe_user_id"] == canonical.recipe_user_id.get_as_string()
+    assert metadata["rownd_email_recipe_user_ids"] == {
+        "public": canonical.recipe_user_id.get_as_string(), "tenant-b": "other-credential",
+    }
+    if profile == "existing-id":
+        assert metadata["original_rownd_user"] == {
+            "data": {"user_id": user_id, "email": new_email},
+            "verified_data": {"email": new_email},
+        }
+    else:
+        assert metadata.get("original_rownd_user") == original
+    projected = client.get(
+        "/auth/plugin/rownd/user", headers=auth_headers(replacement.get_access_token())
+    ).json()
+    assert projected["data"]["email"] == new_email
+    assert projected["verified_data"]["email"] == new_email
+    rownd_profile = {
+        "data": {"user_id": "rownd-" + suffix, "email": new_email},
+        "verified_data": {"email": new_email},
+    }
+    source = create_rownd_identity_snapshot(cast(Any, rownd_profile), "public")
+    state = await impl.read_fresh_migration_snapshot(source, {})
+    disposition = classify_migration_snapshot(state)
+    if profile == "existing-id":
+        assert disposition.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+    else:
+        assert disposition.reason is not MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+        assert all(item.valid for item in state.metadata.values())
+        assert disposition.status is MigrationDispositionStatus.REPAIRABLE, disposition
+        migration_response = migrate_rownd_user(
+            client, rownd_client, "rownd-" + suffix, rownd_profile
+        )
+        # Session/metadata references can block Core's mapping API, not identity ownership.
+        assert_migration_error(migration_response, "CORE_CAPABILITY_REQUIRED", 503, False, "mapping")
+
+
+@pytest.mark.parametrize("invalid", ["malformed-primary", "malformed-linked", "conflicting"])
+async def test_profile_email_metadata_conflict_precedes_credential_and_session_mutations(
+    core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch, invalid: str,
+):
+    links: list[str] = []
+    client = make_client(
+        core_url, rownd_client, enable_email_verification=True, email_verification_links=links,
+    )
+    suffix = str(uuid.uuid4())
+    target_email = "target-" + suffix + "@example.com"
+    sign_in, session = await start_native_email_change(client, suffix + "@example.com", target_email)
+    linked = await passwordless_asyncio.signinup("public", "linked-" + suffix + "@example.com", None)
+    await accountlinking_asyncio.create_primary_user(sign_in.recipe_user_id)
+    await accountlinking_asyncio.link_accounts(linked.recipe_user_id, sign_in.user.id)
+    primary_original = (
+        {"data": {"email": "missing-id@example.com"}} if invalid == "malformed-primary"
+        else {"data": {"user_id": "primary-rownd"}}
+    )
+    linked_original = (
+        {"data": {"user_id": "primary-rownd"}, "verified_data": []}
+        if invalid == "malformed-linked" else {"data": {"user_id": "linked-rownd"}}
+    )
+    await usermetadata_asyncio.update_user_metadata(
+        sign_in.user.id, {"original_rownd_user": primary_original}
+    )
+    await usermetadata_asyncio.update_user_metadata(
+        linked.recipe_user_id.get_as_string(), {"original_rownd_user": linked_original}
+    )
+    create = AsyncMock(wraps=passwordless_asyncio.signinup)
+    revoke = AsyncMock(wraps=session_asyncio.revoke_session)
+    revoke_all = AsyncMock(wraps=session_asyncio.revoke_all_sessions_for_user)
+    monkeypatch.setattr(passwordless_asyncio, "signinup", create)
+    monkeypatch.setattr(session_asyncio, "revoke_session", revoke)
+    monkeypatch.setattr(session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+    query = parse_qs(urlparse(links[-1]).query)
+    completion = client.post(
+        "/auth/user/email/verify?rowndPendingVerificationId=" + query["rowndPendingVerificationId"][0],
+        headers={**auth_headers(session.get_access_token()), "rid": "emailverification"},
+        json={"method": "token", "token": query["token"][0]},
+    )
+    assert completion.status_code == 200
+    assert completion.json() == {
+        "status": "GENERAL_ERROR",
+        "message": "the account has %s Rownd metadata" % (
+            "conflicting" if invalid == "conflicting" else "malformed"
+        ),
+    }
+    create.assert_not_awaited()
+    revoke.assert_not_awaited()
+    revoke_all.assert_not_awaited()
+    assert await session_asyncio.get_all_session_handles_for_user(sign_in.user.id) == [
+        session.get_handle()
+    ]
+    assert await session_asyncio.get_session_information(session.get_handle()) is not None
+    user = await get_user(sign_in.user.id)
+    assert user is not None and target_email not in user.emails
+    assert not await emailverification_asyncio.is_email_verified(sign_in.recipe_user_id, target_email)
+    primary_metadata = (await usermetadata_asyncio.get_user_metadata(sign_in.user.id)).metadata
+    assert primary_metadata["original_rownd_user"] == primary_original
+    assert primary_metadata["rownd_pending_verification"] == []
+    assert (await usermetadata_asyncio.get_user_metadata(
+        linked.recipe_user_id.get_as_string()
+    )).metadata["original_rownd_user"] == linked_original
 
 
 async def test_email_update_clears_pending_verification_when_reset_to_current_email(
@@ -4984,10 +5302,11 @@ async def test_email_verify_route_completes_pending_verification(
     assert linked_user is not None
     metadata = await usermetadata_asyncio.get_user_metadata(linked_user.id)
     assert metadata.metadata["rownd_pending_verification"] == []
-    assert metadata.metadata["original_rownd_user"]["data"]["email"] == "route-verified@example.com"
+    assert "original_rownd_user" not in metadata.metadata
     canonical_method = next(
         method for method in linked_user.login_methods if method.email == "route-verified@example.com"
     )
+    assert canonical_method.verified
     assert metadata.metadata["rownd_email_recipe_user_id"] == (
         canonical_method.recipe_user_id.get_as_string()
     )
@@ -5235,8 +5554,7 @@ async def test_add_passwordless_finalization_failure_removes_created_method_and_
 
     async def fail_finalization(user_id: str, metadata_update: dict, *args: Any, **kwargs: Any):
         nonlocal linked_method_seen
-        rownd_user = metadata_update.get("original_rownd_user", {})
-        if rownd_user.get("data", {}).get("email") == target_email:
+        if "rownd_email_recipe_user_id" in metadata_update:
             user_at_failure = await get_user(user_id)
             linked_method_seen = user_at_failure is not None and any(
                 method.recipe_id == "passwordless" and method.email == target_email
@@ -5819,8 +6137,8 @@ async def test_email_verification_completes_valid_legacy_pending_record_without_
     }
     canonical_method = next(method for method in user.login_methods if method.email == target_email)
     metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
-    assert metadata.metadata["original_rownd_user"]["data"]["email"] == target_email
-    assert metadata.metadata["original_rownd_user"]["verified_data"]["email"] == target_email
+    assert "original_rownd_user" not in metadata.metadata
+    assert canonical_method.verified
     assert metadata.metadata["rownd_email_recipe_user_id"] == (
         canonical_method.recipe_user_id.get_as_string()
     )

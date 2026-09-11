@@ -27,6 +27,9 @@
 
 ### Patch Changes
 
+- Stop email-change completion from synthesizing a Rownd `data.user_id` from the SuperTokens
+  user ID. Preserve native attributes-only wrappers and genuine linked provenance; reject
+  malformed or conflicting metadata before credential additions or session revocation.
 - Mark the first login method `isPrimary: true` in mapper and online new-user imports,
   including single-method users. Core's primary-user/account-linking feature must be enabled
   even for singleton imports. Standalone missing-identity additions still omit `isPrimary`
