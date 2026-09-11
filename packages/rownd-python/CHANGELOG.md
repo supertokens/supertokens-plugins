@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 0.2.3
+
+### Patch Changes
+
+- Fix primary users and migration identities
+
 ## 0.2.2
 
 ### Patch Changes
