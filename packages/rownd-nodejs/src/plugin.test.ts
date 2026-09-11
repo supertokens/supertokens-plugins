@@ -4103,7 +4103,95 @@ describe("rownd-nodejs plugin", () => {
     });
 
     describe("POST /migrate", () => {
-      it.each(["success", "skipped", "session failure"])("correlates terminal telemetry for %s", async (scenario) => {
+      describe.each(["/auth/plugin/rownd/migrate", "/auth/plugin/migrate-session"])("missing legacy user: %s", (path) => {
+        it.each([
+          "missing", "invalid token", "undefined profile", "existing user", "cached absence",
+          "403", "500", "timeout", "string 404", "message 404", "lookup failure", "null lookup",
+        ])("classifies %s without issuing or clearing credentials", async (scenario) => {
+          const events: Parameters<RowndTelemetryClient["recordEvent"]>[0][] = [];
+          let operationContext: Record<string, any> | undefined;
+          const { server: s, port } = await setup(importCoreConnectionURI, {
+            telemetry: { provider: "custom", factory: () => ({ recordEvent: (event) => { events.push(event); } }) },
+            resolveConfig: ({ userContext }) => { operationContext = userContext; return {}; },
+          });
+          server = s;
+          const account = await Passwordless.signInUp({ tenantId: "public", email: `${randomUUID()}@example.com` });
+          const rowndUserId = `missing-${randomUUID()}`;
+          const hasExistingUser = scenario === "existing user" || scenario === "cached absence";
+          if (hasExistingUser) {
+            expect((await SuperTokens.createUserIdMapping({ superTokensUserId: account.user.id, externalUserId: rowndUserId })).status).toBe("OK");
+          }
+          const existingSession = await Session.createNewSessionWithoutRequestResponse("public", account.recipeUserId);
+          mockRowndClient.validateToken.mockResolvedValue({ user_id: rowndUserId });
+          if (scenario === "invalid token") mockRowndClient.validateToken.mockRejectedValue(new Error("Invalid token"));
+          const rowndError = Object.assign(new Error("Rownd profile lookup failed"), {
+            response: { statusCode: scenario === "string 404" ? "404" : scenario === "403" ? 403 : scenario === "500" ? 500 : 404 },
+          });
+          mockRowndClient.fetchUserInfo.mockImplementation(async () => {
+            if (scenario === "undefined profile") return undefined;
+            if (scenario === "timeout") throw Object.assign(new Error("Rownd request timed out"), { code: "ETIMEDOUT" });
+            if (scenario === "message 404") throw new Error("404 user not found");
+            if (scenario === "cached absence") {
+              operationContext!._default.coreCallCache = { missingUser: true };
+              operationContext!._default.core_call_cache = { missingUser: true };
+            }
+            throw rowndError;
+          });
+          const originalGetUser = SuperTokens.getUser.bind(SuperTokens);
+          const lookup = vi.spyOn(SuperTokens, "getUser");
+          if (scenario === "lookup failure") lookup.mockRejectedValue(new Error("Core unavailable"));
+          if (scenario === "null lookup") lookup.mockResolvedValue(null as any);
+          if (scenario === "cached absence") {
+            lookup.mockImplementation(async (id, context) => {
+              if (context?._default.coreCallCache.missingUser || context?._default.core_call_cache.missingUser) return undefined;
+              return originalGetUser(id, context);
+            });
+          }
+          const createSession = vi.spyOn(Session, "createNewSession");
+          const revokeSessions = vi.spyOn(Session, "revokeAllSessionsForUser");
+          const revokeSession = vi.spyOn(Session, "revokeSession");
+          const deleteUser = vi.spyOn(SuperTokens, "deleteUser");
+          const response = await fetch(`http://localhost:${port}${path}`, {
+            method: "POST", headers: { Authorization: "Bearer private-missing-token", "st-auth-mode": "header" },
+          });
+          expect(response.status).toBe(scenario === "missing" ? 410 : 400);
+          expect(await response.json()).toEqual(scenario === "missing" ? {
+            status: "ERROR", code: "LEGACY_USER_NOT_FOUND",
+            message: "Your previous session could not be restored. Please sign in again.",
+          } : { status: "ERROR", message: "Migration failed" });
+          expect(mockRowndClient.validateToken).toHaveBeenCalledWith("private-missing-token");
+          if (scenario === "invalid token") {
+            expect(mockRowndClient.fetchUserInfo).not.toHaveBeenCalled();
+            expect(lookup).not.toHaveBeenCalled();
+          } else {
+            expect(mockRowndClient.fetchUserInfo).toHaveBeenCalledWith({ user_id: rowndUserId });
+            expect(mockRowndClient.validateToken.mock.invocationCallOrder[0]).toBeLessThan(mockRowndClient.fetchUserInfo.mock.invocationCallOrder[0]);
+          }
+          if (["missing", "existing user", "cached absence", "lookup failure", "null lookup"].includes(scenario)) {
+            expect(lookup).toHaveBeenCalledWith(rowndUserId, expect.any(Object));
+          }
+          expect(createSession).not.toHaveBeenCalled();
+          expect(revokeSessions).not.toHaveBeenCalled();
+          expect(revokeSession).not.toHaveBeenCalled();
+          expect(deleteUser).not.toHaveBeenCalled();
+          for (const header of ["set-cookie", "st-access-token", "st-refresh-token", "front-token"]) {
+            expect(response.headers.has(header)).toBe(false);
+          }
+          expect(await Session.getSessionInformation(existingSession.getHandle())).toBeDefined();
+          expect(await originalGetUser(hasExistingUser ? rowndUserId : account.user.id)).toBeDefined();
+          const terminal = events.filter((event) => event.eventType === "terminal");
+          expect(terminal).toHaveLength(1);
+          expect(terminal[0]).toMatchObject({
+            requestId: response.headers.get("x-rownd-migration-request-id"),
+            outcome: "error", result: "error", sessionCreated: false,
+            ...(scenario === "missing" ? { stage: "rownd_lookup", reason: "rownd_user_not_found", rowndUserId } : { reason: "stage_failed" }),
+          });
+          expect(terminal[0].requestId).toMatch(/^[0-9a-f-]{36}$/);
+          expect(JSON.stringify(events)).not.toContain("private-missing-token");
+        });
+      });
+
+      it.each(["success", "undefined profile", "session failure"])("correlates terminal telemetry for %s", async (scenario) => {
         const events: Parameters<RowndTelemetryClient["recordEvent"]>[0][] = [];
         const { server: s, port } = await setup(importCoreConnectionURI, {
           telemetry: { provider: "custom", factory: () => ({ recordEvent: (event) => { events.push(event); } }) },
@@ -4112,7 +4200,7 @@ describe("rownd-nodejs plugin", () => {
         testPORT = port;
         const rowndUserId = `telemetry-${randomUUID()}`;
         mockRowndClient.validateToken.mockResolvedValue({ user_id: rowndUserId });
-        if (scenario === "skipped") {
+        if (scenario === "undefined profile") {
           mockRowndClient.fetchUserInfo.mockResolvedValue(undefined);
         } else {
           mockRowndClient.fetchUserInfo.mockResolvedValue({
@@ -4126,12 +4214,13 @@ describe("rownd-nodejs plugin", () => {
         const response = await fetch(`http://localhost:${port}/auth/plugin/rownd/migrate`, {
           method: "POST", headers: { Authorization: "Bearer private-token", "st-auth-mode": "header" },
         });
-        expect(await response.json()).toMatchObject({ status: scenario === "session failure" ? "ERROR" : "OK" });
+        expect(response.status).toBe(scenario === "success" ? 200 : 400);
+        expect(await response.json()).toMatchObject({ status: scenario === "success" ? "OK" : "ERROR" });
         const terminal = events.filter((event) => event.eventType === "terminal");
         expect(terminal).toHaveLength(1);
         expect(terminal[0]).toMatchObject({
           requestId: response.headers.get("x-rownd-migration-request-id"),
-          result: scenario === "session failure" ? "error" : scenario,
+          result: scenario === "success" ? "success" : "error",
           sessionCreated: scenario === "success",
           rowndUserId, tenantId: "public", pluginVersion: "0.7.4",
           durationMs: expect.any(Number),
@@ -4143,13 +4232,13 @@ describe("rownd-nodejs plugin", () => {
             error: { name: "TypeError", message: "Session storage unavailable" },
           });
         }
-        if (scenario !== "skipped") {
+        if (scenario !== "undefined profile") {
           expect(events).toContainEqual(expect.objectContaining({ eventType: "transition", reason: "bulk_import_completed" }));
           expect(terminal[0]).toMatchObject({ stage: "session_creation", recipeId: "passwordless", recipeUserId: expect.any(String) });
           expect(await SuperTokens.getUser(rowndUserId)).toBeDefined();
         } else {
           expect(events).toHaveLength(1);
-          expect(terminal[0].reason).toBe("rownd_user_not_found");
+          expect(terminal[0]).toMatchObject({ stage: "rownd_lookup", reason: "stage_failed", outcome: "error" });
         }
         expect(new Set(events.map((event) => event.requestId)).size).toBe(1);
         expect(JSON.stringify(events)).not.toMatch(/private-token|secret-token|@example.com/);
@@ -6315,7 +6404,7 @@ describe("rownd-nodejs plugin", () => {
         });
       });
 
-      it("skips migration if user not found in rownd", async () => {
+      it("fails recoverably if Rownd returns an ambiguous undefined profile", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
@@ -6332,7 +6421,8 @@ describe("rownd-nodejs plugin", () => {
           },
         );
         const body = await res.json();
-        expect(body).toEqual({ status: "OK" });
+        expect(res.status).toBe(400);
+        expect(body).toEqual({ status: "ERROR", message: "Migration failed" });
         expect(res.headers.get("st-access-token")).toBeNull();
         await expect(
           getMigratedUserByRowndUserId("rownd-missing"),

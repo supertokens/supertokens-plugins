@@ -18,7 +18,7 @@ import {
   INSTANT_AUTH_METHOD_ID,
   NATIVE_EMAIL_VERIFICATION_UPGRADE_REQUIRED_MESSAGE,
 } from "./constants";
-import { RowndEmailChangeError, RowndPluginError } from "./errors";
+import { RowndEmailChangeError, RowndLegacyUserNotFoundError, RowndPluginError } from "./errors";
 import { logDebugMessage } from "./logger";
 import type {
   RowndEmailChangeRequestContext,
@@ -281,6 +281,16 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
   };
 }
 
+export function handleMigrationRequest(deps: RowndRouteHandlerDeps): PluginRouteHandler["handler"] {
+  const migrate = handleMigrate(deps);
+  return async (req, res, session, userContext) => {
+    const result = await migrate(req, res, session, userContext);
+    res.setStatusCode(result.status === "OK" ? 200 : result.code === "LEGACY_USER_NOT_FOUND" ? 410 : 400);
+    res.sendJSONResponse(result);
+    return null;
+  };
+}
+
 export function handleMigrate(deps: RowndRouteHandlerDeps) {
   return async (
     req: SuperTokensRequest,
@@ -324,11 +334,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       const stUserImport = authenticated.source;
 
       if (!stUserImport) {
-        telemetry.emit("terminal", "rownd_user_not_found", "skipped");
-        logDebugMessage(
-          `Skipping migration because user does not exist in Rownd. tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,
-        );
-        return { status: "OK" as const };
+        throw new Error("Authenticated Rownd migration source is unavailable");
       }
 
       telemetry.stage = "supertokens_lookup";
@@ -493,6 +499,10 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
 
       return { status: "OK" as const };
     } catch (error) {
+      if (error instanceof RowndLegacyUserNotFoundError) {
+        telemetry.emit("terminal", "rownd_user_not_found", "error", error);
+        return { status: "ERROR" as const, code: error.code, message: error.message };
+      }
       telemetry.emit("terminal", "stage_failed", "error", error);
       return {
         status: "ERROR" as const,

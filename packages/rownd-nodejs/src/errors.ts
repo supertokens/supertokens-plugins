@@ -12,6 +12,15 @@ export class RowndPluginError extends Error {
   }
 }
 
+export class RowndLegacyUserNotFoundError extends Error {
+  readonly code = "LEGACY_USER_NOT_FOUND" as const;
+
+  constructor() {
+    super("Your previous session could not be restored. Please sign in again.");
+    this.name = "RowndLegacyUserNotFoundError";
+  }
+}
+
 export class RowndEmailChangeError extends Error {
   constructor(
     public readonly code: "CONFLICT" | "AMBIGUOUS" | "INVALID_EMAIL",

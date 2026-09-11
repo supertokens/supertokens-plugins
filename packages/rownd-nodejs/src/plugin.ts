@@ -78,7 +78,7 @@ import {
   handleGetUserField,
   handleGetUserMeta,
   handleGuestLogin,
-  handleMigrate,
+  handleMigrationRequest,
   handleSignOut,
   handleUpdateUser,
   handleUpdateUserField,
@@ -312,9 +312,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   {
                     path: `${apiBasePath}${HANDLE_BASE_PATH}/migrate`,
                     method: "post" as const,
-                    handler: withRequestHandler(
-                      handleMigrate(routeHandlerDeps),
-                    ),
+                    handler: handleMigrationRequest(routeHandlerDeps),
                   },
                 ]
                 : []),
@@ -332,9 +330,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   {
                     path: `${apiBasePath}/plugin/migrate-session`,
                     method: "post" as const,
-                    handler: withRequestHandler(
-                      handleMigrate(routeHandlerDeps),
-                    ),
+                    handler: handleMigrationRequest(routeHandlerDeps),
                   },
                 ]
                 : []),

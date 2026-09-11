@@ -10,6 +10,7 @@ import { fetchOptionalRowndUserInfo, validateRowndToken } from "./rownd-reposito
 import { assertMigrationMapping, assertMigrationSourceActive } from "./migration-mapping";
 import { migrationTelemetry } from "./telemetry/migrationTelemetry";
 import { clearSuperTokensCoreCallCache, isRecord, type JsonRecord } from "./utils";
+import { RowndLegacyUserNotFoundError } from "./errors";
 
 type AuthenticatedMigration = Readonly<{
   rowndUserId: string;
@@ -43,8 +44,21 @@ export async function authenticateRowndMigration(token: string, tenantId: string
   if (telemetry) telemetry.rowndUserId = rowndUserId;
   await assertMigrationSourceActive(rowndUserId, userContext);
   if (telemetry) telemetry.stage = "rownd_lookup";
-  const rowndUser = await fetchOptionalRowndUserInfo(rowndUserId);
-  if (!rowndUser) return { rowndUserId };
+  let rowndUser: RowndUser | undefined;
+  try {
+    rowndUser = await fetchOptionalRowndUserInfo(rowndUserId);
+  } catch (error) {
+    // Only the requested profile's definitive HTTP 404 can establish absence.
+    // Other optional lookups and ambiguous SDK responses retain their semantics.
+    if (isRecord(error) && isRecord(error.response) && error.response.statusCode === 404) {
+      clearSuperTokensCoreCallCache(userContext);
+      const existingUser = await SuperTokens.getUser(rowndUserId, userContext);
+      if (existingUser === undefined) throw new RowndLegacyUserNotFoundError();
+      if (telemetry) telemetry.superTokensUserId = existingUser?.id;
+    }
+    throw error;
+  }
+  if (!rowndUser) throw new Error("Rownd profile lookup returned no authoritative result");
   if (rowndUser.data?.user_id !== rowndUserId || !isRowndMigrationProfileActive(rowndUser)) {
     throw new Error("Rownd profile does not match an enabled validated token user ID");
   }
