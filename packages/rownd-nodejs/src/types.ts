@@ -827,6 +827,22 @@ export type RowndUser = JSONObject & {
   meta?: JSONObject;
 };
 
+export type RowndMigrationEmailRetirement = {
+  version: 1;
+  planId: string;
+  tenantId: string;
+  targetRecipeUserId: string;
+  targetEmail: string;
+  source: {
+    rowndUserId: string;
+    providerId: string;
+    providerUserId: string;
+    providerRecipeUserId: string;
+    previousEmail: string;
+  };
+  retiredMethods: Array<{ recipeUserId: string; email: string }>;
+};
+
 export type RowndUserMetadata = {
   /** Preserves the Rownd profile shape used by compatibility endpoints and claims. */
   original_rownd_user?: RowndUser;
@@ -836,6 +852,8 @@ export type RowndUserMetadata = {
   rownd_email_recipe_user_ids?: Record<string, string>;
   /** Prevents a successfully imported Rownd user from being migrated again. */
   rownd_migration_complete?: boolean;
+  /** Primary-only retirement evidence retained independently of mutable cleanup plans. */
+  rownd_migration_email_retirements?: Record<string, RowndMigrationEmailRetirement>;
   /** Tracks verified profile changes until they commit or are safely reconciled. */
   rownd_pending_verification?: Array<{
     /** Correlates the pending operation with the verification link that completes it. */

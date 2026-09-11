@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { MigrationTelemetry } from "./telemetry/migrationTelemetry";
 import { assertMigrationMapping, assertMigrationSourceActive } from "./migration-mapping";
+import { resolveCanonicalEmailForTenant } from "./canonical-email";
 import SuperTokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
@@ -536,8 +537,28 @@ export async function associateUserLoginMethodsToTenant(
   tenantId: string,
   userContext: SuperTokensUserContext,
 ) {
+  let canonicalEmailRecipeUserIds: string[] | undefined;
+  if (user.loginMethods.some((method) => method.recipeId === "passwordless" && method.email &&
+      !method.tenantIds.includes(tenantId))) {
+    const metadata = await getUserMetadata(user.id, userContext);
+    const pointer = metadata.rownd_email_recipe_user_ids?.[tenantId] ??
+      (metadata.rownd_email_recipe_user_ids === undefined ? metadata.rownd_email_recipe_user_id : undefined);
+    // A legacy global pointer to another tenant is not a choice for a new tenant.
+    const pointerMethod = user.loginMethods.find((method) => method.recipeUserId.getAsString() === pointer);
+    const legacyPointerBelongsToAnotherTenant = metadata.rownd_email_recipe_user_ids === undefined &&
+      pointerMethod !== undefined && !pointerMethod.tenantIds.includes(tenantId);
+    if (pointer !== undefined && !legacyPointerBelongsToAnotherTenant) {
+      const canonical = resolveCanonicalEmailForTenant({ user, metadata, tenantId, passwordlessOnly: true });
+      if (canonical.status !== "SELECTED") {
+        throw new Error("Canonical passwordless email method is invalid for tenant association");
+      }
+      canonicalEmailRecipeUserIds = canonical.recipeUserIds;
+    }
+  }
   for (const loginMethod of user.loginMethods) {
     if (loginMethod.tenantIds.includes(tenantId)) continue;
+    if (canonicalEmailRecipeUserIds && loginMethod.recipeId === "passwordless" && loginMethod.email &&
+        !canonicalEmailRecipeUserIds.includes(loginMethod.recipeUserId.getAsString())) continue;
 
     const associationResult = await MultiTenancy.associateUserToTenant(
       tenantId,

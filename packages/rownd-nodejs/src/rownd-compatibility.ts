@@ -13,6 +13,11 @@ import {
   ROWND_JWT_CLAIMS,
 } from "./constants";
 import { getConfigForUserContext, getPluginConfig } from "./config";
+import {
+  isSyntheticEmail,
+  resolveCanonicalEmailForTenant,
+  SUPERTOKENS_FAKE_EMAIL_DOMAIN,
+} from "./canonical-email";
 import type {
   RowndPluginNormalisedConfig,
   RowndUser,
@@ -81,6 +86,7 @@ const INTERNAL_METADATA_FIELDS = new Set([
   "rownd_email_recipe_user_id",
   "rownd_email_recipe_user_ids",
   "rownd_migration_complete",
+  "rownd_migration_email_retirements",
   "rownd_pending_verification",
   "rownd_migration_superseded",
   "rownd_migration_target",
@@ -96,10 +102,9 @@ const LINKED_OPERATIONAL_METADATA_FIELDS = new Set([
   "rownd_email_recipe_user_id",
   "rownd_email_recipe_user_ids",
   "rownd_migration_complete",
+  "rownd_migration_email_retirements",
   "rownd_pending_verification",
 ]);
-
-const SUPERTOKENS_FAKE_EMAIL_DOMAIN = "stfakeemail.supertokens.com";
 
 export async function getRawUserMetadata(
   userId: string,
@@ -335,10 +340,7 @@ export async function updatePrimaryUserMetadata(
 }
 
 export function isSuperTokensFakeEmail(email: unknown): email is string {
-  return (
-    typeof email === "string" &&
-    email.toLowerCase().endsWith(`@${SUPERTOKENS_FAKE_EMAIL_DOMAIN}`)
-  );
+  return isSyntheticEmail(email);
 }
 
 function buildSuperTokensFakeEmail(
@@ -990,76 +992,15 @@ async function hasCanonicalEmailForTenant(
   tenantId: string,
   userContext?: Record<string, any>,
 ) {
+  if (isSyntheticEmail(email)) return false;
   const metadata = (await inspectLinkedUserMetadata(user.id, userContext, user))
     .combinedMetadata;
-  const scopedCanonicalRecipeUserId =
-    metadata.rownd_email_recipe_user_ids?.[tenantId];
-  const legacyCanonicalRecipeUserId =
-    metadata.rownd_email_recipe_user_ids === undefined
-      ? metadata.rownd_email_recipe_user_id
-      : undefined;
-  const canonicalRecipeUserId =
-    scopedCanonicalRecipeUserId ?? legacyCanonicalRecipeUserId;
-  if (canonicalRecipeUserId) {
-    const canonicalMethod = user.loginMethods.find(
-      (method) =>
-        method.recipeUserId.getAsString() === canonicalRecipeUserId &&
-        method.tenantIds.includes(tenantId),
-    );
-    if (canonicalMethod) {
-      return canonicalMethod.email?.toLowerCase() === email.toLowerCase();
-    }
-    if (scopedCanonicalRecipeUserId) {
-      return false;
-    }
-  }
-
-  const tenantEmailMethods = user.loginMethods.filter(
-    (method) =>
-      !isGuestLoginMethod(method) &&
-      method.tenantIds.includes(tenantId) &&
-      method.verified &&
-      method.email !== undefined,
+  const canonical = resolveCanonicalEmailForTenant({ user, metadata, tenantId });
+  if (canonical.status === "NO_EMAIL") return undefined;
+  return (
+    canonical.status === "SELECTED" &&
+    canonical.email === email.trim().toLowerCase()
   );
-  const tenantEmails = new Set(
-    tenantEmailMethods.map((method) => method.email!.toLowerCase()),
-  );
-  const firstPartyEmails = new Set(
-    tenantEmailMethods
-      .filter(
-        (method) =>
-          method.recipeId === "passwordless" ||
-          method.recipeId === "emailpassword",
-      )
-      .map((method) => method.email!.toLowerCase()),
-  );
-  if (firstPartyEmails.size === 1) {
-    return firstPartyEmails.has(email.toLowerCase());
-  }
-
-  const originalEmail = metadata.original_rownd_user?.data?.email;
-  if (firstPartyEmails.size > 1) {
-    if (typeof originalEmail !== "string") {
-      return false;
-    }
-    const normalizedOriginalEmail = originalEmail.toLowerCase();
-    return (
-      firstPartyEmails.has(normalizedOriginalEmail) &&
-      normalizedOriginalEmail === email.toLowerCase()
-    );
-  }
-
-  if (typeof originalEmail === "string") {
-    const normalizedOriginalEmail = originalEmail.toLowerCase();
-    return (
-      tenantEmails.has(normalizedOriginalEmail) &&
-      normalizedOriginalEmail === email.toLowerCase()
-    );
-  }
-  if (tenantEmails.size > 0) {
-    return tenantEmails.size === 1 && tenantEmails.has(email.toLowerCase());
-  }
-  return undefined;
 }
 
 export function mapMethod(method: SuperTokensLoginMethod) {

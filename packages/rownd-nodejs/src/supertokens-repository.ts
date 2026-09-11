@@ -1,6 +1,14 @@
 import SuperTokens from "supertokens-node";
 import { migrationTelemetry } from "./telemetry/migrationTelemetry";
 import {
+  checkpointCurrentRowndEmailRetirement,
+  finishCurrentRowndEmailReconciliation,
+  isCurrentRowndEmailReconciliationPlan,
+  prepareCurrentRowndEmailReconciliation,
+  validateCurrentRowndEmailReconciliation,
+  type MigrationEmailPlan,
+} from "./migration-email";
+import {
   assertMigrationMapping,
   assertMigrationSourceActive,
   getMigrationTarget,
@@ -31,6 +39,7 @@ import {
 } from "./constants";
 import { RowndEmailChangeError, RowndPluginError } from "./errors";
 import { logDebugMessage } from "./logger";
+import { resolveCanonicalEmailForTenant } from "./canonical-email";
 import {
   assertRowndAppVariantIsConfigured,
   getConfigForUserContext,
@@ -605,8 +614,14 @@ async function reconcileRowndUserOnce(
     pinnedId ?? stUser.externalUserId, userContext,
   );
   const currentUser = mappedUser ?? options?.repairUser;
+  // Bulk import stored migration state under the Rownd alias. Only that exact,
+  // token-bound alias may supply missing state; primary metadata stays authoritative.
   const repairMetadata = currentUser
-    ? await getUserMetadata(currentUser.id, userContext)
+    ? {
+      ...(requestedMetadata.original_rownd_user?.data.user_id === stUser.externalUserId
+        ? requestedMetadata : {}),
+      ...await getUserMetadata(currentUser.id, userContext),
+    } as RowndMetadata
     : undefined;
   const originalRowndUserId = repairMetadata?.original_rownd_user?.data?.user_id;
   if (mappedUser && pinnedId === undefined && originalRowndUserId !== stUser.externalUserId &&
@@ -622,18 +637,39 @@ async function reconcileRowndUserOnce(
   const canonicalEmailId = repairMetadata
     ? getCanonicalEmailRecipeUserId(repairMetadata, tenantId)
     : undefined;
+  const finishEmailReconciliation = async (internalUserId: string, plan: RowndPendingVerification) => {
+    await assertMigrationMapping(internalUserId, stUser.externalUserId!, userContext);
+    await finishCurrentRowndEmailReconciliation({
+      internalUserId, plan, tenantId, userContext,
+      removeMethod: (recipeUserId, scopedTenantId, sdkUserId) =>
+        removePasswordlessMethodFromTenant(recipeUserId, scopedTenantId, sdkUserId, true, userContext),
+    });
+  };
+  const migrationEmailPlan = repairMetadata && getCommittingEmailPlansForTenant(repairMetadata, tenantId).find(
+    isCurrentRowndEmailReconciliationPlan,
+  );
+  if (repairUser && migrationEmailPlan) {
+    await finishEmailReconciliation(await resolveSuperTokensUserId(repairUser.id, userContext), migrationEmailPlan);
+  }
+  const hasPendingEmail = repairMetadata && getPendingVerifications(repairMetadata).some(
+    (verification) => verification.field === "email" &&
+      (verification.tenantId ?? PUBLIC_TENANT_ID) === tenantId,
+  );
+  const currentEmailReconciliation = repairUser && repairMetadata && !canonicalEmailId && !hasPendingEmail
+    ? await prepareCurrentRowndEmailReconciliation(stUser, repairUser, repairMetadata, tenantId)
+    : undefined;
   // Native contact changes and existing provider replacements remain authoritative.
   // Completion is not permission to skip newly added provider identities.
   const importMethods = stUser.loginMethods.filter(
     (method) =>
-      !(method.recipeId === "passwordless" && method.email && canonicalEmailId) &&
+      !(method.recipeId === "passwordless" && method.email && (canonicalEmailId || hasPendingEmail)) &&
         !repairUser?.loginMethods.some((existing) =>
           matchesImportLoginMethod(existing, method) ||
           (method.recipeId === "thirdparty" &&
             existing.thirdParty?.id === method.thirdPartyId),
         ),
   );
-  if (repairUser && importMethods.length === 0) {
+  if (repairUser && importMethods.length === 0 && !currentEmailReconciliation) {
     const internalId = await resolveSuperTokensUserId(repairUser.id, userContext);
     await assertMigrationMapping(internalId, stUser.externalUserId, userContext);
     return true;
@@ -771,6 +807,16 @@ async function reconcileRowndUserOnce(
   const phoneAnchoredEmailOwners = canonicalPhoneAnchor && !canLinkProviderEmailOwners
     ? foreignOwners.filter(isExactVerifiedEmailOwner) : [];
   const currentProfileOwners = [...phoneOwners, ...phoneAnchoredEmailOwners];
+  if (currentEmailReconciliation) {
+    for (const owner of foreignOwners.filter(({ importMethod }) =>
+      importMethod.recipeId === "passwordless" && importMethod.email !== undefined)) {
+      if (owner.user.isPrimaryUser || owner.user.loginMethods.length !== 1 ||
+          !owner.loginMethod.tenantIds.includes(tenantId)) {
+        throw new Error("Current Rownd email belongs to a non-standalone account");
+      }
+      await assertUserIsNotMappedToAnotherRowndUser(owner.superTokensUserId, stUser.externalUserId, userContext);
+    }
+  }
   if (currentProfileOwners.length > 0) {
     // Current token-bound profile data authorizes linking; stale verified_data
     // neither authorizes mapping retirement nor changes stored verification.
@@ -1048,6 +1094,67 @@ async function reconcileRowndUserOnce(
     throw new Error("Migrated login method postcondition failed");
   }
 
+  if (currentEmailReconciliation) {
+    await currentEmailReconciliation.assertFreshSource();
+    clearSuperTokensCoreCallCache(userContext);
+    const linkedUser = await SuperTokens.getUser(primaryUserId, userContext);
+    const canonicalMethod = linkedUser?.loginMethods.find((method) =>
+      method.recipeId === "passwordless" && method.verified &&
+      method.tenantIds.includes(tenantId) && method.hasSameEmailAs(currentEmailReconciliation.email));
+    if (!linkedUser || !canonicalMethod ||
+        !(await sdkUserIdMatchesInternalTarget(linkedUser.id, primaryUserId, userContext))) {
+      throw new Error("Current Rownd email ownership postcondition failed");
+    }
+    const latestMetadata = {
+      ...repairMetadata,
+      ...await getRawUserMetadata(stUser.externalUserId, userContext),
+      ...await getRawUserMetadata(primaryUserId, userContext),
+    } as RowndMetadata;
+    if (getCanonicalEmailRecipeUserId(latestMetadata, tenantId) ||
+        getPendingVerifications(latestMetadata).some((verification) => verification.field === "email" &&
+          (verification.tenantId ?? PUBLIC_TENANT_ID) === tenantId)) {
+      throw new Error("Canonical email state changed during migration reconciliation");
+    }
+    const canonicalRecipeUserId = canonicalMethod.recipeUserId.getAsString();
+    currentEmailReconciliation.assertCompatibleMethods(linkedUser);
+    const retiredMethods = linkedUser.loginMethods.filter((method) =>
+      method.recipeId === "passwordless" && method.email !== undefined &&
+      method.tenantIds.includes(tenantId) && method.recipeUserId.getAsString() !== canonicalRecipeUserId &&
+      !currentEmailReconciliation.placeholderIds.includes(method.recipeUserId.getAsString()));
+    const plan: MigrationEmailPlan = {
+      id: `migration-email-${canonicalRecipeUserId}`,
+      field: "email", value: currentEmailReconciliation.email, tenantId,
+      created_at: new Date().toISOString(), purpose: "UPDATE_PASSWORDLESS", status: "COMMITTING",
+      targetCanonicalRecipeUserId: canonicalRecipeUserId,
+      migrationSource: currentEmailReconciliation.migrationSource,
+      retiredMethods: retiredMethods.map((method) => ({
+        recipeUserId: method.recipeUserId.getAsString(), email: normalizeEmail(method.email!),
+      })),
+    };
+    const retirementCheckpoints = await checkpointCurrentRowndEmailRetirement({
+      internalUserId: primaryUserId, plan, tenantId, userContext,
+    });
+    // Publish only after Core proves ownership. A failed write leaves the snapshot
+    // intact, so the next migration can resume even when linking already succeeded.
+    await UserMetadata.updateUserMetadata(primaryUserId, {
+      ...buildVerifiedEmailMetadata(latestMetadata, linkedUser.id, currentEmailReconciliation.email, canonicalRecipeUserId, tenantId),
+      rownd_migration_complete: true,
+      rownd_migration_email_retirements: retirementCheckpoints,
+      rownd_pending_verification: [
+        ...getPendingVerifications(latestMetadata),
+        ...(retiredMethods.length > 0 ? [plan] : []),
+      ],
+    }, userContext);
+    if (retiredMethods.length > 0) {
+      await finishEmailReconciliation(primaryUserId, plan);
+    }
+    clearSuperTokensCoreCallCache(userContext);
+    const publishedMetadata = await getRawUserMetadata(primaryUserId, userContext);
+    if (getCanonicalEmailRecipeUserId(publishedMetadata, tenantId) !== canonicalRecipeUserId) {
+      throw new Error("Current Rownd canonical email publication failed");
+    }
+  }
+
   return true;
 }
 
@@ -1254,6 +1361,17 @@ export async function createMagicLinkWithConfirmationBypass(
     rowndClientDomain: input.clientDomain,
     rowndAppVariantId: appVariantId,
   });
+  if (hasEmail) {
+    const preparation = await prepareEmailForPasswordlessAuth({
+      email: input.email!,
+      tenantId,
+      reconcileTarget: false,
+      userContext: operationContext,
+    });
+    if (preparation.status !== "ALLOW") {
+      throw new Error("No existing account found");
+    }
+  }
   const codeInfo = hasEmail
     ? await Passwordless.createCode({
       email: input.email!,
@@ -3052,6 +3170,9 @@ export async function prepareEmailForPasswordlessAuth(input: {
 }) {
   const normalizedEmail = normalizeEmail(input.email);
   if (!normalizedEmail) return { status: "ALLOW" } as const;
+  if (isSuperTokensFakeEmail(normalizedEmail)) {
+    return { status: "REJECT_CLEANUP_METHOD" } as const;
+  }
 
   const users = await SuperTokens.listUsersByAccountInfo(
     input.tenantId,
@@ -3064,6 +3185,7 @@ export async function prepareEmailForPasswordlessAuth(input: {
         userId: string;
         pendingVerification: RowndPendingVerification;
         disposition: "TARGET";
+        migrationInternalUserId?: string;
       }
     | { userId: string; disposition: "CLEANUP" }
   > = [];
@@ -3077,7 +3199,8 @@ export async function prepareEmailForPasswordlessAuth(input: {
     );
     if (listedMatchingMethods.length === 0) continue;
 
-    const metadata = await getRawUserMetadata(user.id, input.userContext);
+    const inspection = await inspectLinkedUserMetadata(user.id, input.userContext, user);
+    const metadata = inspection.combinedMetadata;
     const committingPlans = getCommittingEmailPlansForTenant(
       metadata,
       input.tenantId,
@@ -3087,35 +3210,25 @@ export async function prepareEmailForPasswordlessAuth(input: {
     }
     const committingPlan = committingPlans[0];
     if (!committingPlan) {
-      const canonicalRecipeUserId = getCanonicalEmailRecipeUserId(
+      const canonical = resolveCanonicalEmailForTenant({
+        user,
         metadata,
-        input.tenantId,
-      );
-      const tenantEmailMethods = user.loginMethods.filter(
-        (method) =>
-          method.recipeId === "passwordless" &&
-          method.email !== undefined &&
-          method.tenantIds.includes(input.tenantId),
-      );
-      if (!canonicalRecipeUserId && tenantEmailMethods.length > 1) {
+        tenantId: input.tenantId,
+        passwordlessOnly: true,
+      });
+      if (canonical.status === "AMBIGUOUS") {
         throw new Error(
           "multiple passwordless email methods found without a canonical method",
         );
       }
-      if (
-        canonicalRecipeUserId &&
-        !tenantEmailMethods.some(
-          (method) =>
-            method.recipeUserId.getAsString() === canonicalRecipeUserId,
-        )
-      ) {
+      if (canonical.status === "INVALID_CANONICAL") {
         throw new Error("canonical passwordless email method is invalid");
       }
       if (
-        canonicalRecipeUserId &&
+        canonical.status === "SELECTED" &&
         listedMatchingMethods.some(
           (method) =>
-            method.recipeUserId.getAsString() !== canonicalRecipeUserId,
+            !canonical.recipeUserIds.includes(method.recipeUserId.getAsString()),
         )
       ) {
         matchingPlans.push({
@@ -3126,15 +3239,23 @@ export async function prepareEmailForPasswordlessAuth(input: {
       continue;
     }
 
-    const validatedPlan = await validateCommittingEmailVerificationPlan({
-      userId: user.id,
-      pendingVerificationId: committingPlan.id,
-      tenantId: input.tenantId,
-      expectedTargetRecipeUserId:
-        committingPlan.targetCanonicalRecipeUserId ?? "",
-      expectedEmail: committingPlan.value,
-      userContext: input.userContext,
-    });
+    const migrationPlan = isCurrentRowndEmailReconciliationPlan(committingPlan);
+    const validatedPlan = migrationPlan
+      ? await validateCurrentRowndEmailReconciliation({
+        internalUserId: inspection.primaryUserId,
+        plan: committingPlan,
+        tenantId: input.tenantId,
+        userContext: input.userContext ?? {},
+      })
+      : await validateCommittingEmailVerificationPlan({
+        userId: user.id,
+        pendingVerificationId: committingPlan.id,
+        tenantId: input.tenantId,
+        expectedTargetRecipeUserId:
+          committingPlan.targetCanonicalRecipeUserId ?? "",
+        expectedEmail: committingPlan.value,
+        userContext: input.userContext,
+      });
     const matchingRecipeUserIds = validatedPlan.user.loginMethods
       .filter(
         (method) =>
@@ -3169,6 +3290,7 @@ export async function prepareEmailForPasswordlessAuth(input: {
         userId: user.id,
         pendingVerification: validatedPlan.pendingVerification,
         disposition: "TARGET",
+        ...(migrationPlan ? { migrationInternalUserId: inspection.primaryUserId } : {}),
       });
     }
   }
@@ -3184,11 +3306,22 @@ export async function prepareEmailForPasswordlessAuth(input: {
   }
 
   if (input.reconcileTarget) {
-    await reconcileCommittingEmailVerification({
-      userId: matchingPlan.userId,
-      pendingVerification: matchingPlan.pendingVerification,
-      userContext: input.userContext,
-    });
+    if (matchingPlan.migrationInternalUserId !== undefined) {
+      await finishCurrentRowndEmailReconciliation({
+        internalUserId: matchingPlan.migrationInternalUserId,
+        plan: matchingPlan.pendingVerification,
+        tenantId: input.tenantId,
+        userContext: input.userContext ?? {},
+        removeMethod: (recipeUserId, tenantId, sdkUserId) =>
+          removePasswordlessMethodFromTenant(recipeUserId, tenantId, sdkUserId, true, input.userContext),
+      });
+    } else {
+      await reconcileCommittingEmailVerification({
+        userId: matchingPlan.userId,
+        pendingVerification: matchingPlan.pendingVerification,
+        userContext: input.userContext,
+      });
+    }
   }
   return { status: "ALLOW" } as const;
 }
@@ -3201,6 +3334,7 @@ export async function validateConsumedPasswordlessEmail(input: {
   createdNewRecipeUser: boolean;
   userContext?: Record<string, any>;
 }) {
+  if (isSuperTokensFakeEmail(input.email)) return { status: "REJECT" } as const;
   const owner = await SuperTokens.getUser(input.userId, input.userContext);
   if (!owner || owner.id !== input.userId) {
     return { status: "REJECT" } as const;
@@ -3241,7 +3375,9 @@ export async function validateConsumedPasswordlessEmail(input: {
       : ({ status: "REJECT_AND_DELETE", recipeUserId } as const);
   }
 
-  const metadata = await getRawUserMetadata(owner.id, input.userContext);
+  const metadata = (
+    await inspectLinkedUserMetadata(owner.id, input.userContext, owner)
+  ).combinedMetadata;
   const committingPlans = getCommittingEmailPlansForTenant(
     metadata,
     input.tenantId,
@@ -3256,24 +3392,14 @@ export async function validateConsumedPasswordlessEmail(input: {
       : ({ status: "REJECT" } as const);
   }
 
-  const canonicalRecipeUserId = getCanonicalEmailRecipeUserId(
+  const canonical = resolveCanonicalEmailForTenant({
+    user: owner,
     metadata,
-    input.tenantId,
-  );
-  if (canonicalRecipeUserId) {
-    return canonicalRecipeUserId === recipeUserId
-      ? ({ status: "ALLOW" } as const)
-      : ({ status: "REJECT" } as const);
-  }
-
-  const tenantEmailMethods = owner.loginMethods.filter(
-    (candidate) =>
-      candidate.recipeId === "passwordless" &&
-      candidate.email !== undefined &&
-      candidate.tenantIds.includes(input.tenantId),
-  );
-  return tenantEmailMethods.length === 1 &&
-    tenantEmailMethods[0]?.recipeUserId.getAsString() === recipeUserId
+    tenantId: input.tenantId,
+    passwordlessOnly: true,
+  });
+  return canonical.status === "SELECTED" &&
+    canonical.recipeUserIds.includes(recipeUserId)
     ? ({ status: "ALLOW" } as const)
     : ({ status: "REJECT" } as const);
 }
