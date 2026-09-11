@@ -101,6 +101,7 @@ from .migration import (
     RowndIdentitySnapshot,
     ValidatedMigrationMetadata,
     classify_migration_snapshot,
+    has_rownd_provenance,
     immutable_mapping,
     validate_migration_metadata,
 )
@@ -480,13 +481,19 @@ async def read_fresh_migration_snapshot(
     raw_same_graph = bool(
         raw_user
         and (
-            any(owner.primary_user_id == raw_user.id for owner in owners)
+            any(
+                owner.primary_user_id == raw_user.id
+                and any(
+                    identity.key == owner.identity_key
+                    and (identity.verified or has_rownd_provenance(raw_metadata, source.rownd_user_id))
+                    for identity in source.expected_identities
+                )
+                for owner in owners
+            )
             or (
-                raw_metadata
-                and raw_metadata.valid
-                and raw_metadata.value
+                has_rownd_provenance(raw_metadata, source.rownd_user_id)
+                and raw_metadata is not None and raw_metadata.value is not None
                 and raw_metadata.value.legacy_complete is True
-                and raw_metadata.value.original_rownd_user_id == source.rownd_user_id
             )
         )
     )
@@ -535,8 +542,6 @@ async def read_fresh_migration_snapshot(
             reason = "FOREIGN_OWNER"
         elif method.recipe_id != "passwordless" or not method.email:
             reason = "NOT_PASSWORDLESS"
-        elif not method.verified:
-            reason = "NOT_VERIFIED"
         elif source.tenant_id not in method.tenant_ids:
             reason = "WRONG_TENANT"
         return (
@@ -1058,27 +1063,10 @@ def combine_linked_metadata(
         if mapped_rownd_user_id is not None
         else None
     )
-    canonical_replaces_primary = (
-        canonical_linked_metadata is not None and primary_rownd_user_id != mapped_rownd_user_id
-    )
-    metadata_update: JsonDict = (
-        {"original_rownd_user": canonical_linked_metadata[1]["original_rownd_user"]}
-        if canonical_replaces_primary and canonical_linked_metadata is not None
-        else {}
-    )
+    metadata_update: JsonDict = {}
     for _, metadata in ordered:
         for key, value in metadata.items():
-            if key in _LINKED_OPERATIONAL_METADATA_FIELDS:
-                continue
-            if (
-                key == "original_rownd_user"
-                and mapped_rownd_user_id is not None
-                and (
-                    primary_rownd_user_id == mapped_rownd_user_id
-                    or canonical_linked_metadata is not None
-                )
-                and get_original_rownd_user_id(metadata) != mapped_rownd_user_id
-            ):
+            if key in _LINKED_OPERATIONAL_METADATA_FIELDS or key == "original_rownd_user":
                 continue
             current = metadata_update[key] if key in metadata_update else primary_metadata.get(key)
             if key not in metadata_update and key not in primary_metadata:
@@ -1109,6 +1097,49 @@ def combine_linked_metadata(
             )
         )
     )
+    profile_metadata = (
+        primary_metadata if source_user_id in {None, primary_user_id}
+        else next(metadata for user_id, metadata in ordered if user_id == source_user_id)
+    )
+    if source_user_id is None and "original_rownd_user" not in profile_metadata:
+        profile_metadata = next(
+            (metadata for _, metadata in ordered if "original_rownd_user" in metadata), {},
+        )
+    if "original_rownd_user" in profile_metadata:
+        original = profile_metadata["original_rownd_user"]
+        if isinstance(original, dict):
+            original_id = get_original_rownd_user_id(profile_metadata)
+            data = dict(as_json_dict(original.get("data")))
+            if original_id is not None:
+                for metadata in [primary_metadata, *(item[1] for item in ordered)]:
+                    if get_original_rownd_user_id(metadata) != original_id:
+                        continue
+                    profile_data = as_json_dict(as_json_dict(metadata.get("original_rownd_user")).get("data"))
+                    for key, value in profile_data.items():
+                        if not rownd_compatibility.is_identity_field(key):
+                            data.setdefault(key, value)
+                if data != original.get("data"):
+                    original = {**original, "data": data}
+            # Authority fields stay on the selected snapshot; only variant membership unions.
+            variants: List[str] = []
+            for metadata in [profile_metadata, primary_metadata, *(item[1] for item in ordered)]:
+                profile = as_json_dict(metadata.get("original_rownd_user"))
+                memberships = as_json_dict(profile.get("attributes")).get("rownd:app_variants")
+                if isinstance(memberships, str):
+                    memberships = [memberships]
+                if isinstance(memberships, list):
+                    for variant in memberships:
+                        if isinstance(variant, str) and variant not in variants:
+                            variants.append(variant)
+            if variants:
+                original = {
+                    **original,
+                    "attributes": {
+                        **as_json_dict(original.get("attributes")), "rownd:app_variants": variants,
+                    },
+                }
+        if original != primary_metadata.get("original_rownd_user"):
+            metadata_update["original_rownd_user"] = original
     return {
         "primary_user_id": primary_user_id,
         "linked_user_ids": [linked_user_id for linked_user_id, _ in ordered],
@@ -1302,7 +1333,7 @@ async def build_rownd_session_and_anonymous_claims(
     rownd_claims = rownd_compatibility.build_rownd_session_claim_payload(
         config, user_id, user, metadata, current_payload, app_variant_id
     )
-    is_anonymous = rownd_compatibility.get_effective_auth_level(user) in {
+    is_anonymous = rownd_claims.get("auth_level") in {
         GUEST_AUTH_METHOD_ID,
         INSTANT_AUTH_METHOD_ID,
     }
@@ -1316,6 +1347,7 @@ async def build_rownd_oauth_payload(
     user: Optional[User],
     scopes: List[str],
     current_payload: Optional[JsonDict],
+    tenant_id: Optional[str],
     user_context: UserContext,
 ) -> JsonDict:
     payload = current_payload or {}
@@ -1332,10 +1364,12 @@ async def build_rownd_oauth_payload(
             user_context.get("rowndOAuthAudience")
         )
     )
+    if "email" in scopes and get_original_rownd_user_id(metadata) is not None:
+        payload = {key: value for key, value in payload.items() if key not in {"email", "email_verified"}}
     return {
         **payload,
         **(
-            rownd_compatibility.build_standard_oauth_claims(user, scopes, metadata)
+            rownd_compatibility.build_standard_oauth_claims(user, scopes, metadata, tenant_id)
             if user
             else {}
         ),
@@ -1355,15 +1389,19 @@ async def build_rownd_oauth_user_info(
     access_token_payload: JsonDict,
     scopes: List[str],
     current_payload: Optional[JsonDict],
+    tenant_id: str,
     user_context: Optional[UserContext] = None,
 ) -> JsonDict:
     metadata = cast(
         JsonDict,
         (await inspect_linked_user_metadata(user.id, user_context, user))["combined_metadata"],
     )
+    payload = current_payload or {}
+    if "email" in scopes and get_original_rownd_user_id(metadata) is not None:
+        payload = {key: value for key, value in payload.items() if key not in {"email", "email_verified"}}
     return {
-        **(current_payload or {}),
-        **rownd_compatibility.build_standard_oauth_claims(user, scopes, metadata),
+        **payload,
+        **rownd_compatibility.build_standard_oauth_claims(user, scopes, metadata, tenant_id),
         **rownd_compatibility.pick_oauth_user_info_rownd_claims(access_token_payload),
     }
 
@@ -1385,7 +1423,13 @@ async def record_rownd_app_variant_for_user(
     )
     clear_supertokens_core_call_cache(operation_context)
     metadata = await get_raw_user_metadata(metadata_user_id, operation_context)
+    if "original_rownd_user" in metadata and not validate_migration_metadata(
+        {"original_rownd_user": metadata["original_rownd_user"]}
+    ).valid:
+        return
     original = as_json_dict(metadata.get("original_rownd_user"))
+    if "attributes" in original and not isinstance(original["attributes"], dict):
+        return
     attributes = as_json_dict(original.get("attributes"))
     app_variants = attributes.get("rownd:app_variants") or []
     if isinstance(app_variants, str):
@@ -1399,8 +1443,6 @@ async def record_rownd_app_variant_for_user(
         {
             "original_rownd_user": {
                 **original,
-                "data": as_json_dict(original.get("data")) or {"user_id": metadata_user_id},
-                "verified_data": as_json_dict(original.get("verified_data")),
                 "attributes": {**attributes, "rownd:app_variants": [*app_variants, app_variant_id]},
             },
         },
@@ -1919,6 +1961,8 @@ def _build_online_migration_import(source: FreshMigrationSource) -> JsonDict:
             data["%s_id" % identity.provider_id] = identity.provider_user_id
         elif identity.identifier_type == "phone":
             data["phone_number"] = identity.identifier
+        elif identity.identifier_type == "email":
+            data["email"] = identity.identifier
     mapped = rownd_compatibility.map_rownd_user_to_supertokens(
         {**source.rownd_user, "data": data}, tenant_id, migration_complete=False
     )
@@ -1931,6 +1975,12 @@ def _build_online_migration_import(source: FreshMigrationSource) -> JsonDict:
             for identity in source.snapshot.expected_identities
         )
     ]
+    for method in login_methods:
+        identity = next(
+            identity for identity in source.snapshot.expected_identities
+            if _import_method_matches_expected_identity(method, identity)
+        )
+        method["isVerified"] = identity.recipe_id == "passwordless" and identity.verified
     if not login_methods and not source.snapshot.expected_identities:
         bridge_user = {
             **source.rownd_user,
@@ -1978,6 +2028,8 @@ async def _apply_to_fresh_migration_method(
     )
     if user is None or method is None:
         raise MigrationError(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link")
+    if expected_identity is not None and not _migration_method_matches_identity(method, expected_identity):
+        raise MigrationError(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link")
     current_primary_user_id = await resolve_supertokens_user_id(user.id, user_context)
     if permitted_unlinked_owner is not None:
         normalized_identifier = (
@@ -1996,7 +2048,6 @@ async def _apply_to_fresh_migration_method(
             or permitted_unlinked_owner.normalized_identifier != normalized_identifier
             or not _migration_method_matches_identity(method, expected_identity)
             or method.verified != permitted_unlinked_owner.verified
-            or (expected_identity.recipe_id == "passwordless" and not method.verified)
             or permitted_unlinked_owner.is_primary_user
             or user.is_primary_user
             or current_primary_user_id != permitted_unlinked_owner.primary_user_id
@@ -2021,6 +2072,19 @@ async def _apply_to_fresh_migration_method(
         if (
             original_rownd_user_id is not None
             and original_rownd_user_id != expected_rownd_user_id
+        ):
+            raise MigrationError(
+                MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link"
+            )
+        if (
+            not (
+                expected_identity.verified
+                and (expected_identity.recipe_id == "thirdparty" or method.verified)
+            )
+            and (
+                expected_rownd_user_id is None
+                or original_rownd_user_id != expected_rownd_user_id
+            )
         ):
             raise MigrationError(
                 MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "account_link"
@@ -2137,7 +2201,6 @@ async def _link_fresh_migration_method(
                 linked_user is None
                 or linked_method is None
                 or not linked_user.is_primary_user
-                or (identity.recipe_id == "passwordless" and not linked_method.verified)
                 or await resolve_supertokens_user_id(linked_user.id, user_context)
                 != pinned_target.user_id
             ):
@@ -2279,9 +2342,25 @@ async def apply_migration_repairs(
             )
             if method_import is None:
                 raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "account_link")
-            recipe_user_id, _ = await create_missing_login_method(
-                method_import, fresh.snapshot.tenant_id, target_user_id, user_context
-            )
+            if identity.recipe_id == "thirdparty" or not identity.verified:
+                # Import never updates a raced owner or verifies an unproven contact. Its
+                # atomic provenance write also permits recovery after an interrupted link.
+                imported = await import_user(
+                    {
+                        "loginMethods": [{k: v for k, v in method_import.items() if k != "isPrimary"}],
+                        "userMetadata": {"original_rownd_user": fresh.rownd_user},
+                    },
+                    supertokens_config,
+                    user_context,
+                )
+                imported_id = imported.get("id")
+                if not isinstance(imported_id, str) or not imported_id:
+                    raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "account_link")
+                recipe_user_id = RecipeUserId(imported_id)
+            else:
+                recipe_user_id, _ = await create_missing_login_method(
+                    method_import, fresh.snapshot.tenant_id, target_user_id, user_context
+                )
             clear_supertokens_core_call_cache(user_context)
             created_user = await get_user(recipe_user_id.get_as_string(), user_context)
             if created_user is None:
@@ -2406,6 +2485,7 @@ async def apply_migration_repairs(
                 or identity.recipe_id != "passwordless"
                 or identity.identifier_type != "email"
                 or identity.identifier is None
+                or not identity.verified
             ):
                 raise RuntimeError("Unsupported migration verification method")
             email_to_verify = cast(str, identity.identifier)
@@ -2423,6 +2503,7 @@ async def apply_migration_repairs(
                 target_user_id,
                 user_context,
                 verify,
+                expected_identity=identity,
             )
             clear_supertokens_core_call_cache(user_context)
             continue
@@ -2432,7 +2513,7 @@ async def apply_migration_repairs(
             repair.type != "WRITE_METADATA" for repair in current.mutations
         ):
             continue
-        verified_email = next(
+        email = next(
             (
                 identity.identifier
                 for identity in fresh.snapshot.expected_identities
@@ -2444,10 +2525,9 @@ async def apply_migration_repairs(
             (
                 owner
                 for owner in snapshot.owners
-                if verified_email
-                and owner.identity_key == "passwordless:email:%s" % verified_email
+                if email
+                and owner.identity_key == "passwordless:email:%s" % email
                 and owner.primary_user_id == target_user_id
-                and owner.verified
                 and fresh.snapshot.tenant_id in owner.tenant_ids
             ),
             None,
@@ -2465,8 +2545,30 @@ async def apply_migration_repairs(
             )
         if publication_source.snapshot != fresh.snapshot:
             return publication_source
+        profile = publication_source.rownd_user
+        previous_profiles = [as_json_dict(current_metadata.get("original_rownd_user"))]
+        if metadata_source_user_id != target_user_id:
+            source_metadata = await get_raw_user_metadata(metadata_source_user_id, user_context)
+            previous_profiles.append(as_json_dict(source_metadata.get("original_rownd_user")))
+        app_variants: List[str] = []
+        for variant_profile in [profile, *previous_profiles]:
+            variants = as_json_dict(variant_profile.get("attributes")).get("rownd:app_variants")
+            if isinstance(variants, str):
+                variants = [variants]
+            if isinstance(variants, list):
+                for variant in variants:
+                    if isinstance(variant, str) and variant not in app_variants:
+                        app_variants.append(variant)
+        if app_variants:
+            profile = {
+                **profile,
+                "attributes": {
+                    **as_json_dict(profile.get("attributes")),
+                    "rownd:app_variants": app_variants,
+                },
+            }
         profile_metadata = rownd_compatibility.build_rownd_user_metadata(
-            publication_source.rownd_user, migration_complete=False
+            profile, migration_complete=False
         )
         if metadata_source_user_id != target_user_id:
             await usermetadata_asyncio.update_user_metadata(
@@ -2530,8 +2632,32 @@ async def read_fresh_migration_session_method(
         raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
     if await resolve_supertokens_user_id(user.id, user_context) != target.user_id:
         raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "state_inspect")
-    for method in user.login_methods:
+    email_identity = next(
+        (identity for identity in source.expected_identities if identity.identifier_type == "email"),
+        None,
+    )
+    canonical_id = None
+    if email_identity is not None:
+        metadata = validate_migration_metadata(
+            await get_raw_user_metadata(target.user_id, user_context), source.tenant_id,
+        )
+        if not metadata.valid or metadata.value is None:
+            raise MigrationError(MigrationErrorReason.MIGRATION_STATE_INVALID, "state_inspect")
+        canonical_id = metadata.value.canonical_email_recipe_user_id
+        if canonical_id is None:
+            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+    for method in sorted(user.login_methods, key=lambda method: method.recipe_user_id.get_as_string()):
         if source.tenant_id not in method.tenant_ids:
+            continue
+        if email_identity is not None and (
+            method.recipe_user_id.get_as_string() != canonical_id
+            or not _migration_method_matches_identity(method, email_identity)
+        ):
+            continue
+        if source.expected_identities and not any(
+            _migration_method_matches_identity(method, identity)
+            for identity in source.expected_identities
+        ):
             continue
         recipe_user_id = method.recipe_user_id.get_as_string()
         owner = await get_user(recipe_user_id, user_context)
@@ -2541,6 +2667,14 @@ async def read_fresh_migration_session_method(
             and any(
                 candidate.recipe_user_id.get_as_string() == recipe_user_id
                 and source.tenant_id in candidate.tenant_ids
+                and (email_identity is None or _migration_method_matches_identity(candidate, email_identity))
+                and (
+                    not source.expected_identities
+                    or any(
+                        _migration_method_matches_identity(candidate, identity)
+                        for identity in source.expected_identities
+                    )
+                )
                 for candidate in owner.login_methods
             )
         ):
@@ -3677,11 +3811,17 @@ def classify_email_credential(
         if method.recipe_user_id.get_as_string() == canonical_id
     )
     if not canonical_method.verified:
-        return EmailCredentialAuthorization(
-            EmailCredentialState.MALFORMED,
-            EmailCredentialReason.CANONICAL_TOPOLOGY,
-            user.id,
-        )
+        migration = validate_migration_metadata(metadata, tenant_id)
+        if not (
+            migration.valid and migration.value
+            and migration.value.legacy_complete is True
+            and migration.value.canonical_email_recipe_user_id == canonical_id
+        ):
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED,
+                EmailCredentialReason.CANONICAL_TOPOLOGY,
+                user.id,
+            )
 
     matching = [method for method in methods if normalize_email(cast(str, method.email)) == normalized_email]
     if len(matching) != 1:

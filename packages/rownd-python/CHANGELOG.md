@@ -27,6 +27,14 @@
 
 ### Patch Changes
 
+- Preserve app-variant membership in its existing metadata location without fabricating
+  Rownd identity or verification fields; accept attributes-only wrappers as non-provenance.
+- Migrate eligible emails and Google/Apple identifiers without historical `verified_data`.
+  Keep eligibility separate from EV: stale email evidence is not trusted and generated
+  placeholder emails remain unverified. Interrupted unverified-email repairs require trusted
+  same-Rownd provenance; otherwise Passwordless linking requires source and owner verification.
+  Retain namespace, tenant, collision, mapping, and primary-account guards. Completed migration
+  can publish an unverified canonical email for Passwordless challenges, not bypass EV.
 - Classify verified Session/UserMetadata user-ID mapping rejections as `CORE_CAPABILITY_REQUIRED`
   (HTTP 503, `retryable: false`, `stage: "mapping"`), compatibility-tested with Python SDK
   0.31.3 and Core 12.0.10. No automatic reference repair, forced mapping, or session revocation
@@ -83,9 +91,10 @@
   prevents checking a new signing key, rather than permanently rejecting a potentially valid
   rotated token. Preserve confirmed-unknown 401s, refresh limits, and negative caching.
 
-- Recover verified standalone Passwordless email/phone identities left by interrupted
+- Recover standalone Passwordless email/phone identities left by interrupted
   create-before-link repairs when an exact mapping or non-raw pinned target resolves
-  cross-identity ambiguity. Existing ownership and verification checks remain required.
+  cross-identity ambiguity. Require source and owner verification or trusted same-Rownd
+  provenance, with existing ownership, tenant, and nonprimary-owner checks retained.
 - Return HTTP 422 instead of 409 for the six migration identity/state conflicts so native
   clients do not mistake blocked migrations for existing sessions. Reasons and
   `retryable: false` are unchanged; email-change conflicts remain HTTP 409.

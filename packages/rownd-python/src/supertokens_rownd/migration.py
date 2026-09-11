@@ -17,6 +17,7 @@ class ExpectedIdentity:
     provider_user_id: Optional[str] = None
     identifier_type: Optional[str] = None
     identifier: Optional[str] = None
+    verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -191,19 +192,14 @@ def _normalize_phone(value: object) -> Optional[str]:
     return normalized
 
 
-def _verified_contact(value: object, verification: object, normalizer) -> Optional[str]:
+def _contact_identity(value: object, verification: object, normalizer) -> Tuple[Optional[str], bool]:
     if value is _MISSING:
-        if verification is True or isinstance(verification, str):
-            raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "source_normalize")
-        return None
-    # Final Node parity validates every present contact before deciding whether it is authoritative.
+        return None, False
     normalized = normalizer(value)
     normalized_verification = normalizer(verification) if isinstance(verification, str) else None
-    if not normalized or (
-        isinstance(verification, str) and normalized_verification != normalized
-    ):
+    if not normalized:
         raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "source_normalize")
-    return normalized if verification is True or isinstance(verification, str) else None
+    return normalized, verification is True or normalized_verification == normalized
 
 
 def create_rownd_identity_snapshot(
@@ -213,21 +209,24 @@ def create_rownd_identity_snapshot(
     schema: Optional[RowndSchema] = None,
 ) -> RowndIdentitySnapshot:
     data = rownd_user.get("data")
-    verified_data = rownd_user.get("verified_data")
+    verified_data = rownd_user.get("verified_data", {})
     if not isinstance(data, dict) or not isinstance(verified_data, dict):
         raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "source_normalize")
     rownd_user_id = data.get("user_id")
     if not isinstance(rownd_user_id, str) or not rownd_user_id.strip():
         raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "source_normalize")
 
-    verified_email = _verified_contact(
+    email, email_verified = _contact_identity(
         data.get("email", _MISSING), verified_data.get("email", _MISSING), _normalize_email
     )
-    verified_phone = _verified_contact(
+    phone, phone_verified = _contact_identity(
         data.get("phone_number", _MISSING),
         verified_data.get("phone_number", _MISSING),
         _normalize_phone,
     )
+    phone_evidence = verified_data.get("phone_number")
+    if (phone_evidence is True or isinstance(phone_evidence, str)) and not phone_verified:
+        raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "source_normalize")
 
     identities = []
     for provider_id, field in (("apple", "apple_id"), ("google", "google_id")):
@@ -247,31 +246,34 @@ def create_rownd_identity_snapshot(
         normalized_verification = verification.strip() if isinstance(verification, str) else None
         if isinstance(verification, str) and normalized_verification != normalized_provider_user_id:
             raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "source_normalize")
-        if verification is True or isinstance(verification, str):
-            identities.append(
-                ExpectedIdentity(
-                    key="thirdparty:%s:%s" % (provider_id, normalized_provider_user_id),
-                    recipe_id="thirdparty",
-                    provider_id=provider_id,
-                    provider_user_id=normalized_provider_user_id,
-                )
-            )
-    if verified_email:
         identities.append(
             ExpectedIdentity(
-                key="passwordless:email:%s" % verified_email,
-                recipe_id="passwordless",
-                identifier_type="email",
-                identifier=verified_email,
+                key="thirdparty:%s:%s" % (provider_id, normalized_provider_user_id),
+                recipe_id="thirdparty",
+                provider_id=provider_id,
+                provider_user_id=normalized_provider_user_id,
+                verified=verification is True or isinstance(verification, str),
             )
         )
-    if verified_phone:
+    # Schema controls profile fields, not Rownd's effective authentication lookup fields.
+    if email:
         identities.append(
             ExpectedIdentity(
-                key="passwordless:phone:%s" % verified_phone,
+                key="passwordless:email:%s" % email,
+                recipe_id="passwordless",
+                identifier_type="email",
+                identifier=email,
+                verified=email_verified,
+            )
+        )
+    if phone and phone_verified:
+        identities.append(
+            ExpectedIdentity(
+                key="passwordless:phone:%s" % phone,
                 recipe_id="passwordless",
                 identifier_type="phone",
-                identifier=verified_phone,
+                identifier=phone,
+                verified=phone_verified,
             )
         )
     identities.sort(key=lambda identity: identity.key)
@@ -313,10 +315,17 @@ def validate_migration_metadata(
     original = metadata.get("original_rownd_user", _MISSING)
     original_id = None
     if original is not _MISSING:
-        original_data = original.get("data") if isinstance(original, dict) else None
-        original_id = original_data.get("user_id") if isinstance(original_data, dict) else None
-        if not isinstance(original_id, str) or not original_id:
+        if not isinstance(original, dict):
             return MigrationMetadataState(False)
+        # Variant-only wrappers carry operational state, not Rownd identity provenance.
+        attributes_only = set(original) == {"attributes"} and isinstance(
+            original["attributes"], dict
+        )
+        if not attributes_only:
+            original_data = original.get("data")
+            original_id = original_data.get("user_id") if isinstance(original_data, dict) else None
+            if not isinstance(original_id, str) or not original_id.strip():
+                return MigrationMetadataState(False)
     return MigrationMetadataState(
         True,
         ValidatedMigrationMetadata(
@@ -505,6 +514,10 @@ def classify_migration_snapshot(
                 for identity in source.expected_identities
                 for owner in owners_by_identity[identity.key]
                 if owner.recipe_id == recipe_id
+                and (
+                    identity.verified
+                    or has_rownd_provenance(snapshot.metadata.get(owner.primary_user_id), source.rownd_user_id)
+                )
             ),
             None,
         )
@@ -516,7 +529,7 @@ def classify_migration_snapshot(
                 else MigrationTargetSource.VERIFIED_PASSWORDLESS,
             )
     primary_reservations = [owner for owner in snapshot.reservation_owners if owner.is_primary_user]
-    if not target and primary_reservations:
+    if not target and (snapshot.owners or snapshot.reservation_owners):
         return _blocked(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER)
     if not target:
         return MigrationDisposition(
@@ -525,6 +538,16 @@ def classify_migration_snapshot(
         )
     if not snapshot.users.get(target.user_id, MigrationUserState(False, False)).exists:
         return _blocked(MigrationErrorReason.MAPPING_CONFLICT, target)
+    if (
+        pinned_target is not None and authoritative_target is None
+        and not has_rownd_provenance(snapshot.metadata.get(target.user_id), source.rownd_user_id)
+        and not any(
+            identity.verified and owner.primary_user_id == target.user_id
+            for identity in source.expected_identities
+            for owner in owners_by_identity[identity.key]
+        )
+    ):
+        return _blocked(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, target)
     if target.user_id not in snapshot.mapping.internal_lookups:
         return _blocked(MigrationErrorReason.MAPPING_CONFLICT, target)
     internal = snapshot.mapping.internal_lookups[target.user_id]
@@ -571,6 +594,14 @@ def classify_migration_snapshot(
             )
         if owner.primary_user_id != target.user_id and not owner_metadata.valid:
             return _blocked(MigrationErrorReason.MIGRATION_STATE_INVALID)
+        identity = next(item for item in source.expected_identities if item.key == owner.identity_key)
+        if (
+            identity.recipe_id == "thirdparty"
+            and not identity.verified
+            and not has_rownd_provenance(owner_metadata, source.rownd_user_id)
+            and not (mapping_exact and owner.primary_user_id == target.user_id)
+        ):
+            return _blocked(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, target, "thirdparty")
     foreign_third_party = tuple(
         owner
         for owner in snapshot.owners
@@ -586,24 +617,14 @@ def classify_migration_snapshot(
         if owner.primary_user_id != target.user_id and owner.recipe_id == "passwordless"
     )
     if any(
-        not owner.verified
-        or not any(
-            identity.recipe_id == "passwordless"
-            and identity.key == owner.identity_key
-            and identity.identifier == owner.normalized_identifier
-            for identity in source.expected_identities
-        )
+        not _can_link_passwordless_owner(source, owner, snapshot.metadata.get(owner.primary_user_id))
         for owner in foreign_passwordless
     ):
         blocked_owner = next(
             owner
             for owner in foreign_passwordless
-            if not owner.verified
-            or not any(
-                identity.recipe_id == "passwordless"
-                and identity.key == owner.identity_key
-                and identity.identifier == owner.normalized_identifier
-                for identity in source.expected_identities
+            if not _can_link_passwordless_owner(
+                source, owner, snapshot.metadata.get(owner.primary_user_id)
             )
         )
         identity = next(
@@ -639,6 +660,8 @@ def classify_migration_snapshot(
             target,
             _diagnostic_identity_type(identity),
         )
+    if any(owner.primary_user_id != target.user_id for owner in snapshot.reservation_owners):
+        return _blocked(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, target)
 
     metadata = snapshot.metadata.get(target.user_id)
     if metadata is None or not metadata.valid or metadata.value is None:
@@ -677,6 +700,7 @@ def classify_migration_snapshot(
             owner
             and owner.recipe_id == "passwordless"
             and identity.identifier_type == "phone"
+            and identity.verified
             and not owner.verified
         ):
             return _blocked(MigrationErrorReason.MIGRATION_STATE_INVALID)
@@ -690,6 +714,7 @@ def classify_migration_snapshot(
             owner
             and owner.recipe_id == "passwordless"
             and identity.identifier_type == "email"
+            and identity.verified
             and not owner.verified
         ):
             verify_mutations.append(
@@ -707,7 +732,7 @@ def classify_migration_snapshot(
         metadata.value.legacy_complete is True
         and metadata.value.original_rownd_user_id == source.rownd_user_id
     )
-    verified_email = next(
+    email = next(
         (
             identity.identifier
             for identity in source.expected_identities
@@ -720,8 +745,8 @@ def classify_migration_snapshot(
         (
             owner
             for owner in snapshot.owners
-            if verified_email
-            and owner.identity_key == "passwordless:email:%s" % verified_email
+            if email
+            and owner.identity_key == "passwordless:email:%s" % email
             and owner.primary_user_id == target.user_id
         ),
         None,
@@ -729,13 +754,12 @@ def classify_migration_snapshot(
     pointer = snapshot.canonical_email_pointers.get(target.user_id)
     if pointer is None:
         return _blocked(MigrationErrorReason.MIGRATION_STATE_INVALID)
-    email_matches = not verified_email or bool(
+    email_matches = not email or bool(
         email_owner
-        and email_owner.verified
         and pointer.status is CanonicalEmailPointerStatus.VALID
         and pointer.recipe_user_id == email_owner.recipe_user_id
     )
-    if pointer.status is CanonicalEmailPointerStatus.INVALID and not verified_email:
+    if pointer.status is CanonicalEmailPointerStatus.INVALID and not email:
         return _blocked(MigrationErrorReason.MIGRATION_STATE_INVALID)
     if mutations or not metadata_matches or not email_matches:
         mutations.append(MigrationMutation("WRITE_METADATA", target_user_id=target.user_id))
@@ -743,4 +767,26 @@ def classify_migration_snapshot(
         MigrationDispositionStatus.REPAIRABLE if mutations else MigrationDispositionStatus.COMPLETE,
         target=target,
         mutations=tuple(mutations),
+    )
+
+
+def _can_link_passwordless_owner(
+    source: RowndIdentitySnapshot,
+    owner: IdentityOwner,
+    metadata: Optional[MigrationMetadataState],
+) -> bool:
+    same_rownd_user = has_rownd_provenance(metadata, source.rownd_user_id)
+    return any(
+        identity.recipe_id == "passwordless"
+        and identity.key == owner.identity_key
+        and identity.identifier == owner.normalized_identifier
+        and (same_rownd_user or (identity.verified and owner.verified))
+        for identity in source.expected_identities
+    )
+
+
+def has_rownd_provenance(metadata: Optional[MigrationMetadataState], rownd_user_id: str) -> bool:
+    return bool(
+        metadata and metadata.valid and metadata.value
+        and metadata.value.original_rownd_user_id == rownd_user_id
     )

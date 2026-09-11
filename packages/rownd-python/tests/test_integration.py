@@ -825,8 +825,9 @@ async def test_migrate_phone_user_successfully(core_url: str, rownd_client: Mock
 
 @pytest.mark.parametrize("field", ["google_id", "apple_id", "phone_number"])
 @pytest.mark.parametrize("repair", [False, True])
+@pytest.mark.parametrize("verified", [False, True])
 async def test_migrate_padded_verified_identity_converges(
-    core_url: str, rownd_client: MockRowndClient, field: str, repair: bool,
+    core_url: str, rownd_client: MockRowndClient, field: str, repair: bool, verified: bool,
 ):
     client = make_client(core_url, rownd_client)
     user_id = "padded-" + str(uuid.uuid4())
@@ -837,7 +838,7 @@ async def test_migrate_padded_verified_identity_converges(
     )
     profile: dict[str, Any] = {
         "data": {"user_id": user_id, field: "  " + value + "  "},
-        "verified_data": {field: " " + value + " "},
+        "verified_data": {field: " " + value + " "} if verified else {},
         "meta": {"custom": "retained"},
     }
     target_id = None
@@ -861,11 +862,13 @@ async def test_migrate_padded_verified_identity_converges(
         )
     snapshot = create_rownd_identity_snapshot(cast(Any, profile), "public")
     before = classify_migration_snapshot(await impl.read_fresh_migration_snapshot(snapshot, {}))
-    assert before.status is MigrationDispositionStatus.REPAIRABLE
-    assert any(
-        mutation.type == ("CREATE_IDENTITY" if repair else "IMPORT_USER")
-        for mutation in before.mutations
-    )
+    excluded_phone = field == "phone_number" and not verified
+    if not (excluded_phone and repair):
+        assert before.status is MigrationDispositionStatus.REPAIRABLE
+        assert any(
+            mutation.type == ("CREATE_IDENTITY" if repair else "IMPORT_USER")
+            for mutation in before.mutations
+        )
 
     response = migrate_rownd_user(client, rownd_client, user_id, profile)
     assert response.status_code == 200, response.text
@@ -879,8 +882,10 @@ async def test_migrate_padded_verified_identity_converges(
         assert disposition.target.user_id == target_id
     user = await get_user(user_id)
     assert user is not None
-    assert len(user.login_methods) == (2 if repair else 1)
-    if field == "phone_number":
+    assert len(user.login_methods) == (2 if repair and not excluded_phone else 1)
+    if excluded_phone:
+        assert all(method.phone_number is None for method in user.login_methods)
+    elif field == "phone_number":
         assert any(method.phone_number == value and method.verified for method in user.login_methods)
     else:
         method = next(method for method in user.login_methods if method.third_party is not None)
@@ -900,6 +905,270 @@ async def test_migrate_padded_verified_identity_converges(
     assert {m.recipe_user_id.get_as_string() for m in repeated.login_methods} == {
         m.recipe_user_id.get_as_string() for m in user.login_methods
     }
+
+
+@pytest.mark.parametrize("mode", ["standalone", "mixed", "phone", "repair", "interrupted_repair"])
+@pytest.mark.parametrize("evidence", ["missing", "matching", "stale"])
+async def test_migrate_email_eligibility_and_verification_converge_independently(
+    core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch,
+    mode: str, evidence: str,
+) -> None:
+    client = make_client(
+        core_url, rownd_client, enable_email_verification=True,
+        plugin_config={"email_change": {"retirement_mode": "guard"}},
+    )
+    user_id = "eligibility-" + str(uuid.uuid4())
+    email = user_id + "@example.com"
+    old_email = "old-" + email
+    profile: dict[str, Any] = {
+        "data": {"user_id": user_id, "email": " " + email.upper() + " "},
+    }
+    if evidence != "missing":
+        profile["verified_data"] = {"email": email if evidence == "matching" else old_email}
+    if mode == "mixed":
+        profile["data"]["google_id"] = "google-" + user_id
+    if mode == "phone":
+        profile["data"]["phone_number"] = "+1555%07d" % (uuid.uuid4().int % 10000000)
+        profile.setdefault("verified_data", {})["phone_number"] = True
+    if "repair" in mode:
+        assert migrate_rownd_user(client, rownd_client, user_id, {
+            "data": {"user_id": user_id, "email": old_email},
+            "verified_data": {"email": old_email},
+        }).status_code == 200
+
+    verify = AsyncMock(wraps=impl._verify_migration_email)
+    monkeypatch.setattr(impl, "_verify_migration_email", verify)
+    original_import = impl.import_user
+    interrupted = False
+
+    async def import_with_response_loss(payload, *args):
+        nonlocal interrupted
+        result = await original_import(payload, *args)
+        if mode == "interrupted_repair" and not interrupted:
+            interrupted = True
+            raise MigrationError(MigrationErrorReason.CORE_UNAVAILABLE, "bulk_import")
+        return result
+
+    monkeypatch.setattr(impl, "import_user", import_with_response_loss)
+    response = migrate_rownd_user(client, rownd_client, user_id, profile)
+    assert response.status_code == 200, response.text
+    snapshot = create_rownd_identity_snapshot(cast(Any, profile), "public")
+    state = await impl.read_fresh_migration_snapshot(snapshot, {})
+    result = classify_migration_snapshot(state)
+    assert result.status is MigrationDispositionStatus.COMPLETE
+    assert result.mutations == ()
+    assert result.target is not None
+    user = await get_user(user_id)
+    assert user is not None
+    email_method = next(method for method in user.login_methods if method.email == email)
+    assert email_method.verified is (evidence == "matching")
+    if "repair" in mode:
+        assert next(method for method in user.login_methods if method.email == old_email).verified
+    if mode == "mixed":
+        provider = next(method for method in user.login_methods if method.third_party is not None)
+        assert provider.third_party is not None and provider.third_party.id == "google"
+        assert provider.verified is False
+    metadata = await impl.get_user_metadata(user_id)
+    assert metadata["rownd_migration_complete"] is True
+    assert cast(dict, metadata["rownd_email_recipe_user_ids"])["public"] == (
+        email_method.recipe_user_id.get_as_string()
+    )
+    durable_metadata = await impl.get_raw_user_metadata(state.metadata_source_user_ids[result.target.user_id])
+    assert durable_metadata["original_rownd_user"] == profile
+    assert metadata["original_rownd_user"] == profile
+    session = await session_asyncio.get_session_without_request_response(response.headers["st-access-token"])
+    assert session is not None and session.get_user_id() == user_id
+    assert session.get_recipe_user_id().get_as_string() == email_method.recipe_user_id.get_as_string()
+    assert session.get_access_token_payload()["st-ev"]["v"] is (evidence == "matching")
+    if mode in {"standalone", "mixed"} and evidence != "matching":
+        assert session.get_access_token_payload()["auth_level"] == "unverified"
+        assert session.get_access_token_payload()["is_verified_user"] is False
+    projected = client.get("/auth/plugin/rownd/user", headers=auth_headers(response.headers["st-access-token"]))
+    assert projected.status_code == 200, projected.text
+    assert projected.json()["data"]["email"] == email
+    assert projected.json()["verified_data"].get("email") == (email if evidence == "matching" else None)
+    claims = impl.rownd_compatibility.build_standard_oauth_claims(user, ["email"], metadata, "public")
+    assert claims["email_verified"] is (evidence == "matching")
+    if evidence != "matching":
+        verify.assert_not_awaited()
+    assert migrate_rownd_user(client, rownd_client, user_id, profile).status_code == 200
+    repeated = await get_user(user_id)
+    assert repeated is not None
+    assert {m.recipe_user_id.get_as_string() for m in repeated.login_methods} == {
+        m.recipe_user_id.get_as_string() for m in user.login_methods
+    }
+    challenge = await passwordless_asyncio.create_code("public", email=email)
+    authorization = await impl.authorize_passwordless_email("public", email, {})
+    assert authorization.allowed, authorization
+    consumed = client.post(
+        "/auth/signinup/code/consume",
+        headers={"rid": "passwordless", **session_headers()},
+        json={"preAuthSessionId": challenge.pre_auth_session_id, "linkCode": challenge.link_code},
+    )
+    assert consumed.status_code == 200, consumed.text
+    assert consumed.json()["status"] == "OK", consumed.text
+    signed_in = await session_asyncio.get_session_without_request_response(consumed.headers["st-access-token"])
+    assert signed_in is not None and signed_in.get_user_id() == user_id
+    assert signed_in.get_recipe_user_id().get_as_string() == email_method.recipe_user_id.get_as_string()
+    after_challenge = await get_user(user_id)
+    assert after_challenge is not None
+    assert {method.recipe_user_id.get_as_string() for method in after_challenge.login_methods} == {
+        method.recipe_user_id.get_as_string() for method in user.login_methods
+    }
+
+
+@pytest.mark.parametrize("verified", [False, True])
+async def test_provider_creation_race_preserves_existing_verified_core_email(
+    core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch,
+    verified: bool,
+) -> None:
+    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    user_id = "provider-race-" + str(uuid.uuid4())
+    provider_email = "provider-" + user_id + "@example.com"
+    profile = {
+        "data": {"user_id": user_id, "email": user_id + "@example.com"},
+        "verified_data": {"email": True},
+    }
+    assert migrate_rownd_user(client, rownd_client, user_id, profile).status_code == 200
+    profile["data"]["google_id"] = user_id
+    profile["verified_data"]["google_id"] = verified
+    original_import = impl.import_user
+    raced = None
+
+    async def import_after_native_creation(payload, *args):
+        nonlocal raced
+        assert raced is None
+        raced = await thirdparty_asyncio.manually_create_or_update_user(
+            "public", "google", user_id, provider_email, True, user_context={},
+        )
+        assert isinstance(raced, ManuallyCreateOrUpdateUserOkResult)
+        return await original_import(payload, *args)
+
+    monkeypatch.setattr(impl, "import_user", import_after_native_creation)
+    response = migrate_rownd_user(client, rownd_client, user_id, profile)
+    assert raced is not None
+    if not verified:
+        assert_migration_error(response, "IDENTITY_OWNED_BY_ANOTHER_USER", 422, False, "state_inspect")
+        unchanged = await get_user(cast(Any, raced).user.id)
+        assert unchanged is not None and len(unchanged.login_methods) == 1
+        assert unchanged.login_methods[0].email == provider_email
+        assert unchanged.login_methods[0].verified is True
+        return
+    assert response.status_code == 200, response.text
+    user = await get_user(user_id)
+    assert user is not None and len(user.login_methods) == 2
+    provider = next(method for method in user.login_methods if method.third_party is not None)
+    assert provider.email == provider_email
+    assert provider.verified is True
+
+
+@pytest.mark.parametrize("provider", ["google", "apple"])
+@pytest.mark.parametrize("evidence", ["missing", "false"])
+@pytest.mark.parametrize("authority", ["none", "mapped", "raw"])
+async def test_markerless_native_provider_collision_has_no_writes(
+    core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch,
+    provider: str, evidence: str, authority: str,
+) -> None:
+    client = make_client(core_url, rownd_client)
+    subject = "native-" + str(uuid.uuid4())
+    native = await thirdparty_asyncio.manually_create_or_update_user(
+        "public", provider, subject, subject + "@example.com", True,
+    )
+    assert isinstance(native, ManuallyCreateOrUpdateUserOkResult)
+    user_id = native.user.id if authority == "raw" else "rownd-" + subject
+    profile: dict[str, Any] = {"data": {"user_id": user_id, provider + "_id": subject}}
+    if evidence == "false":
+        profile["verified_data"] = {provider + "_id": False}
+    if authority == "mapped":
+        email = user_id + "@example.com"
+        assert migrate_rownd_user(client, rownd_client, user_id, {
+            "data": {"user_id": user_id, "email": email}, "verified_data": {"email": True},
+        }).status_code == 200
+        profile["data"]["email"] = email
+        profile.setdefault("verified_data", {})["email"] = True
+    count = await get_user_count()
+    writes = []
+    original_send = httpx.AsyncClient.send
+    async def send(self, request, *args, **kwargs):
+        if request.url.port == httpx.URL(core_url).port and request.method != "GET":
+            writes.append((request.method, request.url.path))
+        return await original_send(self, request, *args, **kwargs)
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    response = migrate_rownd_user(client, rownd_client, user_id, profile)
+    assert_migration_error(
+        response, "RAW_USER_ID_COLLISION" if authority == "raw" else "IDENTITY_OWNED_BY_ANOTHER_USER",
+        422, False, "state_inspect",
+    )
+    assert writes == []
+    assert await get_user_count() == count
+    for header in ("st-access-token", "st-refresh-token", "front-token", "set-cookie"):
+        assert header not in response.headers
+
+
+@pytest.mark.parametrize("provider", ["google", "apple"])
+async def test_markerless_provider_created_for_same_rownd_user_recovers_interrupted_link(
+    core_url: str, rownd_client: MockRowndClient, monkeypatch: pytest.MonkeyPatch, provider: str,
+) -> None:
+    client = make_client(core_url, rownd_client)
+    user_id = "provider-recovery-" + str(uuid.uuid4())
+    profile = {
+        "data": {"user_id": user_id, "email": user_id + "@example.com"},
+        "verified_data": {"email": True},
+    }
+    assert migrate_rownd_user(client, rownd_client, user_id, profile).status_code == 200
+    profile["data"][provider + "_id"] = user_id
+    original_import = impl.import_user
+    calls = 0
+    async def lose_response(payload, *args):
+        nonlocal calls
+        calls += 1
+        await original_import(payload, *args)
+        raise MigrationError(MigrationErrorReason.CORE_UNAVAILABLE, "bulk_import")
+    monkeypatch.setattr(impl, "import_user", lose_response)
+    response = migrate_rownd_user(client, rownd_client, user_id, profile)
+    assert response.status_code == 200, response.text
+    assert calls == 1
+    user = await get_user(user_id)
+    assert user is not None and len(user.login_methods) == 2
+    assert classify_migration_snapshot(await impl.read_fresh_migration_snapshot(
+        create_rownd_identity_snapshot(cast(Any, profile), "public"), {},
+    )).status is MigrationDispositionStatus.COMPLETE
+
+
+@pytest.mark.parametrize("provider", ["google", "apple"])
+async def test_native_provider_signin_heals_markerless_import_without_email_verification(
+    core_url: str, rownd_client: MockRowndClient, provider: str,
+) -> None:
+    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    user_id = "native-provider-" + str(uuid.uuid4())
+    profile = {"data": {"user_id": user_id, provider + "_id": user_id}}
+    response = migrate_rownd_user(client, rownd_client, user_id, profile)
+    assert response.status_code == 200, response.text
+    initial = await session_asyncio.get_session_without_request_response(response.headers["st-access-token"])
+    assert initial is not None and initial.get_access_token_payload()["auth_level"] == "unverified"
+    before = await get_user(user_id)
+    assert before is not None
+    native_email = user_id + "@example.com"
+    # This trusted SDK boundary receives the identity/email asserted by the native provider.
+    authenticated = await thirdparty_asyncio.manually_create_or_update_user(
+        "public", provider, user_id, native_email, False,
+    )
+    assert isinstance(authenticated, ManuallyCreateOrUpdateUserOkResult)
+    assert not authenticated.created_new_recipe_user
+    assert authenticated.recipe_user_id.get_as_string() == before.login_methods[0].recipe_user_id.get_as_string()
+    current = await get_user(user_id)
+    assert current is not None and current.login_methods[0].email == native_email
+    assert current.login_methods[0].verified is False
+    native_session = await session_asyncio.create_new_session_without_request_response(
+        "public", authenticated.recipe_user_id, {}, {}, True,
+    )
+    payload = native_session.get_access_token_payload()
+    assert payload["auth_level"] == "verified" and payload["is_verified_user"] is True
+    assert payload["st-ev"]["v"] is False
+    projected = await impl.get_rownd_compat_user(user_id)
+    assert cast(dict, projected["verified_data"])[provider + "_id"] == user_id
+    assert projected["auth_level"] == "verified"
+    assert (await impl.get_user_metadata(user_id))["original_rownd_user"] == profile
 
 
 async def test_migrate_guest_user_successfully(core_url: str, rownd_client: MockRowndClient):
@@ -951,16 +1220,19 @@ async def test_migrate_google_user_successfully(core_url: str, rownd_client: Moc
     assert res.json() == {"status": "OK"}
     user = await get_user("py-google-user")
     assert user is not None
-    assert len(user.login_methods) == 1
-    thirdparty_method = user.login_methods[0]
+    assert len(user.login_methods) == 2
+    thirdparty_method = next(method for method in user.login_methods if method.recipe_id == "thirdparty")
     assert thirdparty_method.third_party is not None
     assert thirdparty_method.third_party.id == "google"
     assert thirdparty_method.email is not None
     assert thirdparty_method.email.endswith("@stfakeemail.supertokens.com")
     assert thirdparty_method.verified is False
+    email_method = next(method for method in user.login_methods if method.recipe_id == "passwordless")
+    assert email_method.email == "google-user@example.com"
+    assert email_method.verified is False
 
 
-async def test_migrate_reconciles_unverified_rownd_email_with_existing_passwordless_account(
+async def test_migrate_blocks_unverified_rownd_email_collision_without_duplicate(
     core_url: str, rownd_client: MockRowndClient
 ):
     client = make_client(core_url, rownd_client)
@@ -981,33 +1253,21 @@ async def test_migrate_reconciles_unverified_rownd_email_with_existing_passwordl
         },
     )
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "OK"}
-    access_token = res.headers.get("st-access-token")
-    assert access_token is not None
-    session = await session_asyncio.get_session_without_request_response(access_token)
-    assert session is not None
-    assert session.get_user_id() == "migration-unverified-collision"
+    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 422, False, "state_inspect")
+    assert res.headers.get("st-access-token") is None
     mapping = await get_user_id_mapping("migration-unverified-collision", "EXTERNAL", {})
-    assert isinstance(mapping, GetUserIdMappingOkResult)
-    assert mapping.supertokens_user_id != owner.user.id
+    assert isinstance(mapping, UnknownMappingError)
     migrated_user = await get_user("migration-unverified-collision")
-    assert migrated_user is not None
-    assert all(method.recipe_id != "passwordless" for method in migrated_user.login_methods)
-    assert any(
-        method.recipe_id == "thirdparty"
-        and method.third_party is not None
-        and method.third_party.id == "google"
-        and method.third_party.user_id == "migration-unverified-google"
-        for method in migrated_user.login_methods
-    )
+    assert migrated_user is None
+    unchanged = await get_user(owner.user.id)
+    assert unchanged is not None and len(unchanged.login_methods) == 1
     google_owners = await supertokens_list_users_by_account_info(
         "public",
         AccountInfoInput(third_party=ThirdPartyInfo("migration-unverified-google", "google")),
         False,
         {},
     )
-    assert len(google_owners) == 1
+    assert google_owners == []
 
 
 async def test_migrate_reconciles_cross_recipe_primary_email_owner(
@@ -1114,16 +1374,9 @@ async def test_migrate_fails_closed_for_cross_recipe_owner_without_mutual_verifi
         },
     )
 
-    if incoming_verified:
-        assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 422, False, "state_inspect")
-        assert res.headers.get("st-access-token") is None
-        assert await get_user(rownd_user_id) is None
-    else:
-        assert res.status_code == 200
-        assert res.json() == {"status": "OK"}
-        migrated = await get_user(rownd_user_id)
-        assert migrated is not None
-        assert all(method.email != email for method in migrated.login_methods)
+    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 422, False, "state_inspect")
+    assert res.headers.get("st-access-token") is None
+    assert await get_user(rownd_user_id) is None
     unchanged_owner = await get_user(apple.user.id)
     assert unchanged_owner is not None
     assert unchanged_owner.is_primary_user is True
@@ -1138,8 +1391,8 @@ async def test_migrate_fails_closed_for_cross_recipe_owner_without_mutual_verifi
         False,
         {},
     )
-    assert len(provider_owners) == (0 if incoming_verified else 1)
-    assert len(bulk_import_calls) == (0 if incoming_verified else 1)
+    assert len(provider_owners) == 0
+    assert len(bulk_import_calls) == 0
 
 
 async def test_migrate_links_existing_provider_and_verified_email_owner(
@@ -1350,7 +1603,7 @@ async def test_migrate_does_not_link_provider_to_mismatched_verified_email(
         },
     )
 
-    assert_migration_error(res, "SOURCE_IDENTITY_INVALID", 422, False, "source_normalize")
+    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 422, False, "state_inspect")
     unchanged_provider = await get_user(provider.user.id)
     unchanged_passwordless = await get_user(passwordless.user.id)
     assert unchanged_provider is not None
@@ -1449,11 +1702,12 @@ async def test_migration_preflights_later_collision_before_creating_phone_method
         },
     )
 
-    assert res.status_code == 200
-    assert res.json() == {"status": "OK"}
-    repaired_provider = await get_user(provider.user.id)
-    assert repaired_provider is not None
-    assert any(method.phone_number == phone_number for method in repaired_provider.login_methods)
+    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 422, False, "state_inspect")
+    unchanged_provider = await get_user(provider.user.id)
+    assert unchanged_provider is not None
+    assert len(unchanged_provider.login_methods) == 1
+    assert not any(method.phone_number == phone_number for method in unchanged_provider.login_methods)
+    assert isinstance(await get_user_id_mapping(rownd_user_id, "EXTERNAL"), UnknownMappingError)
 
 
 async def test_migration_finalization_failure_keeps_created_method_and_mapping(

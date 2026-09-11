@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Optional, cast
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -87,18 +88,17 @@ def test_online_import_normalizes_authoritative_identities(
             "email": repository.rownd_compatibility.build_supertokens_fake_email(value, provider),
         })
     expected_methods = [expected_method]
-    if with_email:
-        expected_methods.append({
-            "recipeId": "passwordless", "email": "user@example.com",
-            "isVerified": True, "tenantIds": ["tenant-a"],
-        })
+    expected_methods.append({
+        "recipeId": "passwordless", "email": "user@example.com",
+        "isVerified": with_email, "tenantIds": ["tenant-a"],
+    })
     assert methods == expected_methods
     assert profile == original
     assert cast(dict, payload["userMetadata"])["original_rownd_user"] == original
 
 
 @pytest.mark.parametrize("auth_level", ["guest", "instant"])
-def test_online_import_keeps_unverified_identities_out_of_bridge(auth_level: str) -> None:
+def test_online_import_preserves_eligible_identities_without_verification(auth_level: str) -> None:
     profile: JsonDict = {
         "data": {
             "user_id": "rownd-1", "google_id": " google-123 ",
@@ -111,11 +111,11 @@ def test_online_import_keeps_unverified_identities_out_of_bridge(auth_level: str
     payload = repository._build_online_migration_import(repository.FreshMigrationSource(
         profile, create_rownd_identity_snapshot(profile, "public")
     ))
-    assert payload["loginMethods"] == [{
-        "recipeId": "thirdparty", "thirdPartyId": auth_level,
-        "thirdPartyUserId": "rownd-1", "email": "rownd-1@anonymous.local",
-        "isVerified": False,
-    }]
+    methods = cast(list[dict[str, Any]], payload["loginMethods"])
+    assert [method.get("thirdPartyId", method.get("phoneNumber")) for method in methods] == [
+        "google", "apple",
+    ]
+    assert all(method["isVerified"] is False for method in methods)
     assert profile == original
     assert cast(dict, payload["userMetadata"])["original_rownd_user"] == original
 
@@ -393,7 +393,7 @@ def test_split_passwordless_recovery_blocks_unsafe_foreign_owner(
     assert result.mutations == ()
 
 
-def test_snapshot_normalizes_only_verified_account_identities() -> None:
+def test_snapshot_normalizes_account_identities_and_exact_evidence() -> None:
     identity_source = create_rownd_identity_snapshot(
         {
             "state": "enabled",
@@ -459,7 +459,7 @@ def test_snapshot_normalizes_only_verified_account_identities() -> None:
     assert changed_scope != identity_source
 
 
-def test_valid_unverified_contacts_are_not_authoritative() -> None:
+def test_unverified_email_remains_eligible_but_phone_does_not() -> None:
     identity_source = create_rownd_identity_snapshot(
         {
             "state": "enabled",
@@ -473,10 +473,13 @@ def test_valid_unverified_contacts_are_not_authoritative() -> None:
         "public",
         schema=PHONE_SCHEMA,
     )
-    assert identity_source.expected_identities == ()
+    assert [identity.key for identity in identity_source.expected_identities] == [
+        "passwordless:email:user@example.com",
+    ]
+    assert not any(identity.verified for identity in identity_source.expected_identities)
 
 
-def test_valid_unverified_providers_are_not_authoritative() -> None:
+def test_valid_unverified_providers_remain_eligible() -> None:
     identity_source = create_rownd_identity_snapshot(
         {
             "data": {
@@ -488,7 +491,357 @@ def test_valid_unverified_providers_are_not_authoritative() -> None:
         },
         "public",
     )
-    assert identity_source.expected_identities == ()
+    assert [identity.key for identity in identity_source.expected_identities] == [
+        "thirdparty:apple:apple-user", "thirdparty:google:google-user",
+    ]
+    assert not any(identity.verified for identity in identity_source.expected_identities)
+
+
+@pytest.mark.parametrize("evidence,verified", [
+    ({}, False), ({"email": False}, False), ({"email": None}, False),
+    ({"email": "old@example.com"}, False), ({"email": True}, True),
+    ({"email": " USER@EXAMPLE.COM "}, True),
+])
+def test_email_eligibility_is_independent_of_exact_verification(evidence, verified) -> None:
+    profile: JsonDict = {
+        "data": {"user_id": "rownd-1", "email": " User@Example.com "},
+        "verified_data": evidence,
+    }
+    identity_source = create_rownd_identity_snapshot(profile, "tenant-a")
+    identity, = identity_source.expected_identities
+    assert identity.identifier == "user@example.com"
+    assert identity.verified is verified
+    imported = repository._build_online_migration_import(repository.FreshMigrationSource(
+        profile, identity_source,
+    ))
+    method, = cast(list[dict], imported["loginMethods"])
+    assert method["email"] == "user@example.com"
+    assert method["isVerified"] is verified
+    assert classify_migration_snapshot(snapshot(identity_source=identity_source)).mutations == (
+        MigrationMutation("IMPORT_USER"),
+    )
+    state = snapshot(
+        identity_source=identity_source, external_target="mapped",
+        owners=(owner(identity.key, "mapped", verified=False),),
+        metadata={"mapped": valid_metadata(identity_source)},
+        pointers={"mapped": CanonicalEmailPointerState(CanonicalEmailPointerStatus.VALID, "recipe")},
+    )
+    result = classify_migration_snapshot(state)
+    assert (result.status is MigrationDispositionStatus.COMPLETE) is not verified
+    assert any(m.type == "VERIFY_IDENTITY" for m in result.mutations) is verified
+    # Existing Core evidence remains valid even when Rownd has lost its historic marker.
+    assert classify_migration_snapshot(replace(
+        state, owners=(owner(identity.key, "mapped", verified=True),),
+    )).status is MigrationDispositionStatus.COMPLETE
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+@pytest.mark.parametrize("core_verified", [False, True])
+@pytest.mark.parametrize("evidence", [{}, {"email": False}, {"email": "old@example.com"}])
+def test_unverified_source_email_never_adopts_or_links_foreign_owner(
+    mapped, core_verified, evidence,
+) -> None:
+    identity_source = create_rownd_identity_snapshot({
+        "data": {"user_id": "rownd-1", "email": "user@example.com"},
+        "verified_data": evidence,
+    }, "tenant-a")
+    result = classify_migration_snapshot(snapshot(
+        identity_source=identity_source, external_target="mapped" if mapped else None,
+        owners=(owner(identity_source.expected_identities[0].key, "foreign",
+                      verified=core_verified, is_primary=False),),
+    ))
+    assert result.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+    assert result.mutations == ()
+
+
+def test_unverified_email_created_for_same_rownd_user_can_resume_linking() -> None:
+    identity_source = create_rownd_identity_snapshot({
+        "data": {"user_id": "rownd-1", "email": "user@example.com"},
+    }, "tenant-a")
+    result = classify_migration_snapshot(snapshot(
+        identity_source=identity_source, external_target="mapped",
+        owners=(owner(identity_source.expected_identities[0].key, "created",
+                      verified=False, is_primary=False),),
+        metadata={"created": MigrationMetadataState(
+            True, ValidatedMigrationMetadata(original_rownd_user_id="rownd-1"),
+        )},
+    ))
+    assert [mutation.type for mutation in result.mutations] == ["LINK_IDENTITY", "WRITE_METADATA"]
+
+
+@pytest.mark.parametrize("field", ["email", "phone_number", "google_id", "apple_id"])
+@pytest.mark.parametrize("value", [None, True, 1, [], {}, "", " "])
+def test_invalid_identifier_shapes_do_not_become_eligible(field, value) -> None:
+    with pytest.raises(MigrationError) as error:
+        create_rownd_identity_snapshot({"data": {"user_id": "rownd-1", field: value}}, "public")
+    assert error.value.reason is MigrationErrorReason.SOURCE_IDENTITY_INVALID
+
+
+@pytest.mark.asyncio
+async def test_verification_rechecks_exact_email_not_only_recipe_owner(monkeypatch) -> None:
+    identity = source(email="current@example.com").expected_identities[0]
+    mutate = AsyncMock()
+    monkeypatch.setattr(repository, "get_user", AsyncMock(return_value=sdk_user("mapped", [
+        login_method("recipe", "passwordless", email="old@example.com", verified=False),
+    ])))
+    with pytest.raises(MigrationError) as error:
+        await repository._apply_to_fresh_migration_method(
+            "recipe", "mapped", {}, mutate, expected_identity=identity,
+        )
+    assert error.value.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+    mutate.assert_not_awaited()
+
+
+@pytest.mark.parametrize("complete,pointer,allowed", [
+    (True, "recipe", True), (False, "recipe", False),
+    (True, None, False), (True, "foreign", False),
+])
+def test_unverified_email_challenge_requires_published_canonical_state(complete, pointer, allowed) -> None:
+    user = sdk_user("mapped", [login_method(
+        "recipe", "passwordless", email="user@example.com", verified=False,
+    )])
+    metadata: JsonDict = {"rownd_migration_complete": complete}
+    if pointer is not None:
+        metadata["rownd_email_recipe_user_ids"] = {"tenant-a": pointer}
+    assert repository.classify_email_credential(
+        user, metadata, "tenant-a", "user@example.com",
+    ).allowed is allowed
+
+
+@pytest.mark.parametrize("evidence", [True, "old@example.com", "user@example.com"])
+def test_oauth_claims_use_exact_core_email_evidence_over_historic_metadata(evidence) -> None:
+    user = sdk_user("mapped", [
+        login_method("old", "passwordless", email="old@example.com", verified=True),
+        login_method("new", "passwordless", email="user@example.com", verified=False),
+    ])
+    user.emails = ["old@example.com", "user@example.com"]
+    claims = repository.rownd_compatibility.build_standard_oauth_claims(user, ["email"], {
+        "original_rownd_user": {
+            "data": {"user_id": "rownd-1", "email": " USER@EXAMPLE.COM "},
+            "verified_data": {"email": evidence},
+        },
+    }, "tenant-a")
+    assert claims["email_verified"] is False
+
+
+@pytest.mark.parametrize("provider,provider_user_id,matched", [
+    ("google", "GoogleUser", True), ("custom-google", "GoogleUser", False),
+    ("google", "googleuser", False), ("apple", "GoogleUser", False),
+])
+def test_markerless_provider_still_requires_exact_namespace_and_subject(
+    provider, provider_user_id, matched,
+) -> None:
+    identity, = create_rownd_identity_snapshot({
+        "data": {"user_id": "rownd-1", "google_id": "GoogleUser"},
+    }, "tenant-a").expected_identities
+    method = login_method(
+        "recipe", "thirdparty", provider_id=provider, provider_user_id=provider_user_id,
+        verified=False,
+    )
+    assert repository._migration_method_matches_identity(method, identity) is matched
+
+
+@pytest.mark.parametrize("provider", ["google", "apple"])
+@pytest.mark.parametrize("evidence", [{}, {"google_id": False, "apple_id": False}])
+@pytest.mark.parametrize("mapped", [False, True])
+@pytest.mark.parametrize("provenance", [None, "rownd-1", "other"])
+def test_markerless_provider_owner_requires_positive_rownd_authority(provider, evidence, mapped, provenance):
+    identity_source = create_rownd_identity_snapshot({
+        "data": {"user_id": "rownd-1", provider + "_id": "subject"},
+        "verified_data": evidence,
+    }, "tenant-a")
+    identity, = identity_source.expected_identities
+    state = snapshot(
+        identity_source=identity_source, external_target="target" if mapped else None,
+        owners=(owner(identity.key, "native", verified=True, is_primary=False),),
+        metadata={"native": MigrationMetadataState(True, ValidatedMigrationMetadata(
+            original_rownd_user_id=provenance,
+        ))},
+    )
+    result = classify_migration_snapshot(state)
+    if provenance == "rownd-1":
+        assert result.status is MigrationDispositionStatus.REPAIRABLE
+        assert result.target is not None and result.target.user_id == ("target" if mapped else "native")
+    else:
+        assert result.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+        assert result.mutations == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provenance", [None, "rownd-1", "other"])
+async def test_markerless_provider_link_rechecks_positive_provenance(monkeypatch, provenance):
+    identity, = create_rownd_identity_snapshot({
+        "data": {"user_id": "rownd-1", "google_id": "subject"},
+    }, "tenant-a").expected_identities
+    method = login_method("recipe", "thirdparty", provider_id="google", provider_user_id="subject")
+    monkeypatch.setattr(repository, "get_user", AsyncMock(return_value=sdk_user("native", [method], primary=False)))
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", AsyncMock(return_value="native"))
+    monkeypatch.setattr(repository, "get_user_id_mapping", AsyncMock(return_value=None))
+    monkeypatch.setattr(repository, "get_raw_user_metadata", AsyncMock(return_value=(
+        {"original_rownd_user": {"data": {"user_id": provenance}}} if provenance else {}
+    )))
+    mutate = AsyncMock()
+    args = ("recipe", "target", {}, mutate, owner(identity.key, "native", is_primary=False),
+            identity, "tenant-a", "rownd-1")
+    if provenance == "rownd-1":
+        await repository._apply_to_fresh_migration_method(*args)
+        mutate.assert_awaited_once()
+    else:
+        with pytest.raises(MigrationError) as error:
+            await repository._apply_to_fresh_migration_method(*args)
+        assert error.value.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+        mutate.assert_not_awaited()
+
+
+@pytest.mark.parametrize("evidence", [True, "+12025550101", "invalid"])
+def test_phone_verification_must_match_present_phone(evidence):
+    profile: JsonDict = {
+        "data": {"user_id": "rownd-1"}, "verified_data": {"phone_number": evidence},
+    }
+    with pytest.raises(MigrationError):
+        create_rownd_identity_snapshot(profile, "public")
+    cast(dict, profile["data"])["phone_number"] = "+12025550100"
+    if evidence is True:
+        assert create_rownd_identity_snapshot(profile, "public").expected_identities[0].verified
+    else:
+        with pytest.raises(MigrationError):
+            create_rownd_identity_snapshot(profile, "public")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "absent", "foreign", "tenant", "email", "recipe", "raced_email"])
+async def test_migration_session_uses_exact_canonical_email_or_fails_closed(monkeypatch, failure):
+    identity_source = source(email="current@example.com", google_id="subject", phone_number="+12025550100")
+    methods = [
+        login_method("aaa-phone", "passwordless", phone_number="+12025550100"),
+        login_method("bbb-provider", "thirdparty", provider_id="google", provider_user_id="subject"),
+        login_method("email", "passwordless", email="current@example.com", verified=False),
+    ]
+    if failure == "tenant":
+        methods[-1].tenant_ids = ["other"]
+    if failure == "email":
+        methods[-1] = login_method("email", "passwordless", email="old@example.com")
+    if failure == "recipe":
+        methods[-1].recipe_id = "emailpassword"
+    user = sdk_user("target", methods)
+    async def get_user(user_id, _context):
+        if user_id == "email" and failure == "foreign":
+            return sdk_user("foreign", [methods[-1]])
+        if user_id == "email" and failure == "raced_email":
+            return sdk_user("target", [login_method("email", "passwordless", email="old@example.com")])
+        return user
+    monkeypatch.setattr(repository, "get_user", get_user)
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", AsyncMock(side_effect=lambda user_id, _: user_id))
+    monkeypatch.setattr(repository, "get_raw_user_metadata", AsyncMock(return_value=(
+        {} if failure == "absent" else {"rownd_email_recipe_user_ids": {"tenant-a": "email"}}
+    )))
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    if failure is None:
+        selected = await repository.read_fresh_migration_session_method(identity_source, target, {})
+        assert selected.get_as_string() == "email"
+    else:
+        with pytest.raises(MigrationError):
+            await repository.read_fresh_migration_session_method(identity_source, target, {})
+
+
+def test_pinned_provider_target_cannot_outlive_its_source_authority():
+    state = snapshot(
+        identity_source=create_rownd_identity_snapshot({"data": {"user_id": "rownd-1"}}, "tenant-a"),
+        users={"native": MigrationUserState(True, False)},
+        internal={"native": None}, metadata={"native": MigrationMetadataState(True, ValidatedMigrationMetadata())},
+        pointers={"native": CanonicalEmailPointerState(CanonicalEmailPointerStatus.ABSENT)},
+    )
+    result = classify_migration_snapshot(state, PinnedMigrationTarget("native", MigrationTargetSource.THIRD_PARTY))
+    assert result.reason is MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+    assert result.mutations == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provenance", [None, "rownd-1", "other"])
+async def test_raw_provider_overlap_requires_exact_positive_provenance(monkeypatch, provenance):
+    identity_source = create_rownd_identity_snapshot({
+        "data": {"user_id": "rownd-1", "google_id": "subject"},
+    }, "tenant-a")
+    user = sdk_user("rownd-1", [login_method(
+        "recipe", "thirdparty", provider_id="google", provider_user_id="subject", verified=True,
+    )])
+    metadata = {"original_rownd_user": {"data": {"user_id": provenance}}} if provenance else {}
+    monkeypatch.setattr(repository, "get_user_id_mapping", AsyncMock(return_value=None))
+    monkeypatch.setattr(repository, "get_user", AsyncMock(return_value=user))
+    monkeypatch.setattr(repository, "_get_migration_identity_users", AsyncMock(return_value=[user]))
+    monkeypatch.setattr(repository, "get_raw_user_metadata", AsyncMock(return_value=metadata))
+    monkeypatch.setattr(repository, "inspect_linked_user_metadata", AsyncMock(return_value={
+        "rownd_metadata_source_user_id": "rownd-1",
+    }))
+    state = await repository.read_fresh_migration_snapshot(identity_source, {})
+    assert state.mapping.raw_id_inspection.same_identity_graph is (provenance == "rownd-1")
+    result = classify_migration_snapshot(state)
+    if provenance == "rownd-1":
+        assert result.status is MigrationDispositionStatus.REPAIRABLE
+    else:
+        assert result.reason is MigrationErrorReason.RAW_USER_ID_COLLISION
+        assert result.mutations == ()
+
+
+@pytest.mark.asyncio
+async def test_oauth_wrappers_remove_detached_historic_email_claims(monkeypatch):
+    user = sdk_user("rownd-1", [])
+    user.emails = []
+    metadata = {"original_rownd_user": {
+        "data": {"user_id": "rownd-1", "email": "old@example.com"},
+        "verified_data": {"email": True},
+    }}
+    monkeypatch.setattr(repository, "inspect_linked_user_metadata", AsyncMock(return_value={
+        "combined_metadata": metadata,
+    }))
+    payload = {"email": "old@example.com", "email_verified": True, "custom": "retained"}
+    from supertokens_rownd.types import RowndPluginConfig
+    token = await repository.build_rownd_oauth_payload(RowndPluginConfig(), user, ["email"], payload, "public", {})
+    info = await repository.build_rownd_oauth_user_info(user, {}, ["email"], payload, "public", {})
+    for result in (token, info):
+        assert "email" not in result and "email_verified" not in result
+        assert result["custom"] == "retained"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("builder", ["access", "id", "userinfo"])
+@pytest.mark.parametrize("session_exists", [False, True])
+async def test_oauth_overrides_thread_authoritative_active_tenant(monkeypatch, builder, session_exists):
+    import supertokens_rownd.plugin as plugin
+    from supertokens_rownd.types import RowndPluginConfig
+
+    user = sdk_user("r", [
+        login_method("current", "passwordless", email="current@example.com", verified=False),
+        login_method("other", "passwordless", email="current@example.com", verified=True, tenant_ids=("other",)),
+    ])
+    user.emails = ["current@example.com"]
+    metadata = {
+        "original_rownd_user": {"data": {"user_id": "r"}},
+        "rownd_email_recipe_user_ids": {"tenant-a": "current", "other": "detached"},
+    }
+    monkeypatch.setattr(repository, "inspect_linked_user_metadata", AsyncMock(return_value={"combined_metadata": metadata}))
+    read_session = AsyncMock(return_value=SimpleNamespace(tenant_id="tenant-a") if session_exists else None)
+    monkeypatch.setattr(plugin.session_asyncio, "get_session_information", read_session)
+    original = SimpleNamespace(
+        get_requested_scopes=None,
+        build_access_token_payload=AsyncMock(return_value={"email": "stale@example.com", "email_verified": True}),
+        build_id_token_payload=AsyncMock(return_value={"email": "stale@example.com", "email_verified": True}),
+        build_user_info=AsyncMock(return_value={"email": "stale@example.com", "email_verified": True}),
+    )
+    overridden = plugin._oauth2provider_function_override(RowndPluginConfig())(cast(Any, original))
+    context = {}
+    if builder == "userinfo":
+        result = await overridden.build_user_info(user, {"tId": "other"}, ["email"], "tenant-a", context)
+        read_session.assert_not_awaited()
+    else:
+        method = overridden.build_access_token_payload if builder == "access" else overridden.build_id_token_payload
+        result = await method(user, cast(Any, None), "session-handle", ["email"], context)
+        read_session.assert_awaited_once_with("session-handle", context)
+    if builder == "userinfo" or session_exists:
+        assert result["email"] == "current@example.com"
+        assert result["email_verified"] is False
+    else:
+        assert "email" not in result and "email_verified" not in result
 
 
 def test_verified_phone_is_included_without_schema_declaration() -> None:
@@ -517,17 +870,17 @@ def test_verified_phone_is_included_without_schema_declaration() -> None:
         ("apple_id", "apple-user"),
     ],
 )
-def test_authoritative_evidence_without_source_value_fails_closed(
+def test_evidence_without_source_value_distinguishes_contacts_from_provider_conflicts(
     field: str, verification: Any
 ) -> None:
+    profile: JsonDict = {
+        "data": {"user_id": "rownd-1"}, "verified_data": {field: verification},
+    }
+    if field == "email":
+        assert create_rownd_identity_snapshot(profile, "public").expected_identities == ()
+        return
     with pytest.raises(MigrationError) as error:
-        create_rownd_identity_snapshot(
-            {
-                "data": {"user_id": "rownd-1"},
-                "verified_data": {field: verification},
-            },
-            "public",
-        )
+        create_rownd_identity_snapshot(profile, "public")
     assert error.value.reason is MigrationErrorReason.SOURCE_IDENTITY_INVALID
     assert error.value.stage == "source_normalize"
 
@@ -551,7 +904,7 @@ def test_malformed_provider_verification_evidence_fails_closed(
     "profile",
     [
         {},
-        {"data": {"user_id": "rownd-1"}},
+        {"data": {"user_id": "rownd-1"}, "verified_data": None},
         {"data": {"user_id": 1}, "verified_data": {}},
         {"data": {"user_id": "rownd-1", "google_id": ""}, "verified_data": {}},
         {
@@ -561,7 +914,7 @@ def test_malformed_provider_verification_evidence_fails_closed(
         {"data": {"user_id": "rownd-1", "email": 1}, "verified_data": {}},
         {
             "data": {"user_id": "rownd-1", "email": "a@example.com"},
-            "verified_data": {"email": "b@example.com"},
+            "verified_data": [],
         },
         {
             "data": {"user_id": "rownd-1", "phone_number": "555-0100"},
@@ -1305,7 +1658,7 @@ async def test_completion_associates_before_fresh_session_resolution(
         rownd_user, create_rownd_identity_snapshot(rownd_user, tenant_id)
     )
     methods = [
-        login_method("google-recipe", "thirdparty", tenant_ids=()),
+        login_method("google-recipe", "thirdparty", provider_id="google", provider_user_id="g", tenant_ids=()),
         login_method("extra-recipe", "emailpassword", tenant_ids=()),
     ]
     if tenant_id == "public" and failure != "missing_membership":
@@ -2491,7 +2844,7 @@ async def test_create_identity_rechecks_created_method_immediately_before_link(
         return before_create if snapshot_reads == 1 else before_link
 
     async def create_method(*_args: Any):
-        return RecipeUserId("created-recipe"), True
+        return {"id": "created-recipe"}
 
     async def get_created_user(*_args: Any):
         nonlocal user_reads
@@ -2521,7 +2874,7 @@ async def test_create_identity_rechecks_created_method_immediately_before_link(
         raise AssertionError("raced created identity must not be linked")
 
     monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
-    monkeypatch.setattr(repository, "create_missing_login_method", create_method)
+    monkeypatch.setattr(repository, "import_user", create_method)
     monkeypatch.setattr(repository, "get_user", get_created_user)
     monkeypatch.setattr(repository, "sdk_user_id_matches_internal_target", not_linked_to_target)
     monkeypatch.setattr(repository, "resolve_supertokens_user_id", resolve_created)
@@ -2707,6 +3060,122 @@ async def test_metadata_repair_stops_when_refetched_source_snapshot_changed(
 
     assert result == changed
     assert source_reads == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("linked_source", [False, True])
+@pytest.mark.parametrize("variant_format", ["list", "string", "stored_only", "absent"])
+async def test_metadata_publication_preserves_variant_union_without_stale_profile_fields(
+    monkeypatch: pytest.MonkeyPatch, linked_source: bool, variant_format: str
+) -> None:
+    incoming: JsonDict = {
+        "data": {"user_id": "rownd-1", "google_id": "google-123", "custom": {"fresh": None}},
+        "verified_data": {"google_id": True},
+        "attributes": {"fresh": {"nested": [False, None]}},
+    }
+    target_attributes: JsonDict = {"target_only": True}
+    linked_attributes: JsonDict = {"linked_only": True}
+    incoming_attributes = cast(JsonDict, incoming["attributes"])
+    if variant_format == "list":
+        incoming_attributes["rownd:app_variants"] = ["incoming", "shared", "incoming"]
+        target_attributes["rownd:app_variants"] = ["target", "shared"]
+        linked_attributes["rownd:app_variants"] = ["linked", "shared"]
+        expected_variants = ["incoming", "shared", "target"]
+        if linked_source:
+            expected_variants.append("linked")
+    elif variant_format == "string":
+        incoming_attributes["rownd:app_variants"] = "incoming"
+        target_attributes["rownd:app_variants"] = "target"
+        linked_attributes["rownd:app_variants"] = "linked"
+        expected_variants = ["incoming", "target"] + (["linked"] if linked_source else [])
+    elif variant_format == "stored_only":
+        incoming.pop("attributes")
+        target_attributes["rownd:app_variants"] = ["target"]
+        linked_attributes["rownd:app_variants"] = ["linked"]
+        expected_variants = ["target"] + (["linked"] if linked_source else [])
+    else:
+        expected_variants = []
+    stored: dict[str, JsonDict] = {
+        "target": {"original_rownd_user": {"attributes": target_attributes}},
+        "linked": {
+            "original_rownd_user": {
+                "data": {"user_id": "rownd-1", "stale": "must not survive"},
+                "verified_data": {"stale": True},
+                "attributes": linked_attributes,
+            }
+        },
+    }
+    previous = deepcopy(stored)
+    original_incoming = deepcopy(incoming)
+    initial_profile = {**incoming, "attributes": {"outdated": True}}
+    fresh = repository.FreshMigrationSource(
+        initial_profile, create_rownd_identity_snapshot(incoming, "tenant-a")
+    )
+    publication = repository.FreshMigrationSource(incoming, fresh.snapshot)
+    target = PinnedMigrationTarget("target", MigrationTargetSource.MAPPING)
+    metadata_source = "linked" if linked_source else "target"
+
+    async def read_snapshot(*_args: Any):
+        target_metadata = validate_migration_metadata(stored["target"])
+        profile_metadata = validate_migration_metadata(stored[metadata_source])
+        assert target_metadata.value is not None and profile_metadata.value is not None
+        return snapshot(
+            identity_source=fresh.snapshot,
+            owners=(owner("thirdparty:google:google-123", "target"),),
+            external_target="target",
+            metadata={
+                "target": MigrationMetadataState(True, replace(
+                    target_metadata.value,
+                    original_rownd_user_id=profile_metadata.value.original_rownd_user_id,
+                ))
+            },
+        )
+
+    async def get_metadata(user_id: str, *_args: Any):
+        return deepcopy(stored[user_id])
+
+    async def update_metadata(user_id: str, metadata: JsonDict, *_args: Any):
+        stored[user_id].update(deepcopy(metadata))
+
+    writer = AsyncMock(side_effect=update_metadata)
+    monkeypatch.setattr(repository, "read_fresh_migration_snapshot", read_snapshot)
+    monkeypatch.setattr(repository, "get_raw_user_metadata", get_metadata)
+    monkeypatch.setattr(repository, "inspect_linked_user_metadata", AsyncMock(return_value={
+        "rownd_metadata_source_user_id": metadata_source,
+        "combined_metadata": {},
+    }))
+    monkeypatch.setattr(repository.usermetadata_asyncio, "update_user_metadata", writer)
+    disposition = classify_migration_snapshot(await read_snapshot(), target)
+    assert [mutation.type for mutation in disposition.mutations] == ["WRITE_METADATA"]
+
+    await repository.apply_migration_repairs(
+        disposition, fresh, target, cast(Any, SimpleNamespace()), {},
+        AsyncMock(side_effect=[fresh, publication]),
+    )
+
+    expected_profile = deepcopy(incoming)
+    if expected_variants:
+        cast(JsonDict, expected_profile.setdefault("attributes", {}))[
+            "rownd:app_variants"
+        ] = [variant for variant in expected_variants]
+    assert stored[metadata_source]["original_rownd_user"] == expected_profile
+    assert stored["target"]["rownd_migration_complete"] is True
+    assert incoming == original_incoming
+    assert initial_profile["attributes"] == {"outdated": True}
+    untouched_user = "target" if linked_source else "linked"
+    assert (
+        stored[untouched_user]["original_rownd_user"]
+        == previous[untouched_user]["original_rownd_user"]
+    )
+    assert writer.await_count == (2 if linked_source else 1)
+
+    writer.reset_mock()
+    completed = classify_migration_snapshot(await read_snapshot(), target)
+    assert completed.status is MigrationDispositionStatus.COMPLETE
+    await repository.apply_migration_repairs(
+        disposition, fresh, target, cast(Any, SimpleNamespace()), {}, AsyncMock(return_value=fresh)
+    )
+    writer.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3595,7 +4064,7 @@ async def test_identity_create_response_loss_converges_through_real_repair_branc
         if created
         else disposition,
     )
-    monkeypatch.setattr(repository, "create_missing_login_method", create_then_lose_response)
+    monkeypatch.setattr(repository, "import_user", create_then_lose_response)
 
     with pytest.raises(TimeoutError):
         await repository.apply_migration_repairs(

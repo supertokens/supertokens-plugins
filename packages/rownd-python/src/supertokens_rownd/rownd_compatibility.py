@@ -89,17 +89,34 @@ def has_only_guest_login_methods(user: Optional[User]) -> bool:
     return all(is_guest_login_method(method) for method in user.login_methods)
 
 
-def has_verified_real_login_method(user: Optional[User]) -> bool:
+def is_verified_provider_method(method: LoginMethod, original: Optional[JsonDict] = None) -> bool:
+    provider, subject = get_third_party_info(method)
+    if method.recipe_id != "thirdparty" or not subject or is_guest_login_method(method):
+        return False
+    if method.email and not is_supertokens_fake_email(method.email):
+        return True
+    data = as_json_dict((original or {}).get("data"))
+    field = "%s_id" % provider
+    if field in data:
+        evidence = as_json_dict((original or {}).get("verified_data")).get(field)
+        return (
+            isinstance(data.get(field), str) and cast(str, data[field]).strip() == subject
+            and (evidence is True or (isinstance(evidence, str) and evidence.strip() == subject))
+        )
+    # A preserved synthetic method is not a provider assertion, even if its email EV changes.
+    return False
+
+
+def has_verified_real_login_method(user: Optional[User], original: Optional[JsonDict] = None) -> bool:
     if not user:
         return False
     for method in user.login_methods:
         if is_guest_login_method(method):
             continue
-        if method.recipe_id == "passwordless" and (method.email or method.phone_number):
+        if method.recipe_id == "passwordless" and method.verified and (method.email or method.phone_number):
             return True
-        if method.recipe_id == "thirdparty" and method.verified:
-            _, third_party_user_id = get_third_party_info(method)
-            return bool(third_party_user_id)
+        if is_verified_provider_method(method, original):
+            return True
         if method.recipe_id == "emailpassword" and method.email and method.verified:
             return True
     return False
@@ -122,15 +139,16 @@ def get_effective_auth_level(
     user: Optional[User],
     original_auth_level: Optional[str] = None,
     verified_data: Optional[JsonDict] = None,
+    original: Optional[JsonDict] = None,
 ) -> str:
-    if has_verified_real_login_method(user):
+    if has_verified_real_login_method(user, original):
         return "verified"
-    if original_auth_level == INSTANT_AUTH_METHOD_ID:
-        return INSTANT_AUTH_METHOD_ID
+    if original_auth_level in {INSTANT_AUTH_METHOD_ID, "verified"}:
+        return original_auth_level
     return (
         get_guest_auth_level(user)
         or original_auth_level
-        or ("verified" if verified_data else "unverified")
+        or "unverified"
     )
 
 
@@ -196,7 +214,7 @@ def project_rownd_compat_user(
     verified_data = {
         key: value
         for key, value in as_json_dict(original.get("verified_data")).items()
-        if key != "email"
+        if key not in {"email", "google_id", "apple_id"}
     }
     data: JsonDict = {"user_id": user_id}
     data_field_keys = set()
@@ -257,13 +275,22 @@ def project_rownd_compat_user(
                 data.setdefault("email", method.email)
             if third_party_id == "google" and third_party_user_id:
                 data["google_id"] = third_party_user_id
-                verified_data["google_id"] = third_party_user_id
+                if is_verified_provider_method(method, original):
+                    verified_data["google_id"] = third_party_user_id
             if third_party_id == "apple" and third_party_user_id:
                 data["apple_id"] = third_party_user_id
-                verified_data["apple_id"] = third_party_user_id
+                if is_verified_provider_method(method, original):
+                    verified_data["apple_id"] = third_party_user_id
 
-    if verified_data.get("email") is True and isinstance(data.get("email"), str):
-        verified_data["email"] = data["email"]
+    email = data.get("email")
+    if isinstance(email, str):
+        verified_data.pop("email", None)
+        if any(
+            method.verified and method.email
+            and method.email.strip().lower() == email.strip().lower()
+            for method in tenant_login_methods
+        ):
+            verified_data["email"] = email
     if verified_data.get("phone_number") is True and isinstance(data.get("phone_number"), str):
         verified_data["phone_number"] = data["phone_number"]
 
@@ -327,6 +354,7 @@ def project_rownd_compat_user(
             tenant_user,
             original_auth_level if isinstance(original_auth_level, str) else None,
             verified_data,
+            original,
         ),
         "redacted": [],
         "groups": original.get("groups", []),
@@ -349,7 +377,7 @@ def build_rownd_session_claim_payload(
     original_auth_level = (
         original_auth_level_value if isinstance(original_auth_level_value, str) else None
     )
-    auth_level = get_effective_auth_level(user, original_auth_level, verified_data)
+    auth_level = get_effective_auth_level(user, original_auth_level, verified_data, original)
     app_user_id = as_json_dict(original.get("data")).get("user_id")
     app_user_id = (
         app_user_id or current_payload.get("app_user_id") or (user.id if user else user_id)
@@ -427,7 +455,7 @@ def first_string(value: object) -> Optional[str]:
 
 
 def is_supertokens_fake_email(value: object) -> bool:
-    return isinstance(value, str) and value.lower().endswith("@%s" % SUPERTOKENS_FAKE_EMAIL_DOMAIN)
+    return isinstance(value, str) and value.strip().lower().endswith("@%s" % SUPERTOKENS_FAKE_EMAIL_DOMAIN)
 
 
 def build_supertokens_fake_email(provider_user_id: str, provider_id: str) -> str:
@@ -466,20 +494,56 @@ def apply_rownd_oauth_resource_params(params: Dict[str, object]) -> Optional[str
     return rownd_audience
 
 
-def build_standard_oauth_claims(user: User, scopes: List[str], metadata: JsonDict) -> JsonDict:
+def build_standard_oauth_claims(
+    user: User, scopes: List[str], metadata: JsonDict, tenant_id: Optional[str],
+) -> JsonDict:
     claims: JsonDict = {}
     original = as_json_dict(metadata.get("original_rownd_user"))
     rownd_data = as_json_dict(original.get("data"))
     verified_data = as_json_dict(original.get("verified_data"))
+    tenant_methods = [method for method in user.login_methods if tenant_id in method.tenant_ids]
 
     if "email" in scopes:
         email = first_real_email(first_string(rownd_data.get("email")), *(user.emails or []))
+        migrated = isinstance(rownd_data.get("user_id"), str)
+        if migrated:
+            canonical_id = (
+                get_canonical_email_recipe_user_id(metadata, tenant_id) if tenant_id is not None else None
+            )
+            if "rownd_email_recipe_user_ids" in metadata:
+                scoped = metadata["rownd_email_recipe_user_ids"]
+                canonical_present = not isinstance(scoped, dict) or tenant_id in scoped
+            else:
+                canonical_present = "rownd_email_recipe_user_id" in metadata
+            methods = [
+                method for method in tenant_methods
+                if first_real_email(method.email) is not None
+                and (
+                    not canonical_present or (
+                        method.recipe_id == "passwordless"
+                        and method.recipe_user_id.get_as_string() == canonical_id
+                    )
+                )
+            ]
+            emails = sorted({cast(str, method.email).strip().lower() for method in methods})
+            # Only the active tenant's pointer and methods establish email evidence.
+            email = (
+                emails[0] if canonical_present and len(emails) == 1
+                else None if canonical_present
+                else email.strip().lower() if email and email.strip().lower() in emails
+                else emails[0] if len(emails) == 1 else None
+            )
         if email:
             claims["email"] = email
-            claims["email_verified"] = is_oauth_claim_verified(
-                verified_data.get("email"),
-                email,
-                any(method.email == email and method.verified for method in user.login_methods),
+            matching_methods = [
+                method for method in tenant_methods
+                if method.email and method.email.strip().lower() == email.strip().lower()
+            ]
+            # Imported Core state supersedes historical (possibly merged) profile evidence.
+            claims["email_verified"] = (
+                any(method.verified for method in matching_methods)
+                if matching_methods
+                else not migrated and is_rownd_email_verified(verified_data.get("email"), email)
             )
 
     if "phone" in scopes:
@@ -493,7 +557,7 @@ def build_standard_oauth_claims(user: User, scopes: List[str], metadata: JsonDic
                 phone_number,
                 any(
                     method.phone_number == phone_number and method.verified
-                    for method in user.login_methods
+                    for method in tenant_methods
                 ),
             )
 
@@ -535,7 +599,9 @@ def is_oauth_claim_verified(value: object, expected_value: str, fallback: bool) 
 
 
 def is_rownd_email_verified(value: object, email: str) -> bool:
-    return value is True or (isinstance(value, str) and value.lower() == email.lower())
+    return not is_supertokens_fake_email(email) and (
+        value is True or (isinstance(value, str) and value.strip().lower() == email.strip().lower())
+    )
 
 
 def map_rownd_user_to_supertokens(

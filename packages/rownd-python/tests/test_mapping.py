@@ -1,3 +1,4 @@
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -15,15 +16,19 @@ from supertokens_rownd.config import (
     build_app_config,
 )
 from supertokens_rownd.errors import RowndEmailChangeError, RowndPluginError
+from supertokens_rownd.migration import validate_migration_metadata
 from supertokens_rownd.supertokens_repository import (
     combine_linked_metadata,
     find_canonical_passwordless_method,
     get_rownd_compat_user,
 )
 from supertokens_rownd.rownd_compatibility import (
+    build_rownd_session_claim_payload,
+    build_standard_oauth_claims,
     build_supertokens_fake_email,
     get_canonical_email_recipe_user_id,
     map_rownd_user_to_supertokens,
+    project_rownd_compat_user,
 )
 from supertokens_rownd.types import (
     EmailCredentialAuthorization,
@@ -52,6 +57,256 @@ def rownd_snapshot(user_id: str, **data: Any) -> JsonDict:
         "data": {"user_id": user_id, **data},
         "verified_data": {},
     }
+
+
+@pytest.mark.parametrize("provider", ["google", "apple"])
+@pytest.mark.parametrize("evidence,verified", [(None, False), (False, False), (True, True), ("subject", True), ("old", False)])
+@pytest.mark.parametrize("email_verified", [False, True])
+def test_imported_provider_projection_and_claims_require_identity_evidence(provider, evidence, verified, email_verified):
+    method = SimpleNamespace(
+        recipe_id="thirdparty", third_party=SimpleNamespace(id=provider, user_id="subject"),
+        email=build_supertokens_fake_email("subject", provider), verified=email_verified,
+        phone_number=None, tenant_ids=["public"], time_joined=1000,
+        recipe_user_id=RecipeUserId("provider"),
+    )
+    user = cast(Any, SimpleNamespace(id="rownd-user", login_methods=[method], time_joined=1000))
+    original: JsonDict = {"data": {"user_id": "rownd-user", provider + "_id": "subject"}}
+    if evidence is not None:
+        original["verified_data"] = {provider + "_id": evidence}
+    metadata: JsonDict = {"original_rownd_user": original}
+    projected = project_rownd_compat_user("rownd-user", user, metadata, None, "public", None)
+    assert cast(dict, projected["data"])[provider + "_id"] == "subject"
+    assert cast(dict, projected["verified_data"]).get(provider + "_id") == ("subject" if verified else None)
+    claims = build_rownd_session_claim_payload(RowndPluginConfig(), "rownd-user", user, metadata, {}, None)
+    assert claims["auth_level"] == ("verified" if verified else "unverified")
+    assert claims["is_verified_user"] is verified
+    snapshot = deepcopy(original)
+    method.email = "native@example.com"
+    projected = project_rownd_compat_user("rownd-user", user, metadata, None, "public", None)
+    assert cast(dict, projected["verified_data"])[provider + "_id"] == "subject"
+    assert cast(dict, projected["verified_data"]).get("email") == (method.email if email_verified else None)
+    assert projected["auth_level"] == "verified"
+    claims = build_rownd_session_claim_payload(RowndPluginConfig(), "rownd-user", user, metadata, {}, None)
+    assert claims["auth_level"] == "verified" and claims["is_verified_user"] is True
+    assert method.verified is email_verified
+    assert original == snapshot
+    method.email = build_supertokens_fake_email("subject", provider)
+    original["auth_level"] = "verified"
+    assert build_rownd_session_claim_payload(
+        RowndPluginConfig(), "rownd-user", user, metadata, {}, None,
+    )["auth_level"] == "verified"
+
+
+@pytest.mark.parametrize("email_verified", [False, True])
+def test_native_provider_assertion_does_not_require_email_verification(email_verified):
+    method = SimpleNamespace(
+        recipe_id="thirdparty", third_party=SimpleNamespace(id="google", user_id="native"),
+        email="native@example.com", verified=email_verified, phone_number=None,
+        tenant_ids=["public"], time_joined=1000, recipe_user_id=RecipeUserId("provider"),
+    )
+    user = cast(Any, SimpleNamespace(id="native-user", login_methods=[method], time_joined=1000))
+    projected = project_rownd_compat_user("native-user", user, {}, None, "public", None)
+    assert cast(dict, projected["verified_data"])["google_id"] == "native"
+    assert projected["auth_level"] == "verified"
+    assert cast(dict, projected["verified_data"]).get("email") == (method.email if email_verified else None)
+    assert build_rownd_session_claim_payload(
+        RowndPluginConfig(), "native-user", user, {}, {}, None,
+    )["auth_level"] == "verified"
+
+
+@pytest.mark.parametrize("linked_source", [False, True])
+@pytest.mark.parametrize("current_evidence", [None, {}, {"email": "current@example.com"}])
+def test_combination_never_resurrects_original_identity_or_verification(linked_source, current_evidence):
+    current: JsonDict = {
+        "data": {"user_id": "rownd-user"},
+        "attributes": {"rownd:app_variants": ["current"]},
+    }
+    if current_evidence is not None:
+        current["verified_data"] = current_evidence
+    stale: JsonDict = {
+        "data": {"user_id": "rownd-user", "email": "old@example.com", "google_id": "old-subject"},
+        "verified_data": {"email": True, "google_id": True},
+        "auth_level": "verified",
+        "attributes": {"rownd:app_variants": ["stale"]},
+    }
+    primary: JsonDict = {
+        "original_rownd_user": {"attributes": {"rownd:app_variants": ["primary"]}} if linked_source else current,
+        "rownd_email_recipe_user_ids": {"public": "canonical"},
+        "nested": {"primary": True},
+    }
+    linked: list[tuple[str, JsonDict]] = [("z-stale", {
+        "original_rownd_user": stale, "rownd_email_recipe_user_ids": {"public": "stale"},
+        "nested": {"linked": True},
+    })]
+    if linked_source:
+        linked.append(("a-current", {"original_rownd_user": current}))
+    result = combine_linked_metadata("primary", primary, linked, "rownd-user")
+    combined = cast(dict, result["combined_metadata"])
+    expected = {**current, "attributes": {"rownd:app_variants": (
+        ["current", "primary", "stale"] if linked_source else ["current", "stale"]
+    )}}
+    assert combined["original_rownd_user"] == expected
+    assert combined["rownd_email_recipe_user_ids"] == {"public": "canonical"}
+    assert combined["nested"] == {"primary": True, "linked": True}
+    assert result["rownd_metadata_source_user_id"] == ("a-current" if linked_source else "primary")
+    assert "email" not in cast(dict, current["data"])
+    assert "auth_level" not in current
+
+
+@pytest.mark.parametrize("linked_source", [False, True])
+def test_same_rownd_profile_fallback_never_restores_authority_fields(linked_source):
+    current: JsonDict = {"data": {"user_id": "r", "last_name": "Current", "nickname": None}}
+    stale: JsonDict = {
+        "data": {
+            "user_id": "r", "first_name": "Ada", "last_name": "Old", "nickname": "old",
+            "email": "old@example.com", "google_id": "old-google", "apple_id": "old-apple",
+            "phone_number": "+12025550100",
+        },
+        "verified_data": {"email": True, "google_id": True},
+        "auth_level": "verified", "groups": ["admin"], "state": "enabled",
+        "attributes": {"permissions": ["admin"]},
+    }
+    primary: JsonDict = {} if linked_source else {"original_rownd_user": current}
+    linked: list[tuple[str, JsonDict]] = [
+        ("a-foreign", {"original_rownd_user": {"data": {"user_id": "foreign", "first_name": "Wrong", "zip_code": "wrong"}}}),
+        ("z-stale", {"original_rownd_user": stale}),
+    ]
+    if linked_source:
+        linked.append(("b-current", {"original_rownd_user": current}))
+    before = deepcopy((primary, linked))
+    result = combine_linked_metadata("primary", primary, linked, "r")
+    assert cast(dict, result["combined_metadata"])["original_rownd_user"] == {
+        "data": {"user_id": "r", "first_name": "Ada", "last_name": "Current", "nickname": None},
+    }
+    assert result["rownd_metadata_source_user_id"] == ("b-current" if linked_source else "primary")
+    assert (primary, linked) == before
+
+
+@pytest.mark.parametrize("pointer", [None, "current", "detached"])
+@pytest.mark.parametrize("verified", [False, True])
+def test_migrated_oauth_email_comes_from_current_core_not_unmatched_history(pointer, verified):
+    method = SimpleNamespace(
+        recipe_id="passwordless", recipe_user_id=RecipeUserId("current"),
+        email="current@example.com", verified=verified, tenant_ids=["public"],
+    )
+    user = cast(Any, SimpleNamespace(login_methods=[method], emails=[method.email]))
+    metadata: JsonDict = {"original_rownd_user": {
+        "data": {"user_id": "rownd-user", "email": "old@example.com"},
+        "verified_data": {"email": True},
+    }}
+    if pointer:
+        metadata["rownd_email_recipe_user_ids"] = {"public": pointer}
+    claims = build_standard_oauth_claims(user, ["email"], metadata, "public")
+    if pointer == "detached":
+        assert "email" not in claims and "email_verified" not in claims
+    else:
+        assert claims == {"email": method.email, "email_verified": verified}
+    user.login_methods = []
+    user.emails = []
+    assert build_standard_oauth_claims(user, ["email"], metadata, "public") == {}
+
+
+@pytest.mark.parametrize("other_pointer", ["other", "detached", None, 123])
+@pytest.mark.parametrize("verified", [False, True])
+def test_oauth_canonical_email_and_verification_are_active_tenant_only(other_pointer, verified):
+    methods = [
+        SimpleNamespace(recipe_id="passwordless", recipe_user_id=RecipeUserId("current"),
+                        email="current@example.com", verified=verified, tenant_ids=["current-tenant"]),
+        SimpleNamespace(recipe_id="passwordless", recipe_user_id=RecipeUserId("other"),
+                        email="other@example.com", verified=True, tenant_ids=["other-tenant"]),
+        SimpleNamespace(recipe_id="passwordless", recipe_user_id=RecipeUserId("same-email-other"),
+                        email="current@example.com", verified=True, tenant_ids=["other-tenant"]),
+    ]
+    user = cast(Any, SimpleNamespace(login_methods=methods, emails=["other@example.com", "current@example.com"]))
+    metadata: JsonDict = {
+        "original_rownd_user": {"data": {"user_id": "r", "email": "old@example.com"}, "verified_data": {"email": True}},
+        "rownd_email_recipe_user_ids": {"current-tenant": "current", "other-tenant": other_pointer},
+    }
+    assert build_standard_oauth_claims(user, ["email"], metadata, "current-tenant") == {
+        "email": "current@example.com", "email_verified": verified,
+    }
+    if other_pointer == "other":
+        assert build_standard_oauth_claims(user, ["email"], metadata, "other-tenant") == {
+            "email": "other@example.com", "email_verified": True,
+        }
+    else:
+        assert build_standard_oauth_claims(user, ["email"], metadata, "other-tenant") == {}
+    assert build_standard_oauth_claims(user, ["email"], metadata, None) == {}
+    assert build_standard_oauth_claims(user, ["email"], metadata, "missing-tenant") == {}
+    metadata["rownd_email_recipe_user_ids"] = {"other-tenant": "detached"}
+    assert build_standard_oauth_claims(user, ["email"], metadata, "current-tenant") == {
+        "email": "current@example.com", "email_verified": verified,
+    }
+
+
+def test_native_oauth_email_scope_does_not_borrow_verification_from_other_tenant():
+    user = cast(Any, SimpleNamespace(
+        emails=["native@example.com"], login_methods=[
+            SimpleNamespace(email="native@example.com", verified=False, tenant_ids=["current"]),
+            SimpleNamespace(email="native@example.com", verified=True, tenant_ids=["other"]),
+        ],
+    ))
+    assert build_standard_oauth_claims(user, ["email"], {}, "current") == {
+        "email": "native@example.com", "email_verified": False,
+    }
+
+
+@pytest.mark.parametrize("complete", [False, True])
+@pytest.mark.parametrize("attributes", [{}, {"rownd:app_variants": ["variant_123"]}])
+def test_metadata_validator_treats_attribute_only_wrapper_as_absent_provenance(
+    complete: bool, attributes: JsonDict
+):
+    state = validate_migration_metadata(
+        {
+            "original_rownd_user": {"attributes": attributes},
+            "rownd_migration_complete": complete,
+        }
+    )
+
+    assert state.valid
+    assert state.value is not None
+    assert state.value.original_rownd_user_id is None
+    assert state.value.legacy_complete is complete
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        None,
+        [],
+        {},
+        {"attributes": None},
+        {"attributes": []},
+        {"attributes": {}, "verified_data": {"email": True}},
+        {"attributes": {}, "data": None},
+        {"attributes": {}, "data": []},
+        {"attributes": {}, "data": {}},
+        {"attributes": {}, "data": {"email": "user@example.com"}},
+        {"attributes": {}, "data": {"user_id": None}},
+        {"attributes": {}, "data": {"user_id": 123}},
+        {"attributes": {}, "data": {"user_id": ""}},
+        {"attributes": {}, "data": {"user_id": "  "}},
+    ],
+)
+def test_metadata_validator_rejects_malformed_provenance_with_attributes(original: JsonValue):
+    assert not validate_migration_metadata({"original_rownd_user": original}).valid
+
+
+def test_metadata_validator_retains_genuine_provenance_with_variants():
+    state = validate_migration_metadata(
+        {
+            "original_rownd_user": {
+                **rownd_snapshot("rownd-user", email="user@example.com"),
+                "attributes": {"rownd:app_variants": ["variant_123"]},
+            },
+            "rownd_migration_complete": True,
+        }
+    )
+
+    assert state.valid
+    assert state.value is not None
+    assert state.value.original_rownd_user_id == "rownd-user"
+    assert state.value.legacy_complete is True
 
 
 def test_combines_linked_metadata_recursively_with_primary_values_winning():
@@ -1789,6 +2044,7 @@ async def test_rownd_compat_user_uses_latest_session_for_last_sign_in_method(
                     tenant_ids=["public"],
                     time_joined=2000,
                     last_used=5000,
+                    verified=True,
                 ),
                 SimpleNamespace(
                     recipe_id="thirdparty",

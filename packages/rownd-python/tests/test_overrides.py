@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, Dict, Optional, cast
 from unittest.mock import AsyncMock, Mock
@@ -16,6 +17,7 @@ from supertokens_python.types import LoginMethod, RecipeUserId, User
 
 from supertokens_rownd import plugin
 import supertokens_rownd.config as rownd_config
+import supertokens_rownd.migration as migration
 import supertokens_rownd.plugin_implementation as impl
 import supertokens_rownd.rownd_compatibility as compatibility
 import supertokens_rownd.supertokens_repository as supertokens_repository
@@ -2845,6 +2847,7 @@ async def test_rownd_oauth_payload_adds_standard_and_rownd_claims(monkeypatch: p
         user,
         ["email", "profile"],
         {"existing": "claim"},
+        "public",
         {"rowndOAuthAudience": "app:app_123"},
     )
 
@@ -2937,6 +2940,7 @@ async def test_oauth_payload_preserves_authoritative_reserved_claims(
         user,
         ["email", "profile"],
         authoritative_claims,
+        "public",
         {},
     )
 
@@ -2977,6 +2981,7 @@ async def test_rownd_oauth_user_info_picks_rownd_claims(monkeypatch: pytest.Monk
         },
         ["email"],
         {"sub": "st-user"},
+        "public",
     )
 
     assert user_info == {
@@ -3004,7 +3009,7 @@ async def test_repository_resolves_compatibility_policy_from_owning_module(
         lambda *_args, **_kwargs: {"policy_owner_patch": True},
     )
 
-    user_info = await supertokens_repository.build_rownd_oauth_user_info(user, {}, [], {})
+    user_info = await supertokens_repository.build_rownd_oauth_user_info(user, {}, [], {}, "public")
 
     assert user_info["policy_owner_patch"] is True
 
@@ -3070,6 +3075,70 @@ async def test_passwordless_consume_records_app_variant_before_refresh(
         ("record", "passwordless-user", "variant_123"),
         ("refresh", "passwordless-user", "variant_123"),
     ]
+
+
+@pytest.mark.parametrize("recipe", ["passwordless", "thirdparty"])
+@pytest.mark.parametrize(
+    "original_metadata",
+    [
+        None,
+        [],
+        {},
+        {"data": {"email": "user@example.com"}},
+        {"attributes": None},
+        {"data": {"user_id": "native-user"}, "attributes": []},
+    ],
+)
+async def test_native_sign_in_preserves_success_with_malformed_variant_metadata(
+    monkeypatch: pytest.MonkeyPatch, recipe: str, original_metadata: Any
+):
+    config = make_config()
+    returned_session = make_passwordless_returned_session(AsyncMock(), user_id="native-user")
+    successful = SimpleNamespace(
+        status="OK", user=SimpleNamespace(id="native-user"), session=returned_session
+    )
+    original_api = AsyncMock(return_value=successful)
+    stored = {"original_rownd_user": deepcopy(original_metadata)}
+    get_raw = AsyncMock(return_value=stored)
+    update = AsyncMock()
+    refresh = AsyncMock()
+    monkeypatch.setattr(
+        supertokens_repository,
+        "inspect_linked_user_metadata",
+        AsyncMock(return_value={"primary_user_id": "native-user"}),
+    )
+    monkeypatch.setattr(supertokens_repository, "get_raw_user_metadata", get_raw)
+    monkeypatch.setattr(supertokens_repository.usermetadata_asyncio, "update_user_metadata", update)
+    monkeypatch.setattr(plugin, "refresh_rownd_session_claims", refresh)
+    options = cast(Any, SimpleNamespace(request=FakeRequest({"app_variant_id": "variant_123"})))
+
+    if recipe == "passwordless":
+        overridden = plugin._passwordless_api_override(config)(cast(
+            Any, SimpleNamespace(create_code_post=None, consume_code_post=original_api)
+        ))
+        result = await overridden.consume_code_post(
+            "preauth", None, None, "link-code", None, None, "public", options, {}
+        )
+    else:
+        overridden = plugin._thirdparty_api_override(config)(cast(
+            Any, SimpleNamespace(sign_in_up_post=original_api)
+        ))
+        result = await overridden.sign_in_up_post(
+            cast(Any, None), None, None, None, None, "public", options, {}
+        )
+
+    assert result is successful
+    assert isinstance(result, SimpleNamespace)
+    assert result.status == "OK"
+    assert result.session is returned_session
+    original_api.assert_awaited_once()
+    assert original_api.await_args is not None
+    get_raw.assert_awaited_once()
+    update.assert_not_awaited()
+    assert stored == {"original_rownd_user": original_metadata}
+    refresh.assert_awaited_once_with(
+        config, returned_session, "native-user", "variant_123", original_api.await_args.args[-1]
+    )
 
 
 async def test_passwordless_consume_rejects_unknown_app_variant():
@@ -4103,21 +4172,27 @@ async def test_oauth_claims_share_one_metadata_inspection(monkeypatch: pytest.Mo
     monkeypatch.setattr(supertokens_repository, "inspect_linked_user_metadata", inspect)
 
     await supertokens_repository.build_rownd_oauth_payload(
-        make_config(), user, ["email"], {}, context
+        make_config(), user, ["email"], {}, "public", context
     )
 
     assert calls == 1
 
 
+@pytest.mark.parametrize("verified_data", [{"email": "user@example.com"}, None, [False]])
 async def test_app_variant_uses_fresh_raw_metadata_before_write(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, verified_data: Any,
 ):
     context: Dict[str, Any] = {"_default": {"core_call_cache": {"metadata": "stale"}}}
     fresh_original = {
-        "data": {"user_id": "rownd-user"},
-        "verified_data": {},
+        "data": {
+            "user_id": "rownd-user", "email": "user@example.com",
+            "custom": {"empty": None, "enabled": False, "nested": [1, {"value": "raw"}]},
+        },
+        "verified_data": verified_data,
+        "auth_level": "verified",
         "attributes": {"preserved": True},
     }
+    before = deepcopy(fresh_original)
     written: Dict[str, Any] = {}
 
     async def inspect(*args: Any, **kwargs: Any):
@@ -4147,10 +4222,215 @@ async def test_app_variant_uses_fresh_raw_metadata_before_write(
     )
 
     original = cast(Dict[str, Any], written["original_rownd_user"])
-    assert original["attributes"] == {
-        "preserved": True,
-        "rownd:app_variants": ["variant_123"],
+    assert original == {
+        **before,
+        "attributes": {"preserved": True, "rownd:app_variants": ["variant_123"]},
     }
+    assert fresh_original == before
+
+
+@pytest.mark.parametrize(
+    ("initial", "expected_status", "expected_reason"),
+    [
+        ({}, "REPAIRABLE", None),
+        ({"rownd_migration_complete": True}, "REPAIRABLE", None),
+        (
+            {
+                "original_rownd_user": {"data": {"user_id": "rownd-user"}},
+                "rownd_migration_complete": True,
+            },
+            "COMPLETE",
+            None,
+        ),
+        (
+            {"original_rownd_user": {"data": {"user_id": "another-rownd-user"}}},
+            "BLOCKED",
+            "IDENTITY_OWNED_BY_ANOTHER_USER",
+        ),
+        (
+            {"original_rownd_user": {"data": {"user_id": "native-user"}, "verified_data": {}}},
+            "BLOCKED",
+            "IDENTITY_OWNED_BY_ANOTHER_USER",
+        ),
+    ],
+)
+async def test_app_variant_writer_composes_with_migration_classification(
+    monkeypatch: pytest.MonkeyPatch,
+    initial: Dict[str, Any],
+    expected_status: str,
+    expected_reason: Optional[str],
+):
+    stored = deepcopy(initial)
+    writes = 0
+
+    async def update(user_id: str, metadata: Dict[str, Any], user_context: Any):
+        nonlocal writes
+        assert user_id == "native-user"
+        writes += 1
+        stored.update(deepcopy(metadata))
+
+    monkeypatch.setattr(
+        supertokens_repository,
+        "inspect_linked_user_metadata",
+        AsyncMock(return_value={"primary_user_id": "native-user"}),
+    )
+    monkeypatch.setattr(
+        supertokens_repository, "get_raw_user_metadata", AsyncMock(return_value=stored)
+    )
+    monkeypatch.setattr(supertokens_repository.usermetadata_asyncio, "update_user_metadata", update)
+
+    for _ in range(2):
+        await supertokens_repository.record_rownd_app_variant_for_user(
+            make_config(), "native-user", "variant_123"
+        )
+
+    assert writes == 1
+    assert stored == {
+        **initial,
+        "original_rownd_user": {
+            **initial.get("original_rownd_user", {}),
+            "attributes": {"rownd:app_variants": ["variant_123"]},
+        },
+    }
+    source = migration.create_rownd_identity_snapshot(
+        {
+            "data": {"user_id": "rownd-user", "google_id": "google-user"},
+            "verified_data": {"google_id": True},
+        },
+        "public",
+    )
+    mapping = migration.MappingLookup("rownd-user", "native-user")
+    disposition = migration.classify_migration_snapshot(
+        migration.MigrationSnapshot(
+            source=source,
+            owners=(
+                migration.IdentityOwner(
+                    identity_key=source.expected_identities[0].key,
+                    recipe_user_id="google-recipe",
+                    primary_user_id="native-user",
+                    recipe_id="thirdparty",
+                    normalized_identifier="google-user",
+                    verified=True,
+                    tenant_ids=("public",),
+                    is_primary_user=True,
+                ),
+            ),
+            reservation_owners=(),
+            mapping=migration.MappingState(
+                external_lookup=mapping,
+                source_internal_lookup=None,
+                internal_lookups={"native-user": mapping},
+                raw_id_inspection=migration.RawIdInspection(migration.RawIdStatus.UNINSPECTABLE),
+            ),
+            users={"native-user": migration.MigrationUserState(True, True)},
+            metadata={"native-user": migration.validate_migration_metadata(stored)},
+            metadata_source_user_ids={"native-user": "native-user"},
+            canonical_email_pointers={
+                "native-user": migration.CanonicalEmailPointerState(
+                    migration.CanonicalEmailPointerStatus.ABSENT
+                )
+            },
+        )
+    )
+
+    assert disposition.status.value == expected_status
+    assert (disposition.reason.value if disposition.reason else None) == expected_reason
+    assert [mutation.type for mutation in disposition.mutations] == (
+        ["WRITE_METADATA"] if expected_status == "REPAIRABLE" else []
+    )
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        None, [], "invalid", {},
+        {"attributes": None},
+        {"attributes": []},
+        {"data": None},
+        {"data": {}},
+        {"data": {"email": "user@example.com"}},
+        {"data": {"user_id": "rownd-user"}, "attributes": None},
+        {"data": {"user_id": "rownd-user"}, "attributes": []},
+    ],
+)
+async def test_app_variant_writer_skips_malformed_original_without_cleaning(
+    monkeypatch: pytest.MonkeyPatch, original: Any
+):
+    stored = {"original_rownd_user": deepcopy(original)}
+    writer = AsyncMock()
+    monkeypatch.setattr(
+        supertokens_repository, "inspect_linked_user_metadata",
+        AsyncMock(return_value={"primary_user_id": "user"}),
+    )
+    monkeypatch.setattr(
+        supertokens_repository, "get_raw_user_metadata", AsyncMock(return_value=stored)
+    )
+    monkeypatch.setattr(supertokens_repository.usermetadata_asyncio, "update_user_metadata", writer)
+
+    validation_before = migration.validate_migration_metadata(stored)
+    await supertokens_repository.record_rownd_app_variant_for_user(
+        make_config(), "user", "variant_123"
+    )
+
+    writer.assert_not_awaited()
+    assert stored == {"original_rownd_user": original}
+    assert migration.validate_migration_metadata(stored) == validation_before
+
+
+@pytest.mark.parametrize("existing_variants", ["variant_123", ["variant_123"]])
+async def test_app_variant_writer_preserves_guest_membership_and_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch, existing_variants: Any
+):
+    stored = {"original_rownd_user": {"attributes": {"rownd:app_variants": existing_variants}}}
+
+    async def update(user_id: str, metadata: Dict[str, Any], user_context: Any):
+        assert user_id == "guest-user"
+        stored.update(metadata)
+
+    writer = AsyncMock(side_effect=update)
+    monkeypatch.setattr(
+        supertokens_repository,
+        "inspect_linked_user_metadata",
+        AsyncMock(return_value={"primary_user_id": "guest-user"}),
+    )
+    monkeypatch.setattr(
+        supertokens_repository, "get_raw_user_metadata", AsyncMock(return_value=stored)
+    )
+    monkeypatch.setattr(supertokens_repository.usermetadata_asyncio, "update_user_metadata", writer)
+
+    for variant in ("variant_123", "variant_456", "variant_456"):
+        await supertokens_repository.record_rownd_app_variant_for_user(
+            make_config(), "guest-user", variant
+        )
+
+    writer.assert_awaited_once()
+    assert stored == {
+        "original_rownd_user": {
+            "attributes": {"rownd:app_variants": ["variant_123", "variant_456"]}
+        }
+    }
+    assert migration.validate_migration_metadata(stored).valid
+
+
+@pytest.mark.parametrize("variant", [None, ""])
+async def test_app_variant_writer_without_variant_is_noop(
+    monkeypatch: pytest.MonkeyPatch, variant: Optional[str]
+):
+    inspect = AsyncMock()
+    get_raw = AsyncMock()
+    update = AsyncMock()
+    configured = Mock()
+    monkeypatch.setattr(supertokens_repository, "inspect_linked_user_metadata", inspect)
+    monkeypatch.setattr(supertokens_repository, "get_raw_user_metadata", get_raw)
+    monkeypatch.setattr(supertokens_repository.usermetadata_asyncio, "update_user_metadata", update)
+    monkeypatch.setattr(supertokens_repository, "assert_app_variant_is_configured", configured)
+
+    await supertokens_repository.record_rownd_app_variant_for_user(make_config(), "user", variant)
+
+    configured.assert_not_called()
+    inspect.assert_not_awaited()
+    get_raw.assert_not_awaited()
+    update.assert_not_awaited()
 
 
 async def _invoke_observe_passwordless_operation(

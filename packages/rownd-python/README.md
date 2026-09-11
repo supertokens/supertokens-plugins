@@ -190,8 +190,12 @@ conflicts retain their HTTP 409 status.
 
 If a Passwordless identity is created but linking is interrupted, migration can recover
 the standalone email/phone owner using an exact Rownd mapping or a non-raw target already
-pinned in the invocation. Recovery still requires a verified, matching, same-tenant,
-nonprimary foreign owner with valid metadata and no conflicting Rownd ownership/mapping.
+pinned in the invocation. Recovery requires either verification of the exact identifier
+by both the Rownd source and Core owner, or trusted same-Rownd provenance in the owner's
+`original_rownd_user.data.user_id`. The latter permits interrupted unverified-email
+repairs to resume without marking the email verified. Both paths still require an exact
+recipe/identifier match, same-tenant membership, a nonprimary owner, valid metadata,
+and no conflicting Rownd ownership/mapping.
 Multiple owners of the same identity always block. Separate email/phone owners without
 that authority remain ambiguous; raw-ID graph overlap alone does not bypass this check.
 
@@ -286,12 +290,42 @@ retains its legacy payload and delivery path and is outside this migration contr
 
 ### Migration and compatibility behavior
 
-Rownd passwordless identifiers are authoritative during migration. When an exact
-third-party identity and an existing Passwordless email belong to separate users, the
-plugin links the Passwordless method only if Rownd verifies that email, its owner is not
-already primary, and it is not mapped to another Rownd user. `verified_data.email` must
-be `true` or match `data.email` case-insensitively. Other ownership conflicts still fail
-migration.
+Online migration accepts eligible `data.email`, `data.google_id`, and `data.apple_id`
+without historical `verified_data` markers. Eligibility is separate from email
+verification (EV): `verified_data.email` must be `true` or match the current `data.email`
+after trimming and case normalization to establish source verification. Missing or stale
+email evidence does not verify the current email. Generated provider/guest placeholder
+emails remain unverified; a Google/Apple identity does not prove email ownership.
+Existing Core verification for the exact email is preserved and takes precedence over
+historical metadata in compatibility email-verification claims.
+
+Eligibility does not authorize adopting or linking an unrelated email or provider owner.
+Provider-owner adoption/linking requires matching source verification or positive same-Rownd
+owner provenance; a mapping to a different target is not authority over that owner.
+Google/Apple matching requires the exact provider namespace
+and case-sensitive subject after trimming. Tenant, mapping, collision, and primary-account
+guards remain in place. The plugin's `schema` is local profile configuration, not an
+upstream Rownd authentication configuration; it does not select migration lookup fields.
+
+Phone migration remains verified-only: missing verification preserves the phone in original
+profile metadata, not as a Core login method; contradictory phone evidence blocks migration.
+Preserving a provider identifier does not itself create verified provider claims. Source
+authentication level remains separate from contact and provider verification evidence.
+When an eligible source email exists, migration sessions use its owned, tenant-scoped
+canonical Passwordless method and the SDK's actual email-verification claim.
+Linked metadata does not fill missing identity or verification fields in the authoritative
+original profile. Missing non-identity `original.data` profile fields (such as `first_name`)
+may fall back to snapshots with the same Rownd user ID; authority fields and non-variant
+attributes do not fall back. App-variant membership is still unioned.
+OAuth email selection and verification use only the active tenant's canonical pointer and
+login methods. Native provider authentication replacing a synthetic email with a real email
+supersedes historical provider evidence without changing the original snapshot or treating
+synthetic-email EV as provider authentication.
+
+App-variant membership stays at `original_rownd_user.attributes["rownd:app_variants"]`.
+Recording a variant preserves genuine Rownd metadata without synthesizing `data.user_id`
+or `verified_data`. An attributes-only wrapper is valid operational metadata, not identity
+provenance; malformed or conflicting identity metadata still blocks migration.
 
 After all Rownd users have migrated, retain the compatibility routes without Rownd credentials by configuring `disable_rownd_user_migration=True`. This removes both migration routes; when no app key is configured, it uses an internal app key for passwordless and verification-link rewriting.
 
@@ -396,10 +430,12 @@ completion claims are local compatibility behavior rather than a distributed gua
 The tenant's canonical email method is tracked separately from its login aliases.
 Existing metadata using `rownd_email_recipe_user_id` remains
 supported; new updates also maintain the tenant-scoped `rownd_email_recipe_user_ids`
-map. Guard mode permits the verified canonical Passwordless email and blocks every
-retained noncanonical alias during create, resend, and consume, even when an old alias
-is unverified. Synchronous migration retains old methods and publishes the tenant
-canonical pointer with migration-completion metadata only after durable verification.
+map. Guard mode permits the verified canonical Passwordless email, or an unverified
+canonical email with valid migration-completion metadata and a matching tenant canonical
+pointer. This permits a Passwordless challenge, not an EV bypass. Every retained
+noncanonical alias remains blocked during create, resend, and consume. Synchronous migration
+retains old methods and publishes completion and the tenant canonical pointer after identity
+reconciliation; completion alone does not mark an eligible email verified.
 
 Successful profile or field updates that start verification return
 `email_verification_pending: true`. Until verification completes, the returned profile

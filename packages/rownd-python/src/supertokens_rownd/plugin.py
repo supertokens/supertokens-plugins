@@ -797,7 +797,14 @@ def _oauth2provider_function_override(config: RowndPluginConfig):
                 scopes,
                 user_context,
             )
-            return await build_rownd_oauth_payload(config, user, scopes, payload, user_context)
+            session_info = (
+                await session_asyncio.get_session_information(session_handle, user_context)
+                if session_handle is not None else None
+            )
+            return await build_rownd_oauth_payload(
+                config, user, scopes, payload,
+                session_info.tenant_id if session_info is not None else None, user_context,
+            )
 
         async def build_id_token_payload(
             user: Optional[User],
@@ -813,7 +820,14 @@ def _oauth2provider_function_override(config: RowndPluginConfig):
                 scopes,
                 user_context,
             )
-            return await build_rownd_oauth_payload(config, user, scopes, payload, user_context)
+            session_info = (
+                await session_asyncio.get_session_information(session_handle, user_context)
+                if session_handle is not None else None
+            )
+            return await build_rownd_oauth_payload(
+                config, user, scopes, payload,
+                session_info.tenant_id if session_info is not None else None, user_context,
+            )
 
         async def build_user_info(
             user: User,
@@ -830,7 +844,7 @@ def _oauth2provider_function_override(config: RowndPluginConfig):
                 user_context,
             )
             return await build_rownd_oauth_user_info(
-                user, access_token_payload, scopes, payload, user_context
+                user, access_token_payload, scopes, payload, tenant_id, user_context
             )
 
         original.get_requested_scopes = get_requested_scopes
