@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { resolveRowndProviderSubject } from "./provider-identity";
 
 import SuperTokens from "supertokens-node";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
@@ -87,6 +88,9 @@ const INTERNAL_METADATA_FIELDS = new Set([
   "rownd_email_recipe_user_ids",
   "rownd_migration_complete",
   "rownd_migration_email_retirements",
+  "rownd_migration_provider_retirements",
+  "rownd_migration_provider_introductions",
+  "rownd_migration_provider_introduction",
   "rownd_pending_verification",
   "rownd_migration_superseded",
   "rownd_migration_target",
@@ -374,10 +378,8 @@ export function mapRowndUserToSuperTokens(
     throw new Error("Rownd user has no user_id");
   }
 
-  const googleId = rowndUserData.google_id ||
-    (typeof rowndUserVerifiedData.google_id === "string" ? rowndUserVerifiedData.google_id : undefined);
-  const appleId = rowndUserData.apple_id ||
-    (typeof rowndUserVerifiedData.apple_id === "string" ? rowndUserVerifiedData.apple_id : undefined);
+  const googleId = resolveRowndProviderSubject(rowndUser, "google");
+  const appleId = resolveRowndProviderSubject(rowndUser, "apple");
   if (googleId) {
     loginMethods.push({
       recipeId: "thirdparty",

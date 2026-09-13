@@ -131,6 +131,8 @@ For native/header-token clients, call the endpoint with `rid: session`, `fdi-ver
 
 The example above enables automatic linking with verification required so migrated Rownd identities can attach to matching verified SuperTokens users. During migration, Rownd passwordless identifiers are authoritative and can anchor reconciliation even when the exported `verified_data` does not contain that identifier. If an exact third-party identity and an existing Passwordless email belong to separate users, migration links them only when `verified_data.email` is `true` or matches `data.email` case-insensitively, and the Passwordless owner is neither primary nor mapped to another Rownd user. Other ownership conflicts still fail migration. Review this trust policy, provider identities, and guest upgrade flows before using the same policy in production.
 
+Google and Apple provider subjects use the non-empty string from `verified_data` first, falling back to `data`. When that subject changes, reconciliation links the replacement to the existing account before retiring an obsolete migrated provider method proven by the migration snapshot, only in the requested tenant. Other tenants and the primary account are preserved. Retirement is resumable, and ownership conflicts still fail migration.
+
 Do not expose SuperTokens Core directly to the public internet. Use a Core API key for any shared or deployed instance, and store Rownd, OAuth, and Core credentials in environment variables or a secret manager.
 
 For production, add rate limits and abuse protection around migration and guest session endpoints.

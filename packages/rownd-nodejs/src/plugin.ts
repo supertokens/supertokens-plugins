@@ -1,4 +1,5 @@
 import { SuperTokensPlugin, type UserContext } from "supertokens-node/types";
+import { assertProviderSessionMembership } from "./migration-provider";
 import {
   EmailVerificationClaim,
   type APIInterface as EmailVerificationAPIInterface,
@@ -1079,10 +1080,18 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   ...rowndIsAnonymousClaim,
                 };
 
-                return originalImplementation.createNewSession({
+                await assertProviderSessionMembership(input.userId, input.recipeUserId.getAsString(), input.tenantId, resolved.userContext);
+                const session = await originalImplementation.createNewSession({
                   ...input,
                   userContext: resolved.userContext,
                 });
+                try {
+                  await assertProviderSessionMembership(input.userId, input.recipeUserId.getAsString(), input.tenantId, resolved.userContext);
+                  return session;
+                } catch (error) {
+                  await session.revokeSession();
+                  throw error;
+                }
               },
             }),
           },

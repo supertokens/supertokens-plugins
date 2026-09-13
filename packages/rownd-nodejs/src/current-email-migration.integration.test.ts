@@ -359,8 +359,16 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
     expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata.rownd_pending_verification).toEqual([]);
   });
 
+  it.each(["stale data", "missing verified subject"])("reconciles current email with %s", async (state) => {
+    const fixture = await seed(true);
+    if (state === "stale data") fixture.current.data.apple_id = randomUUID();
+    else delete fixture.current.verified_data.apple_id;
+    await migrate(fixture);
+    await expectCanonical(fixture);
+  });
+
   it.each([
-    "changed email", "disabled source", "changed provider", "contradictory provider",
+    "changed email", "disabled source", "changed provider", "changed verified provider",
     "wrong user", "absent", "source error", "foreign primary", "ambiguous first-party", "unknown synthetic",
   ])("rejects %s before changing credentials or metadata", async (failure) => {
     const fixture = await seed(true);
@@ -372,8 +380,8 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
     const fresh = structuredClone(fixture.current);
     if (failure === "changed email") fresh.data.email = `${randomUUID()}@example.com`;
     if (failure === "disabled source") fresh.state = "disabled";
-    if (failure === "changed provider") fresh.data.apple_id = randomUUID();
-    if (failure === "contradictory provider") fresh.verified_data.apple_id = randomUUID();
+    if (failure === "changed provider") fresh.data.apple_id = fresh.verified_data.apple_id = randomUUID();
+    if (failure === "changed verified provider") fresh.verified_data.apple_id = randomUUID();
     if (failure === "wrong user") fresh.data.user_id = randomUUID();
     rownd.fetchUserInfo.mockResolvedValue(failure === "absent" ? undefined : fresh);
     if (failure === "source error") rownd.fetchUserInfo.mockRejectedValue(new Error("Injected Rownd service error"));
@@ -431,27 +439,13 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
     expect(checkpoint).toMatchObject({ public: { retiredMethods: [{ recipeUserId: fixture.relayId, email: fixture.relayEmail }] } });
   });
 
-  it.each([false, true])("rejects an original snapshot provider contradiction before any mutation (standalone=%s)", async (standalone) => {
+  it.each([false, true])("uses the original snapshot verified provider over stale data (standalone=%s)", async (standalone) => {
     const fixture = await seed(standalone);
     await UserMetadata.updateUserMetadata(fixture.internalId, {
-      original_rownd_user: { ...fixture.original, verified_data: { ...fixture.original.verified_data, apple_id: randomUUID() } },
+      original_rownd_user: { ...fixture.original, data: { ...fixture.original.data, apple_id: randomUUID() } },
     });
-    const snapshot = async () => ({
-      user: (await SuperTokens.getUser(fixture.rowndId))!.toJson(),
-      metadata: (await UserMetadata.getUserMetadata(fixture.internalId)).metadata,
-      owners: (await SuperTokens.listUsersByAccountInfo("public", { email: fixture.email }, false)).map((owner) => owner.toJson()),
-    });
-    const before = await snapshot();
-    const mutations = [
-      vi.spyOn(AccountLinking, "linkAccounts"), vi.spyOn(AccountLinking, "createPrimaryUser"),
-      vi.spyOn(Passwordless, "signInUp"), vi.spyOn(ThirdParty, "manuallyCreateOrUpdateUser"),
-      vi.spyOn(SuperTokens, "deleteUser"), vi.spyOn(SuperTokens, "deleteUserIdMapping"), vi.spyOn(SuperTokens, "createUserIdMapping"),
-      vi.spyOn(UserMetadata, "updateUserMetadata"), vi.spyOn(EmailVerification, "createEmailVerificationToken"),
-      vi.spyOn(EmailVerification, "verifyEmailUsingToken"), vi.spyOn(EmailVerification, "unverifyEmail"),
-    ];
-    await expect(reconcileRowndUserWithExistingLoginMethods(mapRowndUserToSuperTokens(fixture.current, "public"), "public", {})).rejects.toThrow();
-    for (const mutation of mutations) expect(mutation).not.toHaveBeenCalled();
-    expect(await snapshot()).toEqual(before);
+    await migrate(fixture);
+    await expectCanonical(fixture);
   });
 
   it("repairs a completed real bulk import whose migration snapshot is stored under its Rownd alias", async () => {
@@ -481,6 +475,25 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
     rownd.fetchUserInfo.mockResolvedValue(current);
     await migrate(fixture);
     await expectCanonical(fixture);
+  });
+
+  it.each([false, true])("does not retire email when the snapshot verified provider differs from the account (standalone=%s)", async (standalone) => {
+    const fixture = await seed(standalone);
+    await UserMetadata.updateUserMetadata(fixture.internalId, {
+      original_rownd_user: { ...fixture.original, verified_data: { ...fixture.original.verified_data, apple_id: randomUUID() } },
+    });
+    const destructive = [
+      vi.spyOn(SuperTokens, "deleteUser"), vi.spyOn(Multitenancy, "disassociateUserFromTenant"),
+      vi.spyOn(Passwordless, "revokeAllCodes"), vi.spyOn(Session, "revokeAllSessionsForUser"),
+    ];
+    await expect(reconcileRowndUserWithExistingLoginMethods(mapRowndUserToSuperTokens(fixture.current, "public"), "public", {})).resolves.toBe(true);
+    for (const mutation of destructive) expect(mutation).not.toHaveBeenCalled();
+    const user = (await SuperTokens.getUser(fixture.rowndId))!;
+    expect(user.loginMethods.some((method) => method.recipeUserId.getAsString() === fixture.relayId && method.email === fixture.relayEmail)).toBe(true);
+    expect(user.loginMethods.some((method) => method.email === fixture.email && method.recipeId === "passwordless")).toBe(true);
+    const { metadata } = await UserMetadata.getUserMetadata(fixture.internalId);
+    expect(metadata.rownd_email_recipe_user_ids).toBeUndefined();
+    expect(metadata.rownd_migration_email_retirements).toBeUndefined();
   });
 
   it.each([false, null])("resumes checkpointed cleanup before completion is published (%s)", async (completion) => {
@@ -538,7 +551,7 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
   it.each([
     "missing provenance", "wrong source", "wrong provider", "wrong provider recipe", "unproven retired email",
     "wrong target email", "duplicate retired ID", "synthetic retired method", "missing canonical pointer",
-    "changed snapshot", "contradictory snapshot provider", "target lost tenant", "provider lost tenant", "retired ownership changed",
+    "changed snapshot email", "changed snapshot verified provider", "target lost tenant", "provider lost tenant", "retired ownership changed",
     "wrong plan tenant", "unverified target", "missing checkpoint", "secondary checkpoint only",
   ])("rejects a durable migration plan with %s without destructive mutation", async (failure) => {
     const fixture = await seed();
@@ -568,8 +581,8 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
       plan.retiredMethods = [{ email: fixture.fakeEmail, recipeUserId: synthetic.recipeUserId.getAsString() }];
     }
     if (failure === "missing canonical pointer") metadata.rownd_email_recipe_user_ids = {};
-    if (failure === "changed snapshot") (metadata.original_rownd_user as any).data.apple_id = randomUUID();
-    if (failure === "contradictory snapshot provider") (metadata.original_rownd_user as any).verified_data.apple_id = randomUUID();
+    if (failure === "changed snapshot email") (metadata.original_rownd_user as any).data.email = `${randomUUID()}@example.com`;
+    if (failure === "changed snapshot verified provider") (metadata.original_rownd_user as any).verified_data.apple_id = randomUUID();
     if (failure === "wrong plan tenant") plan.tenantId = `tenant-${randomUUID()}`;
     if (failure === "unverified target") await EmailVerification.unverifyEmail(SuperTokens.convertToRecipeUserId(plan.targetCanonicalRecipeUserId), fixture.email);
     if (failure === "target lost tenant") await Multitenancy.disassociateUserFromTenant("public", SuperTokens.convertToRecipeUserId(plan.targetCanonicalRecipeUserId));

@@ -1,5 +1,6 @@
 import SuperTokens from "supertokens-node";
 import { assertMigrationPostconditions } from "./migration-postconditions";
+import { assertCurrentRowndProviders, checkpointProviderIntroduction, finishProviderIntroductions, prepareRowndProviderRetirement, type ProviderIntroduction } from "./migration-provider";
 import { migrationTelemetry } from "./telemetry/migrationTelemetry";
 import {
   assertAuthenticatedMigrationSource,
@@ -606,14 +607,25 @@ export async function reconcileRowndUserWithExistingLoginMethods(
   options?: { repairUser: SuperTokensUser },
 ) {
   let lastError: unknown;
-  const targetBinding: { internalUserId?: string; retryMapping?: boolean } = {};
+  const targetBinding: { internalUserId?: string; retryMapping?: boolean; introduced: ProviderIntroduction[] } = { introduced: [] };
+  if (stUser.externalUserId) {
+    const mapping = await SuperTokens.getUserIdMapping({ userId: stUser.externalUserId, userIdType: "EXTERNAL", userContext });
+    if (mapping.status === "OK") await finishProviderIntroductions(mapping.superTokensUserId, stUser.externalUserId, userContext, true);
+  }
   for (let attempt = 0; attempt < 3; attempt++) {
     clearSuperTokensCoreCallCache(userContext);
     try {
-      return await reconcileRowndUserOnce(
+      const result = await reconcileRowndUserOnce(
         stUser, tenantId, userContext, targetBinding, options,
       );
+      if (targetBinding.internalUserId) {
+        await assertCurrentRowndProviders(stUser, tenantId);
+        await finishProviderIntroductions(targetBinding.internalUserId, stUser.externalUserId!, userContext, false, targetBinding.introduced);
+      }
+      return result;
     } catch (error) {
+      if (targetBinding.internalUserId) await finishProviderIntroductions(targetBinding.internalUserId, stUser.externalUserId!, userContext, true, targetBinding.introduced);
+      targetBinding.introduced = [];
       lastError = error;
       if (!targetBinding.retryMapping) throw error;
     }
@@ -625,7 +637,7 @@ async function reconcileRowndUserOnce(
   stUser: SuperTokensUserImport,
   tenantId: string,
   userContext: JsonRecord,
-  targetBinding: { internalUserId?: string; retryMapping?: boolean },
+  targetBinding: { internalUserId?: string; retryMapping?: boolean; introduced: ProviderIntroduction[] },
   options?: { repairUser: SuperTokensUser },
 ) {
   if (!stUser.externalUserId) {
@@ -694,21 +706,23 @@ async function reconcileRowndUserOnce(
   const currentEmailReconciliation = repairUser && repairMetadata && !canonicalEmailId && !hasPendingEmail
     ? await prepareCurrentRowndEmailReconciliation(stUser, repairUser, repairMetadata, tenantId)
     : undefined;
-  // Native contact changes and existing provider replacements remain authoritative.
-  // Completion is not permission to skip newly added provider identities.
+  const finishProviderRetirement = repairUser && repairMetadata
+    ? await prepareRowndProviderRetirement({
+      source: stUser, user: repairUser, metadata: repairMetadata,
+      internalUserId: await resolveSuperTokensUserId(repairUser.id, userContext), tenantId, userContext,
+    }) : undefined;
+  // Rownd provider subjects remain authoritative during migration.
   const importMethods = stUser.loginMethods.filter(
     (method) =>
       !(method.recipeId === "passwordless" && method.email && (canonicalEmailId || hasPendingEmail)) &&
         !repairUser?.loginMethods.some((existing) =>
-          (matchesImportLoginMethod(existing, method) &&
+          (existing.tenantIds.includes(tenantId) && matchesImportLoginMethod(existing, method) &&
             !(method.recipeId === "passwordless" && authenticatedEmail !== undefined &&
-              method.email?.toLowerCase() === authenticatedEmail && !existing.verified)) ||
-          (method.recipeId === "thirdparty" &&
-            existing.thirdParty?.id === method.thirdPartyId),
+              method.email?.toLowerCase() === authenticatedEmail && !existing.verified)),
         ),
   );
   if (repairUser && repairMetadata?.rownd_migration_complete === true &&
-      importMethods.length === 0 && !currentEmailReconciliation) {
+      importMethods.length === 0 && !currentEmailReconciliation && !finishProviderRetirement) {
     const internalId = await resolveSuperTokensUserId(repairUser.id, userContext);
     await assertMigrationMapping(internalId, stUser.externalUserId, userContext);
     return true;
@@ -1013,6 +1027,12 @@ async function reconcileRowndUserOnce(
           expectedOwner !== undefined && matchesImportLoginMethod(method, expectedOwner.importMethod))))) {
       throw new Error("Migrated login method ownership changed before linking");
     }
+    if (expectedOwner?.importMethod.recipeId === "thirdparty" && beforeLink.id !== stUser.externalUserId && beforeLink.id !== primaryUserId) {
+      await checkpointProviderIntroduction({ source: stUser, internalUserId: primaryUserId,
+        recipeUserId: recipeUserId.getAsString(), tenantId, provider: expectedOwner.importMethod.thirdPartyId,
+        subject: expectedOwner.importMethod.thirdPartyUserId, created: false, userContext, introduced: targetBinding.introduced });
+      await assertCurrentRowndProviders(stUser, tenantId);
+    }
     const linkResult = await AccountLinking.linkAccounts(
       recipeUserId,
       primaryUserId,
@@ -1058,12 +1078,18 @@ async function reconcileRowndUserOnce(
         ? { ...importMethod, isVerified: true }
         : importMethod;
       if (telemetry) telemetry.stage = "login_method_creation";
-      ({ recipeUserId } = await createMissingLoginMethod(
+      const creation = await createMissingLoginMethod(
         effectiveImportMethod,
         tenantId,
         primaryUserId,
         userContext,
-      ));
+      );
+      recipeUserId = creation.recipeUserId;
+      if (creation.createdNewRecipeUser && effectiveImportMethod.recipeId === "thirdparty") {
+        await checkpointProviderIntroduction({ source: stUser, internalUserId: primaryUserId,
+          recipeUserId: recipeUserId.getAsString(), tenantId, provider: effectiveImportMethod.thirdPartyId,
+          subject: effectiveImportMethod.thirdPartyUserId, created: true, userContext, introduced: targetBinding.introduced });
+      }
       const createdUser = await SuperTokens.getUser(
         recipeUserId.getAsString(),
         userContext,
@@ -1087,6 +1113,7 @@ async function reconcileRowndUserOnce(
         ))
       ) {
         if (telemetry) telemetry.stage = "account_linking";
+        if (effectiveImportMethod.recipeId === "thirdparty") await assertCurrentRowndProviders(stUser, tenantId);
         const linkResult = await AccountLinking.linkAccounts(
           recipeUserId,
           primaryUserId,
@@ -1165,6 +1192,7 @@ async function reconcileRowndUserOnce(
       }
     }
   }
+  await finishProviderRetirement?.();
   await assertMigrationPostconditions({
     internalUserId: primaryUserId, source: stUser, importMethods, tenantId,
     authenticatedEmail, userContext, matchesMethod: matchesImportLoginMethod,

@@ -11,6 +11,7 @@ import { assertMigrationMapping, assertMigrationSourceActive } from "./migration
 import { migrationTelemetry } from "./telemetry/migrationTelemetry";
 import { clearSuperTokensCoreCallCache, isRecord, type JsonRecord } from "./utils";
 import { RowndLegacyUserNotFoundError } from "./errors";
+import { resolveRowndProviderSubject } from "./provider-identity";
 
 type AuthenticatedMigration = Readonly<{
   rowndUserId: string;
@@ -162,11 +163,9 @@ export async function checkpointCurrentRowndEmailRetirement(input: {
   await assertMigrationMapping(internalUserId, plan.migrationSource.rowndUserId, userContext);
   const metadata = await getCombinedUserMetadata(internalUserId, userContext);
   const snapshot = metadata.original_rownd_user;
-  const field = `${plan.migrationSource.providerId}_id`;
   if (snapshot?.data.user_id !== plan.migrationSource.rowndUserId ||
       snapshot.data.email?.toLowerCase() !== plan.migrationSource.previousEmail ||
-      (snapshot.data[field] ?? snapshot.verified_data?.[field]) !== plan.migrationSource.providerUserId ||
-      (typeof snapshot.verified_data?.[field] === "string" && snapshot.verified_data[field] !== plan.migrationSource.providerUserId)) {
+      resolveRowndProviderSubject(snapshot, plan.migrationSource.providerId) !== plan.migrationSource.providerUserId) {
     throw new Error("Original Rownd retirement snapshot changed before checkpoint");
   }
   const primary = (await UserMetadata.getUserMetadata(internalUserId, userContext)).metadata as RowndMetadata;
@@ -233,9 +232,7 @@ export async function validateCurrentRowndEmailReconciliation(input: {
     throw new Error("Current Rownd email cleanup plan changed");
   }
   const snapshotMethods = mapRowndUserToSuperTokens(snapshot!, tenantId).loginMethods;
-  const verifiedProvider = snapshot!.verified_data?.[`${plan.migrationSource.providerId}_id`];
   if (!isRowndMigrationProfileActive(snapshot!) ||
-       (typeof verifiedProvider === "string" && verifiedProvider !== plan.migrationSource.providerUserId) ||
       !snapshotMethods.some((method) => method.recipeId === "thirdparty" &&
       provider.hasSameThirdPartyInfoAs({ id: method.thirdPartyId, userId: method.thirdPartyUserId })) ||
        !snapshotMethods.some((method) => method.recipeId === "passwordless" &&
@@ -327,10 +324,6 @@ export async function prepareCurrentRowndEmailReconciliation(
   const snapshotProvider = snapshotMethods.find((method) => method.recipeId === "thirdparty" &&
     provider.hasSameThirdPartyInfoAs({ id: method.thirdPartyId, userId: method.thirdPartyUserId }));
   if (!snapshotProvider || snapshotProvider.recipeId !== "thirdparty") return undefined;
-  const snapshotVerifiedProvider = snapshot.verified_data?.[`${provider.thirdParty.id}_id`];
-  if (typeof snapshotVerifiedProvider === "string" && snapshotVerifiedProvider !== provider.thirdParty.userId) {
-    throw new Error("Original Rownd snapshot has contradictory provider identities");
-  }
 
   // A fake-domain suffix alone is not proof that a credential is a provider placeholder.
   const placeholderIds = emailMethods.filter((method) => method.hasSameEmailAs(snapshotProvider.email) &&
@@ -353,13 +346,10 @@ export async function prepareCurrentRowndEmailReconciliation(
   }
   const assertFreshSource = async () => {
     const fresh = await fetchOptionalRowndUserInfo(source.externalUserId!);
-    const field = `${provider.thirdParty!.id}_id`;
-    const currentSubject = fresh?.data[field] ?? fresh?.verified_data?.[field];
-    const verifiedSubject = fresh?.verified_data?.[field];
+    const currentSubject = fresh && resolveRowndProviderSubject(fresh, provider.thirdParty!.id);
     if (!fresh || !isRowndMigrationProfileActive(fresh) || fresh.data.user_id !== source.externalUserId ||
         typeof fresh.data.email !== "string" || fresh.data.email.toLowerCase() !== email ||
         currentSubject !== provider.thirdParty!.userId ||
-        (typeof verifiedSubject === "string" && verifiedSubject !== currentSubject) ||
         !(getAuthenticatedMigrationEmail(source, tenantId) === email ||
           mapRowndUserToSuperTokens(fresh, tenantId).loginMethods.some((method) =>
             method.recipeId === "passwordless" && method.email?.toLowerCase() === email && method.isVerified))) {

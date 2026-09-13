@@ -4362,6 +4362,9 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("uses the requested tenant for association and session creation", async () => {
+        const repository = await import("./supertokens-repository");
+        const reconcile = vi.spyOn(repository, "reconcileRowndUserWithExistingLoginMethods")
+          .mockResolvedValue(true);
         const tenantId = "migration-tenant";
         const rowndUserId = `rownd-${randomUUID()}`;
         const recipeUserId = {
@@ -4444,6 +4447,12 @@ describe("rownd-nodejs plugin", () => {
         })(req, res, undefined, userContext);
 
         expect(result).toEqual({ status: "OK" });
+        expect(reconcile).toHaveBeenCalledWith(
+          expect.objectContaining({ externalUserId: rowndUserId }),
+          tenantId,
+          expect.objectContaining(userContext),
+          expect.objectContaining({ repairUser: expect.objectContaining({ id: rowndUserId }) }),
+        );
         expect(associateUserToTenant).toHaveBeenCalledWith(
           tenantId,
           recipeUserId,
@@ -4525,7 +4534,7 @@ describe("rownd-nodejs plugin", () => {
               google_id: "different-historical-google",
               first_name: "Stale name",
             },
-            verified_data: { email: true },
+            verified_data: { email: true, google_id: googleId },
           });
 
           for (let attempt = 0; attempt < 2; attempt++) {
@@ -5659,6 +5668,11 @@ describe("rownd-nodejs plugin", () => {
         const parentGoogleId = `google-mapping-lock-parent-${suffix}`;
         const siblingGoogleId = `google-mapping-lock-sibling-${suffix}`;
         const phoneNumber = "+15555550132";
+        const rowndProfile = (googleId: string) => ({
+          data: { user_id: rowndUserId, google_id: googleId, phone_number: phoneNumber },
+          verified_data: { google_id: googleId, phone_number: true },
+        });
+        mockRowndClient.fetchUserInfo.mockResolvedValue(rowndProfile(parentGoogleId));
         const parentProvider = await ThirdParty.manuallyCreateOrUpdateUser(
           "public",
           "google",
@@ -5720,8 +5734,12 @@ describe("rownd-nodejs plugin", () => {
           },
           "public",
           {},
+        ).then(
+          () => undefined,
+          (error: unknown) => error,
         );
         await parentAtMapping;
+        mockRowndClient.fetchUserInfo.mockResolvedValue(rowndProfile(siblingGoogleId));
         try {
           await expect(
             reconcileRowndUserWithExistingLoginMethods(
@@ -5746,9 +5764,9 @@ describe("rownd-nodejs plugin", () => {
           resumeParent();
         }
 
-        await expect(parentReconciliation).rejects.toThrow(
-          "Failed to map migrated Rownd user ID",
-        );
+        expect(await parentReconciliation).toMatchObject({
+          message: expect.stringContaining("Failed to map migrated Rownd user ID"),
+        });
         const losingProvider = await SuperTokens.getUser(
           parentProvider.user.id,
         );
