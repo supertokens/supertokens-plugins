@@ -1,4 +1,5 @@
 import SuperTokens from "supertokens-node";
+import { assertMigrationPostconditions } from "./migration-postconditions";
 import { migrationTelemetry } from "./telemetry/migrationTelemetry";
 import {
   assertAuthenticatedMigrationSource,
@@ -706,7 +707,8 @@ async function reconcileRowndUserOnce(
             existing.thirdParty?.id === method.thirdPartyId),
         ),
   );
-  if (repairUser && importMethods.length === 0 && !currentEmailReconciliation) {
+  if (repairUser && repairMetadata?.rownd_migration_complete === true &&
+      importMethods.length === 0 && !currentEmailReconciliation) {
     const internalId = await resolveSuperTokensUserId(repairUser.id, userContext);
     await assertMigrationMapping(internalId, stUser.externalUserId, userContext);
     return true;
@@ -1163,30 +1165,10 @@ async function reconcileRowndUserOnce(
       }
     }
   }
-  if (!repairUser) {
-    if (telemetry) telemetry.stage = "migration_metadata";
-    const currentMetadata = await getRawUserMetadata(primaryUserId, userContext);
-    await UserMetadata.updateUserMetadata(
-      primaryUserId,
-      {
-        ...mergeMissingValues(currentMetadata, stUser.userMetadata),
-        original_rownd_user: stUser.userMetadata.original_rownd_user,
-        rownd_migration_complete: true,
-      },
-      userContext,
-    );
-    telemetry?.emit("transition", "migration_metadata_written");
-  }
-
-  await assertMigrationMapping(primaryUserId, stUser.externalUserId, userContext);
-  const finalUser = await SuperTokens.getUser(primaryUserId, userContext);
-  if (!finalUser || !(await sdkUserIdMatchesInternalTarget(finalUser.id, primaryUserId, userContext)) ||
-      importMethods.some((method) => !finalUser.loginMethods.some((existing) =>
-        existing.tenantIds.includes(tenantId) && matchesImportLoginMethod(existing, method) &&
-        !(method.recipeId === "passwordless" && authenticatedEmail !== undefined &&
-          method.email?.toLowerCase() === authenticatedEmail && !existing.verified)))) {
-    throw new Error("Migrated login method postcondition failed");
-  }
+  await assertMigrationPostconditions({
+    internalUserId: primaryUserId, source: stUser, importMethods, tenantId,
+    authenticatedEmail, userContext, matchesMethod: matchesImportLoginMethod,
+  });
 
   if (currentEmailReconciliation) {
     await currentEmailReconciliation.assertFreshSource();
@@ -1228,11 +1210,15 @@ async function reconcileRowndUserOnce(
     const retirementCheckpoints = await checkpointCurrentRowndEmailRetirement({
       internalUserId: primaryUserId, plan, tenantId, userContext,
     });
+    const canonicalMetadata = buildVerifiedEmailMetadata(
+      latestMetadata, linkedUser.id, currentEmailReconciliation.email, canonicalRecipeUserId, tenantId,
+    );
+    // Completion is published separately after retirement and publication checks.
+    delete canonicalMetadata.rownd_migration_complete;
     // Publish only after Core proves ownership. A failed write leaves the snapshot
     // intact, so the next migration can resume even when linking already succeeded.
     await UserMetadata.updateUserMetadata(primaryUserId, {
-      ...buildVerifiedEmailMetadata(latestMetadata, linkedUser.id, currentEmailReconciliation.email, canonicalRecipeUserId, tenantId),
-      rownd_migration_complete: true,
+      ...canonicalMetadata,
       rownd_migration_email_retirements: retirementCheckpoints,
       rownd_pending_verification: [
         ...getPendingVerifications(latestMetadata),
@@ -1247,6 +1233,22 @@ async function reconcileRowndUserOnce(
     if (getCanonicalEmailRecipeUserId(publishedMetadata, tenantId) !== canonicalRecipeUserId) {
       throw new Error("Current Rownd canonical email publication failed");
     }
+  }
+
+  if (!repairUser || repairMetadata?.rownd_migration_complete !== true || currentEmailReconciliation) {
+    // Read after email reconciliation so its canonical state and retirement
+    // checkpoints cannot be overwritten by the pre-migration metadata snapshot.
+    await assertMigrationMapping(primaryUserId, stUser.externalUserId, userContext);
+    if (telemetry) telemetry.stage = "migration_metadata";
+    const currentMetadata = await getRawUserMetadata(primaryUserId, userContext);
+    await UserMetadata.updateUserMetadata(primaryUserId, {
+      ...(!repairUser ? {
+        ...mergeMissingValues(currentMetadata, stUser.userMetadata),
+        original_rownd_user: stUser.userMetadata.original_rownd_user,
+      } : {}),
+      rownd_migration_complete: true,
+    }, userContext);
+    telemetry?.emit("transition", "migration_metadata_written");
   }
 
   return true;

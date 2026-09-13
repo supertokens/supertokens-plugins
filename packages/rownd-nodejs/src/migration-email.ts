@@ -222,9 +222,11 @@ export async function validateCurrentRowndEmailReconciliation(input: {
     method.recipeUserId.getAsString() === plan.migrationSource.providerRecipeUserId &&
     method.hasSameThirdPartyInfoAs({ id: plan.migrationSource.providerId, userId: plan.migrationSource.providerUserId }));
   const snapshot = stored.original_rownd_user;
+  // Completion is published after cleanup. The independent retirement checkpoint,
+  // canonical method, source snapshot, and persisted plan authorize this step.
   if (!user || !target || target.recipeId !== "passwordless" || !target.verified ||
       !target.tenantIds.includes(tenantId) || !target.hasSameEmailAs(plan.value) ||
-      targetOwner?.id !== user.id || !provider || stored.rownd_migration_complete !== true ||
+      targetOwner?.id !== user.id || !provider ||
       !isRecord(snapshot?.data) || snapshot.data.user_id !== plan.migrationSource.rowndUserId ||
       stored.rownd_email_recipe_user_ids?.[tenantId] !== target.recipeUserId.getAsString() ||
       tenantPlans.length !== 1 || JSON.stringify(tenantPlans[0]) !== JSON.stringify(plan)) {

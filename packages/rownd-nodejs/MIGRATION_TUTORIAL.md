@@ -120,10 +120,10 @@ A complete backend-only example is available in `packages/rownd-nodejs/example`.
 When `POST {apiDomain}{apiBasePath}/plugin/rownd/migrate` is called, for example `POST /auth/plugin/rownd/migrate` when `apiBasePath` is `/auth`, the plugin:
 
 1. Validates the Rownd access token via Rownd's API.
-2. Checks whether the user already exists in SuperTokens.
-3. Imports the user into SuperTokens if needed.
-4. Creates a SuperTokens session to validate session migration.
-5. Stores the original Rownd data in UserMetadata.
+2. Resolves the existing SuperTokens account, if present.
+3. Imports or reconciles the user's login methods and Rownd metadata.
+4. Verifies reconciliation before publishing its completion marker. A failed final account or method check gets one fresh verification attempt against the same internal account, with renewed source and mapping checks.
+5. Creates a SuperTokens session in the requested tenant. A completion marker alone does not establish that session creation succeeded.
 
 For native/header-token clients, call the endpoint with `rid: session`, `fdi-version: 1.18`, and `st-auth-mode: header`. A successful migration response must include `st-access-token`, `st-refresh-token`, and `front-token`; clients should treat a 2xx response missing any of these headers as an incomplete session migration.
 

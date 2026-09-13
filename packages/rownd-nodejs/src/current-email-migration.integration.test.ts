@@ -483,6 +483,22 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
     await expectCanonical(fixture);
   });
 
+  it.each([false, null])("resumes checkpointed cleanup before completion is published (%s)", async (completion) => {
+    const fixture = await seed();
+    const removal = vi.spyOn(Multitenancy, "disassociateUserFromTenant").mockRejectedValueOnce(new Error("Pause before retirement"));
+    await expect(reconcileRowndUserWithExistingLoginMethods(mapRowndUserToSuperTokens(fixture.current, "public"), "public", {})).rejects.toThrow("Pause before retirement");
+    removal.mockRestore();
+    await UserMetadata.updateUserMetadata(fixture.internalId, { rownd_migration_complete: completion });
+    rownd.fetchUserInfo.mockClear();
+    await expect(prepareEmailForPasswordlessAuth({ email: fixture.email, tenantId: "public", reconcileTarget: true, userContext: {} })).resolves.toEqual({ status: "ALLOW" });
+    expect(rownd.fetchUserInfo).not.toHaveBeenCalled();
+    await expectCanonical(fixture);
+    const { metadata } = await UserMetadata.getUserMetadata(fixture.internalId);
+    expect(metadata.rownd_pending_verification).toEqual([]);
+    expect(metadata.rownd_migration_email_retirements).toEqual({});
+    expect(metadata.rownd_migration_complete).not.toBe(true);
+  });
+
   it("retries scoped migration retirement after restart, preserving synthetic records and native pending state", async () => {
     const fixture = await seed();
     const synthetic = await Passwordless.signInUp({ tenantId: "public", email: fixture.fakeEmail });
@@ -521,7 +537,7 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
 
   it.each([
     "missing provenance", "wrong source", "wrong provider", "wrong provider recipe", "unproven retired email",
-    "wrong target email", "duplicate retired ID", "synthetic retired method", "missing completion",
+    "wrong target email", "duplicate retired ID", "synthetic retired method", "missing canonical pointer",
     "changed snapshot", "contradictory snapshot provider", "target lost tenant", "provider lost tenant", "retired ownership changed",
     "wrong plan tenant", "unverified target", "missing checkpoint", "secondary checkpoint only",
   ])("rejects a durable migration plan with %s without destructive mutation", async (failure) => {
@@ -551,7 +567,7 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
       plan.migrationSource.previousEmail = fixture.fakeEmail;
       plan.retiredMethods = [{ email: fixture.fakeEmail, recipeUserId: synthetic.recipeUserId.getAsString() }];
     }
-    if (failure === "missing completion") metadata.rownd_migration_complete = false;
+    if (failure === "missing canonical pointer") metadata.rownd_email_recipe_user_ids = {};
     if (failure === "changed snapshot") (metadata.original_rownd_user as any).data.apple_id = randomUUID();
     if (failure === "contradictory snapshot provider") (metadata.original_rownd_user as any).verified_data.apple_id = randomUUID();
     if (failure === "wrong plan tenant") plan.tenantId = `tenant-${randomUUID()}`;
