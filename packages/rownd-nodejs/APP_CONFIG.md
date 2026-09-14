@@ -245,6 +245,10 @@ provider clients.
 - `iconLightUrl?: string`: light-mode button icon.
 - `iconDarkUrl?: string`: dark-mode icon; falls back to `iconLightUrl`.
 
+The guest endpoint only permits creation in the configured mode. Omitting
+`anonymous` disables both guest and instant creation. Existing Rownd users can
+still be migrated regardless of this setting.
+
 ### Custom OAuth provider
 
 ```ts

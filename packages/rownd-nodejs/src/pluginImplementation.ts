@@ -30,6 +30,7 @@ import { createClient } from "./telemetry/createTelemetryClient";
 import {
   assertRowndAppVariantIsConfigured,
   buildRowndAppConfig,
+  isAnonymousSignInEnabled,
   isEmailSignInEnabled,
   resolvePluginConfigSnapshot,
 } from "./config";
@@ -207,6 +208,12 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
         body.authLevel === INSTANT_AUTH_METHOD_ID
           ? INSTANT_AUTH_METHOD_ID
           : GUEST_AUTH_METHOD_ID;
+      if (!isAnonymousSignInEnabled(resolved.config, thirdPartyId, appVariantId)) {
+        return {
+          status: "ERROR" as const,
+          message: `${thirdPartyId === INSTANT_AUTH_METHOD_ID ? "Instant" : "Guest"} sign-in is not enabled`,
+        };
+      }
       const thirdPartyUserId =
         thirdPartyId === INSTANT_AUTH_METHOD_ID
           ? `anon_${randomUUID()}`

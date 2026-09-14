@@ -8441,6 +8441,7 @@ describe("rownd-nodejs plugin", () => {
           pluginConfig: {
             rowndAppKey: "test-key",
             rowndAppSecret: "test-secret",
+            appConfig: { signInMethods: [{ method: "anonymous" }] },
           },
           stConfig: {} as any,
           telemetryClient: {
@@ -8475,7 +8476,7 @@ describe("rownd-nodejs plugin", () => {
 
       it("should create a guest user and a session with correct claims (default auth_level)", async () => {
         const { server: s, port } = await setup(coreConnectionURI, {
-          appConfig: { id: "app_xyz" },
+          appConfig: { id: "app_xyz", signInMethods: [{ method: "anonymous" }] },
           subBrands: {
             variant_123: {
               id: "app_xyz",
@@ -8554,7 +8555,9 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("should use the instant provider while exposing instant auth_level", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: { signInMethods: [{ method: "anonymous", type: "instant" }] },
+        });
         server = s;
         testPORT = port;
 
@@ -9803,7 +9806,7 @@ describe("rownd-nodejs plugin", () => {
         const passwordlessLinks: string[] = [];
         const { server: s, port } = await setup(
           coreConnectionURI,
-          undefined,
+          { appConfig: { signInMethods: [{ method: "anonymous", type: "instant" }] } },
           { passwordlessLinks },
         );
         server = s;
@@ -12319,7 +12322,7 @@ describe("rownd-nodejs plugin", () => {
         async (authLevel) => {
           const { server: s, port } = await setup(
             coreConnectionURI,
-            undefined,
+            { appConfig: { signInMethods: [{ method: "email" }, { method: "anonymous", type: authLevel }] } },
             {
               enableEmailVerification: true,
             },
@@ -12353,7 +12356,9 @@ describe("rownd-nodejs plugin", () => {
       );
 
       it("rejects a guest email change before checking ownership", async () => {
-        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: { signInMethods: [{ method: "email" }, { method: "anonymous" }] },
+        }, {
           enableEmailVerification: true,
         });
         server = s;
@@ -12406,7 +12411,9 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("preserves account metadata when rejecting an email ownership conflict", async () => {
-        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: { signInMethods: [{ method: "email" }, { method: "anonymous" }] },
+        }, {
           enableEmailVerification: true,
         });
         server = s;
@@ -12968,7 +12975,9 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it("keeps anonymous_id while marking linked passwordless users verified", async () => {
-        const { server: s, port } = await setup(coreConnectionURI);
+        const { server: s, port } = await setup(coreConnectionURI, {
+          appConfig: { signInMethods: [{ method: "anonymous" }] },
+        });
         server = s;
         testPORT = port;
         const guestSession = await createGuestSession();

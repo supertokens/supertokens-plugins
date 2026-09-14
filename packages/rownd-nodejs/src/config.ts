@@ -528,6 +528,19 @@ export function isEmailSignInEnabled(
   return methods?.some((method) => method.method === "email") === true;
 }
 
+export function isAnonymousSignInEnabled(
+  config: RowndPluginNormalisedConfig,
+  authLevel: "guest" | "instant",
+  appVariantId?: string,
+) {
+  const methods =
+    (appVariantId ? config.subBrands?.[appVariantId]?.signInMethods : undefined) ??
+    config.appConfig?.signInMethods;
+  return methods?.some(
+    (method) => method.method === "anonymous" && getAnonymousType(method) === authLevel,
+  ) === true;
+}
+
 export function isExplicitSignUpFlowEnabled(
   config: RowndPluginNormalisedConfig,
   appVariantId?: string,
