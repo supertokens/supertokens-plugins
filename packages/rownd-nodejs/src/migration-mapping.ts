@@ -1,4 +1,5 @@
 import SuperTokens from "supertokens-node";
+import { RowndMigrationPolicyError } from "./errors";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import {
   getRawUserMetadata,
@@ -8,7 +9,8 @@ import {
 } from "./rownd-compatibility";
 import { fetchOptionalRowndUserInfo } from "./rownd-repository";
 import { migrationTelemetry } from "./telemetry/migrationTelemetry";
-import { assertAuthenticatedMigrationSource, getAuthenticatedMigrationEmail, isRowndMigrationProfileActive } from "./migration-email";
+import { assertAuthenticatedMigrationSource, getMigrationContactEmail, isAdministrativeMigration, isRowndMigrationProfileActive } from "./migration-email";
+import { assertAdministrativeDuplicateWinner, isAdministrativeElectionCandidate } from "./migration-election";
 import type { SuperTokensUserImport } from "./types";
 import {
   clearSuperTokensCoreCallCache,
@@ -21,7 +23,7 @@ export function getMigrationTarget(metadata: JsonRecord) {
   // overwrite a provisional target, but cannot change a published target.
   const target = metadata.rownd_migration_canonical_target ?? metadata.rownd_migration_target;
   if (target !== undefined && typeof target !== "string") {
-    throw new Error("Invalid migration target record");
+    throw new RowndMigrationPolicyError("Invalid migration target record");
   }
   return target;
 }
@@ -45,6 +47,46 @@ async function hasCanonicalMapping(
   if (target === rowndUserId && external.status !== "OK" && internal.status !== "OK") {
     return (await SuperTokens.getUser(target, userContext))?.id === rowndUserId;
   }
+  return false;
+}
+
+export async function isProtectedDuplicateMapping(input: {
+  source: SuperTokensUserImport; duplicateId: string; ownerInternalId: string; targetInternalId: string; tenantId: string; userContext: JsonRecord;
+}) {
+  const { source, duplicateId, ownerInternalId, targetInternalId, tenantId, userContext } = input;
+  const metadata = await getRawUserMetadata(duplicateId, userContext);
+  const canonical = await hasCanonicalMapping(duplicateId, metadata, userContext);
+  if (!isAdministrativeMigration(source, tenantId)) return canonical;
+  const stored = await getRawUserMetadata(ownerInternalId, userContext);
+  if ([metadata, stored].some((record) => [record.rownd_migration_canonical_target, record.rownd_migration_target]
+    .some((target) => target !== undefined && target !== ownerInternalId))) {
+    throw new RowndMigrationPolicyError("Duplicate mapping changed before retirement");
+  }
+  if (!canonical || !isAdministrativeElectionCandidate(source, duplicateId)) return canonical;
+  await assertAdministrativeDuplicateWinner(source, tenantId, duplicateId);
+  clearSuperTokensCoreCallCache(userContext);
+  const winnerMapping = await SuperTokens.getUserIdMapping({ userId: source.externalUserId!, userIdType: "EXTERNAL", userContext });
+  const winnerTarget = getMigrationTarget(await getRawUserMetadata(source.externalUserId!, userContext));
+  if ((winnerMapping.status === "OK" && winnerMapping.superTokensUserId !== targetInternalId) ||
+    (winnerTarget !== undefined && winnerTarget !== targetInternalId)) throw new RowndMigrationPolicyError("The reconciliation target changed");
+  const owner = await SuperTokens.getUser(ownerInternalId, userContext);
+  if (!owner || owner.isPrimaryUser || owner.loginMethods.length !== 1 ||
+    owner.loginMethods[0]!.tenantIds.length !== 1 || !owner.loginMethods[0]!.tenantIds.includes(tenantId)) return true;
+  const method = owner.loginMethods[0]!;
+  const duplicate = await fetchOptionalRowndUserInfo(duplicateId);
+  const email = getMigrationContactEmail(source, tenantId);
+  const contact = method.recipeId === "passwordless" && email !== undefined && method.hasSameEmailAs(email) &&
+    duplicate?.data.email?.toLowerCase() === email;
+  const provider = method.recipeId === "thirdparty" && duplicate &&
+    source.loginMethods.some((expected) => expected.recipeId === "thirdparty" && ["google", "apple"].includes(expected.thirdPartyId) &&
+      method.hasSameThirdPartyInfoAs({ id: expected.thirdPartyId, userId: expected.thirdPartyUserId }) &&
+      mapRowndUserToSuperTokens(duplicate, tenantId).loginMethods.some((other) => other.recipeId === "thirdparty" &&
+        other.thirdPartyId === expected.thirdPartyId && other.thirdPartyUserId === expected.thirdPartyUserId));
+  if (!contact && !provider) return true;
+  await assertMigrationMapping(ownerInternalId, duplicateId, userContext);
+  // Published ownership is replaceable only by this live, privately bound admin
+  // election. Token migrations retain the first-published-owner protection.
+  await assertAdministrativeDuplicateWinner(source, tenantId, duplicateId);
   return false;
 }
 
@@ -75,9 +117,22 @@ export async function assertMigrationSourceActive(
           telemetry.canonicalRowndUserId = electedMapping.externalUserId;
       }
     }
-    throw new Error("The requested Rownd user has been superseded");
+    throw new RowndMigrationPolicyError("The requested Rownd user has been superseded");
   }
   return metadata;
+}
+
+export async function assertSelectorNamespace(id: string, userContext: JsonRecord) {
+  const [external, internal] = await Promise.all([
+    SuperTokens.getUserIdMapping({ userId: id, userIdType: "EXTERNAL", userContext }),
+    SuperTokens.getUserIdMapping({ userId: id, userIdType: "SUPERTOKENS", userContext }),
+  ]);
+  if (external.status === "OK" && internal.status === "OK" && external.superTokensUserId !== internal.superTokensUserId) {
+    throw new RowndMigrationPolicyError("EXTERNAL_ALIAS_AMBIGUOUS: selector identifies different internal and external owners");
+  }
+  if (external.status === "OK" && !await SuperTokens.getUser(external.superTokensUserId, userContext)) {
+    throw new RowndMigrationPolicyError("MAPPING_TARGET_MISSING: external mapping target does not exist");
+  }
 }
 
 export async function assertMigrationMapping(
@@ -90,7 +145,7 @@ export async function assertMigrationMapping(
     metadata.rownd_migration_canonical_target !== undefined &&
     metadata.rownd_migration_canonical_target !== internalUserId
   ) {
-    throw new Error("The canonical reconciliation target changed");
+    throw new RowndMigrationPolicyError("The canonical reconciliation target changed");
   }
   const [external, internal] = await Promise.all([
     SuperTokens.getUserIdMapping({
@@ -116,7 +171,7 @@ export async function assertMigrationMapping(
     external.superTokensUserId !== internalUserId ||
     internal.externalUserId !== rowndUserId
   ) {
-    throw new Error("Migrated user mapping postcondition failed");
+    throw new RowndMigrationPolicyError("Migrated user mapping postcondition failed");
   }
 }
 
@@ -140,7 +195,7 @@ export async function retireDuplicateMapping(input: {
     requestedMetadata.rownd_migration_canonical_target !== undefined &&
     requestedMetadata.rownd_migration_canonical_target !== targetInternalId
   ) {
-    throw new Error(
+    throw new RowndMigrationPolicyError(
       "The requested Rownd user has a different reconciliation target",
     );
   }
@@ -153,7 +208,7 @@ export async function retireDuplicateMapping(input: {
   const plan = ownerMetadata.rownd_migration_reconciliation;
   if (mapping.status === "OK" && mapping.externalUserId === requestedId) {
     if (ownerInternalId !== targetInternalId) {
-      throw new Error("The requested Rownd mapping has a different target");
+      throw new RowndMigrationPolicyError("The requested Rownd mapping has a different target");
     }
     await assertMigrationMapping(ownerInternalId, requestedId, userContext);
     return;
@@ -165,7 +220,7 @@ export async function retireDuplicateMapping(input: {
       typeof plan.targetUserId !== "string" ||
       typeof plan.previousExternalUserId !== "string")
   ) {
-    throw new Error("The login method has an invalid reconciliation record");
+    throw new RowndMigrationPolicyError("The login method has an invalid reconciliation record");
   }
   if (mapping.status !== "OK" && !isRecord(plan)) return;
   // A competing reservation is not ownership. If the old mapping is gone, its
@@ -175,7 +230,7 @@ export async function retireDuplicateMapping(input: {
   const duplicateId = mapping.status === "OK" ? mapping.externalUserId : previousExternalId;
   if (duplicateId === undefined) return;
   if (duplicateId === requestedId) {
-    throw new Error("A retired Rownd mapping cannot authorize its own replacement");
+    throw new RowndMigrationPolicyError("A retired Rownd mapping cannot authorize its own replacement");
   }
   const telemetry = migrationTelemetry(userContext);
   if (telemetry) {
@@ -183,8 +238,9 @@ export async function retireDuplicateMapping(input: {
     telemetry.conflictingRowndUserId = duplicateId;
   }
   const duplicateMetadata = await getRawUserMetadata(duplicateId, userContext);
-  if (await hasCanonicalMapping(duplicateId, duplicateMetadata, userContext)) {
-    throw new Error(
+  const protectedDuplicate = () => isProtectedDuplicateMapping({ source, duplicateId, ownerInternalId, targetInternalId, tenantId, userContext });
+  if (await protectedDuplicate()) {
+    throw new RowndMigrationPolicyError(
       "The duplicate mapping already has an elected canonical Rownd user",
     );
   }
@@ -202,10 +258,10 @@ export async function retireDuplicateMapping(input: {
     fetchOptionalRowndUserInfo(requestedId),
   ]);
   if (duplicate && duplicate.data?.user_id !== duplicateId) {
-    throw new Error("Duplicate Rownd profile could not be verified");
+    throw new RowndMigrationPolicyError("Duplicate Rownd profile could not be verified");
   }
   if (!freshSource || freshSource.data?.user_id !== requestedId) {
-    throw new Error("Requested Rownd source identity could not be verified");
+    throw new RowndMigrationPolicyError("Requested Rownd source identity could not be verified");
   }
   const freshMethods = mapRowndUserToSuperTokens(
     freshSource,
@@ -216,7 +272,7 @@ export async function retireDuplicateMapping(input: {
     : undefined;
   clearSuperTokensCoreCallCache(userContext);
   const owner = await SuperTokens.getUser(ownerInternalId, userContext);
-  const authenticatedEmail = getAuthenticatedMigrationEmail(source, tenantId);
+  const authenticatedEmail = getMigrationContactEmail(source, tenantId);
   const hasContactProof = () => authenticatedEmail !== undefined &&
     isRowndMigrationProfileActive(freshSource) && freshSource.data.email?.toLowerCase() === authenticatedEmail &&
     duplicate !== undefined && isRowndMigrationProfileActive(duplicate) && duplicate.data.email?.toLowerCase() === authenticatedEmail &&
@@ -229,7 +285,7 @@ export async function retireDuplicateMapping(input: {
     freshSource.state !== "enabled" || freshSource.auth_level !== "verified" ||
     !owner || owner.isPrimaryUser || owner.loginMethods.length !== 1
   )) {
-    throw new Error("Missing duplicate Rownd profile requires a verified source and standalone provider owner");
+    throw new RowndMigrationPolicyError("Missing duplicate Rownd profile requires a verified source and standalone provider owner");
   }
   const exactProof = source.loginMethods.some(
     (method) =>
@@ -258,13 +314,23 @@ export async function retireDuplicateMapping(input: {
   );
   const contactProof = hasContactProof();
   if (!exactProof && !contactProof)
-    throw new Error(
+    throw new RowndMigrationPolicyError(
       "Duplicate Rownd mapping has no exact provider identity proof",
     );
   if (ownerInternalId !== targetInternalId && owner?.isPrimaryUser) {
-    throw new Error("Cannot safely merge a duplicate primary account");
+    throw new RowndMigrationPolicyError("Cannot safely merge a duplicate primary account");
   }
-  if (contactProof) await assertAuthenticatedMigrationSource(source, tenantId);
+  if (isAdministrativeMigration(source, tenantId) && duplicate && mapping.status === "OK" &&
+    !isAdministrativeElectionCandidate(source, duplicateId)) {
+    throw new RowndMigrationPolicyError("Rownd activity election changed before reconciliation completion");
+  }
+  if (contactProof || isAdministrativeMigration(source, tenantId)) await assertAuthenticatedMigrationSource(source, tenantId);
+  if (duplicate) await assertAdministrativeDuplicateWinner(source, tenantId, duplicateId);
+
+  const assertRetirable = async () => {
+    if (await protectedDuplicate()) throw new RowndMigrationPolicyError("Concurrent canonical election prevents safe mapping retirement");
+  };
+  await assertRetirable();
 
   await UserMetadata.updateUserMetadata(
     requestedId,
@@ -273,6 +339,8 @@ export async function retireDuplicateMapping(input: {
   );
   // Preserve application metadata written under either storage convention. Internal
   // values take precedence; the canonical source profile is merged by reconciliation.
+  if (duplicate) await assertAdministrativeDuplicateWinner(source, tenantId, duplicateId);
+  await assertRetirable();
   await UserMetadata.updateUserMetadata(
     ownerInternalId,
     {
@@ -287,6 +355,8 @@ export async function retireDuplicateMapping(input: {
     },
     userContext,
   );
+  if (duplicate) await assertAdministrativeDuplicateWinner(source, tenantId, duplicateId);
+  await assertRetirable();
   await UserMetadata.updateUserMetadata(
     duplicateId,
     {
@@ -312,10 +382,10 @@ export async function retireDuplicateMapping(input: {
     !isRecord(retirement) ||
     retirement.rowndUserId !== requestedId ||
     retirement.targetUserId !== targetInternalId ||
-    (await hasCanonicalMapping(duplicateId, durableDuplicateMetadata, userContext)) ||
+    (await protectedDuplicate()) ||
     getMigrationTarget(durableRequestedMetadata) !== targetInternalId
   ) {
-    throw new Error(
+    throw new RowndMigrationPolicyError(
       "Concurrent canonical election prevents safe mapping retirement",
     );
   }
@@ -331,13 +401,14 @@ export async function retireDuplicateMapping(input: {
       userContext,
     }),
   ]);
+  if (duplicate) await assertAdministrativeDuplicateWinner(source, tenantId, duplicateId);
   if (freshExternal.status === "OK") {
     if (
       freshExternal.superTokensUserId !== ownerInternalId ||
       freshInternal.status !== "OK" ||
       freshInternal.externalUserId !== duplicateId
     ) {
-      throw new Error("Duplicate mapping changed before retirement");
+      throw new RowndMigrationPolicyError("Duplicate mapping changed before retirement");
     }
     if (contactProof) {
       await assertAuthenticatedMigrationSource(source, tenantId);
@@ -352,12 +423,13 @@ export async function retireDuplicateMapping(input: {
           !latestOwner.loginMethods[0]!.hasSameEmailAs(authenticatedEmail!) ||
           !latestDuplicate || !isRowndMigrationProfileActive(latestDuplicate) || latestDuplicate.data.user_id !== duplicateId ||
           latestDuplicate.data.email?.toLowerCase() !== authenticatedEmail) {
-        throw new Error("Duplicate Rownd contact ownership changed before retirement");
+        throw new RowndMigrationPolicyError("Duplicate Rownd contact ownership changed before retirement");
       }
     }
     // Never delete by internal ID: another worker may already have installed A.
     // Core has no compare-and-delete API. Another migration or external writer
     // can still race the final election/mapping reads and this deletion.
+    await assertRetirable();
     await SuperTokens.deleteUserIdMapping({
       userId: duplicateId,
       userIdType: "EXTERNAL",
@@ -372,6 +444,6 @@ export async function retireDuplicateMapping(input: {
     userContext,
   });
   if (retired.status === "OK")
-    throw new Error("Duplicate mapping retirement incomplete");
+    throw new RowndMigrationPolicyError("Duplicate mapping retirement incomplete");
   telemetry?.emit("transition", "duplicate_mapping_retired");
 }

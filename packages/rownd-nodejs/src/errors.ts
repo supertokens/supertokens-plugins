@@ -40,3 +40,11 @@ export class RowndConfigResolutionError extends Error {
     Object.defineProperty(this, "cause", { enumerable: false, value: cause });
   }
 }
+
+// Explicit invariant failures are policy blocks; unknown errors remain operational.
+export class RowndMigrationPolicyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RowndMigrationPolicyError";
+  }
+}

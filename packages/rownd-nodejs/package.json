@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/rownd-nodejs",
-  "version": "0.7.8",
+  "version": "0.7.9",
   "description": "Rownd User Migration Plugin for SuperTokens",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -35,7 +35,6 @@
   ],
   "license": "Apache-2.0",
   "dependencies": {
-    "@supertokens-plugins/rownd-support": "^0.1.0",
     "@opentelemetry/api": "^1.9.0",
     "@rownd/node": "^3.0.4",
     "yaml": "^2.8.3",

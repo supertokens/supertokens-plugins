@@ -1,4 +1,5 @@
 import express from "express";
+import { reconcileUser } from "./reconcile-user";
 import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,7 +30,9 @@ import { init } from "./plugin";
 import { getCombinedUserMetadata, mapRowndUserToSuperTokens } from "./rownd-compatibility";
 import { reconcileRowndUserWithExistingLoginMethods } from "./supertokens-repository";
 import type { RowndUser } from "./types";
-import { authenticateRowndMigration } from "./migration-email";
+import { authenticateRowndMigration, fetchAdministrativeMigrationSource } from "./migration-email";
+import { bindAdministrativeElection, inspectAdministrativeElection } from "./migration-election";
+import { assertMigrationMapping, retireDuplicateMapping } from "./migration-mapping";
 
 const rownd = { validateToken: vi.fn(), fetchUserInfo: vi.fn() };
 vi.mock("@rownd/node", () => ({ createInstance: () => rownd }));
@@ -170,8 +173,66 @@ describe("authenticated Rownd contact reconciliation", () => {
     expect(superseded.headers.get("st-access-token")).toBeNull();
   });
 
+  it("admin uses verified live email to retire and link a supported duplicate contact without a token", async () => {
+    const fixture = await seed();
+    fixture.profileA.verified_data.email = true;
+    fixture.profileA.meta = { last_active: "2020-01-02T00:00:00.000Z" };
+    fixture.profileB.meta = { last_active: "2020-01-01T00:00:00.000Z" };
+    const result = await reconcileUser({ rownd_user_id: fixture.a });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "OK", supertokens_user_id: fixture.internalA });
+    expect((await SuperTokens.getUser(fixture.internalB))!.id).toBe(fixture.a);
+    expect((await SuperTokens.getUser(fixture.a))!.loginMethods.find((method) => method.recipeId === "passwordless")).toMatchObject({ verified: true, email: fixture.email });
+    expect(rownd.validateToken).not.toHaveBeenCalled();
+    expect(await reconcileUser({ email: fixture.email })).toMatchObject({ status: "OK", changed: false });
+  });
+
+  it("admin revalidates activity before retiring a duplicate mapping after reservation", async () => {
+    const fixture = await seed();
+    fixture.profileA.meta = { last_active: "2020-01-02T00:00:00.000Z" };
+    fixture.profileB.meta = { last_active: "2020-01-01T00:00:00.000Z" };
+    const source = (await fetchAdministrativeMigrationSource(fixture.a, "public", {}))!;
+    const election = await inspectAdministrativeElection([
+      { rownd_user_id: fixture.a, supertokens_user_id: fixture.internalA },
+      { rownd_user_id: fixture.b, supertokens_user_id: fixture.internalB },
+    ]);
+    bindAdministrativeElection(source, "public", election, () => assertMigrationMapping(fixture.internalA, fixture.a, {}));
+    const update = UserMetadata.updateUserMetadata.bind(UserMetadata);
+    vi.spyOn(UserMetadata, "updateUserMetadata").mockImplementation(async (id, data, context) => {
+      const result = await update(id, data, context);
+      if (id === fixture.a && data.rownd_migration_target === fixture.internalA) {
+        fixture.profileB.meta = { last_active: "2020-01-03T00:00:00.000Z" };
+      }
+      return result;
+    });
+    const writes = [vi.spyOn(SuperTokens, "deleteUserIdMapping"), vi.spyOn(AccountLinking, "linkAccounts"),
+      vi.spyOn(EmailVerification, "createEmailVerificationToken"), vi.spyOn(EmailVerification, "verifyEmailUsingToken")];
+    await expect(retireDuplicateMapping({ source, ownerInternalId: fixture.internalB, targetInternalId: fixture.internalA,
+      tenantId: "public", userContext: {} })).rejects.toThrow("Rownd activity election changed before reconciliation completion");
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect(await SuperTokens.getUserIdMapping({ userId: fixture.b, userIdType: "EXTERNAL" })).toMatchObject({ status: "OK", superTokensUserId: fixture.internalB });
+    expect((await UserMetadata.getUserMetadata(fixture.b)).metadata.rownd_migration_superseded).toBeUndefined();
+    expect((await SuperTokens.getUser(fixture.b))!.loginMethods).toHaveLength(1);
+  });
+
+  it("the retirement primitive retains its bound-admin exception for an older published contact", async () => {
+    const fixture = await seed();
+    fixture.profileA.meta = { last_active: "2020-01-02T00:00:00.000Z" };
+    fixture.profileB.meta = { last_active: "2020-01-01T00:00:00.000Z" };
+    await UserMetadata.updateUserMetadata(fixture.b, { rownd_migration_canonical_target: fixture.internalB });
+    const source = (await fetchAdministrativeMigrationSource(fixture.a, "public", {}))!;
+    const election = await inspectAdministrativeElection([
+      { rownd_user_id: fixture.a, supertokens_user_id: fixture.internalA },
+      { rownd_user_id: fixture.b, supertokens_user_id: fixture.internalB },
+    ]);
+    bindAdministrativeElection(source, "public", election, () => assertMigrationMapping(fixture.internalA, fixture.a, {}));
+    await retireDuplicateMapping({ source, ownerInternalId: fixture.internalB, targetInternalId: fixture.internalA, tenantId: "public", userContext: {} });
+    expect(await SuperTokens.getUserIdMapping({ userId: fixture.b, userIdType: "EXTERNAL" })).toMatchObject({ status: "UNKNOWN_MAPPING_ERROR" });
+  });
+
   it.each([false, true])("keeps token B on B without absorbing same-email Google A (primary=%s), and preserves that published election", async (primary) => {
     const fixture = await seed();
+    fixture.profileA.meta = { last_active: "2020-01-02T00:00:00.000Z" };
+    fixture.profileB.meta = { last_active: "2020-01-01T00:00:00.000Z" };
     if (primary) await AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(fixture.internalA));
     const googleBefore = (await SuperTokens.getUser(fixture.a))!.toJson();
     await expectSession(await migrate(fixture.b), fixture.b);

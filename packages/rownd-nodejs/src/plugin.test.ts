@@ -1582,6 +1582,244 @@ describe("rownd-nodejs plugin", () => {
   });
 
   describe("recipe API overrides", () => {
+    describe("magic-link URL corruption repro", () => {
+      const hubDomain = "https://stardust.rownd-hub.supertokens.com";
+      const redirect =
+        "https://stardust.app/rownd?label=sign in&next=/a_b#section";
+      const preAuthSessionId = "test_pre-auth-session";
+      const linkCode = "test_link-code";
+
+      it.each([
+        { channel: "email", useClientDomain: false },
+        { channel: "sms", useClientDomain: false },
+        { channel: "email", useClientDomain: true },
+        { channel: "sms", useClientDomain: true },
+      ] as const)(
+        "preserves raw URL encoding at $channel delivery (client domain: $useClientDomain)",
+        async ({ channel, useClientDomain }) => {
+          const plugin = init({
+            rowndAppKey: "test-key",
+            rowndAppSecret: "test-secret",
+            ...(useClientDomain
+              ? { clientDomains: { mobile: hubDomain } }
+              : {}),
+          }) as any;
+          plugin.routeHandlers(
+            makePublicConfig("https://st-auth.stardust.app", "/auth"),
+          );
+          const send = vi.fn();
+          const config = plugin.overrideMap.passwordless.config({});
+          const input = {
+            urlWithLinkCode: `${hubDomain}/auth/verify?preAuthSessionId=${preAuthSessionId}&tenantId=public#${linkCode}`,
+            userContext: {
+              rowndDisplayContext: "mobile_app",
+              rowndRedirectToPath: redirect,
+              rowndAuthIntent: "sign_in",
+            },
+          };
+
+          if (channel === "email") {
+            await config.emailDelivery
+              .override({ sendEmail: send })
+              .sendEmail(input);
+          } else {
+            await config.smsDelivery.override({ sendSms: send }).sendSms(input);
+          }
+
+          expect(send).toHaveBeenCalledOnce();
+          const rawLink = send.mock.calls[0][0].urlWithLinkCode;
+          expect(rawLink).not.toMatch(/\s/);
+          expect(rawLink).toContain("displayContext=mobile_app");
+          expect(rawLink).toContain("rowndAuthIntent=sign_in#");
+          expect(rawLink).toContain(
+            "apiDomain=https%3A%2F%2Fst-auth.stardust.app",
+          );
+          expect(rawLink).toContain("apiBasePath=%2Fauth");
+          const url = new URL(rawLink);
+          expect(url.origin).toBe(hubDomain);
+          expect(url.pathname).toBe("/account/login");
+          expect(url.searchParams.get("redirectToPath")).toBe(redirect);
+          expect(url.searchParams.get("preAuthSessionId")).toBe(
+            preAuthSessionId,
+          );
+          expect(url.searchParams.get("tenantId")).toBe("public");
+          expect(url.searchParams.has("next")).toBe(false);
+          expect(url.hash).toBe(`#${linkCode}`);
+        },
+      );
+
+      it("encodes an invalid display context and omits invalid intent supplied directly to delivery", async () => {
+        const plugin = init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+        }) as any;
+        plugin.routeHandlers(
+          makePublicConfig("https://st-auth.stardust.app", "/auth"),
+        );
+        const sendEmail = vi.fn();
+        const config = plugin.overrideMap.passwordless.config({});
+
+        await config.emailDelivery.override({ sendEmail }).sendEmail({
+          urlWithLinkCode: `${hubDomain}/auth/verify?preAuthSessionId=${preAuthSessionId}#${linkCode}`,
+          userContext: {
+            rowndDisplayContext: "mobile app",
+            rowndAuthIntent: "sign in",
+          },
+        });
+
+        const rawLink = sendEmail.mock.calls[0][0].urlWithLinkCode;
+        expect(rawLink).not.toMatch(/\s/);
+        expect(rawLink).toContain("displayContext=mobile+app");
+        const url = new URL(rawLink);
+        expect(url.searchParams.get("displayContext")).toBe("mobile app");
+        expect(url.searchParams.has("rowndAuthIntent")).toBe(false);
+        expect(url.hash).toBe(`#${linkCode}`);
+      });
+
+      it("characterizes fragment corruption when delivery receives a relative source link", async () => {
+        const plugin = init({
+          rowndAppKey: "test-key",
+          rowndAppSecret: "test-secret",
+        }) as any;
+        plugin.routeHandlers(
+          makePublicConfig("https://st-auth.stardust.app", "/auth"),
+        );
+        const sendEmail = vi.fn();
+        const config = plugin.overrideMap.passwordless.config({});
+
+        await config.emailDelivery.override({ sendEmail }).sendEmail({
+          urlWithLinkCode: `/auth/verify?preAuthSessionId=${preAuthSessionId}&tenantId=public#${linkCode}`,
+          userContext: {
+            rowndDisplayContext: "mobile_app",
+            rowndAuthIntent: "sign_in",
+          },
+        });
+
+        // The invalid-URL fallback treats the fragment as query data and duplicates the leading slash.
+        const rawLink = sendEmail.mock.calls[0][0].urlWithLinkCode;
+        expect(rawLink).toContain("//account/login?");
+        expect(rawLink).toContain(`tenantId=public%23${linkCode}`);
+        expect(rawLink).not.toContain("#");
+        expect(rawLink).toContain("rowndAuthIntent=sign_in");
+      });
+
+      it.each(["mobile_app", "mobile app"])(
+        "returns a consumable bypass link with runtime displayContext=%s",
+        async (displayContext) => {
+          const { server: s, port } = await setup(coreConnectionURI, {
+            clientDomains: { mobile: "https://stardust.app" },
+            crossDeviceConfirmationBypass: { allowedRedirectPaths: ["/rownd"] },
+          });
+          server = s;
+          const rawLink = await createMagicLinkWithConfirmationBypass({
+            email: `bypass-url-repro-${randomUUID()}@example.com`,
+            clientDomain: "mobile",
+            redirectToPath: "https://stardust.app/rownd",
+            // Exercise unchecked JavaScript input at the public function boundary.
+            displayContext: displayContext as "mobile_app",
+            userContext: { rowndAuthIntent: "sign_in" },
+          });
+
+          expect(rawLink).not.toMatch(/\s/);
+          expect(rawLink).toContain(
+            `displayContext=${displayContext === "mobile_app" ? "mobile_app" : "mobile+app"}`,
+          );
+          const url = new URL(rawLink);
+          expect(url.origin).toBe("https://stardust.app");
+          expect(url.pathname).toBe("/account/login");
+          expect(url.searchParams.get("redirectToPath")).toBe("/rownd");
+          expect(url.searchParams.get("displayContext")).toBe(displayContext);
+          expect(url.searchParams.get("bypassDeviceConfirmation")).toBe("true");
+          expect(url.searchParams.has("rowndAuthIntent")).toBe(false);
+          expect(url.searchParams.get("preAuthSessionId")).toMatch(
+            /^[A-Za-z0-9_-]{43}$/,
+          );
+          expect(url.hash).toMatch(/^#[A-Za-z0-9_-]{43}$/);
+
+          const response = await fetch(
+            `http://localhost:${port}/auth/signinup/code/consume`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                preAuthSessionId: url.searchParams.get("preAuthSessionId"),
+                linkCode: url.hash.substring(1),
+                shouldTryLinkingWithSessionUser: false,
+              }),
+            },
+          );
+          expect(response.status).toBe(200);
+          expect(await response.json()).toMatchObject({ status: "OK" });
+        },
+      );
+
+      it("preserves intent through HTTP create and resend, and rejects a space-containing intent", async () => {
+        const links: string[] = [];
+        const { server: s, port } = await setup(
+          coreConnectionURI,
+          {
+            clientDomains: { mobile: hubDomain },
+            appConfig: { auth: { useExplicitSignUpFlow: true } },
+          },
+          { passwordlessLinks: links },
+        );
+        server = s;
+        const email = `delivery-url-repro-${randomUUID()}@example.com`;
+        await Passwordless.signInUp({ tenantId: "public", email });
+        const params = new URLSearchParams({
+          rownd_display_context: "mobile_app",
+          rownd_redirect_to_path: redirect,
+        });
+        const post = (path: string, body: Record<string, unknown>) =>
+          fetch(`http://localhost:${port}/auth/${path}?${params}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+        const rejected = await post("signinup/code", { email, intent: "sign in" });
+        expect(await rejected.json()).toMatchObject({
+          status: "GENERAL_ERROR",
+          message: "intent must be sign_in or sign_up",
+        });
+        expect(links).toHaveLength(0);
+
+        const created = await post("signinup/code", { email, intent: "sign_in" });
+        expect(created.status).toBe(200);
+        const attempt = await created.json();
+        expect(attempt).toMatchObject({ status: "OK" });
+        const resent = await post("signinup/code/resend", {
+          deviceId: attempt.deviceId,
+          preAuthSessionId: attempt.preAuthSessionId,
+          intent: "sign_in",
+        });
+        expect(resent.status).toBe(200);
+        expect(await resent.json()).toMatchObject({ status: "OK" });
+        expect(links).toHaveLength(2);
+        for (const rawLink of links) {
+          expect(rawLink).not.toMatch(/\s/);
+          expect(rawLink).toContain("displayContext=mobile_app");
+          expect(rawLink).toContain("rowndAuthIntent=sign_in#");
+          const url = new URL(rawLink);
+          expect(url.origin).toBe(hubDomain);
+          expect(url.searchParams.get("redirectToPath")).toBe(redirect);
+          expect(url.searchParams.get("preAuthSessionId")).toBe(
+            attempt.preAuthSessionId,
+          );
+          expect(url.hash).toMatch(/^#[A-Za-z0-9_-]{43}$/);
+        }
+
+        const url = new URL(links[1]);
+        const consumed = await post("signinup/code/consume", {
+          preAuthSessionId: url.searchParams.get("preAuthSessionId"),
+          linkCode: url.hash.substring(1),
+          intent: "sign_in",
+          shouldTryLinkingWithSessionUser: false,
+        });
+        expect(consumed.status).toBe(200);
+        expect(await consumed.json()).toMatchObject({ status: "OK" });
+      });
+    });
+
     it("adds hub bootstrap params to passwordless magic links", async () => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
@@ -1897,6 +2135,87 @@ describe("rownd-nodejs plugin", () => {
       expect(resolveConfig).toHaveBeenCalledOnce();
       expect(resolveConfig.mock.calls[0]?.[0]).toMatchObject({
         tenantId: "public",
+      });
+    });
+
+    it("characterizes quote-contaminated bypass links as Core 400 and app 500 without consuming the clean code", async () => {
+      const { server: s, port } = await setup(coreConnectionURI, {
+        clientDomains: { browser: "http://localhost:3000" },
+        crossDeviceConfirmationBypass: {
+          allowedRedirectPaths: ["/account?view=subscription"],
+        },
+      });
+      server = s;
+      const link = await createMagicLinkWithConfirmationBypass({
+        email: `malformed-link-${randomUUID()}@example.com`,
+        clientDomain: "browser",
+        redirectToPath: "/account?view=subscription",
+        displayContext: "browser",
+      });
+      const url = new URL(JSON.parse(JSON.stringify({ link })).link);
+      const linkCode = url.hash.substring(1);
+      const preAuthSessionId = url.searchParams.get("preAuthSessionId");
+      expect(linkCode).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(preAuthSessionId).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(url.searchParams.get("redirectToPath")).toBe(
+        "/account?view=subscription",
+      );
+
+      const consumeAtApp = (code: string) =>
+        fetch(
+          `http://localhost:${port}/auth/signinup/code/consume?rownd_display_context=browser&rownd_client_domain=browser`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              preAuthSessionId,
+              linkCode: code,
+              shouldTryLinkingWithSessionUser: false,
+            }),
+          },
+        );
+
+      // Copying a closing JSON quote into the fragment becomes literal %22 in location.hash.
+      const contaminatedCode = new URL(`${link}"`).hash.substring(1);
+      expect(contaminatedCode).toBe(`${linkCode}%22`);
+      for (const code of [contaminatedCode, `${linkCode}"`]) {
+        const coreResponse = await fetch(
+          `${coreConnectionURI}/public/recipe/signinup/code/consume`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "cdi-version": "5.4",
+            },
+            body: JSON.stringify({ preAuthSessionId, linkCode: code }),
+          },
+        );
+        expect(coreResponse.status).toBe(400);
+        expect(await coreResponse.text()).toContain(
+          "Input encoding error in linkCode",
+        );
+
+        await expect(
+          Passwordless.consumeCode({
+            tenantId: "public",
+            preAuthSessionId: preAuthSessionId!,
+            linkCode: code,
+          }),
+        ).rejects.toThrow("Input encoding error in linkCode");
+        const appResponse = await consumeAtApp(code);
+        expect(appResponse.status).toBe(500);
+        const appError = await appResponse.text();
+        expect(appError).toContain("Input encoding error in linkCode");
+        expect(appError).toContain("/public/recipe/signinup/code/consume");
+      }
+
+      const cleanResponse = await consumeAtApp(linkCode);
+      expect(cleanResponse.status).toBe(200);
+      expect(await cleanResponse.json()).toMatchObject({ status: "OK" });
+      const replayResponse = await consumeAtApp(linkCode);
+      expect(replayResponse.status).toBe(200);
+      expect(await replayResponse.json()).toMatchObject({
+        status: "RESTART_FLOW_ERROR",
       });
     });
 

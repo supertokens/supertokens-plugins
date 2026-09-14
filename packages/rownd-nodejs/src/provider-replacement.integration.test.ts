@@ -17,6 +17,7 @@ import type { RowndUser } from "./types";
 import { Querier } from "supertokens-node/lib/build/querier";
 import SessionRecipe from "supertokens-node/lib/build/recipe/session/recipe";
 import { prepareRowndProviderRetirement } from "./migration-provider";
+import { reconcileUser } from "./reconcile-user";
 
 const rownd = vi.hoisted(() => ({ validateToken: vi.fn(), fetchUserInfo: vi.fn() }));
 vi.mock("@rownd/node", () => ({ createInstance: () => rownd }));
@@ -88,6 +89,84 @@ describe("verified Rownd provider replacement", () => {
     expect(user?.loginMethods.some((method) => method.email === fixture.current.data.email)).toBe(true);
     expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata.customer_value).toBe("preserved");
     expect(await SuperTokens.getUserIdMapping({ userId: fixture.rowndId, userIdType: "EXTERNAL" })).toMatchObject({ status: "OK", superTokensUserId: fixture.internalId });
+  });
+
+  it("admin replaces from live verified Rownd, resolves recipe/internal/email IDs and becomes a no-op", async () => {
+    const fixture = await seed("google");
+    await UserMetadata.updateUserMetadata(fixture.internalId, { original_rownd_user: fixture.original });
+    rownd.validateToken.mockClear();
+    const result = await reconcileUser({ supertokens_user_id: fixture.internalId });
+    expect(result).toMatchObject({ status: "OK", changed: true, supertokens_user_id: fixture.internalId, rownd_user_id: fixture.rowndId });
+    expect(rownd.validateToken).not.toHaveBeenCalled();
+    expect(await reconcileUser({ email: fixture.current.data.email! })).toMatchObject({ status: "OK", changed: false });
+    const recipeId = (await SuperTokens.getUser(fixture.internalId))!.loginMethods[0]!.recipeUserId.getAsString();
+    expect(await reconcileUser({ supertokens_user_id: recipeId })).toMatchObject({ status: "OK", changed: false });
+  });
+
+  it("admin imports an absent explicit Rownd user and adds a new live method", async () => {
+    const rowndId = `rownd-${randomUUID()}`;
+    const profile: RowndUser = { state: "enabled", auth_level: "verified", data: { user_id: rowndId, email: `${randomUUID()}@example.com` }, verified_data: { email: true } };
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    expect(await reconcileUser({ rownd_user_id: rowndId })).toMatchObject({ status: "OK", changed: true });
+    const mapping = await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL" });
+    rownd.fetchUserInfo.mockResolvedValue({ ...profile, verified_data: { ...profile.verified_data, apple_id: randomUUID() } });
+    expect(await reconcileUser({ rownd_user_id: rowndId })).toMatchObject({ status: "OK", changed: true });
+    expect(await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL" })).toEqual(mapping);
+    expect((await SuperTokens.getUser(rowndId))?.loginMethods.some((method) => method.thirdParty?.id === "apple")).toBe(true);
+  });
+
+  it("admin reports a native canonical mismatch instead of false success", async () => {
+    const fixture = await seed("google");
+    const user = (await SuperTokens.getUser(fixture.internalId))!;
+    const emailId = user.loginMethods.find((method) => method.recipeId === "passwordless")!.recipeUserId.getAsString();
+    await UserMetadata.updateUserMetadata(fixture.internalId, { rownd_email_recipe_user_ids: { public: emailId } });
+    rownd.fetchUserInfo.mockResolvedValue({ ...fixture.current, data: { ...fixture.current.data, email: `${randomUUID()}@example.com` } });
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", message: expect.stringContaining("canonical policy") });
+  });
+
+  it("admin repairs a removed external mapping discovered through metadata", async () => {
+    const fixture = await seed("apple");
+    await UserMetadata.updateUserMetadata(fixture.internalId, { original_rownd_user: fixture.original });
+    await SuperTokens.deleteUserIdMapping({ userId: fixture.rowndId, userIdType: "EXTERNAL", force: true });
+    expect(await reconcileUser({ supertokens_user_id: fixture.internalId })).toMatchObject({ status: "OK", supertokens_user_id: fixture.internalId });
+    expect(await SuperTokens.getUserIdMapping({ userId: fixture.rowndId, userIdType: "EXTERNAL" })).toMatchObject({ status: "OK", superTokensUserId: fixture.internalId });
+  });
+
+  it("admin does not use contradictory same-ID historical snapshots as mapping restoration proof", async () => {
+    const fixture = await seed("apple");
+    await SuperTokens.deleteUserIdMapping({ userId: fixture.rowndId, userIdType: "EXTERNAL", force: true });
+    const writes = [vi.spyOn(SuperTokens, "createUserIdMapping"), vi.spyOn(AccountLinking, "linkAccounts"), vi.spyOn(UserMetadata, "updateUserMetadata")];
+    expect(await reconcileUser({ supertokens_user_id: fixture.internalId })).toMatchObject({ status: "BLOCKED", changed: false,
+      message: "Contradictory historical snapshots cannot authorize mapping restoration" });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it("admin returns ambiguous sources without selecting an email owner", async () => {
+    const email = `${randomUUID()}@example.com`;
+    const ids: string[] = [];
+    for (const provider of ["google", "apple"]) {
+      const created = await ThirdParty.manuallyCreateOrUpdateUser("public", provider, randomUUID(), email, false);
+      if (created.status !== "OK") throw new Error("Seed failed");
+      const rowndId = `rownd-${randomUUID()}`;
+      ids.push(rowndId);
+      await UserMetadata.updateUserMetadata(created.user.id, { original_rownd_user: { data: { user_id: rowndId } } });
+    }
+    rownd.fetchUserInfo.mockClear().mockImplementation(async ({ user_id }) => ids.includes(user_id) ? { data: { user_id } } : undefined);
+    const result = await reconcileUser({ email });
+    expect(result).toMatchObject({ status: "AMBIGUOUS", changed: false });
+    expect(result.candidates?.map((entry) => entry.rownd_user_id).sort()).toEqual(ids.sort());
+    expect(rownd.fetchUserInfo.mock.calls.map(([input]) => input.user_id)).toEqual(expect.arrayContaining(result.candidates!.map((entry) => entry.rownd_user_id)));
+  });
+
+  it("admin links an eligible existing replacement and retries an interruption", async () => {
+    const fixture = await seed("google");
+    const replacement = await ThirdParty.manuallyCreateOrUpdateUser("public", "google", fixture.subject, `${randomUUID()}@example.com`, false);
+    if (replacement.status !== "OK") throw new Error("Seed failed");
+    const failure = vi.spyOn(Multitenancy, "disassociateUserFromTenant").mockRejectedValueOnce(new Error("interrupted"));
+    try { expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "ERROR", partialProgress: true, message: "interrupted" }); }
+    finally { failure.mockRestore(); }
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "OK", supertokens_user_id: fixture.internalId });
+    expect((await SuperTokens.getUser(replacement.recipeUserId.getAsString()))?.id).toBe(fixture.rowndId);
   });
 
   it("retains the old recipe in another tenant and resumes after snapshot refresh", async () => {

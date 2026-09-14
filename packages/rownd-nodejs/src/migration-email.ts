@@ -10,17 +10,74 @@ import { fetchOptionalRowndUserInfo, validateRowndToken } from "./rownd-reposito
 import { assertMigrationMapping, assertMigrationSourceActive } from "./migration-mapping";
 import { migrationTelemetry } from "./telemetry/migrationTelemetry";
 import { clearSuperTokensCoreCallCache, isRecord, type JsonRecord } from "./utils";
-import { RowndLegacyUserNotFoundError } from "./errors";
+import { RowndLegacyUserNotFoundError, RowndMigrationPolicyError } from "./errors";
 import { resolveRowndProviderSubject } from "./provider-identity";
+import { assertAdministrativeElection } from "./migration-election";
 
 type AuthenticatedMigration = Readonly<{
   rowndUserId: string;
   tenantId: string;
   email?: string;
+  contactEmail?: string;
   identities: string;
 }>;
 
 const authenticatedMigrations = new WeakMap<SuperTokensUserImport, AuthenticatedMigration>();
+const administrativeMigrations = new WeakMap<SuperTokensUserImport, AuthenticatedMigration>();
+
+function verifiedProfileEmail(profile: RowndUser) {
+  const email = profile.data.email?.toLowerCase();
+  const verified = profile.verified_data?.email;
+  return email && !isSuperTokensFakeEmail(email) &&
+    (verified === true || (typeof verified === "string" && verified.toLowerCase() === email)) ? email : undefined;
+}
+
+export function assertRowndSourcePayload(profile: RowndUser) {
+  const invalid: string[] = [];
+  if (!isRecord(profile) || !isRecord(profile.data)) {
+    throw new RowndMigrationPolicyError("SOURCE_PAYLOAD_INVALID: data");
+  }
+  for (const container of ["data", "verified_data"] as const) {
+    const values = profile[container];
+    if (values == null) continue;
+    if (!isRecord(values)) { invalid.push(container); continue; }
+    for (const field of ["user_id", "email", "phone_number", "google_id", "apple_id"]) {
+      const value = values[field];
+      if (value === undefined || value === null) continue;
+      const marker = container === "verified_data" && typeof value === "boolean";
+      if (!marker && (typeof value !== "string" || !value.trim() ||
+          (field === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) ||
+          (field === "phone_number" && !/^\+[1-9]\d{1,14}$/.test(value)))) {
+        invalid.push(`${container}.${field}`);
+      }
+    }
+  }
+  if (typeof profile.data.user_id !== "string" || !profile.data.user_id.trim()) invalid.push("data.user_id");
+  if (invalid.length) throw new RowndMigrationPolicyError(`SOURCE_PAYLOAD_INVALID: ${[...new Set(invalid)].join(", ")}`);
+}
+
+// Server-only factory: arbitrary import objects and userContext flags cannot mint proof.
+export async function fetchAdministrativeMigrationSource(rowndUserId: string, tenantId: string, userContext: JsonRecord) {
+  await assertMigrationSourceActive(rowndUserId, userContext);
+  let profile: RowndUser | undefined;
+  try {
+    profile = await fetchOptionalRowndUserInfo(rowndUserId);
+  } catch (error) {
+    if (isRecord(error) && isRecord(error.response) && error.response.statusCode === 404) return undefined;
+    throw error;
+  }
+  if (!profile) return undefined;
+  assertRowndSourcePayload(profile);
+  if (profile.data?.user_id !== rowndUserId || !isRowndMigrationProfileActive(profile)) {
+    throw new RowndMigrationPolicyError("Rownd source is not the requested enabled user");
+  }
+  const source = mapRowndUserToSuperTokens(structuredClone(profile), tenantId);
+  const email = verifiedProfileEmail(profile);
+  const contactEmail = profile.data.email?.toLowerCase();
+  administrativeMigrations.set(source, Object.freeze({ rowndUserId, tenantId, email,
+    contactEmail: contactEmail && !isSuperTokensFakeEmail(contactEmail) ? contactEmail : undefined, identities: migrationIdentities(source) }));
+  return source;
+}
 
 export function isRowndMigrationProfileActive(profile: RowndUser) {
   // Older Rownd fetch responses omit state; explicit inactive states still deny migration.
@@ -33,8 +90,8 @@ function migrationIdentities(source: SuperTokensUserImport) {
       ? { ...method, email: method.email.toLowerCase(), isVerified: false } : method));
 }
 
-// Only this token-validating factory can mint contact ownership proof. Import
-// flags, userContext values, and arbitrary fetched profiles cannot reproduce it.
+// Token authorization can prove the current contact even without a verified_data
+// marker. Administrative contact ownership is separate from verification proof.
 export async function authenticateRowndMigration(token: string, tenantId: string, userContext: JsonRecord) {
   if (!tenantId) throw new Error("Authenticated Rownd migration requires a tenant");
   const rowndUserId = await validateRowndToken(token);
@@ -79,28 +136,43 @@ export async function authenticateRowndMigration(token: string, tenantId: string
 }
 
 export function getAuthenticatedMigrationEmail(source: SuperTokensUserImport, tenantId: string) {
-  const proof = authenticatedMigrations.get(source);
+  const proof = authenticatedMigrations.get(source) ?? administrativeMigrations.get(source);
   if (!proof) return undefined;
   if (proof.rowndUserId !== source.externalUserId || proof.tenantId !== tenantId ||
       proof.identities !== migrationIdentities(source)) {
-    throw new Error("Authenticated Rownd migration binding changed");
+    throw new RowndMigrationPolicyError("Authenticated Rownd migration binding changed");
   }
   return proof.email;
 }
 
+export function isAdministrativeMigration(source: SuperTokensUserImport, tenantId: string) {
+  getAuthenticatedMigrationEmail(source, tenantId);
+  return administrativeMigrations.has(source);
+}
+
+export function getMigrationContactEmail(source: SuperTokensUserImport, tenantId: string) {
+  const verifiedEmail = getAuthenticatedMigrationEmail(source, tenantId);
+  return administrativeMigrations.get(source)?.contactEmail ?? verifiedEmail;
+}
+
 export async function assertAuthenticatedMigrationSource(source: SuperTokensUserImport, tenantId: string) {
-  const proof = authenticatedMigrations.get(source);
+  const proof = authenticatedMigrations.get(source) ?? administrativeMigrations.get(source);
   if (!proof) return undefined;
   getAuthenticatedMigrationEmail(source, tenantId);
+  await assertAdministrativeElection(source);
   const fresh = await fetchOptionalRowndUserInfo(proof.rowndUserId);
   assertAuthenticatedProfile(fresh, proof);
+  if (administrativeMigrations.has(source) && verifiedProfileEmail(fresh) !== proof.email) {
+    throw new RowndMigrationPolicyError("Rownd verified email proof changed before reconciliation completion");
+  }
   return fresh;
 }
 
 function assertAuthenticatedProfile(fresh: RowndUser | undefined, proof: AuthenticatedMigration): asserts fresh is RowndUser {
+  if (fresh) assertRowndSourcePayload(fresh);
   if (!fresh || !isRowndMigrationProfileActive(fresh) || fresh.data?.user_id !== proof.rowndUserId ||
       migrationIdentities(mapRowndUserToSuperTokens(fresh, proof.tenantId)) !== proof.identities) {
-    throw new Error("Rownd source identity changed before migration completion");
+    throw new RowndMigrationPolicyError("Rownd source identity changed before migration completion");
   }
 }
 
@@ -134,7 +206,7 @@ function assertMigrationEmailPlan(plan: RowndPendingVerification, tenantId: stri
         method.recipeUserId === plan.targetCanonicalRecipeUserId ||
         typeof method.email !== "string" || method.email.toLowerCase() !== (source.previousEmail as string).toLowerCase()) ||
       new Set(plan.retiredMethods.map((method) => method.recipeUserId)).size !== plan.retiredMethods.length) {
-    throw new Error("Current Rownd email cleanup provenance is invalid");
+    throw new RowndMigrationPolicyError("Current Rownd email cleanup provenance is invalid");
   }
 }
 
@@ -166,17 +238,17 @@ export async function checkpointCurrentRowndEmailRetirement(input: {
   if (snapshot?.data.user_id !== plan.migrationSource.rowndUserId ||
       snapshot.data.email?.toLowerCase() !== plan.migrationSource.previousEmail ||
       resolveRowndProviderSubject(snapshot, plan.migrationSource.providerId) !== plan.migrationSource.providerUserId) {
-    throw new Error("Original Rownd retirement snapshot changed before checkpoint");
+    throw new RowndMigrationPolicyError("Original Rownd retirement snapshot changed before checkpoint");
   }
   const primary = (await UserMetadata.getUserMetadata(internalUserId, userContext)).metadata as RowndMetadata;
   const checkpoints = primary.rownd_migration_email_retirements;
   if (checkpoints !== undefined && !isRecord(checkpoints)) {
-    throw new Error("Current Rownd retirement checkpoints are invalid");
+    throw new RowndMigrationPolicyError("Current Rownd retirement checkpoints are invalid");
   }
   const expected = retirementCheckpoint(plan);
   const existing = checkpoints?.[tenantId];
   if (existing !== undefined && !isDeepStrictEqual(existing, expected)) {
-    throw new Error("Current Rownd retirement checkpoint changed");
+    throw new RowndMigrationPolicyError("Current Rownd retirement checkpoint changed");
   }
   // This independent checkpoint precedes snapshot replacement and is never rebuilt
   // from a persisted cleanup plan. Privileged writes to both records remain trusted.
@@ -188,7 +260,7 @@ export async function checkpointCurrentRowndEmailRetirement(input: {
   clearSuperTokensCoreCallCache(userContext);
   const saved = (await UserMetadata.getUserMetadata(internalUserId, userContext)).metadata as RowndMetadata;
   if (!isDeepStrictEqual(saved.rownd_migration_email_retirements?.[tenantId], expected)) {
-    throw new Error("Current Rownd retirement checkpoint was not persisted");
+    throw new RowndMigrationPolicyError("Current Rownd retirement checkpoint was not persisted");
   }
   return saved.rownd_migration_email_retirements!;
 }
@@ -206,7 +278,7 @@ export async function validateCurrentRowndEmailReconciliation(input: {
   const { metadata } = await UserMetadata.getUserMetadata(internalUserId, userContext);
   const stored = metadata as RowndMetadata;
   if (!isDeepStrictEqual(stored.rownd_migration_email_retirements?.[tenantId], retirementCheckpoint(plan))) {
-    throw new Error("Current Rownd email cleanup does not match its retirement checkpoint");
+    throw new RowndMigrationPolicyError("Current Rownd email cleanup does not match its retirement checkpoint");
   }
   const user = await SuperTokens.getUser(internalUserId, userContext);
   const target = user?.loginMethods.find((method) => method.recipeUserId.getAsString() === plan.targetCanonicalRecipeUserId);
@@ -229,7 +301,7 @@ export async function validateCurrentRowndEmailReconciliation(input: {
       !isRecord(snapshot?.data) || snapshot.data.user_id !== plan.migrationSource.rowndUserId ||
       stored.rownd_email_recipe_user_ids?.[tenantId] !== target.recipeUserId.getAsString() ||
       tenantPlans.length !== 1 || JSON.stringify(tenantPlans[0]) !== JSON.stringify(plan)) {
-    throw new Error("Current Rownd email cleanup plan changed");
+    throw new RowndMigrationPolicyError("Current Rownd email cleanup plan changed");
   }
   const snapshotMethods = mapRowndUserToSuperTokens(snapshot!, tenantId).loginMethods;
   if (!isRowndMigrationProfileActive(snapshot!) ||
@@ -237,7 +309,7 @@ export async function validateCurrentRowndEmailReconciliation(input: {
       provider.hasSameThirdPartyInfoAs({ id: method.thirdPartyId, userId: method.thirdPartyUserId })) ||
        !snapshotMethods.some((method) => method.recipeId === "passwordless" &&
         method.email?.toLowerCase() === plan.value.toLowerCase())) {
-    throw new Error("Current Rownd email cleanup source changed");
+    throw new RowndMigrationPolicyError("Current Rownd email cleanup source changed");
   }
   // Validate the whole retirement set before any destructive call. Unlike native
   // replacement, migration only retires snapshot-proven emails, never placeholders.
@@ -247,7 +319,7 @@ export async function validateCurrentRowndEmailReconciliation(input: {
     const method = owner.loginMethods.find((entry) => entry.recipeUserId.getAsString() === retired.recipeUserId);
     if (owner.id !== user.id || !method || method.recipeId !== "passwordless" ||
         !method.hasSameEmailAs(retired.email)) {
-      throw new Error("Current Rownd email cleanup ownership changed");
+      throw new RowndMigrationPolicyError("Current Rownd email cleanup ownership changed");
     }
   }
   return {
@@ -279,7 +351,7 @@ export async function finishCurrentRowndEmailReconciliation(input: {
   const { user: finalUser } = await validateCurrentRowndEmailReconciliation(input);
   if (finalUser.loginMethods.some((method) => (method.tenantIds.includes(tenantId) || method.tenantIds.length === 0) &&
       retiredMethods.some((retired) => retired.recipeUserId === method.recipeUserId.getAsString()))) {
-    throw new Error("Current Rownd email cleanup postcondition failed");
+    throw new RowndMigrationPolicyError("Current Rownd email cleanup postcondition failed");
   }
   const finalMetadata = (await UserMetadata.getUserMetadata(internalUserId, userContext)).metadata as RowndMetadata;
   await UserMetadata.updateUserMetadata(internalUserId, {
@@ -316,7 +388,7 @@ export async function prepareCurrentRowndEmailReconciliation(
       !snapshotEmail || isSuperTokensFakeEmail(snapshotEmail)) return undefined;
   if (!provider?.thirdParty) {
     if (scopedMethods.some((method) => method.thirdParty?.id === "apple") && snapshotEmail !== email) {
-      throw new Error("Current Rownd provider does not match the migrated Apple identity");
+      throw new RowndMigrationPolicyError("Current Rownd provider does not match the migrated Apple identity");
     }
     return undefined;
   }
@@ -335,14 +407,15 @@ export async function prepareCurrentRowndEmailReconciliation(
         !method.hasSameEmailAs(email) && !method.hasSameEmailAs(snapshotEmail) &&
         !(placeholderIds.includes(method.recipeUserId.getAsString()) &&
           method.hasSameEmailAs(snapshotProvider.email)))) {
-      throw new Error("Migrated email methods are ambiguous without a canonical method");
+      throw new RowndMigrationPolicyError("Migrated email methods are ambiguous without a canonical method");
     }
   };
   assertCompatibleMethods(user);
   if (snapshotEmail === email) return undefined;
   if (!emailMethods.some((method) => method.hasSameEmailAs(snapshotEmail))) return undefined;
   if (!requested.isVerified) {
-    throw new Error("Current Rownd email is not verified");
+    if (isAdministrativeMigration(source, tenantId)) return undefined;
+    throw new RowndMigrationPolicyError("Current Rownd email is not verified");
   }
   const assertFreshSource = async () => {
     const fresh = await fetchOptionalRowndUserInfo(source.externalUserId!);
@@ -353,7 +426,7 @@ export async function prepareCurrentRowndEmailReconciliation(
         !(getAuthenticatedMigrationEmail(source, tenantId) === email ||
           mapRowndUserToSuperTokens(fresh, tenantId).loginMethods.some((method) =>
             method.recipeId === "passwordless" && method.email?.toLowerCase() === email && method.isVerified))) {
-      throw new Error("Current Rownd email or provider identity changed before reconciliation");
+      throw new RowndMigrationPolicyError("Current Rownd email or provider identity changed before reconciliation");
     }
   };
   await assertFreshSource();

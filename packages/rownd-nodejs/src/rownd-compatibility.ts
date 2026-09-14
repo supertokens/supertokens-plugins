@@ -96,9 +96,11 @@ const INTERNAL_METADATA_FIELDS = new Set([
   "rownd_migration_target",
   "rownd_migration_canonical_target",
   "rownd_migration_reconciliation",
+  "rownd_migration_owner_consolidation",
 ]);
 
 const LINKED_OPERATIONAL_METADATA_FIELDS = new Set([
+  "rownd_migration_owner_consolidation",
   "rownd_migration_superseded",
   "rownd_migration_target",
   "rownd_migration_canonical_target",
@@ -463,7 +465,7 @@ export function buildRowndUserMetadata(rowndUser: RowndUser): JSONObject {
   };
 
   for (const [key, value] of Object.entries(rowndUser.data || {})) {
-    if (!isIdentityField(key) && value !== undefined) {
+    if (!isIdentityField(key) && !isInternalMetadataField(key) && value !== undefined) {
       metadata[key] = value as JsonValue;
     }
   }

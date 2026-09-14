@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { MigrationTelemetry } from "./telemetry/migrationTelemetry";
 import { assertMigrationMapping } from "./migration-mapping";
+import { resolveConsolidatedTokenOwner } from "./migration-consolidation";
 import { authenticateRowndMigration, assertAuthenticatedMigrationSource } from "./migration-email";
 import { resolveCanonicalEmailForTenant } from "./canonical-email";
 import SuperTokens from "supertokens-node";
@@ -339,12 +340,17 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
 
       telemetry.stage = "supertokens_lookup";
       user = await SuperTokens.getUser(rowndUserId, resolved.userContext);
+      const consolidatedAlias = await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext);
       telemetry.superTokensUserId = user?.id;
       const existingMetadata = user
         ? await getUserMetadata(user.id, resolved.userContext)
         : undefined;
 
-      if (!user || existingMetadata?.rownd_migration_complete !== true) {
+      if (consolidatedAlias) {
+        user = consolidatedAlias.user;
+        superTokensUserId = user.id;
+        recipeUserId = consolidatedAlias.recipeUserId;
+      } else if (!user || existingMetadata?.rownd_migration_complete !== true) {
         telemetry.stage = "reconciliation";
         const reconciled = await reconcileRowndUserWithExistingLoginMethods(
           stUserImport,
@@ -422,7 +428,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
 
       telemetry.stage = "recipe_selection";
       const tenantLoginMethod = user?.loginMethods.find((method) =>
-        method.tenantIds.includes(tenantId!),
+        method.tenantIds.includes(tenantId!) && (!consolidatedAlias || method.recipeUserId.getAsString() === rowndUserId),
       );
       recipeUserId = tenantLoginMethod?.recipeUserId ?? recipeUserId;
       telemetry.recipeUserId = recipeUserId?.getAsString();
@@ -445,6 +451,9 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
 
       telemetry.stage = "session_creation";
       await assertAuthenticatedMigrationSource(stUserImport, tenantId);
+      if (consolidatedAlias && (await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext))?.canonicalRowndId !== consolidatedAlias.canonicalRowndId) {
+        throw new Error("Consolidated Rownd alias ownership changed before session creation");
+      }
       clearSuperTokensCoreCallCache(resolved.userContext);
       const finalMapping = await SuperTokens.getUserIdMapping({
         userId: rowndUserId, userIdType: "EXTERNAL", userContext: resolved.userContext,
@@ -480,13 +489,16 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         resolved.userContext,
       );
       try {
-        if (createdSession.getUserId(resolved.userContext) !== rowndUserId ||
+        if (createdSession.getUserId(resolved.userContext) !== (consolidatedAlias?.canonicalRowndId ?? rowndUserId) ||
             createdSession.getRecipeUserId(resolved.userContext).getAsString() !== recipeUserId.getAsString() ||
             createdSession.getTenantId(resolved.userContext) !== tenantId) {
           telemetry.canonicalRowndUserId = createdSession.getUserId(resolved.userContext);
           throw new Error("Created session does not match the requested Rownd identity");
         }
         await assertMigrationMapping(internalUserId, rowndUserId, resolved.userContext);
+        if (consolidatedAlias && (await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext))?.canonicalRowndId !== consolidatedAlias.canonicalRowndId) {
+          throw new Error("Consolidated Rownd alias ownership changed after session creation");
+        }
       } catch (error) {
         await Promise.allSettled([Session.revokeSession(createdSession.getHandle(resolved.userContext), resolved.userContext)]);
         throw error;
@@ -494,7 +506,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       for (const write of responseWrites) write();
 
       telemetry.sessionCreated = true;
-      telemetry.canonicalRowndUserId = rowndUserId;
+      telemetry.canonicalRowndUserId = consolidatedAlias?.canonicalRowndId ?? rowndUserId;
       telemetry.emit("terminal", "session_created");
 
       return { status: "OK" as const };

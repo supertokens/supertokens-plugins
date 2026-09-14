@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.7.9
+
+### Patch Changes
+
+- Fix how the passwordless email is resolved
+
 ## 0.7.8
 
 ### Patch Changes

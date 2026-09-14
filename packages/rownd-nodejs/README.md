@@ -465,3 +465,299 @@ The script:
 
 All runtime config is read from the YAML file passed with `--config`.
 There is no environment variable parsing.
+
+## Administrative user reconciliation
+
+After initializing SuperTokens with the Rownd plugin, server code can reconcile a
+single user without a Rownd JWT or a session:
+
+```ts
+import { reconcileUser } from "@supertokens-plugins/rownd-nodejs";
+
+const result = await reconcileUser({
+  rownd_user_id: "rownd-user-id",
+  tenantId: "public",
+  userContext: {},
+});
+// Alternatively: reconcileUser({ email: "user@example.com" })
+// Or: reconcileUser({ supertokens_user_id: "internal-external-or-recipe-id" })
+```
+
+Exactly one selector is required, enforced by TypeScript and at runtime. Tenant
+defaults to `public`; the operation resolves the initialized dynamic plugin
+configuration for that tenant and user context. The API uses the initialized
+Rownd client and Core connection; it never reads local CLI profiles.
+
+`OK` includes `changed`, observed `actions`, `rownd_user_id`, the actual internal
+`supertokens_user_id`, and `recipe_user_ids`. Other outcomes are `NOT_FOUND`,
+`AMBIGUOUS` (with source/owner candidates), `BLOCKED`, or `ERROR`. Failures after
+reconciliation starts include `partialProgress`: mutations may already have
+completed, and retrying resumes the existing repair/retirement machinery.
+`changed` and `actions` describe observed account, mapping and metadata changes;
+they are not a transaction log of transient writes or session revocations.
+`changed` is `null` when final observation fails, or when reconciliation selects
+an existing owner without a before snapshot. The latter can occur with `OK` and
+empty `actions`; it does not mean nothing changed. Observation failures include
+`observationError`, preserving any original reconciliation error.
+
+`rownd_user_id` identifies the canonical source selected for reconciliation.
+`requested_rownd_user_id` retains an explicit original Rownd selector. When
+activity-based election chooses among competing sources, `election` includes
+the candidate IDs, normalized activity timestamps, and
+`basis: "latest_valid_activity"`. An explicit SuperTokens selector is retained
+as `requested_supertokens_user_id`; if election requires a different internal
+owner, that request returns `BLOCKED` rather than switching its target.
+When duplicate-owner consolidation cannot finish, `unresolved_owners` identifies
+the owners requiring further reconciliation. A healthy canonical winner alone
+does not satisfy consolidation postconditions.
+
+### CLI profiles and reconciliation
+
+```sh
+rownd-nodejs profiles add --profile stardust
+rownd-nodejs profiles list
+rownd-nodejs profiles show --profile stardust
+rownd-nodejs reconcile-user --profile stardust --rownd-user-id ROWND_USER_ID
+rownd-nodejs reconcile-user --profile stardust --rownd-user-id ROWND_USER_ID --dry-run
+rownd-nodejs reconcile-user --profile stardust --email user@example.com
+rownd-nodejs reconcile-user --profile stardust --supertokens-user-id SUPERTOKENS_ID
+rownd-nodejs profiles remove --profile stardust
+```
+
+`profiles add` prompts for Rownd app ID, app key, app secret, SuperTokens connection
+URI, optional Core API key, and tenant ID (default `public`). App keys, secrets,
+API keys, and the connection URI are masked during entry, keeping credentials out
+of command arguments and shell history. Ctrl-C cancels without saving a profile.
+For noninteractive use, explicitly supply `--app-id`, `--app-key`, `--app-secret`,
+and `--connection-uri`, with optional `--api-key` and `--tenant-id`. The singular
+`profile` command and positional profile names remain supported aliases.
+Connection URIs must use HTTP(S) without embedded username/password credentials;
+use the separate Core API key field for authentication.
+
+Profiles live at `~/.config/rownd-nodejs/profiles.json`, independently of any other
+package. The directory is owner-only (`0700`), the file is owner-only (`0600`),
+and updates use an atomic rename. Profile output masks app keys, app secrets,
+Core API keys and URI credentials. Reconciliation prints a structured JSON result
+with credential redaction and sanitized diagnostics; non-allowlisted messages
+become generic explanations. Execution exits zero for `OK`; dry run exits zero
+for `PREVIEW` with `canReconcile: true`. Other results exit nonzero.
+Argument, profile, or initialization failures instead print an error to stderr
+and exit nonzero. Commands are bundled in the package;
+from the package directory use `npm run cli -- reconcile-user ...`.
+
+### Dry run
+
+Pass `--dry-run` to the CLI or `dryRun: true` to the API with any selector:
+
+```ts
+const preview = await reconcileUser({
+  rownd_user_id: "rownd-user-id",
+  tenantId: "public",
+  dryRun: true,
+});
+```
+
+Dry run inspects live Rownd and SuperTokens state without importing, linking,
+changing mappings or metadata, verifying emails, or revoking sessions. It is
+disabled by default.
+
+Dry-run results include `dryRun: true`, `changed: false`, `actions: []` and
+`snapshotOnly: true`. Proposed changes are returned separately:
+
+- `proposedActions`: candidate repairs based on the inspected state.
+- `missingMethods`: expected identities absent from the selected owner.
+- `matchesSource`: whether the inspected account satisfies the source checks.
+- `canReconcile`: whether inspection can establish that reconciliation may
+  proceed without unresolved blockers or execution-time proof requirements.
+- `blockers` and `requiresExecutionProof`: conflicts or checks that inspection
+  cannot resolve. Conditional retirement and checkpoint recovery can require
+  execution-time proof, so `canReconcile: false` does not always mean execution
+  will fail.
+
+Successful inspection returns `PREVIEW`; known failures retain `BLOCKED`,
+`AMBIGUOUS`, `NOT_FOUND` or `ERROR`. A preview is a snapshot, not authorization or
+a guarantee of later execution. Run again without `dryRun` to apply repairs;
+execution revalidates live state.
+
+### Reconcile a CSV
+
+Use `reconcile-csv` to reconcile every unique Rownd ID in a CSV using one profile:
+
+```sh
+bun packages/rownd-nodejs/scripts/adminCli.ts reconcile-csv \
+  --profile stardust --file ./users.csv \
+  --concurrency 5 --failed-file ./failed.csv --dry-run
+```
+
+From a global installation, use `rownd-nodejs reconcile-csv` with the same flags.
+Remove `--dry-run` to apply repairs. The default ID column is `rownd_user_id`:
+
+```csv
+rownd_user_id,email
+user_123,first@example.com
+user_456,second@example.com
+```
+
+For a different header, pass `--id-column "Rownd ID"`. Only that column selects
+users; other CSV fields do not supply identity or verification evidence. The
+file must have a header. Quoted fields, embedded commas/newlines, UTF-8 BOM and
+CRLF are supported. Blank lines are ignored, surrounding ID whitespace is
+trimmed, and repeated IDs are processed once in first-seen order.
+
+The whole CSV is validated before clients are initialized or repairs begin.
+Missing IDs, inconsistent columns and malformed quoting reject the file.
+Reconciliation continues after individual failures. `--concurrency N` bounds
+the number of users processed at once (default `1`).
+Output is JSON Lines: a `type: "result"` record for each unique ID (with its
+sanitized reconciliation `result`), followed by a `type: "summary"` record with
+`total`, `duplicatesSkipped`, `succeeded`, `failed`, and `statuses` counts.
+Results arrive in completion order; `index` retains the original one-based
+position among unique IDs. Results preserve the canonical `rownd_user_id` even
+when election redirects an older input ID. `requested_rownd_user_id` identifies
+that original input, and the failure file always records the original input ID.
+
+Progress is logged to stderr at startup, every second, and when processing
+finishes. It shows completed/total unique IDs, percentage, active reconciliation
+calls, successes/failures, average users per second since startup, elapsed time
+and estimated time remaining. Throughput counts all completed results, including
+failures. ETA is unknown until the first user finishes and is only an estimate. A
+`complete` progress line means processing finished; the summary and exit code
+still indicate whether any users failed. JSON Lines remain on stdout, so results
+can be redirected while progress stays visible:
+
+```sh
+bun packages/rownd-nodejs/scripts/adminCli.ts reconcile-csv \
+  --profile stardust --file ./users.csv --concurrency 5 > results.jsonl
+```
+
+With `--failed-file`, unsuccessful IDs are saved as they finish to a CSV with a
+`rownd_user_id` header. This includes blocked/ambiguous/not-found/error results
+and previews with `canReconcile: false`. The output must be a new file in an
+existing directory; existing files are never overwritten. It is owner-only
+(`0600`) and contains only the header if every user succeeds. Dry run still
+writes this requested local report while leaving authentication state unchanged.
+If saving fails, new work stops and in-flight users finish before the command
+exits nonzero. Without `--failed-file`, results are only printed.
+
+Retry saved IDs with the same command, using a new output file:
+
+```sh
+bun packages/rownd-nodejs/scripts/adminCli.ts reconcile-csv \
+  --profile stardust --file ./failed.csv \
+  --concurrency 5 --failed-file ./failed-retry.csv
+```
+
+The command exits zero only if every unique ID returns `OK`, or every dry-run
+preview returns `PREVIEW` with `canReconcile: true`. Batch execution is not
+atomic: completed repairs remain if another user fails or the command is
+interrupted. Results are emitted as each user finishes.
+
+### Reconciliation boundaries
+
+- **Live Rownd is the reference.** Stored migration snapshots identify a source
+  and support retirement evidence; they do not override its current profile.
+  Provider IDs use `verified_data` first, then `data`.
+- Email selection searches SuperTokens in the selected tenant, then resolves
+  Rownd IDs from mappings and migration metadata. There is no Rownd email search.
+  Results are deduplicated by actual internal owner. Competing live Rownd sources
+  sharing the relevant identity are compared using the most recent valid timestamp
+  across `meta.last_sign_in` and `meta.last_active`. A unique most-recent source
+  wins; an explicit Rownd selector does not make an older source win. Ties or
+  insufficient activity evidence leave the sources ambiguous. Activity does not
+  authorize merging unrelated identities or bypass ownership safeguards.
+  Election alone is not a completed repair: eligible losing owners must join the
+  canonical owner, and their existing IDs must resolve to the shared account.
+  Unsupported consolidation returns `BLOCKED` even if the winner already has all
+  its expected methods. Dry run includes the required account-linking work.
+  Supported consolidation promotes the winner's existing account and links
+  eligible standalone donor recipes. Existing recipe IDs and their Rownd aliases
+  are retained so old and new IDs resolve to the shared primary account. A losing
+  method is not deleted simply because it is absent from the winner's current
+  profile. Checkpoints allow interrupted linking to resume, and incomplete
+  consolidation blocks both migration and native sign-in sessions. Session
+  creation checks consolidation before and after issuance; a failed post-check
+  revokes the new session before returning credentials. A required Rownd source
+  disappearing during recovery leaves the operation blocked rather than dropping
+  that owner from the repair.
+  No discoverable Rownd source for an email or
+  SuperTokens selector returns `BLOCKED`; a resolved Rownd source absent from
+  live lookup returns `NOT_FOUND`.
+- An explicit Rownd ID can import an absent user, add missing methods, link
+  eligible related standalone accounts, repair external mappings, and retire
+  supported replaced providers through the existing reconciliation engine.
+  Internal primary IDs remain stable: “updating user IDs” means changing the
+  external Rownd mapping, not recreating the primary account.
+- Server-fetched authorization is separate from JWT authorization. Administrative
+  contact ownership uses the live Rownd `data.email`, including when
+  `verified_data.email` is absent. This can authorize linking an eligible
+  standalone email method, but does not make that email verified. Email
+  verification still requires `verified_data.email === true` or a string matching
+  the current email case-insensitively. Arbitrary mapped imports and caller flags
+  cannot supply server-fetched proof. Evidence is revalidated before mutations.
+  Independently anchored phone donors may also be eligible; a shared phone number
+  alone is not authority to merge accounts.
+- Foreign primaries, conflicting mappings, stale evidence, and unsupported
+  canonical/pending email transitions are not force-merged or overwritten.
+  Native canonical choices remain protected. If that policy leaves any current
+  Rownd method missing, the result is `BLOCKED` with the mismatch, never `OK`.
+  Success checks **all** source methods, including methods skipped by native
+  canonical policy, and verification of matching email methods. Even with all
+  methods present, a canonical email conflicting with the currently verified
+  Rownd email or a pending email-verification transition in the selected tenant
+  returns `BLOCKED`. Existing token-login behavior is unchanged.
+
+### Interpreting saved audit findings
+
+Audit findings describe an extracted snapshot. Reconciliation fetches current
+Rownd and SuperTokens state before deciding which changes are supported. An
+owner is a primary SuperTokens account together with its linked login methods.
+
+- **Missing methods and provider drift:** recipe-level, contact-level and
+  provider-specific findings can describe the same missing identity. Match the
+  recipe, exact contact or provider subject, and tenant. The saved audit discussed
+  here used `data`-first provider precedence; reconciliation uses `verified_data`
+  first. When both contain different subjects, they describe different expected
+  identities.
+- **Verification:** `CONTACT_VERIFICATION_PENDING`, `SOURCE_VERIFICATION_DRIFT`
+  and `VERIFICATION_ALIAS_RESIDUE` can describe one existing method. Pending
+  verification alone does not authorize verification. Alias residue concerns
+  the verification record under the recipe's effective ID, not a missing method.
+  Source verification drift means Rownd verifies the current email while a
+  matching SuperTokens method is unverified, regardless of its recipe. Rownd
+  evidence is `verified_data.email === true` or a string matching the current
+  email case-insensitively.
+- **Split ownership and linking candidates:** `CURRENT_CONTACT_ON_OTHER_OWNER`,
+  email/phone owner splits, and `ACCOUNT_LINKING_CANDIDATE` can overlap. A shared
+  contact is not sufficient proof to merge accounts. Multiple external aliases
+  on one owner can be legitimate after linking.
+- **Placeholders:** a Passwordless address ending in
+  `@stfakeemail.supertokens.com` is an informational cleanup candidate. That suffix
+  alone does not authorize deletion. Provider placeholder emails and real Apple
+  relay addresses are not this Passwordless finding.
+- **Coverage:** invalid activity timestamps, partial exports and incomplete
+  extraction are evidence-quality findings. Absence from an export does not
+  establish live absence or authorize account creation. Live tenant membership
+  must be checked even when the selected tenant defaults to `public`.
+
+Do not add overlapping rule counts to calculate distinct affected users.
+
+The complete saved-audit code inventory, grouped for reference:
+
+- **Source identity and quality:** `SOURCE_USER_NOT_RESOLVED`,
+  `SOURCE_PAYLOAD_INVALID`, `SOURCE_ID_MISMATCH`, `SOURCE_ID_CONFLICT`.
+- **Audit coverage:** `SOURCE_ACTIVITY_INVALID`, `SOURCE_EXPORT_PARTIAL`,
+  `TARGET_EVIDENCE_INCOMPLETE`, `TARGET_MEMBERSHIP_EVIDENCE_INCOMPLETE`.
+- **Mappings and account structure:** `MAPPING_TARGET_MISSING`,
+  `EXTERNAL_ID_MAPPING_MISSING`, `EXTERNAL_ALIAS_AMBIGUOUS`,
+  `OWNER_MEMBERSHIP_INCONSISTENT`, `MULTIPLE_EXTERNAL_IDENTITIES_ON_OWNER`.
+- **Verification and placeholders:** `SYNTHETIC_PASSWORDLESS_METHOD`,
+  `VERIFICATION_ALIAS_RESIDUE`, `SOURCE_VERIFICATION_DRIFT`,
+  `CONTACT_VERIFICATION_PENDING`.
+- **Missing methods:** `PASSWORDLESS_AUTH_METHOD_MISSING`,
+  `THIRDPARTY_AUTH_METHOD_MISSING`, `PASSWORDLESS_EMAIL_MISSING`,
+  `PASSWORDLESS_PHONE_MISSING`, `PROVIDER_METHOD_MISSING`,
+  `APPLE_METHOD_MISSING`, `GOOGLE_METHOD_MISSING`.
+- **Provider subject drift:** `APPLE_ID_MISMATCH`, `GOOGLE_ID_MISMATCH`.
+- **Split ownership and linking:** `CURRENT_CONTACT_ON_OTHER_OWNER`,
+  `EMAIL_OWNER_SPLIT`, `PHONE_OWNER_SPLIT`, `PROVIDER_IDENTITY_SPLIT`,
+  `ACCOUNT_LINKING_CANDIDATE`.

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SuperTokens from "supertokens-node";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import { assertMigrationSourceActive, retireDuplicateMapping } from "./migration-mapping";
+import { authenticateRowndMigration, fetchAdministrativeMigrationSource } from "./migration-email";
 import { mapRowndUserToSuperTokens } from "./rownd-compatibility";
 import { setRowndClient } from "./rownd-repository";
 import { reconcileRowndUserWithExistingLoginMethods } from "./supertokens-repository";
@@ -111,6 +112,20 @@ describe("durable duplicate mapping recovery", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     setRowndClient(undefined);
+  });
+
+  it.each(["raw", "token", "unbound admin"])("keeps published donor protection without a bound admin election: %s", async (kind) => {
+    setRowndClient({ validateToken: async () => ({ user_id: "A" }), fetchUserInfo: async ({ user_id }) => ({
+      ...profile(user_id), meta: { last_active: user_id === "A" ? "2020-01-02T00:00:00.000Z" : "2020-01-01T00:00:00.000Z" },
+    }) });
+    metadata.set("B", { rownd_migration_canonical_target: internalId });
+    const requested = kind === "token" ? (await authenticateRowndMigration("token", "public", {})).source :
+      kind === "unbound admin" ? (await fetchAdministrativeMigrationSource("A", "public", {}))! : source;
+    await expect(retireDuplicateMapping({ source: requested, ownerInternalId: internalId, targetInternalId: internalId,
+      tenantId: "public", userContext: {} })).rejects.toThrow("The duplicate mapping already has an elected canonical Rownd user");
+    expect(UserMetadata.updateUserMetadata).not.toHaveBeenCalled();
+    expect(SuperTokens.deleteUserIdMapping).not.toHaveBeenCalled();
+    expect(externalId).toBe("B");
   });
 
   it.each([

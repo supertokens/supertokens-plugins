@@ -16,6 +16,7 @@ export default defineConfig([
   {
     entry: {
       cli: "scripts/cli.ts",
+      adminCli: "scripts/adminCli.ts",
       initConfig: "scripts/initConfig.ts",
       bulkMigrate: "scripts/bulkMigrate.ts",
       bulkImportMonitor: "scripts/bulkImportMonitor.ts",

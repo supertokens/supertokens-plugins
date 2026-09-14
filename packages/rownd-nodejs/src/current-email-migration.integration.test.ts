@@ -1,11 +1,18 @@
 import express from "express";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { createServer, request } from "node:http";
 import type { Server } from "node:http";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import SuperTokens from "supertokens-node";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
 import Passwordless from "supertokens-node/recipe/passwordless";
 import EmailVerification from "supertokens-node/recipe/emailverification";
+import EmailPassword from "supertokens-node/recipe/emailpassword";
 import Session from "supertokens-node/recipe/session";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
@@ -30,7 +37,10 @@ import { getCombinedUserMetadata, mapRowndUserToSuperTokens } from "./rownd-comp
 import { importUser, prepareEmailForPasswordlessAuth, reconcileRowndUserWithExistingLoginMethods } from "./supertokens-repository";
 import type { RowndUser } from "./types";
 import { associateUserLoginMethodsToTenant } from "./pluginImplementation";
-import { validateCurrentRowndEmailReconciliation } from "./migration-email";
+import { fetchAdministrativeMigrationSource, validateCurrentRowndEmailReconciliation } from "./migration-email";
+import { prepareOwnerConsolidation } from "./migration-consolidation";
+import { reconcileUser, type ReconcileUserInput } from "./reconcile-user";
+import { getPluginConfig, setPluginConfig } from "./config";
 
 const rownd = { validateToken: vi.fn(), fetchUserInfo: vi.fn() };
 vi.mock("@rownd/node", () => ({ createInstance: () => rownd }));
@@ -88,11 +98,19 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
       recipeList: [
         AccountLinking.init({ shouldDoAutomaticAccountLinking: async () => ({ shouldAutomaticallyLink: false }) }),
         Session.init(), UserMetadata.init(), EmailVerification.init({ mode: "OPTIONAL" }),
-        Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" }), ThirdParty.init(),
+        Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" }), ThirdParty.init(), EmailPassword.init(),
       ],
       experimental: { plugins: [init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret" })] },
     });
     app.use(middleware());
+    app.post("/test/native-session", async (req, res) => {
+      try {
+        await Session.createNewSession(req, res, "public", SuperTokens.convertToRecipeUserId(req.header("x-recipe-user-id")!));
+        res.json({ status: "OK" });
+      } catch (error) {
+        res.status(409).json({ status: "ERROR", message: error instanceof Error ? error.message : "Session failed" });
+      }
+    });
     app.use(errorHandler());
   }
   beforeEach(async () => {
@@ -162,6 +180,1291 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
     expect((await SuperTokens.getUserIdMapping({ userId: fixture.rowndId, userIdType: "EXTERNAL" }))).toMatchObject({ superTokensUserId: fixture.internalId });
     return target;
   }
+
+  async function spyOnReconciliationWrites(added: Array<{ mockRestore(): void }> = []) {
+    const repository = await import("./supertokens-repository");
+    const provider = await import("./migration-provider");
+    const email = await import("./migration-email");
+    const watch = <T extends object>(object: T, key: keyof T) => {
+      const existing = object[key];
+      if (vi.isMockFunction(existing)) return existing;
+      const spy = vi.spyOn(object, key as never);
+      added.push(spy);
+      return spy;
+    };
+    return [watch(repository, "importUser"), watch(repository, "reconcileRowndUserWithExistingLoginMethods"),
+      watch(provider, "finishProviderIntroductions"), watch(provider, "prepareRowndProviderRetirement"),
+      watch(email, "finishCurrentRowndEmailReconciliation"), watch(SuperTokens, "createUserIdMapping"),
+      watch(SuperTokens, "deleteUserIdMapping"), watch(SuperTokens, "deleteUser"),
+      watch(AccountLinking, "createPrimaryUser"), watch(AccountLinking, "linkAccounts"), watch(AccountLinking, "unlinkAccount"),
+      watch(UserMetadata, "updateUserMetadata"), watch(UserMetadata, "clearUserMetadata"),
+      watch(Passwordless, "signInUp"), watch(Passwordless, "updateUser"), watch(Passwordless, "revokeAllCodes"),
+      watch(ThirdParty, "manuallyCreateOrUpdateUser"), watch(EmailPassword, "signUp"),
+      watch(EmailVerification, "createEmailVerificationToken"), watch(EmailVerification, "verifyEmailUsingToken"),
+      watch(EmailVerification, "unverifyEmail"), watch(EmailVerification, "revokeEmailVerificationTokens"),
+      watch(Session, "createNewSession"), watch(Session, "createNewSessionWithoutRequestResponse"), watch(Session, "revokeAllSessionsForUser"),
+      watch(Multitenancy, "associateUserToTenant"), watch(Multitenancy, "disassociateUserFromTenant")];
+  }
+
+  async function readOnlyPreview(input: ReconcileUserInput) {
+    const added: Array<{ mockRestore(): void }> = [];
+    const writes = await spyOnReconciliationWrites(added);
+    const before = writes.map((write) => write.mock.calls.length);
+    try {
+      const result = await reconcileUser({ ...input, dryRun: true });
+      expect(result).toMatchObject({ dryRun: true, changed: false, actions: [], snapshotOnly: true });
+      writes.forEach((write, index) => expect(write.mock.calls.length).toBe(before[index]));
+      return result;
+    } finally {
+      for (const spy of added.reverse()) spy.mockRestore();
+    }
+  }
+
+  async function seedInvalidPublicCanonical() {
+    const fixture = await seed(true);
+    const contact = fixture.separate!;
+    await AccountLinking.linkAccounts(contact.recipeUserId, fixture.internalId);
+    const outsidePublic = `outside-public-${randomUUID()}`;
+    await Multitenancy.createOrUpdateTenant(outsidePublic, { firstFactors: ["link-email"] });
+    await Multitenancy.associateUserToTenant(outsidePublic, contact.recipeUserId);
+    await Multitenancy.disassociateUserFromTenant("public", contact.recipeUserId);
+    await UserMetadata.updateUserMetadata(fixture.internalId, { rownd_email_recipe_user_ids: { public: contact.recipeUserId.getAsString() } });
+    return fixture;
+  }
+
+  async function seedPhoneReference(currentPhone: boolean, duplicate: boolean) {
+    const rowndId = `phone-reference-${randomUUID()}`;
+    const donorId = `email-reference-${randomUUID()}`;
+    const email = `${randomUUID()}@example.com`;
+    const phoneNumber = `+1555${Math.floor(Math.random() * 10000000).toString().padStart(7, "0")}`;
+    const phone = await Passwordless.signInUp({ tenantId: "public", phoneNumber });
+    const donor = await Passwordless.signInUp({ tenantId: "public", email });
+    await EmailVerification.unverifyEmail(donor.recipeUserId, email);
+    await SuperTokens.createUserIdMapping({ superTokensUserId: phone.user.id, externalUserId: rowndId });
+    const original: RowndUser = { data: { user_id: rowndId, phone_number: phoneNumber, ...(!duplicate ? { email } : {}) }, verified_data: {} };
+    const profile: RowndUser = { state: "enabled", data: { user_id: rowndId, email, ...(currentPhone ? { phone_number: phoneNumber } : {}) }, verified_data: currentPhone ? { phone_number: true } : {},
+      meta: { last_sign_in: "2020-07-12T21:54:40.454Z", last_active: "2020-07-12T21:54:40.454Z" } };
+    const donorProfile: RowndUser = { state: "enabled", data: { user_id: donorId, email }, verified_data: {},
+      meta: { last_sign_in: "2020-07-13T10:56:04.098Z", last_active: "2020-07-13T10:56:04.098Z" } };
+    await UserMetadata.updateUserMetadata(phone.user.id, { original_rownd_user: original, rownd_migration_complete: true });
+    if (duplicate) {
+      await SuperTokens.createUserIdMapping({ superTokensUserId: donor.user.id, externalUserId: donorId });
+      await UserMetadata.updateUserMetadata(donor.user.id, { original_rownd_user: donorProfile, rownd_migration_complete: true });
+    }
+    const profiles = new Map([[rowndId, profile], ...(duplicate ? [[donorId, donorProfile] as const] : [])]);
+    rownd.fetchUserInfo.mockImplementation(async ({ user_id }) => profiles.get(user_id));
+    return { rowndId, donorId, email, phone, donor, profile, donorProfile, profiles };
+  }
+
+  it.each([false, true])("admin uses live unverified data.email to link a standalone contact to its phone owner (currentPhone=%s)", async (currentPhone) => {
+    const fixture = await seedPhoneReference(currentPhone, false);
+    const preview = await readOnlyPreview({ rownd_user_id: fixture.rowndId });
+    expect(preview, JSON.stringify(preview)).toMatchObject({ status: "PREVIEW", canReconcile: true,
+      proposedActions: expect.arrayContaining([expect.objectContaining({ action: "link_method", recipeUserId: fixture.donor.user.id })]) });
+    expect(preview.proposedActions?.some(({ action }) => action === "verify_email")).toBe(false);
+    const ev = [vi.spyOn(EmailVerification, "createEmailVerificationToken"), vi.spyOn(EmailVerification, "verifyEmailUsingToken"), vi.spyOn(EmailVerification, "unverifyEmail")];
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "OK", supertokens_user_id: fixture.phone.user.id });
+    const user = (await SuperTokens.getUser(fixture.rowndId))!;
+    expect(user.loginMethods).toHaveLength(2);
+    expect(user.loginMethods.find((method) => method.hasSameEmailAs(fixture.email))).toMatchObject({ verified: false });
+    expect(user.loginMethods.some((method) => method.recipeUserId.getAsString() === fixture.donor.user.id)).toBe(true);
+    for (const write of ev) expect(write).not.toHaveBeenCalled();
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "OK", changed: false });
+  });
+
+  it("Core preserves recipe mappings when consolidating a mapped phone owner into a mapped email primary", async () => {
+    const fixture = await seedPhoneReference(false, true);
+    expect(await AccountLinking.createPrimaryUser(fixture.donor.recipeUserId)).toMatchObject({ status: "OK" });
+    expect(await AccountLinking.linkAccounts(SuperTokens.convertToRecipeUserId(fixture.rowndId), fixture.donor.user.id)).toMatchObject({ status: "OK" });
+    for (const id of [fixture.rowndId, fixture.donorId, fixture.phone.user.id, fixture.donor.user.id]) {
+      expect((await SuperTokens.getUser(id))!.id).toBe(fixture.donorId);
+    }
+    expect(await SuperTokens.getUserIdMapping({ userId: fixture.rowndId, userIdType: "EXTERNAL" })).toMatchObject({ status: "OK", superTokensUserId: fixture.phone.user.id });
+    expect(await SuperTokens.getUserIdMapping({ userId: fixture.donorId, userIdType: "EXTERNAL" })).toMatchObject({ status: "OK", superTokensUserId: fixture.donor.user.id });
+    expect((await SuperTokens.getUser(fixture.rowndId))!.loginMethods.find((method) => method.hasSameEmailAs(fixture.email))).toMatchObject({ verified: false });
+  });
+
+  it("admin creates a missing data.email method without granting email verification", async () => {
+    const fixture = await seedPhoneReference(true, false);
+    await SuperTokens.deleteUser(fixture.donor.user.id);
+    expect(await readOnlyPreview({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "PREVIEW", canReconcile: true });
+    const tokens = [vi.spyOn(EmailVerification, "createEmailVerificationToken"), vi.spyOn(EmailVerification, "verifyEmailUsingToken"), vi.spyOn(EmailVerification, "unverifyEmail")];
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "OK" });
+    expect((await SuperTokens.getUser(fixture.rowndId))!.loginMethods.find((method) => method.hasSameEmailAs(fixture.email))).toMatchObject({ verified: false });
+    for (const write of tokens) expect(write).not.toHaveBeenCalled();
+  });
+
+  it("admin rejects a live data.email change after linking without verification escalation", async () => {
+    const fixture = await seedPhoneReference(true, false);
+    const link = AccountLinking.linkAccounts.bind(AccountLinking);
+    vi.spyOn(AccountLinking, "linkAccounts").mockImplementation(async (...args) => {
+      const result = await link(...args);
+      fixture.profile.data.email = `${randomUUID()}@example.com`;
+      return result;
+    });
+    const writes = [vi.spyOn(EmailVerification, "createEmailVerificationToken"), vi.spyOn(EmailVerification, "verifyEmailUsingToken")];
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", message: "Rownd source identity changed before migration completion" });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect((await SuperTokens.getUser(fixture.rowndId))!.loginMethods.find((method) => method.recipeUserId.getAsString() === fixture.donor.user.id)).toMatchObject({ verified: false });
+  });
+
+  it.each([false, true])("admin consolidates the older phone owner under the newer email source (newerRequestedFirst=%s)", async (newerRequested) => {
+    const fixture = await seedPhoneReference(false, true);
+    if (newerRequested) expect(await reconcileUser({ rownd_user_id: fixture.donorId })).toMatchObject({ status: "OK" });
+    expect(await readOnlyPreview({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "PREVIEW", canReconcile: true, matchesSource: false,
+      rownd_user_id: fixture.donorId, supertokens_user_id: fixture.donor.user.id,
+      requested_rownd_user_id: fixture.rowndId, proposedActions: expect.arrayContaining([
+        expect.objectContaining({ action: "create_primary", supertokens_user_id: fixture.donor.user.id }),
+        expect.objectContaining({ action: "link_method", recipeUserId: fixture.phone.user.id }),
+      ]) });
+    const writes = [vi.spyOn(SuperTokens, "deleteUserIdMapping"), vi.spyOn(EmailVerification, "createEmailVerificationToken"),
+      vi.spyOn(EmailVerification, "verifyEmailUsingToken"), vi.spyOn(EmailVerification, "unverifyEmail")];
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "OK", changed: true, rownd_user_id: fixture.donorId, supertokens_user_id: fixture.donor.user.id,
+      requested_rownd_user_id: fixture.rowndId });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    for (const [alias, internal] of [[fixture.rowndId, fixture.phone.user.id], [fixture.donorId, fixture.donor.user.id]]) {
+      expect(await SuperTokens.getUserIdMapping({ userId: alias, userIdType: "EXTERNAL" })).toMatchObject({ status: "OK", superTokensUserId: internal });
+      const user = (await SuperTokens.getUser(alias!))!;
+      expect(user.id).toBe(fixture.donorId);
+      expect(user.loginMethods).toHaveLength(2);
+      expect(user.loginMethods.find((method) => method.hasSameEmailAs(fixture.email))).toMatchObject({ verified: false });
+      const retry = await reconcileUser({ rownd_user_id: alias! });
+      expect(retry, JSON.stringify(retry)).toMatchObject({ status: "OK", changed: false, rownd_user_id: fixture.donorId });
+    }
+    expect(await reconcileUser({ email: fixture.email })).toMatchObject({ status: "OK", changed: false, rownd_user_id: fixture.donorId });
+  });
+
+  it("an explicit SuperTokens owner cannot silently redirect reconciliation to a different owner", async () => {
+    const fixture = await seedPhoneReference(false, true);
+    const result = await readOnlyPreview({ supertokens_user_id: fixture.phone.user.id });
+    expect(result).toMatchObject({ status: "BLOCKED", canReconcile: false, rownd_user_id: fixture.donorId,
+      requested_rownd_user_id: fixture.rowndId, message: "The SuperTokens selector belongs to a different canonical Rownd owner" });
+    const writes = await spyOnReconciliationWrites();
+    expect(await reconcileUser({ supertokens_user_id: fixture.phone.user.id })).toMatchObject({ status: "BLOCKED" });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each(["old", "new"])("JWT migration creates a canonical session through the %s consolidated alias", async (requested) => {
+    const fixture = await seedPhoneReference(false, true);
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "OK" });
+    const alias = requested === "old" ? fixture.rowndId : fixture.donorId;
+    rownd.validateToken.mockResolvedValue({ user_id: alias });
+    const response = await fetch(`${baseUrl}/auth/plugin/rownd/migrate`, {
+      method: "POST", headers: { Authorization: "Bearer actual-validated-fixture-token", "st-auth-mode": "header", rid: "session", "fdi-version": "1.18" },
+    });
+    expect({ status: response.status, body: await response.json() }).toEqual({ status: 200, body: { status: "OK" } });
+    expect(rownd.validateToken).toHaveBeenCalled();
+    const session = await Session.getSessionWithoutRequestResponse(response.headers.get("st-access-token")!);
+    expect(session.getUserId()).toBe(fixture.donorId);
+    const profile = await fetch(`${baseUrl}/auth/plugin/rownd/user`, {
+      headers: { Authorization: `Bearer ${response.headers.get("st-access-token")}`, rid: "session", "fdi-version": "1.18" },
+    });
+    expect(await profile.json()).toMatchObject({ status: "OK", rownd_user: fixture.donorId, data: { email: fixture.email } });
+    if (requested === "old") {
+      expect(session.getRecipeUserId().getAsString()).toBe(fixture.rowndId);
+      expect((await SuperTokens.getUser(alias))!.loginMethods.find((method) => method.hasSameEmailAs(fixture.email))).toMatchObject({ verified: false });
+    }
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "OK", changed: false, rownd_user_id: fixture.donorId });
+  });
+
+  it.each(["promotion", "second link", "after link"])("admin retries incomplete owner consolidation after failure at %s", async (failure) => {
+    const fixture = await seedPhoneReference(false, true);
+    const thirdId = `third-reference-${randomUUID()}`;
+    const third = await ThirdParty.manuallyCreateOrUpdateUser("public", "google", randomUUID(), fixture.email, false);
+    if (third.status !== "OK") throw new Error("Third owner creation failed");
+    const thirdInternal = third.recipeUserId.getAsString();
+    await SuperTokens.createUserIdMapping({ superTokensUserId: thirdInternal, externalUserId: thirdId });
+    const thirdProfile: RowndUser = { data: { user_id: thirdId, email: fixture.email }, verified_data: {}, meta: { last_active: "2020-07-11T00:00:00Z" } };
+    fixture.profiles.set(thirdId, thirdProfile);
+    await UserMetadata.updateUserMetadata(thirdInternal, { original_rownd_user: thirdProfile, rownd_migration_complete: true });
+    const link = AccountLinking.linkAccounts.bind(AccountLinking);
+    let interrupted = false;
+    const linker = vi.spyOn(AccountLinking, "linkAccounts").mockImplementation(async (...args) => {
+      const stop = !interrupted && (failure !== "second link" || args[0].getAsString() === thirdId);
+      if (stop && failure !== "after link") { interrupted = true; throw new Error("consolidation link interrupted"); }
+      const result = await link(...args);
+      if (stop) { interrupted = true; throw new Error("consolidation link response interrupted"); }
+      return result;
+    });
+    const first = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(first, JSON.stringify(first)).toMatchObject({ status: "ERROR", changed: true, partialProgress: true });
+    expect((await SuperTokens.getUser(fixture.donorId))!.isPrimaryUser).toBe(true);
+    expect((await UserMetadata.getUserMetadata(fixture.donor.user.id)).metadata.rownd_migration_owner_consolidation).toMatchObject({ status: "LINKING" });
+    if (failure !== "promotion") expect((await SuperTokens.getUser(fixture.rowndId))!.id).toBe(fixture.donorId);
+    rownd.validateToken.mockResolvedValue({ user_id: fixture.rowndId });
+    if (failure !== "promotion") {
+      const handles = await Session.getAllSessionHandlesForUser(fixture.donorId);
+      await expect(Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(fixture.rowndId))).rejects.toThrow(/consolidation/i);
+      const native = await fetch(`${baseUrl}/test/native-session`, {
+        method: "POST", headers: { "x-recipe-user-id": fixture.rowndId, "st-auth-mode": "header" },
+      });
+      expect(native.status).toBe(409);
+      expect(native.headers.get("st-access-token")).toBeNull();
+      expect(native.headers.get("set-cookie")).toBeNull();
+      expect(await Session.getAllSessionHandlesForUser(fixture.donorId)).toEqual(handles);
+      const blockedLogin = await fetch(`${baseUrl}/auth/plugin/rownd/migrate`, {
+        method: "POST", headers: { Authorization: "Bearer fixture-token", "st-auth-mode": "header", rid: "session", "fdi-version": "1.18" },
+      });
+      expect(blockedLogin.headers.get("st-access-token")).toBeNull();
+      expect(await blockedLogin.json()).toMatchObject({ status: "ERROR" });
+    }
+    linker.mockRestore();
+    const retry = await reconcileUser({ rownd_user_id: fixture.donorId });
+    expect(retry, JSON.stringify(retry)).toMatchObject({ status: "OK", changed: true, rownd_user_id: fixture.donorId });
+    for (const [alias, id] of [[fixture.rowndId, fixture.phone.user.id], [fixture.donorId, fixture.donor.user.id], [thirdId, thirdInternal]]) {
+      expect((await SuperTokens.getUser(alias!))!.id).toBe(fixture.donorId);
+      expect(await SuperTokens.getUserIdMapping({ userId: alias, userIdType: "EXTERNAL" })).toMatchObject({ status: "OK", superTokensUserId: id });
+    }
+    expect((await SuperTokens.getUser(fixture.donorId))!.loginMethods).toHaveLength(3);
+    expect((await SuperTokens.getUser(fixture.donorId))!.loginMethods.find((method) => method.recipeId === "passwordless" && method.hasSameEmailAs(fixture.email))).toMatchObject({ verified: false });
+    expect((await UserMetadata.getUserMetadata(fixture.donor.user.id)).metadata.rownd_migration_owner_consolidation).toMatchObject({ status: "COMPLETE" });
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "OK", changed: false });
+    expect((await Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(fixture.rowndId))).getUserId()).toBe(fixture.donorId);
+    for (const recipeId of [fixture.donorId, thirdId]) {
+      expect((await Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(recipeId))).getUserId()).toBe(fixture.donorId);
+    }
+  });
+
+  it.each([["request", "before"], ["request", "after"], ["without request", "before"], ["without request", "after"]])(
+    "native session creation (%s) revokes credentials when consolidation starts %s Core issuance", async (mode, timing) => {
+    const fixture = await seedPhoneReference(false, true);
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "OK" });
+    const existing = await Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(fixture.donorId));
+    const checkpoint = (await UserMetadata.getUserMetadata(fixture.donor.user.id)).metadata.rownd_migration_owner_consolidation;
+    await UserMetadata.updateUserMetadata(fixture.donor.user.id, { rownd_migration_owner_consolidation: null });
+    const querier = Reflect.get(SessionRaw.getInstanceOrThrowError(), "querier") as Querier;
+    const send = querier.sendPostRequest.bind(querier);
+    let issued: string | undefined;
+    const race = vi.spyOn(querier, "sendPostRequest").mockImplementation(async (...args) => {
+      const createsSession = typeof args[0] === "object" && args[0].path === "/<tenantId>/recipe/session";
+      const interrupt = () => UserMetadata.updateUserMetadata(fixture.donorId, { rownd_migration_owner_consolidation: { ...checkpoint, status: "LINKING" } });
+      if (createsSession && timing === "before") await interrupt();
+      const result = await send(...args);
+      if (createsSession) {
+        issued = result.session.handle;
+        if (timing === "after") await interrupt();
+      }
+      return result;
+    });
+    try {
+      if (mode === "without request") {
+        await expect(Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(fixture.rowndId))).rejects.toThrow(/consolidation/i);
+      } else {
+        const response = await fetch(`${baseUrl}/test/native-session`, {
+          method: "POST", headers: { "x-recipe-user-id": fixture.rowndId, "st-auth-mode": "header" },
+        });
+        expect(response.status).toBe(409);
+        expect(response.headers.get("st-access-token")).toBeNull();
+        expect(response.headers.get("set-cookie")).toBeNull();
+      }
+    } finally { race.mockRestore(); }
+    expect(issued).toBeDefined();
+    expect(await Session.getSessionInformation(issued!)).toBeUndefined();
+    expect(await Session.getAllSessionHandlesForUser(fixture.donorId)).toEqual([existing.getHandle()]);
+  });
+
+  it.each(["LINKING", "COMMITTING", "malformed"])("native session creation blocks %s checkpoints under a linked alias", async (status) => {
+    const fixture = await seedPhoneReference(false, true);
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "OK" });
+    const checkpoint = (await UserMetadata.getUserMetadata(fixture.donor.user.id)).metadata.rownd_migration_owner_consolidation;
+    await UserMetadata.updateUserMetadata(fixture.rowndId, { rownd_migration_owner_consolidation: status === "malformed" ? {} : { ...checkpoint, status } });
+    const querier = Reflect.get(SessionRaw.getInstanceOrThrowError(), "querier") as Querier;
+    const writes = vi.spyOn(querier, "sendPostRequest");
+    await expect(Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(fixture.donorId))).rejects.toThrow(/consolidation/i);
+    expect(writes.mock.calls.filter(([path]) => typeof path === "object" && path.path === "/<tenantId>/recipe/session")).toHaveLength(0);
+    expect(await Session.getAllSessionHandlesForUser(fixture.donorId)).toEqual([]);
+    await UserMetadata.updateUserMetadata(fixture.rowndId, { rownd_migration_owner_consolidation: null });
+    expect((await Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(fixture.rowndId))).getUserId()).toBe(fixture.donorId);
+  });
+
+  async function seedHistoricalEmailDonor(nativeVerified: boolean) {
+    const fixture = await seedPhoneReference(false, true);
+    const emailB = `${randomUUID()}@example.com`;
+    expect(await Passwordless.updateUser({ recipeUserId: SuperTokens.convertToRecipeUserId(fixture.rowndId), email: emailB, phoneNumber: null })).toMatchObject({ status: "OK" });
+    await EmailVerification.unverifyEmail(SuperTokens.convertToRecipeUserId(fixture.rowndId), emailB);
+    const verifiedB = await EmailPassword.signUp("public", emailB, "password123!");
+    if (verifiedB.status !== "OK") throw new Error("Failed to create native B");
+    if (nativeVerified) {
+      const token = await EmailVerification.createEmailVerificationToken("public", verifiedB.recipeUserId, emailB);
+      if (token.status === "OK") await EmailVerification.verifyEmailUsingToken("public", token.token);
+    }
+    await AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(fixture.donorId));
+    await AccountLinking.linkAccounts(verifiedB.recipeUserId, fixture.donorId);
+    return { ...fixture, emailB, nativeB: verifiedB.recipeUserId };
+  }
+
+  it.each(["email A", "provider only", "contact only"])("consolidation cannot use %s proof to implicitly verify a historical donor email B", async (proof) => {
+    const fixture = await seedHistoricalEmailDonor(true);
+    fixture.donorProfile.verified_data = proof === "email A" ? { email: true } : proof === "provider only" ? { google_id: "fixture-google" } : {};
+    const writes = [vi.spyOn(AccountLinking, "linkAccounts"), vi.spyOn(EmailVerification, "createEmailVerificationToken"), vi.spyOn(EmailVerification, "verifyEmailUsingToken")];
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "BLOCKED", changed: false });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect((await SuperTokens.getUser(fixture.rowndId))!.loginMethods[0]).toMatchObject({ verified: false, email: fixture.emailB });
+  });
+
+  it("unexpected implicit donor verification keeps consolidation and native sessions blocked across retry", async () => {
+    const fixture = await seedHistoricalEmailDonor(false);
+    fixture.donorProfile.verified_data = { email: true };
+    const link = AccountLinking.linkAccounts.bind(AccountLinking);
+    vi.spyOn(AccountLinking, "linkAccounts").mockImplementationOnce(async (...args) => {
+      const token = await EmailVerification.createEmailVerificationToken("public", fixture.nativeB, fixture.emailB);
+      if (token.status === "OK") await EmailVerification.verifyEmailUsingToken("public", token.token);
+      return link(...args);
+    });
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "BLOCKED", changed: true });
+    expect((await SuperTokens.getUser(fixture.rowndId))!.id).toBe(fixture.donorId);
+    const checkpoint = (await UserMetadata.getUserMetadata(fixture.donor.user.id)).metadata.rownd_migration_owner_consolidation;
+    expect(checkpoint).toMatchObject({ status: "LINKING", members: expect.arrayContaining([
+      expect.objectContaining({ rownd_user_id: fixture.rowndId, unverifiedEmail: fixture.emailB }),
+    ]) });
+    await expect(Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(fixture.rowndId))).rejects.toThrow(/consolidation/i);
+    expect(await reconcileUser({ rownd_user_id: fixture.donorId })).toMatchObject({ status: "BLOCKED", changed: false });
+    expect(await Session.getAllSessionHandlesForUser(fixture.donorId)).toEqual([]);
+  });
+
+  it.each([false, true])("implicit donor verification requires proof for that same email (verified=%s)", async (verified) => {
+    const fixture = await seedPhoneReference(false, true);
+    fixture.profile.meta = { last_active: "2020-07-15T00:00:00Z" };
+    fixture.profile.verified_data = verified ? { email: true } : {};
+    const native = await EmailPassword.signUp("public", fixture.email, "password123!");
+    if (native.status !== "OK") throw new Error("Native email creation failed");
+    const token = await EmailVerification.createEmailVerificationToken("public", native.recipeUserId, fixture.email);
+    if (token.status === "OK") await EmailVerification.verifyEmailUsingToken("public", token.token);
+    await AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(fixture.rowndId));
+    await AccountLinking.linkAccounts(native.recipeUserId, fixture.rowndId);
+    const writes = [vi.spyOn(AccountLinking, "linkAccounts"), vi.spyOn(EmailVerification, "createEmailVerificationToken"), vi.spyOn(EmailVerification, "verifyEmailUsingToken")];
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: verified ? "OK" : "BLOCKED" });
+    if (!verified) for (const write of writes) expect(write).not.toHaveBeenCalled();
+    const donor = (await SuperTokens.getUser(fixture.donorId))!;
+    expect(donor.loginMethods.find((method) => method.recipeUserId.getAsString() === fixture.donorId)).toMatchObject({ verified });
+    expect(donor.id).toBe(verified ? fixture.rowndId : fixture.donorId);
+  });
+
+  it.each(["undefined", "404"])("required consolidation source disappearance (%s) blocks preview and execution", async (missing) => {
+    const fixture = await seedPhoneReference(false, true);
+    vi.spyOn(AccountLinking, "linkAccounts").mockRejectedValueOnce(new Error("link interrupted"));
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "ERROR", changed: true });
+    rownd.fetchUserInfo.mockImplementation(async ({ user_id }) => {
+      if (user_id === fixture.rowndId) {
+        if (missing === "404") throw { response: { statusCode: 404 } };
+        return undefined;
+      }
+      return fixture.profiles.get(user_id);
+    });
+    const writes = await spyOnReconciliationWrites();
+    const counts = writes.map((write) => write.mock.calls.length);
+    for (const dryRun of [true, false]) {
+      const result = await reconcileUser({ rownd_user_id: fixture.donorId, dryRun });
+      expect(result, JSON.stringify(result)).toMatchObject({ status: "BLOCKED", changed: false,
+        unresolved_owners: expect.arrayContaining([expect.objectContaining({ rownd_user_id: fixture.rowndId })]) });
+    }
+    writes.forEach((write, index) => expect(write.mock.calls.length).toBe(counts[index]));
+    expect((await SuperTokens.getUser(fixture.rowndId))!.id).toBe(fixture.rowndId);
+    expect((await UserMetadata.getUserMetadata(fixture.donor.user.id)).metadata.rownd_migration_owner_consolidation).toMatchObject({ status: "LINKING" });
+  });
+
+  it.each(["activity", "mapping", "checkpoint"])("admin blocks %s drift immediately before a donor link", async (drift) => {
+    const fixture = await seedPhoneReference(false, true);
+    const check = AccountLinking.canLinkAccounts.bind(AccountLinking);
+    vi.spyOn(AccountLinking, "canLinkAccounts").mockImplementationOnce(async (...args) => {
+      const result = await check(...args);
+      if (drift === "activity") fixture.profile.meta = { last_active: "2020-07-15T00:00:00Z" };
+      if (drift === "mapping") await SuperTokens.deleteUserIdMapping({ userId: fixture.rowndId, userIdType: "EXTERNAL", force: true });
+      if (drift === "checkpoint") await UserMetadata.updateUserMetadata(fixture.donor.user.id, { rownd_migration_owner_consolidation: null });
+      return result;
+    });
+    const link = vi.spyOn(AccountLinking, "linkAccounts");
+    const verify = vi.spyOn(EmailVerification, "createEmailVerificationToken");
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "BLOCKED", changed: true, unresolved_owners: expect.any(Array) });
+    expect(link).not.toHaveBeenCalled();
+    expect(verify).not.toHaveBeenCalled();
+    expect((await SuperTokens.getUser(fixture.phone.user.id))!.isPrimaryUser).toBe(false);
+  });
+
+  it("owner consolidation cannot execute without its private fresh election", async () => {
+    const fixture = await seedPhoneReference(false, true);
+    const source = (await fetchAdministrativeMigrationSource(fixture.donorId, "public", {}))!;
+    const input = { source, target: fixture.donor.user.id, tenantId: "public", userContext: {}, candidates: [
+      { rownd_user_id: fixture.rowndId, supertokens_user_id: fixture.phone.user.id },
+      { rownd_user_id: fixture.donorId, supertokens_user_id: fixture.donor.user.id },
+    ] };
+    const writes = await spyOnReconciliationWrites();
+    expect(await prepareOwnerConsolidation({ ...input, source: { ...source } })).toBeUndefined();
+    const plan = await prepareOwnerConsolidation(input);
+    await expect(plan!.execute()).rejects.toThrow("the private election binding is missing");
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it("a winner JWT cannot publish a session while required owners are still separate", async () => {
+    const fixture = await seedPhoneReference(false, true);
+    vi.spyOn(AccountLinking, "linkAccounts").mockRejectedValueOnce(new Error("link interrupted"));
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "ERROR", changed: true });
+    rownd.validateToken.mockResolvedValue({ user_id: fixture.donorId });
+    const response = await fetch(`${baseUrl}/auth/plugin/rownd/migrate`, {
+      method: "POST", headers: { Authorization: "Bearer fixture-token", "st-auth-mode": "header", rid: "session", "fdi-version": "1.18" },
+    });
+    expect(response.headers.get("st-access-token")).toBeNull();
+    expect(await response.json()).toMatchObject({ status: "ERROR" });
+    expect(await reconcileUser({ rownd_user_id: fixture.donorId })).toMatchObject({ status: "OK", changed: true });
+  });
+
+  it("admin elects a newer provenance-backed source before restoring its missing mapping", async () => {
+    const fixture = await seedPhoneReference(false, true);
+    await SuperTokens.deleteUserIdMapping({ userId: fixture.donorId, userIdType: "EXTERNAL", force: true });
+    expect(await readOnlyPreview({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "PREVIEW", canReconcile: true,
+      rownd_user_id: fixture.donorId, requested_rownd_user_id: fixture.rowndId, supertokens_user_id: fixture.donor.user.id });
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "OK", rownd_user_id: fixture.donorId, supertokens_user_id: fixture.donor.user.id });
+    expect((await SuperTokens.getUser(fixture.rowndId))!.loginMethods).toHaveLength(2);
+    expect((await SuperTokens.getUser(fixture.donorId))!.loginMethods).toHaveLength(2);
+  });
+
+  it("admin checks the elected source's durable target in preview and execution", async () => {
+    const fixture = await seedPhoneReference(false, true);
+    await UserMetadata.updateUserMetadata(fixture.donorId, { rownd_migration_target: fixture.phone.user.id });
+    expect(await readOnlyPreview({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", canReconcile: false,
+      rownd_user_id: fixture.donorId, unresolved_owners: expect.any(Array) });
+    const writes = await spyOnReconciliationWrites();
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", changed: false });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each(["tie", "missing", "invalid", "future"])("admin leaves duplicate Rownd sources ambiguous without reliable activity: %s", async (scenario) => {
+    const fixture = await seedPhoneReference(false, true);
+    fixture.donorProfile.meta = scenario === "missing" ? {} : { last_active: scenario === "tie" ? fixture.profile.meta!.last_active :
+      scenario === "invalid" ? "2020-02-31T00:00:00.000Z" : "2999-01-01T00:00:00.000Z" };
+    expect(await readOnlyPreview({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "AMBIGUOUS", canReconcile: false,
+      election: { candidates: expect.arrayContaining([expect.objectContaining({ rownd_user_id: fixture.rowndId }), expect.objectContaining({ rownd_user_id: fixture.donorId })]) } });
+    const writes = await spyOnReconciliationWrites();
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "AMBIGUOUS", changed: false });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("admin re-elects from fresh activity after preview instead of applying a stale plan (publishedDonor=%s)", async (publishedDonor) => {
+    const fixture = await seedPhoneReference(false, true);
+    if (publishedDonor) await UserMetadata.updateUserMetadata(fixture.donorId, { rownd_migration_canonical_target: fixture.donor.user.id });
+    expect(await readOnlyPreview({ rownd_user_id: fixture.rowndId })).toMatchObject({ rownd_user_id: fixture.donorId });
+    fixture.profile.meta = { last_active: "2020-07-14T00:00:00.000Z" };
+    const preview = await readOnlyPreview({ rownd_user_id: fixture.rowndId });
+    expect(preview, JSON.stringify(preview)).toMatchObject({ status: "PREVIEW", canReconcile: true, rownd_user_id: fixture.rowndId, blockers: [],
+      proposedActions: expect.arrayContaining([expect.objectContaining({ action: "link_method", recipeUserId: fixture.donor.user.id })]) });
+    const ev = [vi.spyOn(EmailVerification, "createEmailVerificationToken"), vi.spyOn(EmailVerification, "verifyEmailUsingToken"), vi.spyOn(EmailVerification, "unverifyEmail")];
+    const refreshed = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(refreshed, JSON.stringify(refreshed)).toMatchObject({ status: "OK", rownd_user_id: fixture.rowndId, supertokens_user_id: fixture.phone.user.id });
+    for (const write of ev) expect(write).not.toHaveBeenCalled();
+    expect((await SuperTokens.getUser(fixture.rowndId))!.loginMethods.find((method) => method.hasSameEmailAs(fixture.email))).toMatchObject({ verified: false });
+    expect(await SuperTokens.getUserIdMapping({ userId: fixture.donorId, userIdType: "EXTERNAL" })).toMatchObject({ status: "OK", superTokensUserId: fixture.donor.user.id });
+  });
+
+  it.each(["wrong target", "contradictory target", "primary"])("admin rejects a published donor with %s before dangerous writes", async (invalid) => {
+    const fixture = await seedPhoneReference(false, true);
+    fixture.profile.meta = { last_active: "2020-07-14T00:00:00.000Z" };
+    await UserMetadata.updateUserMetadata(fixture.donorId, {
+      rownd_migration_canonical_target: invalid === "wrong target" ? fixture.phone.user.id : fixture.donor.user.id,
+      ...(invalid === "contradictory target" ? { rownd_migration_target: fixture.phone.user.id } : {}),
+    });
+    if (invalid === "primary") await AccountLinking.createPrimaryUser(fixture.donor.recipeUserId);
+    expect(await readOnlyPreview({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", canReconcile: false });
+    const writes = await spyOnReconciliationWrites();
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", changed: false });
+    for (const write of writes.filter((write) => !["reconcileRowndUserWithExistingLoginMethods", "finishProviderIntroductions", "prepareRowndProviderRetirement"].includes(write.getMockName()))) {
+      expect(write).not.toHaveBeenCalled();
+    }
+    expect(await SuperTokens.getUserIdMapping({ userId: fixture.donorId, userIdType: "EXTERNAL" })).toMatchObject({ status: "OK", superTokensUserId: fixture.donor.user.id });
+  });
+
+  it.each([["activity", "reservation"], ["marker", "reservation"], ["activity", "promotion"], ["marker", "promotion"]])(
+    "admin rechecks published donor %s after %s before further writes", async (drift, checkpoint) => {
+    const fixture = await seedPhoneReference(false, true);
+    fixture.profile.meta = { last_active: "2020-07-14T00:00:00.000Z" };
+    await UserMetadata.updateUserMetadata(fixture.donorId, { rownd_migration_canonical_target: fixture.donor.user.id });
+    const update = UserMetadata.updateUserMetadata.bind(UserMetadata);
+    const changeEvidence = async () => {
+      if (drift === "activity") fixture.donorProfile.meta = { last_active: "2020-07-15T00:00:00.000Z" };
+      else await update(fixture.donorId, { rownd_migration_canonical_target: fixture.phone.user.id });
+    };
+    vi.spyOn(UserMetadata, "updateUserMetadata").mockImplementation(async (id, data, context) => {
+      const result = await update(id, data, context);
+      if (checkpoint === "reservation" && id === fixture.phone.user.id && data.rownd_migration_owner_consolidation !== undefined) await changeEvidence();
+      return result;
+    });
+    const promote = AccountLinking.createPrimaryUser.bind(AccountLinking);
+    vi.spyOn(AccountLinking, "createPrimaryUser").mockImplementation(async (...args) => {
+      const result = await promote(...args);
+      if (checkpoint === "promotion") await changeEvidence();
+      return result;
+    });
+    const writes = [vi.spyOn(SuperTokens, "deleteUserIdMapping"), vi.spyOn(AccountLinking, "linkAccounts"),
+      vi.spyOn(EmailVerification, "createEmailVerificationToken"), vi.spyOn(EmailVerification, "verifyEmailUsingToken")];
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED" });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    if (checkpoint === "reservation") expect((await UserMetadata.getUserMetadata(fixture.donorId)).metadata.rownd_migration_superseded).toBeUndefined();
+    expect(await SuperTokens.getUserIdMapping({ userId: fixture.donorId, userIdType: "EXTERNAL" })).toMatchObject({ status: "OK", superTokensUserId: fixture.donor.user.id });
+  });
+
+  it("admin blocks activity drift after election and before any write", async () => {
+    const fixture = await seedPhoneReference(false, true);
+    const election = await import("./migration-election");
+    const assertElection = election.assertAdministrativeElection;
+    vi.spyOn(election, "assertAdministrativeElection").mockImplementationOnce(async (source) => {
+      fixture.profile.meta = { last_active: "2020-07-14T00:00:00.000Z" };
+      await assertElection(source);
+    });
+    const writes = await spyOnReconciliationWrites();
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", changed: false,
+      message: "Rownd activity election changed before reconciliation completion" });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each(["identity", "owner", "tenant"])("admin blocks changed election evidence before writes: %s", async (change) => {
+    const fixture = await seedPhoneReference(false, true);
+    const election = await import("./migration-election");
+    const assertElection = election.assertAdministrativeElection;
+    vi.spyOn(election, "assertAdministrativeElection").mockImplementationOnce(async (source) => {
+      if (change === "identity") fixture.profile.data.email = `${randomUUID()}@example.com`;
+      else {
+        const getUser = SuperTokens.getUser.bind(SuperTokens);
+        vi.spyOn(SuperTokens, "getUser").mockImplementation(async (id, context) => {
+          const user = await getUser(id, context);
+          if (id === fixture.phone.user.id && user) {
+            if (change === "owner") user.id = "changed-owner";
+            else for (const method of user.loginMethods) method.tenantIds = ["another-tenant"];
+          }
+          return user;
+        });
+      }
+      await assertElection(source);
+    });
+    const writes = await spyOnReconciliationWrites();
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", changed: false,
+      message: "Rownd activity election changed before reconciliation completion" });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it("public preview blocks a canonical pointer whose matching email method is absent from public", async () => {
+    const fixture = await seedInvalidPublicCanonical();
+    const before = (await SuperTokens.getUser(fixture.internalId))!.toJson();
+    const metadata = (await UserMetadata.getUserMetadata(fixture.internalId)).metadata;
+    expect(await readOnlyPreview({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", canReconcile: false,
+      blockers: [{ code: "CANONICAL_EMAIL_POLICY" }], missingMethods: [expect.objectContaining({ recipeId: "passwordless", email: fixture.email })] });
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED",
+      message: expect.stringContaining("Current Rownd methods remain missing") });
+    expect((await SuperTokens.getUser(fixture.internalId))!.toJson()).toEqual(before);
+    expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata).toEqual(metadata);
+  });
+
+  it.each([false, true])("public preview requires publication proof for an unproven native email owner (metadata=%s)", async (hasMetadata) => {
+    const rowndId = `native-${randomUUID()}`;
+    const email = `${randomUUID()}@example.com`;
+    const native = await Passwordless.signInUp({ tenantId: "public", email });
+    if (hasMetadata) await UserMetadata.updateUserMetadata(native.user.id, { native: true });
+    rownd.fetchUserInfo.mockResolvedValue({ data: { user_id: rowndId, email }, verified_data: { email: true } });
+    const before = (await SuperTokens.getUser(native.user.id))!.toJson();
+    expect(await readOnlyPreview({ rownd_user_id: rowndId })).toMatchObject({ status: "PREVIEW", canReconcile: false,
+      proposedActions: expect.arrayContaining([{ action: "create_mapping", supertokens_user_id: native.user.id, conditional: true }]),
+      requiresExecutionProof: [{ code: hasMetadata ? "MAPPING_METADATA_REQUIRES_EXECUTION_PROOF" : "NATIVE_MAPPING_PUBLICATION_REQUIRES_EXECUTION_PROOF", supertokens_user_id: native.user.id }] });
+    expect((await SuperTokens.getUser(native.user.id))!.toJson()).toEqual(before);
+    const publication = vi.spyOn(SuperTokens, "createUserIdMapping");
+    const result = await reconcileUser({ rownd_user_id: rowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: hasMetadata ? "ERROR" : "OK" });
+    expect(publication.mock.calls.every(([input]) => input.force !== true)).toBe(true);
+    if (hasMetadata) {
+      expect(await SuperTokens.getUser(rowndId)).toBeUndefined();
+      expect((await SuperTokens.getUser(native.user.id))!.toJson()).toEqual(before);
+      expect((await UserMetadata.getUserMetadata(native.user.id)).metadata).toEqual({ native: true });
+    }
+  });
+
+  it("bundled --dry-run uses only read-only Core requests, preserves profiles, and returns explicit preview exit codes", async () => {
+    const exec = promisify(execFile);
+    await exec("../../node_modules/.bin/tsup");
+    const home = await mkdtemp(join(tmpdir(), "rownd-preview-cli-"));
+    const fixture = await seed();
+    const native = await Passwordless.signInUp({ tenantId: "public", email: `${randomUUID()}@example.com` });
+    await UserMetadata.updateUserMetadata(native.user.id, { native: true });
+    const invalidCanonical = await seedInvalidPublicCanonical();
+    const requested: Array<{ method: string; url: string }> = [];
+    const proxy = createServer((req, res) => {
+      requested.push({ method: req.method!, url: req.url! });
+      const upstream = request(`http://${core.getHost()}:${core.getMappedPort(3567)}${req.url}`, { method: req.method, headers: req.headers }, (response) => {
+        res.writeHead(response.statusCode!, response.headers);
+        response.pipe(res);
+      });
+      upstream.on("error", () => { res.writeHead(502); res.end(); });
+      req.pipe(upstream);
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    const run = async (args: string[], preload?: string) => {
+      try {
+        const output = await exec(process.execPath, ["dist/cli.js", ...args], { env: { ...process.env, TEST_MODE: "testing", HOME: home,
+          ...(preload ? { NODE_OPTIONS: `--require=${preload}` } : {}) }, timeout: 15000 });
+        return { ...output, code: 0 };
+      } catch (error) { return error as { stdout: string; stderr: string; code: number }; }
+    };
+    try {
+      const address = proxy.address();
+      if (!address || typeof address === "string") throw new Error("Missing proxy address");
+      expect((await run(["profiles", "add", "--profile", "preview", "--app-id", "app", "--app-key", "preview-private-key",
+        "--app-secret", "preview-private-secret", "--connection-uri", `http://127.0.0.1:${address.port}`])).code).toBe(0);
+      const profilesPath = join(home, ".config", "rownd-nodejs", "profiles.json");
+      await chmod(profilesPath, 0o640);
+      const profiles = await readFile(profilesPath, "utf8");
+      const profileStat = await stat(profilesPath);
+      const preload = join(home, "rownd.cjs");
+      const profilePath = join(home, "source.json");
+      await writeFile(preload, `const Module = require('node:module');
+const original = Module._load;
+Module._load = function(id, ...args) {
+  if (id === '@rownd/node') return { createInstance: () => ({
+    validateToken: async () => { throw new Error('unexpected token'); },
+    fetchUserInfo: async () => JSON.parse(require('node:fs').readFileSync(${JSON.stringify(profilePath)}, 'utf8'))
+  }) };
+  return original.call(this, id, ...args);
+};`);
+      const cases = [
+        { profile: { data: { user_id: `new-${randomUUID()}`, email: `${randomUUID()}@example.com` }, verified_data: {} }, status: "PREVIEW", canReconcile: true, code: 0 },
+        { profile: { ...fixture.original, verified_data: { email: true, apple_id: randomUUID() } }, status: "PREVIEW", canReconcile: false, code: 1 },
+        { profile: { data: { user_id: `native-${randomUUID()}`, email: native.user.loginMethods[0].email }, verified_data: {} }, status: "PREVIEW", canReconcile: false, code: 1 },
+        { profile: invalidCanonical.current, status: "BLOCKED", canReconcile: false, code: 1 },
+        { profile: { data: { user_id: `native-${randomUUID()}`, email: native.user.loginMethods[0].email }, verified_data: { email: true } }, status: "PREVIEW", canReconcile: false, code: 1 },
+      ];
+      for (const test of cases) {
+        await writeFile(profilePath, JSON.stringify(test.profile));
+        const result = await run(["reconcile-user", "--profile", "preview", "--rownd-user-id", test.profile.data.user_id, "--dry-run"], preload);
+        expect(result.code, result.stderr + result.stdout).toBe(test.code);
+        expect(JSON.parse(result.stdout)).toMatchObject({ status: test.status, canReconcile: test.canReconcile, dryRun: true, changed: false, actions: [], snapshotOnly: true });
+        expect(result.stdout + result.stderr).not.toContain("preview-private");
+      }
+      expect(requested.length).toBeGreaterThan(0);
+      expect(requested.filter(({ method }) => method !== "GET")).toEqual([]);
+      expect(await readFile(profilesPath, "utf8")).toBe(profiles);
+      const after = await stat(profilesPath);
+      expect(after.mode).toBe(profileStat.mode);
+      expect(after.mtimeMs).toBe(profileStat.mtimeMs);
+      expect(after.ctimeMs).toBe(profileStat.ctimeMs);
+    } finally {
+      await new Promise<void>((resolve, reject) => proxy.close((error) => error ? reject(error) : resolve()));
+      await rm(home, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it.each(["missing", "inactive", "malformed", "transport", "proof drift"])("dry run preserves failure semantics without writes: %s", async (scenario) => {
+    const rowndId = `preview-${randomUUID()}`;
+    const profile: RowndUser = { data: { user_id: rowndId, email: `${randomUUID()}@example.com` }, verified_data: { email: true } };
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    if (scenario === "missing") rownd.fetchUserInfo.mockResolvedValue(undefined);
+    if (scenario === "inactive") rownd.fetchUserInfo.mockResolvedValue({ ...profile, state: "disabled" });
+    if (scenario === "malformed") rownd.fetchUserInfo.mockResolvedValue({ ...profile, data: { ...profile.data, phone_number: [] } });
+    if (scenario === "transport") rownd.fetchUserInfo.mockRejectedValue(new Error("Core unavailable"));
+    if (scenario === "proof drift") rownd.fetchUserInfo.mockResolvedValue({ ...profile, verified_data: {} }).mockResolvedValueOnce(profile);
+    expect(await readOnlyPreview({ rownd_user_id: rowndId })).toMatchObject({ canReconcile: false,
+      status: scenario === "missing" ? "NOT_FOUND" : scenario === "transport" ? "ERROR" : "BLOCKED" });
+  });
+
+  it.each([false, true])("dry run applies the shared donor linking policy (primary=%s)", async (primary) => {
+    const fixture = await seed(true);
+    if (primary) await AccountLinking.createPrimaryUser(fixture.separate!.recipeUserId);
+    const before = (await SuperTokens.getUser(fixture.separate!.user.id))!.toJson();
+    const result = await readOnlyPreview({ rownd_user_id: fixture.rowndId });
+    if (primary) expect(result).toMatchObject({ status: "BLOCKED", canReconcile: false,
+      blockers: expect.arrayContaining([{ code: "FOREIGN_OWNER_NOT_ELIGIBLE", recipeUserId: fixture.separate!.recipeUserId.getAsString() }]) });
+    else expect(result).toMatchObject({ status: "PREVIEW", proposedActions: expect.arrayContaining([
+      expect.objectContaining({ action: "link_method", recipeUserId: fixture.separate!.recipeUserId.getAsString() }),
+    ]) });
+    expect((await SuperTokens.getUser(fixture.separate!.user.id))!.toJson()).toEqual(before);
+  });
+
+  it("dry run proposes an import without creating any Core state", async () => {
+    const rowndId = `preview-${randomUUID()}`;
+    rownd.fetchUserInfo.mockResolvedValue({ data: { user_id: rowndId, email: `${randomUUID()}@example.com`, apple_id: randomUUID() }, verified_data: { email: true } });
+    const writes = await spyOnReconciliationWrites();
+    expect(await reconcileUser({ rownd_user_id: rowndId, dryRun: true })).toMatchObject({ status: "PREVIEW", dryRun: true, changed: false,
+      actions: [], canReconcile: true, matchesSource: false, snapshotOnly: true, proposedActions: [{ action: "import_user" }], missingMethods: expect.any(Array) });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect(await SuperTokens.getUser(rowndId)).toBeUndefined();
+    expect((await UserMetadata.getUserMetadata(rowndId)).metadata).toEqual({});
+  });
+
+  it.each(["rownd", "email", "recipe"])("dry run reports a healthy no-op using %s selector", async (selector) => {
+    const fixture = await seed();
+    expect((await reconcileUser({ rownd_user_id: fixture.rowndId })).status).toBe("OK");
+    const before = (await SuperTokens.getUser(fixture.internalId))!.toJson();
+    const metadata = (await UserMetadata.getUserMetadata(fixture.internalId)).metadata;
+    const writes = await spyOnReconciliationWrites();
+    const input = selector === "rownd" ? { rownd_user_id: fixture.rowndId } : selector === "email" ? { email: fixture.email }
+      : { supertokens_user_id: before.loginMethods.find((method) => method.recipeId === "passwordless")!.recipeUserId };
+    expect(await reconcileUser({ ...input, dryRun: true })).toMatchObject({ status: "PREVIEW", canReconcile: true, matchesSource: true,
+      dryRun: true, changed: false, actions: [], proposedActions: [], missingMethods: [], blockers: [] });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect((await SuperTokens.getUser(fixture.internalId))!.toJson()).toEqual(before);
+    expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata).toEqual(metadata);
+  });
+
+  it("dry run proposes adding a missing method, without election, creation or linking", async () => {
+    const rowndId = `preview-${randomUUID()}`;
+    const profile: RowndUser = { data: { user_id: rowndId, email: `${randomUUID()}@example.com` }, verified_data: { email: true } };
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    expect((await reconcileUser({ rownd_user_id: rowndId })).status).toBe("OK");
+    profile.data.google_id = randomUUID();
+    const writes = await spyOnReconciliationWrites();
+    expect(await reconcileUser({ rownd_user_id: rowndId, dryRun: true })).toMatchObject({ status: "PREVIEW", canReconcile: true,
+      dryRun: true, changed: false, proposedActions: expect.arrayContaining([expect.objectContaining({ action: "create_method", method: expect.objectContaining({ thirdPartyId: "google" }) })]),
+      missingMethods: [expect.objectContaining({ thirdPartyId: "google" })] });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect((await SuperTokens.getUser(rowndId))!.loginMethods).toHaveLength(1);
+  });
+
+  it("dry run describes provider replacement as conditional without running retirement checkpoints or revocations", async () => {
+    const fixture = await seed();
+    const session = await Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(fixture.relayId));
+    rownd.fetchUserInfo.mockResolvedValue({ ...fixture.original, verified_data: { email: true, apple_id: randomUUID() } });
+    const before = (await SuperTokens.getUser(fixture.internalId))!.toJson();
+    const metadata = (await UserMetadata.getUserMetadata(fixture.internalId)).metadata;
+    const writes = await spyOnReconciliationWrites();
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId, dryRun: true })).toMatchObject({ status: "PREVIEW", canReconcile: false, changed: false,
+      proposedActions: expect.arrayContaining([expect.objectContaining({ action: "review_provider_retirement", conditional: true })]),
+      requiresExecutionProof: expect.arrayContaining([{ code: "PROVIDER_RETIREMENT_PROOF_REQUIRED", recipeUserId: fixture.rowndId }]) });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect((await SuperTokens.getUser(fixture.internalId))!.toJson()).toEqual(before);
+    expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata).toEqual(metadata);
+    expect(await Session.getSessionInformation(session.getHandle())).toBeDefined();
+  });
+
+  it.each(["revocation", "introduction"])("dry run detects outstanding provider %s checkpoints outside the primary metadata index", async (checkpoint) => {
+    const fixture = await seed();
+    expect((await reconcileUser({ rownd_user_id: fixture.rowndId })).status).toBe("OK");
+    const ledgerId = checkpoint === "revocation" ? `rownd-provider-revocations-${createHash("sha256").update(JSON.stringify([fixture.internalId, "public"])).digest("hex")}` : fixture.rowndId;
+    const ledger = { [checkpoint === "revocation" ? "pending" : "rownd_migration_provider_introduction"]: {
+      internalUserId: fixture.internalId, tenantId: "public", rowndUserId: fixture.rowndId, created: false,
+      recipeUserId: checkpoint === "revocation" ? randomUUID() : fixture.internalId, provider: "apple", subject: fixture.appleId } };
+    await UserMetadata.updateUserMetadata(ledgerId, ledger);
+    const before = (await UserMetadata.getUserMetadata(ledgerId)).metadata;
+    const session = await Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(fixture.rowndId));
+    expect(await readOnlyPreview({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "PREVIEW", canReconcile: false, matchesSource: false,
+      requiresExecutionProof: [{ code: "MIGRATION_CHECKPOINT_REVIEW_REQUIRED" }] });
+    expect((await UserMetadata.getUserMetadata(ledgerId)).metadata).toEqual(before);
+    expect(await Session.getSessionInformation(session.getHandle())).toBeDefined();
+  });
+
+  it.each(["email", "phone"])("admin rejects unverified %s election into a native primary without writes", async (contact) => {
+    const email = `${randomUUID()}@example.com`;
+    const phoneNumber = `+1555${Math.floor(Math.random() * 10000000).toString().padStart(7, "0")}`;
+    const victim = await Passwordless.signInUp({ tenantId: "public", ...(contact === "email" ? { email } : { phoneNumber }) });
+    await AccountLinking.createPrimaryUser(victim.recipeUserId);
+    const profile: RowndUser = { state: "enabled", data: { user_id: `rownd-${randomUUID()}`, ...(contact === "email" ? { email } : { phone_number: phoneNumber }), google_id: randomUUID() }, verified_data: {} };
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    const writes = [vi.spyOn(SuperTokens, "createUserIdMapping"), vi.spyOn(AccountLinking, "createPrimaryUser"),
+      vi.spyOn(AccountLinking, "linkAccounts"), vi.spyOn(ThirdParty, "manuallyCreateOrUpdateUser"), vi.spyOn(Passwordless, "signInUp")];
+    const result = await reconcileUser({ rownd_user_id: profile.data.user_id });
+    expect(result).toMatchObject({ status: "BLOCKED", changed: false });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect((await SuperTokens.getUser(victim.user.id))!.loginMethods).toHaveLength(1);
+  });
+
+  it("admin pins the before-snapshot owner before election or retirement", async () => {
+    const fixture = await seed();
+    const other = await ThirdParty.manuallyCreateOrUpdateUser("public", "google", randomUUID(), `${randomUUID()}@example.com`, false);
+    if (other.status !== "OK") throw new Error("Failed to seed other owner");
+    const otherId = other.recipeUserId.getAsString();
+    const beforeOther = JSON.stringify(await SuperTokens.getUser(otherId));
+    rownd.fetchUserInfo.mockResolvedValueOnce(fixture.current).mockImplementationOnce(async () => {
+      await SuperTokens.deleteUserIdMapping({ userId: fixture.rowndId, userIdType: "EXTERNAL", force: true });
+      await SuperTokens.createUserIdMapping({ superTokensUserId: otherId, externalUserId: fixture.rowndId });
+      return fixture.current;
+    });
+    const link = vi.spyOn(AccountLinking, "linkAccounts");
+    const create = vi.spyOn(ThirdParty, "manuallyCreateOrUpdateUser");
+    const metadata = vi.spyOn(UserMetadata, "updateUserMetadata");
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result).toMatchObject({ status: "BLOCKED", supertokens_user_id: fixture.internalId, changed: null });
+    expect(result.message).toContain("target changed");
+    expect(link).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(metadata).not.toHaveBeenCalled();
+    await SuperTokens.deleteUserIdMapping({ userId: fixture.rowndId, userIdType: "EXTERNAL", force: true });
+    expect(JSON.stringify(await SuperTokens.getUser(otherId))).toBe(beforeOther);
+  });
+
+  it("admin final alias observation cannot replace the validated owner", async () => {
+    const fixture = await seed();
+    await reconcileUser({ rownd_user_id: fixture.rowndId });
+    const other = await Passwordless.signInUp({ tenantId: "public", email: `${randomUUID()}@example.com` });
+    const postconditions = await import("./migration-postconditions");
+    const assertPostconditions = postconditions.assertMigrationPostconditions;
+    vi.spyOn(postconditions, "assertMigrationPostconditions").mockImplementation(async (input) => {
+      await assertPostconditions(input);
+      await SuperTokens.deleteUserIdMapping({ userId: fixture.rowndId, userIdType: "EXTERNAL", force: true });
+      await SuperTokens.createUserIdMapping({ superTokensUserId: other.recipeUserId.getAsString(), externalUserId: fixture.rowndId });
+    });
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result).toMatchObject({ status: "BLOCKED", supertokens_user_id: fixture.internalId, changed: null });
+    expect(result.observationError).toContain("target changed");
+  });
+
+  it.each(["throws", "missing"])("admin preserves mutation failure when final observation %s", async (observation) => {
+    const fixture = await seed();
+    const getUser = SuperTokens.getUser.bind(SuperTokens);
+    let failed = false;
+    vi.spyOn(UserMetadata, "updateUserMetadata").mockImplementation(async () => {
+      failed = true;
+      throw new Error("original write failure");
+    });
+    vi.spyOn(SuperTokens, "getUser").mockImplementation(async (...args) => {
+      if (failed) {
+        if (observation === "missing") return undefined;
+        throw new Error("observation unavailable");
+      }
+      return getUser(...args);
+    });
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result).toMatchObject({ status: "ERROR", changed: null, partialProgress: true, message: "original write failure",
+      observationError: observation === "missing" ? "Pinned reconciliation owner disappeared during final observation" : "observation unavailable" });
+  });
+
+  it("admin reports exact no-op after reconciliation", async () => {
+    const fixture = await seed();
+    expect((await reconcileUser({ rownd_user_id: fixture.rowndId })).status).toBe("OK");
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "OK", changed: false, actions: [] });
+    expect(rownd.validateToken).not.toHaveBeenCalled();
+  });
+
+  it("admin resolves a linked secondary recipe selector to its primary owner", async () => {
+    const fixture = await seed();
+    expect((await SuperTokens.getUser(fixture.rowndId))!.loginMethods[0].recipeUserId.getAsString()).not.toBe(fixture.relayId);
+    const result = await reconcileUser({ supertokens_user_id: fixture.relayId });
+    expect(result).toMatchObject({ status: "OK", rownd_user_id: fixture.rowndId, supertokens_user_id: fixture.internalId });
+  });
+
+  it.each(["supertokens", "rownd", "linked-alias"])("admin rejects conflicting live sources on one owner using %s selector", async (selector) => {
+    const fixture = await seed();
+    const conflictingId = `rownd-${randomUUID()}`;
+    await UserMetadata.updateUserMetadata(fixture.relayId, { original_rownd_user: { ...fixture.original, data: { ...fixture.original.data, user_id: conflictingId } } });
+    if (selector === "linked-alias") await SuperTokens.createUserIdMapping({ superTokensUserId: fixture.relayId, externalUserId: `unrelated-alias-${randomUUID()}`, force: true });
+    rownd.fetchUserInfo.mockImplementation(async ({ user_id }) => user_id === conflictingId
+      ? { ...fixture.original, data: { ...fixture.original.data, user_id: conflictingId } } : user_id === fixture.rowndId ? fixture.current : undefined);
+    const writes = [vi.spyOn(UserMetadata, "updateUserMetadata"), vi.spyOn(AccountLinking, "linkAccounts"), vi.spyOn(SuperTokens, "createUserIdMapping")];
+    const result = await reconcileUser(selector === "rownd" ? { rownd_user_id: fixture.rowndId } : { supertokens_user_id: fixture.internalId });
+    expect(result).toMatchObject({ status: "AMBIGUOUS", changed: false });
+    expect(result.candidates).toEqual(expect.arrayContaining([
+      { rownd_user_id: fixture.rowndId, supertokens_user_id: fixture.internalId },
+      { rownd_user_id: conflictingId, supertokens_user_id: fixture.internalId },
+    ]));
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it("admin does not interpret failed linked-alias discovery as absence", async () => {
+    const fixture = await seed();
+    const alias = `linked-${randomUUID()}`;
+    await SuperTokens.createUserIdMapping({ superTokensUserId: fixture.relayId, externalUserId: alias, force: true });
+    rownd.fetchUserInfo.mockImplementation(async ({ user_id }) => {
+      if (user_id === alias) throw new Error("Rownd lookup unavailable");
+      return fixture.current;
+    });
+    const writes = [vi.spyOn(UserMetadata, "updateUserMetadata"), vi.spyOn(AccountLinking, "linkAccounts")];
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "ERROR", changed: false, message: "Rownd lookup unavailable" });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it("admin rejects a partly valid source payload before any identity or verification writes", async () => {
+    const fixture = await seed();
+    rownd.fetchUserInfo.mockResolvedValue({ ...fixture.current, data: { ...fixture.current.data, google_id: [] } });
+    const repository = await import("./supertokens-repository");
+    const writes = [vi.spyOn(repository, "importUser"), vi.spyOn(UserMetadata, "updateUserMetadata"), vi.spyOn(AccountLinking, "linkAccounts"),
+      vi.spyOn(EmailVerification, "createEmailVerificationToken"), vi.spyOn(SuperTokens, "createUserIdMapping")];
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", changed: false, message: "SOURCE_PAYLOAD_INVALID: data.google_id" });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it("admin resolves dynamic configuration once for a non-public tenant", async () => {
+    const tenantId = `tenant-${randomUUID()}`;
+    await Multitenancy.createOrUpdateTenant(tenantId, { firstFactors: ["link-email"] });
+    const config = getPluginConfig()!;
+    const resolveConfig = vi.fn().mockResolvedValue({});
+    setPluginConfig({ ...config, resolveConfig });
+    const email = `${randomUUID()}@example.com`;
+    const rowndId = `rownd-${randomUUID()}`;
+    rownd.fetchUserInfo.mockResolvedValue({ state: "enabled", data: { user_id: rowndId, email }, verified_data: { email: true } });
+    try {
+      const result = await reconcileUser({ rownd_user_id: rowndId, tenantId, userContext: { requestId: "admin-test" } });
+      expect(result, result.message).toMatchObject({ status: "OK", changed: true });
+      expect(resolveConfig).toHaveBeenCalledTimes(1);
+      expect(resolveConfig).toHaveBeenCalledWith(expect.objectContaining({ tenantId, userContext: expect.objectContaining({ requestId: "admin-test" }) }));
+      expect((await SuperTokens.getUser(rowndId))!.tenantIds).toEqual([tenantId]);
+    } finally {
+      setPluginConfig(config);
+    }
+  });
+
+  it.each([undefined, { response: { statusCode: 404 } }])("admin reports authoritative missing Rownd source as NOT_FOUND (%j)", async (failure) => {
+    if (failure) rownd.fetchUserInfo.mockRejectedValue(failure);
+    else rownd.fetchUserInfo.mockResolvedValue(undefined);
+    expect(await reconcileUser({ rownd_user_id: `missing-${randomUUID()}` })).toMatchObject({ status: "NOT_FOUND", changed: false });
+  });
+
+  it("admin reports an inactive source as BLOCKED before mutations", async () => {
+    const fixture = await seed();
+    rownd.fetchUserInfo.mockResolvedValue({ ...fixture.current, state: "disabled" });
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", changed: false, partialProgress: false });
+  });
+
+  it("admin reports a superseded source as BLOCKED before mutations", async () => {
+    const rowndId = `superseded-${randomUUID()}`;
+    await UserMetadata.updateUserMetadata(rowndId, { rownd_migration_superseded: { rowndUserId: "winner" } });
+    expect(await reconcileUser({ rownd_user_id: rowndId })).toMatchObject({ status: "BLOCKED", changed: false, partialProgress: false });
+    expect(rownd.fetchUserInfo).not.toHaveBeenCalled();
+  });
+
+  it("admin reports changed server email proof as BLOCKED", async () => {
+    const fixture = await seed();
+    rownd.fetchUserInfo.mockResolvedValueOnce(fixture.current).mockResolvedValue({ ...fixture.current, verified_data: { apple_id: fixture.appleId } });
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", changed: false, message: "Rownd verified email proof changed before reconciliation completion" });
+  });
+
+  it("admin never interprets a Core transport 404 as source absence", async () => {
+    const error = Object.assign(new Error("Core unavailable"), { response: { statusCode: 404 } });
+    vi.spyOn(UserMetadata, "getUserMetadata").mockRejectedValue(error);
+    expect(await reconcileUser({ rownd_user_id: `rownd-${randomUUID()}` })).toMatchObject({ status: "ERROR", changed: false, partialProgress: false, message: "Core unavailable" });
+  });
+
+  it("admin pins the immutable bulk-import owner before a changed alias is read", async () => {
+    const rowndId = `rownd-${randomUUID()}`;
+    const email = `${randomUUID()}@example.com`;
+    rownd.fetchUserInfo.mockResolvedValue({ state: "enabled", data: { user_id: rowndId, email }, verified_data: { email: true } });
+    const other = await Passwordless.signInUp({ tenantId: "public", email: `${randomUUID()}@example.com` });
+    let otherBefore = (await SuperTokens.getUser(other.user.id))!.toJson();
+    const otherMetadata = (await UserMetadata.getUserMetadata(other.user.id)).metadata;
+    const repository = await import("./supertokens-repository");
+    const bulkImport = repository.importUser;
+    let importedId: string | undefined;
+    vi.spyOn(repository, "importUser").mockImplementation(async (...args) => {
+      const imported = await bulkImport(...args);
+      importedId = imported.id;
+      expect(importedId).not.toBe(rowndId);
+      expect(await SuperTokens.getUser(rowndId)).toBeUndefined();
+      await SuperTokens.createUserIdMapping({ superTokensUserId: other.recipeUserId.getAsString(), externalUserId: rowndId });
+      otherBefore = (await SuperTokens.getUser(other.user.id))!.toJson();
+      return imported;
+    });
+    const result = await reconcileUser({ rownd_user_id: rowndId });
+    expect(importedId).toBeDefined();
+    expect(result).toMatchObject({ status: "BLOCKED", supertokens_user_id: importedId, changed: null, message: "The reconciliation target changed" });
+    expect((await SuperTokens.getUser(other.user.id))!.toJson()).toEqual(otherBefore);
+    expect((await UserMetadata.getUserMetadata(other.user.id)).metadata).toEqual(otherMetadata);
+  });
+
+  it.each(["publication failure", "removed mapping"].flatMap((scenario) =>
+    ["email", "phone", "email+phone", "email+provider"].flatMap((shape) =>
+      [false, true].map((verified) => ({ scenario, shape, verified }))),
+  ))("admin restores the same imported owner after $scenario ($shape, verified=$verified)", async ({ scenario, shape, verified }) => {
+    const rowndId = `rownd-${randomUUID()}`;
+    const profile: RowndUser = { data: { user_id: rowndId,
+      ...(shape.includes("email") ? { email: `${randomUUID()}@example.com` } : {}),
+      ...(shape.includes("phone") ? { phone_number: `+1555${Math.floor(Math.random() * 10000000).toString().padStart(7, "0")}` } : {}),
+      ...(shape.includes("provider") ? { google_id: randomUUID() } : {}),
+    }, verified_data: { email: verified, phone_number: verified } };
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    const repository = await import("./supertokens-repository");
+    const bulkImport = vi.spyOn(repository, "importUser");
+    if (scenario === "publication failure") vi.spyOn(SuperTokens, "createUserIdMapping").mockRejectedValueOnce(new Error("publication interrupted"));
+    const first = await reconcileUser({ rownd_user_id: rowndId });
+    expect(first).toMatchObject({ status: scenario === "publication failure" ? "ERROR" : "OK", supertokens_user_id: expect.any(String) });
+    const internalId = first.supertokens_user_id!;
+    expect(internalId).not.toBe(rowndId);
+    expect((await SuperTokens.getUser(internalId))!.loginMethods).toHaveLength(shape.includes("+") ? 2 : 1);
+    if (scenario === "removed mapping") await SuperTokens.deleteUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL", force: true });
+    expect(await SuperTokens.getUser(rowndId)).toBeUndefined();
+    const preview = await readOnlyPreview({ rownd_user_id: rowndId });
+    expect(preview, JSON.stringify(preview)).toMatchObject({ status: "PREVIEW", canReconcile: true, supertokens_user_id: internalId,
+      proposedActions: expect.arrayContaining([{ action: "restore_mapping", supertokens_user_id: internalId }]) });
+    const retry = await reconcileUser({ rownd_user_id: rowndId });
+    expect(retry, JSON.stringify(retry)).toMatchObject({ status: "OK", supertokens_user_id: internalId });
+    expect(bulkImport).toHaveBeenCalledTimes(1);
+    expect(bulkImport.mock.calls[0][0].externalUserId).toBeUndefined();
+    const imported = await bulkImport.mock.results[0].value;
+    const user = (await SuperTokens.getUser(rowndId))!;
+    const recipeIds = await Promise.all(user.loginMethods.map(async (method) => {
+      const mapping = await SuperTokens.getUserIdMapping({ userId: method.recipeUserId.getAsString(), userIdType: "EXTERNAL" });
+      return mapping.status === "OK" ? mapping.superTokensUserId : method.recipeUserId.getAsString();
+    }));
+    expect(recipeIds.sort()).toEqual(imported.loginMethods.map((method: { recipeUserId: string }) => method.recipeUserId).sort());
+    expect(await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL" })).toMatchObject({ status: "OK", superTokensUserId: internalId });
+    expect(await reconcileUser({ rownd_user_id: rowndId })).toMatchObject({ status: "OK", changed: false });
+    expect(bulkImport).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ...["live conflict", "unrelated alias", "retired donor"].map((secondary) => ({ secondary, marker: undefined, wrongProvenance: false })),
+    ...["rownd_migration_target", "rownd_migration_canonical_target"].flatMap((marker) =>
+      [false, true].map((wrongProvenance) => ({ secondary: "retired donor", marker, wrongProvenance }))),
+  ])("admin checks linked sources before recovery: $secondary, marker=$marker, wrongProvenance=$wrongProvenance", async ({ secondary, marker, wrongProvenance }) => {
+    const rowndId = `rownd-${randomUUID()}`;
+    const otherRowndId = `other-${randomUUID()}`;
+    const profile: RowndUser = { data: { user_id: rowndId, email: `${randomUUID()}@example.com`, google_id: randomUUID() }, verified_data: { email: true } };
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    const publication = vi.spyOn(SuperTokens, "createUserIdMapping").mockRejectedValueOnce(new Error("publication interrupted"));
+    const first = await reconcileUser({ rownd_user_id: rowndId });
+    expect(first).toMatchObject({ status: "ERROR", message: "publication interrupted" });
+    const internalId = first.supertokens_user_id!;
+    const user = (await SuperTokens.getUser(internalId))!;
+    const recipeId = user.loginMethods.find((method) => method.recipeId === "passwordless")!.recipeUserId.getAsString();
+    expect(recipeId).not.toBe(internalId);
+    const otherProfile: RowndUser = { data: { user_id: otherRowndId, email: profile.data.email }, verified_data: { email: true } };
+    if (secondary === "unrelated alias") await SuperTokens.createUserIdMapping({ superTokensUserId: recipeId, externalUserId: otherRowndId, force: true });
+    else await UserMetadata.updateUserMetadata(recipeId, { original_rownd_user: otherProfile });
+    if (secondary === "retired donor") await UserMetadata.updateUserMetadata(otherRowndId, { rownd_migration_superseded: { rowndUserId: rowndId, targetUserId: internalId } });
+    if (marker) await UserMetadata.updateUserMetadata(rowndId, { [marker]: internalId });
+    if (wrongProvenance) await UserMetadata.updateUserMetadata(internalId, { original_rownd_user: otherProfile });
+    rownd.fetchUserInfo.mockImplementation(async ({ user_id }) => user_id === rowndId ? profile :
+      user_id === otherRowndId && secondary !== "unrelated alias" ? otherProfile : undefined);
+    publication.mockClear();
+    const repository = await import("./supertokens-repository");
+    const introduction = await import("./migration-provider");
+    const finishIntroductions = vi.spyOn(introduction, "finishProviderIntroductions");
+    const bulkImport = vi.spyOn(repository, "importUser");
+    const writes = [publication, bulkImport, vi.spyOn(UserMetadata, "updateUserMetadata"), vi.spyOn(AccountLinking, "linkAccounts"),
+      vi.spyOn(SuperTokens, "deleteUserIdMapping"), vi.spyOn(EmailVerification, "createEmailVerificationToken"), vi.spyOn(EmailVerification, "verifyEmailUsingToken")];
+    expect(await readOnlyPreview({ rownd_user_id: rowndId })).toMatchObject({ status: wrongProvenance ? "BLOCKED" : secondary === "live conflict" ? "AMBIGUOUS" : "PREVIEW",
+      canReconcile: !wrongProvenance && secondary !== "live conflict" });
+    const result = await reconcileUser({ rownd_user_id: rowndId });
+    if (wrongProvenance) {
+      expect(result).toMatchObject({ status: "BLOCKED", message: "Missing mapping cannot be restored without matching live identity and migration provenance" });
+      for (const write of writes) expect(write).not.toHaveBeenCalled();
+      expect(finishIntroductions).not.toHaveBeenCalled();
+    } else if (secondary === "live conflict") {
+      expect(result, JSON.stringify(result)).toMatchObject({ status: "AMBIGUOUS", changed: false, candidates: expect.arrayContaining([
+        { rownd_user_id: rowndId, supertokens_user_id: internalId },
+        { rownd_user_id: otherRowndId, supertokens_user_id: internalId },
+      ]) });
+      for (const write of writes) expect(write).not.toHaveBeenCalled();
+      expect(finishIntroductions).not.toHaveBeenCalled();
+      expect((await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL" })).status).toBe("UNKNOWN_MAPPING_ERROR");
+    } else {
+      expect(result, JSON.stringify(result)).toMatchObject({ status: "OK", supertokens_user_id: internalId });
+      expect(bulkImport).not.toHaveBeenCalled();
+      expect((await SuperTokens.getUser(internalId))!.loginMethods).toHaveLength(2);
+    }
+  });
+
+  it.each(["phone", "email+phone"])("admin never treats an unverified native %s owner as a recoverable Rownd import", async (shape) => {
+    const rowndId = `rownd-${randomUUID()}`;
+    const profile: RowndUser = { data: { user_id: rowndId,
+      ...(shape.includes("email") ? { email: `${randomUUID()}@example.com` } : {}),
+      ...(shape.includes("phone") ? { phone_number: `+1555${Math.floor(Math.random() * 10000000).toString().padStart(7, "0")}` } : {}),
+    }, verified_data: {} };
+    const native = await importUser({ ...mapRowndUserToSuperTokens(profile, "public"), externalUserId: undefined, userMetadata: { native: true } },
+      { connectionURI: `http://${core.getHost()}:${core.getMappedPort(3567)}` });
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    const before = (await SuperTokens.getUser(native.id))!.toJson();
+    const writes = [vi.spyOn(SuperTokens, "createUserIdMapping"), vi.spyOn(UserMetadata, "updateUserMetadata"), vi.spyOn(AccountLinking, "linkAccounts"),
+      vi.spyOn(EmailVerification, "createEmailVerificationToken")];
+    expect(await readOnlyPreview({ rownd_user_id: rowndId })).toMatchObject({ status: "BLOCKED", canReconcile: false });
+    expect(await reconcileUser({ rownd_user_id: rowndId })).toMatchObject({ status: "BLOCKED", changed: false });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect((await SuperTokens.getUser(native.id))!.toJson()).toEqual(before);
+  });
+
+  it.each(["owner", "historical alias"])("admin refuses rediscovered import mapping restoration with conflicting %s provenance before writes", async (conflict) => {
+    const rowndId = `rownd-${randomUUID()}`;
+    const profile: RowndUser = { data: { user_id: rowndId, email: `${randomUUID()}@example.com`, google_id: randomUUID() }, verified_data: { email: true } };
+    rownd.fetchUserInfo.mockImplementation(async ({ user_id }) => user_id === rowndId ? profile : undefined);
+    const publication = vi.spyOn(SuperTokens, "createUserIdMapping").mockRejectedValueOnce(new Error("publication interrupted"));
+    const first = await reconcileUser({ rownd_user_id: rowndId });
+    expect(first).toMatchObject({ status: "ERROR", message: "publication interrupted" });
+    const internalId = first.supertokens_user_id!;
+    await UserMetadata.updateUserMetadata(conflict === "owner" ? internalId : rowndId, { original_rownd_user: {
+      ...profile, data: { ...profile.data, ...(conflict === "owner" ? { user_id: `other-${randomUUID()}` } : { email: `${randomUUID()}@example.com` }) },
+    } });
+    publication.mockClear();
+    const repository = await import("./supertokens-repository");
+    const writes = [publication, vi.spyOn(repository, "importUser"), vi.spyOn(UserMetadata, "updateUserMetadata"),
+      vi.spyOn(AccountLinking, "linkAccounts"), vi.spyOn(EmailVerification, "createEmailVerificationToken"), vi.spyOn(EmailVerification, "verifyEmailUsingToken")];
+    expect(await readOnlyPreview({ rownd_user_id: rowndId })).toMatchObject({ status: "BLOCKED", canReconcile: false });
+    const result = await reconcileUser({ rownd_user_id: rowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "BLOCKED", supertokens_user_id: internalId,
+      message: conflict === "owner" ? "Missing mapping cannot be restored without matching live identity and migration provenance" : "Contradictory historical snapshots cannot authorize mapping restoration" });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect((await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL" })).status).toBe("UNKNOWN_MAPPING_ERROR");
+  });
+
+  it.each(["mapping", "provenance"])("admin blocks a dangling %s target before import or metadata writes", async (kind) => {
+    const rowndId = `rownd-${randomUUID()}`;
+    const missingId = randomUUID();
+    rownd.fetchUserInfo.mockResolvedValue({ data: { user_id: rowndId, email: `${randomUUID()}@example.com` }, verified_data: { email: true } });
+    if (kind === "provenance") await UserMetadata.updateUserMetadata(rowndId, { rownd_migration_target: missingId });
+    else {
+      const lookup = SuperTokens.getUserIdMapping.bind(SuperTokens);
+      vi.spyOn(SuperTokens, "getUserIdMapping").mockImplementation(async (input) => input.userId === rowndId && input.userIdType === "EXTERNAL"
+        ? { status: "OK", superTokensUserId: missingId, externalUserId: rowndId } : lookup(input));
+    }
+    const repository = await import("./supertokens-repository");
+    const writes = [vi.spyOn(repository, "importUser"), vi.spyOn(UserMetadata, "updateUserMetadata"), vi.spyOn(SuperTokens, "createUserIdMapping")];
+    expect(await readOnlyPreview({ rownd_user_id: rowndId })).toMatchObject({ status: "BLOCKED", canReconcile: false });
+    expect(await reconcileUser({ rownd_user_id: rowndId })).toMatchObject({ status: "BLOCKED", changed: false, message: expect.stringContaining("MAPPING_TARGET_MISSING") });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it("admin accepts a self-ID primary anchor without creating a self-mapping", async () => {
+    const email = `${randomUUID()}@example.com`;
+    const target = await Passwordless.signInUp({ tenantId: "public", email });
+    await AccountLinking.createPrimaryUser(target.recipeUserId);
+    const rowndId = target.user.id;
+    const profile = { data: { user_id: rowndId, email }, verified_data: { email: true } };
+    await UserMetadata.updateUserMetadata(rowndId, { original_rownd_user: profile, rownd_migration_complete: true });
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    const mapping = vi.spyOn(SuperTokens, "createUserIdMapping");
+    expect(await reconcileUser({ rownd_user_id: rowndId })).toMatchObject({ status: "OK", supertokens_user_id: rowndId, changed: false });
+    expect(mapping).not.toHaveBeenCalled();
+    expect((await SuperTokens.getUser(rowndId))!.loginMethods).toHaveLength(1);
+  });
+
+  it.each(["rownd", "email", "secondary recipe"])("admin blocks dual namespace owners before writes using %s selector", async (selector) => {
+    const fixture = await seed();
+    const lookup = SuperTokens.getUserIdMapping.bind(SuperTokens);
+    vi.spyOn(SuperTokens, "getUserIdMapping").mockImplementation(async (input) => input.userId === fixture.rowndId && input.userIdType === "SUPERTOKENS"
+      ? { status: "OK", superTokensUserId: fixture.rowndId, externalUserId: "other-alias" } : lookup(input));
+    expect(fixture.relayId).not.toBe(fixture.internalId);
+    expect((await SuperTokens.getUser(fixture.relayId))!.id).toBe(fixture.rowndId);
+    const writes = [vi.spyOn(UserMetadata, "updateUserMetadata"), vi.spyOn(AccountLinking, "linkAccounts"),
+      vi.spyOn(SuperTokens, "createUserIdMapping"), vi.spyOn(SuperTokens, "deleteUserIdMapping"),
+      vi.spyOn(EmailVerification, "createEmailVerificationToken"), vi.spyOn(EmailVerification, "verifyEmailUsingToken"), vi.spyOn(EmailVerification, "unverifyEmail")];
+    const input = selector === "rownd" ? { rownd_user_id: fixture.rowndId }
+      : selector === "email" ? { email: fixture.relayEmail } : { supertokens_user_id: fixture.relayId };
+    expect(await readOnlyPreview(input)).toMatchObject({ status: "BLOCKED", canReconcile: false, message: expect.stringContaining("EXTERNAL_ALIAS_AMBIGUOUS") });
+    expect(await reconcileUser(input)).toMatchObject({ status: "BLOCKED", changed: false, message: expect.stringContaining("EXTERNAL_ALIAS_AMBIGUOUS") });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect(rownd.fetchUserInfo).not.toHaveBeenCalled();
+  });
+
+  it.each(["standalone", "dangling", "tenant"])("admin blocks an inconsistent %s owner graph before writes", async (kind) => {
+    const fixture = await seed();
+    const getUser = SuperTokens.getUser.bind(SuperTokens);
+    vi.spyOn(SuperTokens, "getUser").mockImplementation(async (...args) => {
+      const user = await getUser(...args);
+      if (!user) return user;
+      if (kind === "dangling" && args[0] === fixture.relayId) return undefined;
+      if (kind === "standalone") user.isPrimaryUser = false;
+      if (kind === "tenant") for (const method of user.loginMethods) method.tenantIds = ["other"];
+      return user;
+    });
+    const writes = [vi.spyOn(UserMetadata, "updateUserMetadata"), vi.spyOn(AccountLinking, "linkAccounts"), vi.spyOn(SuperTokens, "createUserIdMapping")];
+    expect(await readOnlyPreview({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", canReconcile: false });
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", message: expect.stringContaining("OWNER_MEMBERSHIP_INCONSISTENT") });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each(["forward", "reverse", "completed"])("admin rejects duplicate exact provider owners independent of lookup ordering or completion (%s)", async (scenario) => {
+    const rowndId = `rownd-${randomUUID()}`;
+    const subject = randomUUID();
+    const target = await ThirdParty.manuallyCreateOrUpdateUser("public", "google", subject, `${randomUUID()}@example.com`, false);
+    const other = await ThirdParty.manuallyCreateOrUpdateUser("public", "google", randomUUID(), `${randomUUID()}@example.com`, false);
+    if (target.status !== "OK" || other.status !== "OK") throw new Error("Missing providers");
+    const profile = { data: { user_id: rowndId, google_id: subject }, verified_data: {} };
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    if (scenario === "completed") {
+      await SuperTokens.createUserIdMapping({ superTokensUserId: target.user.id, externalUserId: rowndId });
+      await UserMetadata.updateUserMetadata(target.user.id, { original_rownd_user: profile, rownd_migration_complete: true });
+    }
+    const inconsistent = (await SuperTokens.getUser(other.user.id))!;
+    inconsistent.loginMethods[0].thirdParty = { id: "google", userId: subject };
+    const list = SuperTokens.listUsersByAccountInfo.bind(SuperTokens);
+    vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockImplementation(async (...args) => args[1].thirdParty
+      ? scenario === "reverse" ? [inconsistent, target.user] : [target.user, inconsistent] : list(...args));
+    const writes = [vi.spyOn(SuperTokens, "createUserIdMapping"), vi.spyOn(AccountLinking, "linkAccounts"), vi.spyOn(UserMetadata, "updateUserMetadata")];
+    expect(await reconcileUser({ rownd_user_id: rowndId })).toMatchObject({ status: "BLOCKED", changed: false, message: expect.stringContaining("PROVIDER_IDENTITY_SPLIT") });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each(["repair", "proof drift", "alias drift", "false verification"])("admin verifies each effective recipe alias with full postconditions: %s", async (scenario) => {
+    const rowndId = `rownd-${randomUUID()}`;
+    const email = `${randomUUID()}@example.com`;
+    const subject = randomUUID();
+    const provider = await ThirdParty.manuallyCreateOrUpdateUser("public", "google", subject, email, false);
+    if (provider.status !== "OK") throw new Error("Missing provider");
+    await AccountLinking.createPrimaryUser(provider.recipeUserId);
+    const password = await EmailPassword.signUp("public", email, "StrongPassword123!");
+    if (password.status !== "OK") throw new Error("Missing password method");
+    const contact = await Passwordless.signInUp({ tenantId: "public", email });
+    for (const method of [password, contact]) await AccountLinking.linkAccounts(method.recipeUserId, provider.user.id);
+    const aliases = [rowndId, `password-alias-${randomUUID()}`, `contact-alias-${randomUUID()}`];
+    for (const [index, method] of [provider, password, contact].entries()) {
+      const token = await EmailVerification.createEmailVerificationToken("public", method.recipeUserId, email);
+      if (token.status === "OK") await EmailVerification.verifyEmailUsingToken("public", token.token);
+      expect((await SuperTokens.createUserIdMapping({ superTokensUserId: method.recipeUserId.getAsString(), externalUserId: aliases[index], force: true })).status).toBe("OK");
+    }
+    const profile: RowndUser = { data: { user_id: rowndId, email, google_id: subject }, verified_data: { email: email.toUpperCase() } };
+    await UserMetadata.updateUserMetadata(provider.user.id, { original_rownd_user: profile, rownd_migration_complete: true });
+    rownd.fetchUserInfo.mockImplementation(async ({ user_id }) => user_id === rowndId ? profile : undefined);
+    const before = (await SuperTokens.getUser(rowndId))!;
+    expect(before.loginMethods.some((method) => !method.verified)).toBe(true);
+    expect(await readOnlyPreview({ rownd_user_id: rowndId })).toMatchObject({ status: "PREVIEW", canReconcile: true, matchesSource: false,
+      proposedActions: aliases.map((recipeUserId) => ({ action: "verify_email", recipeUserId, email })) });
+    expect((await SuperTokens.getUser(rowndId))!.toJson()).toEqual(before.toJson());
+    const create = vi.spyOn(Passwordless, "signInUp");
+    const createToken = EmailVerification.createEmailVerificationToken.bind(EmailVerification);
+    const token = vi.spyOn(EmailVerification, "createEmailVerificationToken");
+    const victim = await ThirdParty.manuallyCreateOrUpdateUser("public", "apple", randomUUID(), email, false);
+    if (victim.status !== "OK") throw new Error("Missing unrelated owner");
+    let victimBefore = (await SuperTokens.getUser(victim.user.id))!.toJson();
+    if (scenario === "proof drift" || scenario === "alias drift") token.mockImplementation(async (...args) => {
+      const result = await createToken(...args);
+      if (args[1].getAsString() === aliases[1]) {
+        if (scenario === "proof drift") profile.verified_data.email = false;
+        else {
+          await SuperTokens.deleteUserIdMapping({ userId: aliases[1], userIdType: "EXTERNAL", force: true });
+          await SuperTokens.createUserIdMapping({ superTokensUserId: victim.recipeUserId.getAsString(), externalUserId: aliases[1], force: true });
+          victimBefore = (await SuperTokens.getUser(victim.user.id))!.toJson();
+        }
+      }
+      return result;
+    });
+    if (scenario === "false verification") {
+      const verify = EmailVerification.verifyEmailUsingToken.bind(EmailVerification);
+      vi.spyOn(EmailVerification, "verifyEmailUsingToken").mockImplementation(async (...args) => {
+        const result = await verify(...args);
+        for (const alias of aliases) await EmailVerification.unverifyEmail(SuperTokens.convertToRecipeUserId(alias), email);
+        return result;
+      });
+    }
+    const result = await reconcileUser({ rownd_user_id: rowndId });
+    if (scenario !== "repair") {
+      expect(result, JSON.stringify(result)).toMatchObject({ status: "BLOCKED", supertokens_user_id: provider.user.id });
+      expect((await SuperTokens.getUser(victim.user.id))!.toJson()).toEqual(victimBefore);
+      expect(await EmailVerification.isEmailVerified(SuperTokens.convertToRecipeUserId(scenario === "alias drift" ? aliases[1] : victim.user.id), email)).toBe(false);
+      expect(create).not.toHaveBeenCalled();
+      return;
+    }
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "OK", changed: true, supertokens_user_id: provider.user.id });
+    expect(create).not.toHaveBeenCalled();
+    for (const alias of aliases) expect(await EmailVerification.isEmailVerified(SuperTokens.convertToRecipeUserId(alias), email)).toBe(true);
+    expect((await SuperTokens.getUser(rowndId))!.loginMethods).toHaveLength(3);
+    expect(token.mock.calls.map((call) => call[1].getAsString())).toEqual(expect.arrayContaining(aliases));
+    expect(await reconcileUser({ email })).toMatchObject({ status: "OK", changed: false });
+    expect(rownd.validateToken).not.toHaveBeenCalled();
+  });
+
+  it("admin retains an elected owner after a persistent write and Core failure before mapping", async () => {
+    const rowndId = `rownd-${randomUUID()}`;
+    const email = `${randomUUID()}@example.com`;
+    const target = await Passwordless.signInUp({ tenantId: "public", email });
+    const id = target.recipeUserId.getAsString();
+    expect(target.user.isPrimaryUser).toBe(false);
+    rownd.fetchUserInfo.mockResolvedValue({ state: "enabled", data: { user_id: rowndId, email }, verified_data: { email: true } });
+    vi.spyOn(SuperTokens, "createUserIdMapping").mockImplementation(async () => {
+      await UserMetadata.updateUserMetadata(id, { administrative_test_progress: true });
+      throw Object.assign(new Error("Core mapping transport failed"), { code: "ECONNRESET" });
+    });
+    const result = await reconcileUser({ rownd_user_id: rowndId });
+    expect(result).toMatchObject({ status: "ERROR", supertokens_user_id: id, changed: null, partialProgress: true, message: "Core mapping transport failed" });
+    expect(await SuperTokens.getUser(rowndId)).toBeUndefined();
+    expect((await UserMetadata.getUserMetadata(id)).metadata).toMatchObject({ administrative_test_progress: true });
+  });
 
   it.each([false, true])("publishes current email on original primary and retires relay (standalone=%s)", async (standalone) => {
     const fixture = await seed(standalone);
@@ -312,6 +1615,8 @@ describe("completed Apple relay migration reconciles current Rownd email", () =>
     };
     await UserMetadata.updateUserMetadata(fixture.internalId, metadata);
     const ownerBefore = (await SuperTokens.getUser(fixture.separate!.recipeUserId.getAsString()))!.toJson();
+    expect(await readOnlyPreview({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", canReconcile: false,
+      blockers: [{ code: "CANONICAL_EMAIL_POLICY" }] });
     await expect(reconcileRowndUserWithExistingLoginMethods(mapRowndUserToSuperTokens(fixture.current, "public"), "public", {})).resolves.toBe(true);
     expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata).toEqual(metadata);
     expect((await SuperTokens.getUser(fixture.separate!.recipeUserId.getAsString()))!.toJson()).toEqual(ownerBefore);
