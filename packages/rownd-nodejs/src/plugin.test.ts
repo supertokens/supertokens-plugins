@@ -4795,7 +4795,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it.each(["missing", "existing unverified"])(
-        "repairs completed migrations with %s passwordless without resetting existing state",
+        "leaves completed migrations with %s passwordless unchanged",
         async (scenario) => {
           const { server: s, port } = await setup(
             importCoreConnectionURI,
@@ -4856,6 +4856,7 @@ describe("rownd-nodejs plugin", () => {
             verified_data: { email: true, google_id: googleId },
           });
 
+          const before = (await SuperTokens.getUser(rowndUserId))!.toJson();
           for (let attempt = 0; attempt < 2; attempt++) {
             const response = await fetch(
               `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
@@ -4866,21 +4867,8 @@ describe("rownd-nodejs plugin", () => {
             );
             await expect(response.json()).resolves.toEqual({ status: "OK" });
             const user = await SuperTokens.getUser(rowndUserId);
-            expect(user?.loginMethods).toHaveLength(2);
-            expect(user?.loginMethods).toEqual(
-              expect.arrayContaining([
-                expect.objectContaining({
-                  recipeId: "thirdparty",
-                  thirdParty: { id: "google", userId: googleId },
-                  verified: true,
-                }),
-                expect.objectContaining({
-                  recipeId: "passwordless",
-                  email,
-                  verified: true,
-                }),
-              ]),
-            );
+            expect(user?.toJson()).toEqual(before);
+            expect(user?.loginMethods).toHaveLength(scenario === "missing" ? 1 : 2);
             await expect(
               UserMetadata.getUserMetadata(provider.user.id),
             ).resolves.toMatchObject({ metadata });
@@ -4888,7 +4876,7 @@ describe("rownd-nodejs plugin", () => {
         },
       );
 
-      it("refuses completed migration repair when the passwordless owner is another primary user", async () => {
+      it("does not inspect or adopt a foreign passwordless owner for a completed migration", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
@@ -4933,8 +4921,7 @@ describe("rownd-nodejs plugin", () => {
           },
         );
         await expect(response.json()).resolves.toEqual({
-          status: "ERROR",
-          message: "Migration failed",
+          status: "OK",
         });
         expect(
           (await SuperTokens.getUser(rowndUserId))?.loginMethods,

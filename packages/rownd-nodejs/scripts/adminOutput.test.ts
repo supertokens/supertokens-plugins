@@ -49,3 +49,17 @@ it("formats PREVIEW separately and redacts secrets inside nested proposed action
     proposedActions: [{ recipeUserId: "***", email: "***", conditional: true }] });
   for (const secret of ["quoted", "value", "unknown-secret-token", "headers"]) expect(output).not.toContain(secret);
 });
+
+it.each([
+  "ROWND_EMAIL_SEARCH_UNSUPPORTED: configure an app-scoped Rownd email search client",
+  "ROWND_EMAIL_LOOKUP_NO_MATCH: no enabled exact-email source found through verified-value lookup; use a Rownd user ID for other profiles",
+  "ROWND_EMAIL_SEARCH_INCOMPLETE: pagination did not advance",
+  "ROWND_EMAIL_SEARCH_CHANGED: retry discovery",
+  "Rownd administrative lookup failed (HTTP 403)",
+])("preserves the bounded administrative lookup diagnostic %s", (message) => {
+  const profile: Profile = { rownd: { appId: "app", appKey: "private-key", appSecret: "private-secret" },
+    supertokens: { connectionURI: "http://localhost:3567", tenantId: "public" } };
+  expect(JSON.parse(formatReconcileResult({ status: "BLOCKED", changed: false, actions: [], message }, profile)).message).toBe(message);
+  expect(JSON.parse(formatReconcileResult({ status: "ERROR", changed: false, actions: [], message: `${message} private-request-body` }, profile)).message)
+    .toBe("Reconciliation failed; check profile configuration and service availability");
+});

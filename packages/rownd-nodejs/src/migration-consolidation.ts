@@ -1,304 +1,1980 @@
-import SuperTokens from "supertokens-node";
+import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import AccountLinking from "supertokens-node/recipe/accountlinking";
-import UserMetadata from "supertokens-node/recipe/usermetadata";
+import {
+  reconciliationSuperTokens as SuperTokens,
+  reconciliationAccountLinking as AccountLinking,
+  reconciliationEmailVerification as EmailVerification,
+  reconciliationUserMetadata as UserMetadata,
+} from "./reconciliation-sdk";
 import { RowndMigrationPolicyError } from "./errors";
-import { assertAuthenticatedMigrationSource, assertRowndSourcePayload, getAuthenticatedMigrationEmail, getMigrationContactEmail, isAdministrativeMigration, isRowndMigrationProfileActive } from "./migration-email";
-import { isAdministrativeElectionCandidate, type ActivityCandidate } from "./migration-election";
-import { assertMigrationMapping, assertSelectorNamespace } from "./migration-mapping";
+import {
+  assertAuthenticatedMigrationSource,
+  assertRowndSourcePayload,
+  getAuthenticatedMigrationEmail,
+  isAdministrativeMigration,
+  isRowndMigrationProfileActive,
+} from "./migration-email";
+import {
+  isAdministrativeElectionCandidate,
+  type ActivityCandidate,
+} from "./migration-election";
+import {
+  assertMigrationMapping,
+  assertSelectorNamespace,
+} from "./migration-mapping";
 import { assertMigrationOwnerGraph } from "./migration-postconditions";
-import { getRawUserMetadata, mapRowndUserToSuperTokens } from "./rownd-compatibility";
+import {
+  planOwnerOperations,
+  OWNER_PLAN_KEY,
+  OWNER_POLICY_MARKER_KEYS,
+  ownerStateAt,
+  readOwnerPlanCheckpoint,
+  sameOwnerPlan,
+  type OwnerPlanCheckpoint,
+  type OwnerRecipe,
+  type OwnerState,
+} from "./migration-owner-plan";
+import {
+  getRawUserMetadata,
+  mapRowndUserToSuperTokens,
+} from "./rownd-compatibility";
 import { fetchOptionalRowndUserInfo } from "./rownd-repository";
-import { matchesImportLoginMethod } from "./supertokens-repository";
-import { clearSuperTokensCoreCallCache, isRecord, type JsonRecord } from "./utils";
-import type { SuperTokensUserImport } from "./types";
+import {
+  getCanonicalEmailRecipeUserId,
+  getPendingVerifications,
+  matchesImportLoginMethod,
+} from "./supertokens-repository";
+import { observeAdministrativeMethodCreation } from "./migration-method-receipts";
+import { assertMappingPublicationSessionMembership } from "./migration-publication";
+import { assertVerificationCellInheritance } from "./migration-verification";
+import { resolveRowndProviderSubject } from "./provider-identity";
+import {
+  clearSuperTokensCoreCallCache,
+  isRecord,
+  type JsonRecord,
+} from "./utils";
+import type { RowndUser, SuperTokensUserImport } from "./types";
 import type { ReconcilePreviewAction } from "./reconcile-preview";
+import { invalidateReconciliationReads } from "./reconciliation-reads";
 
 type User = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
-type Member = { rownd_user_id: string; supertokens_user_id: string; identity: string; unverifiedEmail?: string };
-// Retain discovery across partial links; retries still require a fresh private election.
-type Checkpoint = { version: 1; winner: string; target: string; members: Member[]; status: "LINKING" | "COMPLETE" };
-const key = "rownd_migration_owner_consolidation";
+type Method = User["loginMethods"][number];
+type Member = {
+  rownd_user_id: string;
+  supertokens_user_id: string;
+  identity: string;
+  unverifiedEmail?: string;
+};
+type Checkpoint = {
+  version: 1;
+  winner: string;
+  target: string;
+  members: Member[];
+  status: "LINKING" | "COMPLETE";
+};
+const key = OWNER_PLAN_KEY;
+const recoveryKey = "rownd_migration_owner_recovery";
+
+export async function readOwnerRecoveryCheckpoint(
+  metadata: JsonRecord,
+  sourceId: string,
+  context: JsonRecord,
+) {
+  const recovery = metadata[recoveryKey];
+  if (recovery === undefined) return undefined;
+  if (
+    !isRecord(recovery) ||
+    typeof recovery.target !== "string" ||
+    typeof recovery.planId !== "string"
+  )
+    throw new RowndMigrationPolicyError("Invalid owner recovery pointer");
+  const plan = readOwnerPlanCheckpoint(
+    await getRawUserMetadata(recovery.target, context),
+  );
+  if (
+    !plan ||
+    plan.id !== recovery.planId ||
+    plan.target !== recovery.target ||
+    !plan.candidates.some((candidate) => candidate.rownd_user_id === sourceId)
+  ) {
+    throw new RowndMigrationPolicyError(
+      "Owner recovery pointer does not match its checkpoint",
+    );
+  }
+  return plan;
+}
 
 export class UnresolvedConsolidationOwners extends RowndMigrationPolicyError {
-  constructor(readonly owners: ActivityCandidate[], reason: string) {
+  constructor(
+    readonly owners: ActivityCandidate[],
+    reason: string,
+  ) {
     super(`Duplicate owner consolidation blocked: ${reason}`);
   }
 }
 
-export function readConsolidationCheckpoint(metadata: JsonRecord): Checkpoint | undefined {
+export function readConsolidationCheckpoint(
+  metadata: JsonRecord,
+): Checkpoint | undefined {
   const record = metadata[key];
   if (record === undefined) return undefined;
-  if (!isRecord(record) || record.version !== 1 || typeof record.winner !== "string" || typeof record.target !== "string" ||
-    !["LINKING", "COMPLETE"].includes(String(record.status)) || !Array.isArray(record.members) || record.members.length < 2 ||
-    record.members.some((member) => !isRecord(member) || typeof member.rownd_user_id !== "string" ||
-      typeof member.supertokens_user_id !== "string" || typeof member.identity !== "string" ||
-      (member.unverifiedEmail !== undefined && typeof member.unverifiedEmail !== "string"))) {
-    throw new RowndMigrationPolicyError("Invalid duplicate owner consolidation checkpoint");
+  if (isRecord(record) && record.version === 2) {
+    readOwnerPlanCheckpoint(metadata);
+    return undefined;
+  }
+  if (
+    !isRecord(record) ||
+    record.version !== 1 ||
+    typeof record.winner !== "string" ||
+    typeof record.target !== "string" ||
+    !["LINKING", "COMPLETE"].includes(String(record.status)) ||
+    !Array.isArray(record.members) ||
+    record.members.length < 2 ||
+    record.members.some(
+      (member) =>
+        !isRecord(member) ||
+        typeof member.rownd_user_id !== "string" ||
+        typeof member.supertokens_user_id !== "string" ||
+        typeof member.identity !== "string" ||
+        (member.unverifiedEmail !== undefined &&
+          typeof member.unverifiedEmail !== "string"),
+    )
+  ) {
+    throw new RowndMigrationPolicyError(
+      "Invalid duplicate owner consolidation checkpoint",
+    );
   }
   const checkpoint = record as Checkpoint;
-  if (new Set(checkpoint.members.map((member) => member.rownd_user_id)).size !== checkpoint.members.length ||
-    new Set(checkpoint.members.map((member) => member.supertokens_user_id)).size !== checkpoint.members.length ||
-    !checkpoint.members.some((member) => member.rownd_user_id === checkpoint.winner && member.supertokens_user_id === checkpoint.target)) {
-    throw new RowndMigrationPolicyError("Invalid duplicate owner consolidation checkpoint");
+  if (
+    new Set(checkpoint.members.map((member) => member.rownd_user_id)).size !==
+      checkpoint.members.length ||
+    new Set(checkpoint.members.map((member) => member.supertokens_user_id))
+      .size !== checkpoint.members.length ||
+    !checkpoint.members.some(
+      (member) =>
+        member.rownd_user_id === checkpoint.winner &&
+        member.supertokens_user_id === checkpoint.target,
+    )
+  ) {
+    throw new RowndMigrationPolicyError(
+      "Invalid duplicate owner consolidation checkpoint",
+    );
   }
   return checkpoint;
 }
 
-async function recipeMethod(user: User, internalId: string, userContext: JsonRecord) {
-  for (const method of user.loginMethods) {
-    const mapping = await SuperTokens.getUserIdMapping({ userId: method.recipeUserId.getAsString(), userIdType: "ANY", userContext });
-    if ((mapping.status === "OK" ? mapping.superTokensUserId : method.recipeUserId.getAsString()) === internalId) {
+async function immutableId(sdkId: string, context: JsonRecord) {
+  await assertSelectorNamespace(sdkId, context);
+  const mapping = await SuperTokens.getUserIdMapping({
+    userId: sdkId,
+    userIdType: "EXTERNAL",
+    userContext: context,
+  });
+  return mapping.status === "OK" ? mapping.superTokensUserId : sdkId;
+}
+
+async function sdkId(id: string, context: JsonRecord) {
+  const mapping = await SuperTokens.getUserIdMapping({
+    userId: id,
+    userIdType: "SUPERTOKENS",
+    userContext: context,
+  });
+  return mapping.status === "OK" ? mapping.externalUserId : id;
+}
+
+function identity(method: Method) {
+  return JSON.stringify([
+    method.recipeId,
+    method.email,
+    method.phoneNumber,
+    method.thirdParty,
+    [...method.tenantIds].sort(),
+    method.timeJoined,
+    method.webauthn,
+  ]);
+}
+
+function hasNativeContactEmail(user: User, email: string) {
+  return user.loginMethods.some(
+    (method) =>
+      (method.recipeId === "passwordless" ||
+        method.recipeId === "emailpassword") &&
+      method.hasSameEmailAs(email),
+  );
+}
+
+async function recipeMethod(user: User, id: string, context: JsonRecord) {
+  for (const method of user.loginMethods)
+    if ((await immutableId(method.recipeUserId.getAsString(), context)) === id)
       return method;
-    }
-  }
   return undefined;
 }
 
-async function recipeIdentity(user: User, internalId: string, userContext: JsonRecord) {
-  const method = await recipeMethod(user, internalId, userContext);
-  return method && JSON.stringify([method.recipeId, method.email, method.phoneNumber, method.thirdParty, [...method.tenantIds].sort()]);
-}
-
-export async function assertConsolidationSessionMembership(userId: string, recipeUserId: string, tenantId: string, userContext: JsonRecord) {
-  clearSuperTokensCoreCallCache(userContext);
-  const user = await SuperTokens.getUser(userId, userContext);
-  const recipeOwner = await SuperTokens.getUser(recipeUserId, userContext);
-  const ids = new Set([userId, recipeUserId, ...[user, recipeOwner].flatMap((owner) => owner
-    ? [owner.id, ...owner.loginMethods.map((method) => method.recipeUserId.getAsString())] : [])]);
-  const checkpoints: Checkpoint[] = [];
-  for (const id of ids) {
-    const mapping = await SuperTokens.getUserIdMapping({ userId: id, userIdType: "ANY", userContext });
-    if (mapping.status === "OK") {
-      ids.add(mapping.superTokensUserId);
-      ids.add(mapping.externalUserId);
+async function assertV1(checkpoint: Checkpoint, context: JsonRecord) {
+  if (checkpoint.status !== "COMPLETE")
+    throw new RowndMigrationPolicyError("Owner consolidation is incomplete");
+  for (const member of checkpoint.members) {
+    await assertSelectorNamespace(member.rownd_user_id, context);
+    await assertMigrationMapping(
+      member.supertokens_user_id,
+      member.rownd_user_id,
+      context,
+    );
+    const user = await SuperTokens.getUser(member.supertokens_user_id, context);
+    const method =
+      user && (await recipeMethod(user, member.supertokens_user_id, context));
+    if (
+      !user ||
+      user.id !== checkpoint.winner ||
+      !user.isPrimaryUser ||
+      !method ||
+      JSON.stringify([
+        method.recipeId,
+        method.email,
+        method.phoneNumber,
+        method.thirdParty,
+        [...method.tenantIds].sort(),
+      ]) !== member.identity
+    ) {
+      throw new RowndMigrationPolicyError(
+        "Owner consolidation session membership changed",
+      );
     }
-    const checkpoint = readConsolidationCheckpoint(await getRawUserMetadata(id, userContext));
-    if (checkpoint) checkpoints.push(checkpoint);
+    await assertMigrationOwnerGraph(user, "public", context);
   }
-  if (!checkpoints.length) return;
-  const checkpoint = checkpoints[0]!;
-  const fail = (): never => { throw new RowndMigrationPolicyError("Owner consolidation is incomplete or session membership changed"); };
-  if (checkpoints.some((entry) => entry.status !== "COMPLETE" || !isDeepStrictEqual(entry, checkpoint)) ||
-    !user || !recipeOwner || userId !== checkpoint.winner || user.id !== checkpoint.winner || recipeOwner.id !== user.id || !user.isPrimaryUser) fail();
-  const recipeMapping = await SuperTokens.getUserIdMapping({ userId: recipeUserId, userIdType: "ANY", userContext });
-  const method = await recipeMethod(user!, recipeMapping.status === "OK" ? recipeMapping.superTokensUserId : recipeUserId, userContext);
-  if (!method?.tenantIds.includes(tenantId)) fail();
-  for (const member of checkpoint.members) {
-    await assertSelectorNamespace(member.rownd_user_id, userContext);
-    await assertSelectorNamespace(member.supertokens_user_id, userContext);
-    await assertMigrationMapping(member.supertokens_user_id, member.rownd_user_id, userContext);
-    const owner = await SuperTokens.getUser(member.supertokens_user_id, userContext);
-    if (!owner || owner.id !== checkpoint.winner || !owner.isPrimaryUser ||
-      await recipeIdentity(owner, member.supertokens_user_id, userContext) !== member.identity) fail();
+  if (
+    !isDeepStrictEqual(
+      readConsolidationCheckpoint(
+        await getRawUserMetadata(checkpoint.target, context),
+      ),
+      checkpoint,
+    )
+  ) {
+    throw new RowndMigrationPolicyError(
+      "Owner consolidation checkpoint changed",
+    );
   }
-  await assertMigrationOwnerGraph(user!, tenantId, userContext);
-  if (!isDeepStrictEqual(readConsolidationCheckpoint(await getRawUserMetadata(checkpoint.target, userContext)), checkpoint)) fail();
 }
 
-export async function resolveConsolidatedTokenOwner(source: SuperTokensUserImport, tenantId: string, userContext: JsonRecord) {
-  const alias = source.externalUserId!;
-  clearSuperTokensCoreCallCache(userContext);
-  const user = await SuperTokens.getUser(alias, userContext);
-  if (!user) return undefined;
-  const mapping = await SuperTokens.getUserIdMapping({ userId: user.id, userIdType: "EXTERNAL", userContext });
-  const target = mapping.status === "OK" ? mapping.superTokensUserId : user.id;
-  const metadata = await getRawUserMetadata(target, userContext);
-  const checkpoint = readConsolidationCheckpoint(metadata);
-  // Existing, unrelated linked aliases still use their original migration path.
-  if (!checkpoint) return undefined;
-  const fail = (): never => { throw new RowndMigrationPolicyError("Consolidated Rownd alias ownership could not be verified"); };
-  if (tenantId !== "public" || checkpoint.status !== "COMPLETE" || checkpoint.target !== target || checkpoint.winner !== user.id ||
-    metadata.original_rownd_user?.data.user_id !== user.id || !checkpoint.members.some((member) => member.rownd_user_id === alias)) fail();
-  await assertAuthenticatedMigrationSource(source, tenantId);
-  for (const member of checkpoint.members) {
-    await assertSelectorNamespace(member.rownd_user_id, userContext);
-    await assertSelectorNamespace(member.supertokens_user_id, userContext);
-    await assertMigrationMapping(member.supertokens_user_id, member.rownd_user_id, userContext);
-    const owner = await SuperTokens.getUser(member.rownd_user_id, userContext);
-    if (!owner || owner.id !== user.id || await recipeIdentity(owner, member.supertokens_user_id, userContext) !== member.identity) fail();
+const markerKeys = [
+  "original_rownd_user",
+  "rownd_migration_target",
+  "rownd_migration_canonical_target",
+  "rownd_migration_superseded",
+  "rownd_migration_reconciliation",
+  ...OWNER_POLICY_MARKER_KEYS,
+];
+function markers(metadata: JsonRecord) {
+  return Object.fromEntries(
+    markerKeys
+      .filter((field) => metadata[field] !== undefined)
+      .map((field) => [field, metadata[field]]),
+  );
+}
+
+async function assertOwnerEmailPolicy(
+  metadata: Awaited<ReturnType<typeof getRawUserMetadata>>,
+  user: User | undefined,
+  email: string | undefined,
+  context: JsonRecord,
+  plannedRecipes?: OwnerRecipe[],
+) {
+  const fail = () => {
+    throw new RowndMigrationPolicyError("CANONICAL_EMAIL_POLICY");
+  };
+  const pending = metadata.rownd_pending_verification;
+  if (
+    pending !== undefined &&
+    (!Array.isArray(pending) ||
+      pending.length !== getPendingVerifications(metadata).length)
+  )
+    fail();
+  if (
+    getPendingVerifications(metadata).some(
+      (entry) =>
+        entry.field === "email" && (entry.tenantId ?? "public") === "public",
+    )
+  )
+    fail();
+  for (const field of [
+    "rownd_migration_email_retirements",
+    "rownd_migration_provider_retirements",
+    "rownd_migration_provider_introductions",
+    "rownd_migration_provider_introduction",
+  ] as const) {
+    const value = metadata[field];
+    if (
+      value !== undefined &&
+      ((!isRecord(value) && !Array.isArray(value)) ||
+        Object.keys(value as object).length > 0)
+    )
+      fail();
   }
-  await assertMigrationOwnerGraph(user, tenantId, userContext);
-  if (JSON.stringify(readConsolidationCheckpoint(await getRawUserMetadata(target, userContext))) !== JSON.stringify(checkpoint)) fail();
-  if (user.id === alias) return undefined;
-  const canonical = await fetchOptionalRowndUserInfo(checkpoint.winner);
-  if (!canonical) fail();
-  assertRowndSourcePayload(canonical!);
-  if (canonical!.data.user_id !== checkpoint.winner || !isRowndMigrationProfileActive(canonical!)) fail();
-  const email = getMigrationContactEmail(source, tenantId);
-  const methods = mapRowndUserToSuperTokens(canonical!, tenantId).loginMethods;
-  const shared = (email !== undefined && canonical!.data.email?.toLowerCase() === email) || source.loginMethods.some((method) =>
-    method.recipeId === "thirdparty" && ["google", "apple"].includes(method.thirdPartyId) && methods.some((other) =>
-      other.recipeId === "thirdparty" && other.thirdPartyId === method.thirdPartyId && other.thirdPartyUserId === method.thirdPartyUserId));
-  if (!shared || !user.isPrimaryUser || [...source.loginMethods, ...methods].some((expected) => !user.loginMethods.some((method) =>
-    method.tenantIds.includes(tenantId) && matchesImportLoginMethod(method, expected)))) fail();
-  return { user, target, canonicalRowndId: checkpoint.winner, recipeUserId: SuperTokens.convertToRecipeUserId(alias) };
+  if (
+    metadata.rownd_email_recipe_user_ids !== undefined &&
+    !isRecord(metadata.rownd_email_recipe_user_ids)
+  )
+    fail();
+  if (
+    metadata.rownd_email_recipe_user_ids?.public !== undefined &&
+    (typeof metadata.rownd_email_recipe_user_ids.public !== "string" ||
+      !metadata.rownd_email_recipe_user_ids.public)
+  )
+    fail();
+  const pointer = getCanonicalEmailRecipeUserId(metadata, "public");
+  if (pointer === undefined) return;
+  if (typeof pointer !== "string" || !pointer || !user || !email) return fail();
+  const id = await immutableId(pointer, context);
+  const planned = plannedRecipes?.find((recipe) => recipe.id === id);
+  const pointerOwner = planned ? await SuperTokens.getUser(id, context) : user;
+  const method =
+    pointerOwner && (await recipeMethod(pointerOwner, id, context));
+  if (planned && method && identity(method) !== planned.identity) fail();
+  if (
+    !method ||
+    method.recipeId !== "passwordless" ||
+    !method.email ||
+    !method.tenantIds.includes("public")
+  )
+    fail();
+}
+
+async function optionalProfile(id: string): Promise<RowndUser | undefined> {
+  let profile: RowndUser | undefined;
+  try {
+    profile = await fetchOptionalRowndUserInfo(id);
+  } catch (error) {
+    if (
+      !(
+        isRecord(error) &&
+        isRecord(error.response) &&
+        error.response.statusCode === 404
+      )
+    )
+      throw error;
+  }
+  if (!profile) return undefined;
+  assertRowndSourcePayload(profile);
+  if (profile.data.user_id !== id || !isRowndMigrationProfileActive(profile))
+    throw new RowndMigrationPolicyError(
+      "A required consolidation source changed",
+    );
+  return profile;
+}
+
+async function requiredProfile(id: string): Promise<RowndUser> {
+  const profile = await optionalProfile(id);
+  if (!profile)
+    throw new RowndMigrationPolicyError(
+      "A required consolidation source disappeared",
+    );
+  return profile;
+}
+
+function sharedProfile(left: RowndUser, right: RowndUser) {
+  const email = left.data.email?.toLowerCase();
+  if (email && right.data.email?.toLowerCase() === email) return true;
+  const methods = mapRowndUserToSuperTokens(right, "public").loginMethods;
+  return mapRowndUserToSuperTokens(left, "public").loginMethods.some(
+    (method) =>
+      method.recipeId === "thirdparty" &&
+      ["google", "apple"].includes(method.thirdPartyId) &&
+      methods.some(
+        (other) =>
+          other.recipeId === "thirdparty" &&
+          other.thirdPartyId === method.thirdPartyId &&
+          other.thirdPartyUserId === method.thirdPartyUserId,
+      ),
+  );
+}
+
+async function observe(plan: OwnerPlanCheckpoint, context: JsonRecord) {
+  clearSuperTokensCoreCallCache(context);
+  const state: OwnerState = {
+    graph: [],
+    mappings: [],
+    markers: [],
+    verifications: [],
+  };
+  const methods = new Map<string, Method>();
+  const extra = new Map<string, Method>();
+  const owners = new Map<string, string>();
+  for (const recipe of plan.recipes) {
+    await assertSelectorNamespace(recipe.id, context);
+    const user = await SuperTokens.getUser(recipe.id, context);
+    if (!user)
+      throw new RowndMigrationPolicyError("A consolidation recipe disappeared");
+    const graph = JSON.stringify([
+      user.isPrimaryUser,
+      user.loginMethods
+        .map((method) => [method.recipeUserId.getAsString(), identity(method)])
+        .sort(),
+    ]);
+    const earlierGraph = owners.get(user.id);
+    if (earlierGraph !== undefined && earlierGraph !== graph)
+      throw new RowndMigrationPolicyError(
+        "Consolidation owner graph changed during observation",
+      );
+    if (earlierGraph === undefined) {
+      await assertMigrationOwnerGraph(user, "public", context);
+      owners.set(user.id, graph);
+    }
+    const method = await recipeMethod(user, recipe.id, context);
+    if (!method || identity(method) !== recipe.identity)
+      throw new RowndMigrationPolicyError(
+        "Consolidation recipe identity changed",
+      );
+    methods.set(recipe.id, method);
+    const owner = await immutableId(user.id, context);
+    state.graph.push({ id: recipe.id, owner, primary: user.isPrimaryUser });
+    for (const entry of user.loginMethods) {
+      const id = await immutableId(entry.recipeUserId.getAsString(), context);
+      if (!plan.recipes.some((planned) => planned.id === id)) {
+        if (owner !== plan.target)
+          throw new RowndMigrationPolicyError(
+            "Unexpected recipe joined a donor",
+          );
+        extra.set(id, entry);
+      }
+    }
+    const mapping = await SuperTokens.getUserIdMapping({
+      userId: recipe.id,
+      userIdType: "SUPERTOKENS",
+      userContext: context,
+    });
+    state.mappings.push({
+      id: recipe.id,
+      ...(mapping.status === "OK"
+        ? {
+            alias: mapping.externalUserId,
+            ...(mapping.externalUserIdInfo !== undefined
+              ? { info: mapping.externalUserIdInfo }
+              : {}),
+          }
+        : {}),
+    });
+    if (mapping.status === "OK") {
+      await assertSelectorNamespace(mapping.externalUserId, context);
+      const reverse = await SuperTokens.getUserIdMapping({
+        userId: mapping.externalUserId,
+        userIdType: "EXTERNAL",
+        userContext: context,
+      });
+      if (reverse.status !== "OK" || reverse.superTokensUserId !== recipe.id)
+        throw new RowndMigrationPolicyError(
+          "Consolidation reverse mapping changed",
+        );
+    }
+  }
+  for (const alias of plan.aliases) {
+    const mapping = await SuperTokens.getUserIdMapping({
+      userId: alias.id,
+      userIdType: "EXTERNAL",
+      userContext: context,
+    });
+    if (
+      mapping.status === "OK" &&
+      !state.mappings.some(
+        (entry) =>
+          entry.id === mapping.superTokensUserId && entry.alias === alias.id,
+      )
+    ) {
+      throw new RowndMigrationPolicyError(
+        "Consolidation alias moved outside the planned graph",
+      );
+    }
+  }
+  for (const candidate of plan.candidates) {
+    if (
+      candidate.supertokens_user_id !== undefined ||
+      plan.aliases.some((alias) => alias.id === candidate.rownd_user_id)
+    )
+      continue;
+    const mapping = await SuperTokens.getUserIdMapping({
+      userId: candidate.rownd_user_id,
+      userIdType: "EXTERNAL",
+      userContext: context,
+    });
+    const literalUser = await SuperTokens.getUser(
+      candidate.rownd_user_id,
+      context,
+    );
+    if (mapping.status === "OK" || literalUser) {
+      throw new RowndMigrationPolicyError(
+        "An ownerless consolidation candidate acquired an owner",
+      );
+    }
+  }
+  for (const marker of plan.initial.markers)
+    state.markers.push({
+      id: marker.id,
+      values: markers(await getRawUserMetadata(marker.id, context)),
+    });
+  state.verifications = await Promise.all(
+    plan.initial.verifications.map(async (entry) => ({
+      ...entry,
+      verified: await EmailVerification.isEmailVerified(
+        SuperTokens.convertToRecipeUserId(entry.id),
+        entry.email,
+        context,
+      ),
+    })),
+  );
+  return { state, methods, extra };
+}
+
+async function assertCompletedPlan(
+  plan: OwnerPlanCheckpoint,
+  context: JsonRecord,
+) {
+  if (plan.status !== "COMPLETE" || plan.reservation)
+    throw new RowndMigrationPolicyError("Owner consolidation is incomplete");
+  const completed = plan.completion;
+  const { state } = await observe(
+    completed
+      ? { ...plan, recipes: completed.recipes, initial: completed.state }
+      : plan,
+    context,
+  );
+  const final = completed?.state ?? ownerStateAt(plan, plan.operations.length);
+  if (
+    state.graph.length < plan.recipes.length ||
+    state.graph.some(
+      (entry) => entry.owner !== plan.target || !entry.primary,
+    ) ||
+    plan.recipes.some(
+      (recipe) => !state.graph.some((entry) => entry.id === recipe.id),
+    ) ||
+    !isDeepStrictEqual(state.graph, final.graph) ||
+    !isDeepStrictEqual(state.mappings, final.mappings)
+  ) {
+    throw new RowndMigrationPolicyError(
+      "Consolidation completed ownership changed",
+    );
+  }
+  for (const alias of plan.aliases)
+    await assertMigrationMapping(alias.to, alias.id, context);
+  for (const entry of state.markers) {
+    const wanted = final.markers.find((marker) => marker.id === entry.id)!;
+    for (const field of [
+      "rownd_migration_target",
+      "rownd_migration_canonical_target",
+      "rownd_migration_superseded",
+      "rownd_migration_reconciliation",
+    ]) {
+      const alias = plan.aliases.find((alias) => alias.id === entry.id);
+      if (
+        field === "rownd_migration_canonical_target" &&
+        wanted.values[field] === undefined &&
+        alias &&
+        entry.values[field] === alias.to
+      )
+        continue;
+      if (!isDeepStrictEqual(entry.values[field], wanted.values[field]))
+        throw new RowndMigrationPolicyError(
+          "Consolidation literal metadata changed",
+        );
+    }
+    const original = entry.values.original_rownd_user;
+    const expectedOriginal = wanted.values.original_rownd_user;
+    if (
+      isRecord(original) &&
+      isRecord(original.data) &&
+      isRecord(expectedOriginal) &&
+      isRecord(expectedOriginal.data) &&
+      original.data.user_id !== expectedOriginal.data.user_id
+    )
+      throw new RowndMigrationPolicyError(
+        "Consolidation source provenance changed",
+      );
+  }
+  const metadata = await getRawUserMetadata(plan.target, context);
+  if (
+    metadata.original_rownd_user?.data.user_id !== plan.sourceId ||
+    !isDeepStrictEqual(readOwnerPlanCheckpoint(metadata), plan)
+  )
+    throw new RowndMigrationPolicyError(
+      "Consolidation canonical metadata changed",
+    );
+}
+
+export async function assertConsolidationSessionMembership(
+  userId: string,
+  recipeUserId: string,
+  tenantId: string,
+  context: JsonRecord,
+) {
+  clearSuperTokensCoreCallCache(context);
+  await assertMappingPublicationSessionMembership(
+    userId,
+    recipeUserId,
+    context,
+  );
+  const ids = new Set([userId, recipeUserId]);
+  for (const id of ids) {
+    const user = await SuperTokens.getUser(id, context);
+    if (user)
+      for (const value of [
+        user.id,
+        ...user.loginMethods.map((method) => method.recipeUserId.getAsString()),
+      ])
+        ids.add(value);
+    ids.add(await immutableId(id, context));
+  }
+  for (const id of ids) {
+    const metadata = await getRawUserMetadata(id, context);
+    const plan = readOwnerPlanCheckpoint(metadata);
+    const legacy = readConsolidationCheckpoint(metadata);
+    if (!plan && !legacy) continue;
+    if (tenantId !== "public")
+      throw new RowndMigrationPolicyError(
+        "Owner consolidation requires public tenant membership",
+      );
+    if (plan) {
+      // Reservations remain blocking until cleared; the target checkpoint is
+      // completed last, after every recipe belongs to the survivor.
+      await assertCompletedPlan(plan, context);
+      if (userId !== plan.sourceId)
+        throw new RowndMigrationPolicyError(
+          "Owner consolidation session owner changed",
+        );
+    } else await assertV1(legacy!, context);
+    const user = await SuperTokens.getUser(recipeUserId, context);
+    const method =
+      user &&
+      (await recipeMethod(
+        user,
+        await immutableId(recipeUserId, context),
+        context,
+      ));
+    if (!user || user.id !== userId || !method?.tenantIds.includes(tenantId))
+      throw new RowndMigrationPolicyError(
+        "Owner consolidation session membership changed",
+      );
+  }
+}
+
+export async function resolveConsolidatedTokenOwner(
+  source: SuperTokensUserImport,
+  tenantId: string,
+  context: JsonRecord,
+) {
+  const alias = source.externalUserId!;
+  clearSuperTokensCoreCallCache(context);
+  const raw = await getRawUserMetadata(alias, context);
+  const recovery = await readOwnerRecoveryCheckpoint(raw, alias, context);
+  if (recovery && recovery.status !== "COMPLETE")
+    throw new RowndMigrationPolicyError("Owner consolidation is incomplete");
+  const reservation = readOwnerPlanCheckpoint(raw);
+  if (reservation && reservation.status !== "COMPLETE")
+    throw new RowndMigrationPolicyError("Owner consolidation is incomplete");
+  const user = await SuperTokens.getUser(alias, context);
+  if (!user) return undefined;
+  const target = await immutableId(user.id, context);
+  const metadata = await getRawUserMetadata(target, context);
+  const plan = readOwnerPlanCheckpoint(metadata);
+  const legacy = readConsolidationCheckpoint(metadata);
+  if (!plan && !legacy) return undefined;
+  if (tenantId !== "public")
+    throw new RowndMigrationPolicyError(
+      "Consolidated alias requires public tenant",
+    );
+  const canonicalRowndId = plan?.sourceId ?? legacy!.winner;
+  if (plan) {
+    await assertCompletedPlan(plan, context);
+    if (!plan.aliases.some((entry) => entry.id === alias))
+      throw new RowndMigrationPolicyError("Unplanned consolidated alias");
+  } else {
+    await assertV1(legacy!, context);
+    if (
+      !legacy!.members.some((member) => member.rownd_user_id === alias) ||
+      metadata.original_rownd_user?.data.user_id !== legacy!.winner
+    ) {
+      throw new RowndMigrationPolicyError(
+        "Consolidated Rownd alias ownership could not be verified",
+      );
+    }
+  }
+  if (!(await assertAuthenticatedMigrationSource(source, tenantId)))
+    throw new RowndMigrationPolicyError(
+      "Consolidated alias requires an authenticated source",
+    );
+  if (alias === canonicalRowndId) return undefined;
+  const canonical = await requiredProfile(canonicalRowndId);
+  const requested = await requiredProfile(alias);
+  const methods = mapRowndUserToSuperTokens(canonical, tenantId).loginMethods;
+  const requiredMethods = plan ? methods : [...source.loginMethods, ...methods];
+  if (
+    !sharedProfile(requested, canonical) ||
+    !user.isPrimaryUser ||
+    requiredMethods.some(
+      (expected) =>
+        !user.loginMethods.some(
+          (method) =>
+            method.tenantIds.includes(tenantId) &&
+            matchesImportLoginMethod(method, expected),
+        ),
+    )
+  ) {
+    throw new RowndMigrationPolicyError(
+      "Consolidated Rownd alias ownership could not be verified",
+    );
+  }
+  return {
+    user,
+    target,
+    canonicalRowndId,
+    recipeUserId: SuperTokens.convertToRecipeUserId(alias),
+  };
 }
 
 export async function prepareOwnerConsolidation(input: {
-  source: SuperTokensUserImport; candidates: ActivityCandidate[]; target: string; tenantId: string; userContext: JsonRecord;
+  source: SuperTokensUserImport;
+  candidates: ActivityCandidate[];
+  target: string;
+  tenantId: string;
+  userContext: JsonRecord;
+  ownerIds?: string[];
 }) {
-  const { source, candidates, target, tenantId, userContext } = input;
-  if (!isAdministrativeMigration(source, tenantId) || candidates.length < 2) return undefined;
-  const fail = (reason: string): never => { throw new UnresolvedConsolidationOwners(candidates, reason); };
-  if (tenantId !== "public") fail("whole-owner consolidation requires the public tenant");
-  const winner = source.externalUserId!;
-  const existing = readConsolidationCheckpoint(await getRawUserMetadata(target, userContext));
-  if (existing && (existing.target !== target || existing.winner !== winner)) fail("the checkpoint target changed");
-  const members: Member[] = [];
-  const initiallyLinked = new Set<string>();
-  for (const candidate of candidates) {
-    const id = candidate.supertokens_user_id;
-    if (!id) fail("a source has no immutable recipe owner");
-    const user = await SuperTokens.getUser(id!, userContext);
-    if (!user) fail("an owner disappeared");
-    const identity = await recipeIdentity(user!, id!, userContext);
-    if (!identity) fail("a mapping does not identify a recipe member");
-    const stored = existing?.members.find((member) => member.rownd_user_id === candidate.rownd_user_id);
-    if (existing && (!stored || stored.supertokens_user_id !== id || stored.identity !== identity)) fail("checkpoint membership changed");
-    const method = (await recipeMethod(user!, id!, userContext))!;
-    // SDK linking can verify the donor. A retry must not mistake that write for pre-existing verification.
-    const unverifiedEmail = stored?.unverifiedEmail ?? (id !== target && !method.verified ? method.email : undefined);
-    if (unverifiedEmail !== undefined && !method.hasSameEmailAs(unverifiedEmail)) fail("checkpoint email changed");
-    members.push({ rownd_user_id: candidate.rownd_user_id, supertokens_user_id: id!, identity: identity!,
-      ...(unverifiedEmail !== undefined ? { unverifiedEmail } : {}) });
-    if (user!.id === winner) initiallyLinked.add(id!);
-  }
-  if (existing && existing.members.length !== members.length) fail("checkpoint sources are missing");
-  if (!members.some((member) => member.rownd_user_id === winner && member.supertokens_user_id === target)) fail("the winner is not the pinned primary recipe");
-  const checkpoint: Checkpoint = { version: 1, winner, target, members, status: "LINKING" };
-  let expectedCheckpoint = existing;
-  const permittedLinks = new Set([...initiallyLinked, target]);
-  let promotionAllowed = false;
-  const initialWinner = await SuperTokens.getUser(target, userContext);
-  if (!initialWinner) fail("the winner disappeared");
-  const wasPrimary = initialWinner!.isPrimaryUser;
-  const initialWinnerMapping = await SuperTokens.getUserIdMapping({ userId: winner, userIdType: "EXTERNAL", userContext });
-  let restoringWinnerAllowed = initialWinnerMapping.status !== "OK";
-  const confirmedLinks = new Set(initiallyLinked);
-  const initialMethods = new Set(initialWinner!.loginMethods.map((method) => method.recipeUserId.getAsString()));
-  let reconcilingMethods = false;
-
-  const assertOwners = async (complete = false) => {
-    clearSuperTokensCoreCallCache(userContext);
-    if (JSON.stringify(readConsolidationCheckpoint(await getRawUserMetadata(target, userContext))) !== JSON.stringify(expectedCheckpoint)) {
-      fail("the consolidation checkpoint changed");
-    }
-    for (const member of members) {
-      const id = member.supertokens_user_id;
-      await assertSelectorNamespace(id, userContext);
-      await assertSelectorNamespace(member.rownd_user_id, userContext);
-      const user = await SuperTokens.getUser(id, userContext);
-      const mapping = await SuperTokens.getUserIdMapping({ userId: member.rownd_user_id, userIdType: "EXTERNAL", userContext });
-      const reverse = await SuperTokens.getUserIdMapping({ userId: id, userIdType: "SUPERTOKENS", userContext });
-      const restoringWinner = restoringWinnerAllowed && id === target && mapping.status !== "OK" && reverse.status !== "OK" &&
-        (await getRawUserMetadata(id, userContext)).original_rownd_user?.data.user_id === winner;
-      if (!restoringWinner && (mapping.status !== "OK" || mapping.superTokensUserId !== id || reverse.status !== "OK" || reverse.externalUserId !== member.rownd_user_id)) {
-        fail("an alias mapping changed");
-      }
-      if (id === target && mapping.status === "OK") restoringWinnerAllowed = false;
-      if (!user || await recipeIdentity(user, id, userContext) !== member.identity ||
-        !user.loginMethods.some((method) => method.tenantIds.includes(tenantId))) fail("recipe identity or membership changed");
-      if (expectedCheckpoint?.status !== "COMPLETE" && member.unverifiedEmail !== undefined && member.unverifiedEmail.toLowerCase() !== getAuthenticatedMigrationEmail(source, tenantId) &&
-        (await recipeMethod(user!, id, userContext))?.verified) fail("linking verified an email without matching source proof");
-      for (const metadata of [await getRawUserMetadata(id, userContext), await getRawUserMetadata(member.rownd_user_id, userContext)]) {
-        if (metadata.original_rownd_user?.data.user_id !== undefined && metadata.original_rownd_user.data.user_id !== member.rownd_user_id) {
-          fail("an owner's source provenance changed");
-        }
-        if ([metadata.rownd_migration_target, metadata.rownd_migration_canonical_target].some((value) => value !== undefined && value !== id) ||
-          metadata.rownd_migration_superseded !== undefined) fail("an owner has conflicting migration markers");
-      }
-      const linked = user!.id === winner;
-      if (id === target) {
-        if ((!linked && !(restoringWinner && user!.id === target)) ||
-          ((wasPrimary || promotionAllowed) ? !user!.isPrimaryUser : user!.isPrimaryUser)) fail("the winner changed");
-        for (const method of user!.loginMethods) {
-          const recipeId = method.recipeUserId.getAsString();
-          const planned = members.some((member) => permittedLinks.has(member.supertokens_user_id) &&
-            (recipeId === member.rownd_user_id || recipeId === member.supertokens_user_id));
-          if (!initialMethods.has(recipeId) && !planned && !(reconcilingMethods && source.loginMethods.some((expected) =>
-            matchesImportLoginMethod(method, expected)))) fail("an unexpected recipe joined the winner");
-        }
-      } else if (linked) {
-        if (!permittedLinks.has(id) || !user!.isPrimaryUser) fail("an unplanned owner transition occurred");
-        confirmedLinks.add(id);
-      } else {
-        if (confirmedLinks.has(id)) fail("a linked donor left the pinned owner");
-        const method = user!.loginMethods[0]!;
-        if (complete || user!.id !== member.rownd_user_id || user!.isPrimaryUser || user!.loginMethods.length !== 1 ||
-          method.tenantIds.length !== 1 || !(method.recipeId === "passwordless" ||
-            (method.recipeId === "thirdparty" && ["google", "apple"].includes(method.thirdParty!.id)))) fail("a donor is not an eligible standalone owner");
-        if (method.email && !method.verified && method.email.toLowerCase() !== getAuthenticatedMigrationEmail(source, tenantId)) {
-          const primary = await SuperTokens.getUser(target, userContext);
-          if (primary?.loginMethods.some((other) => other.verified && other.hasSameEmailAs(method.email!))) fail("linking would verify an unverified email");
-        }
-      }
-      await assertMigrationOwnerGraph(user!, tenantId, userContext);
-    }
+  const { source, candidates, target, tenantId, userContext: context } = input;
+  if (!isAdministrativeMigration(source, tenantId)) return undefined;
+  const fail: (reason: string) => never = (reason) => {
+    throw new UnresolvedConsolidationOwners(candidates, reason);
   };
-  await assertOwners();
-  const pending = members.filter((member) => member.supertokens_user_id !== target && !initiallyLinked.has(member.supertokens_user_id));
-  if (!wasPrimary && pending.length && (await AccountLinking.canCreatePrimaryUser(SuperTokens.convertToRecipeUserId(target), userContext)).status !== "OK") {
-    fail("Core cannot promote the pinned winner");
+  if (tenantId !== "public")
+    fail("whole-owner consolidation requires the public tenant");
+  const sourceId = source.externalUserId!;
+  const initialMetadata = await getRawUserMetadata(target, context);
+  let existing = readOwnerPlanCheckpoint(initialMetadata);
+  let previous: OwnerPlanCheckpoint | undefined;
+  const legacy = readConsolidationCheckpoint(initialMetadata);
+  if (legacy) {
+    if (legacy.winner !== sourceId || legacy.target !== target)
+      fail("the v1 checkpoint target changed");
+    const assertOwners = async () => {
+      clearSuperTokensCoreCallCache(context);
+      await assertV1(legacy, context);
+    };
+    await assertOwners();
+    const fresh = async () => {
+      if (!isAdministrativeElectionCandidate(source, sourceId))
+        fail("the private election binding is missing");
+      await assertAuthenticatedMigrationSource(source, tenantId);
+      await assertOwners();
+    };
+    return {
+      managesMapping: true as const,
+      sourceId,
+      assertOwners,
+      proposedActions: [] as ReconcilePreviewAction[],
+      plannedOwnerIds: new Set(
+        legacy.members.flatMap((member) => [
+          member.rownd_user_id,
+          member.supertokens_user_id,
+        ]),
+      ),
+      execute: fresh,
+      beginMethodReconciliation: fresh,
+      complete: fresh,
+    };
   }
-  if (wasPrimary) {
-    for (const member of pending) {
-      if ((await AccountLinking.canLinkAccounts(SuperTokens.convertToRecipeUserId(member.rownd_user_id), target, userContext)).status !== "OK") {
-        fail("Core cannot link a donor to the pinned winner");
+  if (existing && (existing.reservation || existing.target !== target))
+    fail("the checkpoint target changed");
+  if (existing && existing.sourceId !== sourceId) {
+    if (existing.status !== "COMPLETE")
+      fail("the in-progress source election changed");
+    await assertCompletedPlan(existing, context);
+    previous = existing;
+    existing = undefined;
+  }
+  const profile = await requiredProfile(sourceId);
+  const survivor = await SuperTokens.getUser(target, context);
+  const anchor = survivor && (await recipeMethod(survivor, target, context));
+  const provider = anchor?.thirdParty;
+  const previousSource = initialMetadata.original_rownd_user;
+  if (
+    provider &&
+    anchor.tenantIds.includes(tenantId) &&
+    previousSource?.data?.user_id === sourceId &&
+    [
+      previousSource.data[`${provider.id}_id`],
+      resolveRowndProviderSubject(previousSource, provider.id),
+    ].includes(provider.userId) &&
+    source.loginMethods.some(
+      (method) =>
+        method.recipeId === "thirdparty" &&
+        method.thirdPartyId === provider.id &&
+        method.thirdPartyUserId !== provider.userId,
+    )
+  ) {
+    fail("provider retirement would delete the immutable primary recipe");
+  }
+  const isRetiredHistory = async (id: string, historical: RowndUser) => {
+    const metadata = await getRawUserMetadata(id, context);
+    const retired = metadata.rownd_migration_superseded;
+    const mapping = await SuperTokens.getUserIdMapping({
+      userId: id,
+      userIdType: "EXTERNAL",
+      userContext: context,
+    });
+    return (
+      isRecord(retired) &&
+      retired.rowndUserId === sourceId &&
+      retired.targetUserId === target &&
+      mapping.status !== "OK" &&
+      !(await SuperTokens.getUser(id, context)) &&
+      sharedProfile(profile, historical)
+    );
+  };
+  const profiles = new Map<string, RowndUser>();
+  for (const candidate of candidates) {
+    const current = await requiredProfile(candidate.rownd_user_id);
+    if (
+      !sharedProfile(profile, current) &&
+      candidate.rownd_user_id !== sourceId
+    )
+      fail("a source no longer shares the current identity");
+    profiles.set(candidate.rownd_user_id, current);
+  }
+  const ownerIds = new Set([
+    target,
+    ...(input.ownerIds ?? []),
+    ...candidates.flatMap((candidate) =>
+      candidate.supertokens_user_id ? [candidate.supertokens_user_id] : [],
+    ),
+  ]);
+  let plan: OwnerPlanCheckpoint;
+  if (existing) {
+    plan = existing;
+    for (const candidate of plan.candidates)
+      if (!profiles.has(candidate.rownd_user_id))
+        fail("a checkpoint source is missing");
+    for (const id of ownerIds)
+      if (
+        !(
+          plan.completion?.recipes ?? [
+            ...plan.recipes,
+            ...(plan.createdRecipes ?? []),
+          ]
+        ).some((recipe) => recipe.id === id)
+      )
+        fail("an unplanned owner appeared");
+  } else {
+    const recipes = new Map<string, OwnerRecipe>();
+    const initial: OwnerState = {
+      graph: [],
+      mappings: [],
+      markers: [],
+      verifications: [],
+    };
+    const owners = new Map<string, User>();
+    for (const id of ownerIds) {
+      const user = await SuperTokens.getUser(id, context);
+      if (!user) fail("an owner disappeared");
+      const owner = await immutableId(user.id, context);
+      if (id === target && owner !== target)
+        fail("the target is not an immutable primary owner");
+      owners.set(owner, user);
+    }
+    const canonical = await SuperTokens.getUserIdMapping({
+      userId: sourceId,
+      userIdType: "EXTERNAL",
+      userContext: context,
+    });
+    if (
+      !previous &&
+      owners.size === 1 &&
+      owners.has(target) &&
+      canonical.status === "OK" &&
+      canonical.superTokensUserId === target &&
+      initialMetadata.original_rownd_user?.data.user_id === sourceId
+    ) {
+      await assertMigrationOwnerGraph(owners.get(target)!, tenantId, context);
+      await assertMigrationMapping(target, sourceId, context);
+      return undefined;
+    }
+    for (const [owner, user] of owners) {
+      await assertMigrationOwnerGraph(user, tenantId, context);
+      const hasEmail =
+        profile.data.email !== undefined &&
+        hasNativeContactEmail(user, profile.data.email);
+      let provenRownd = false;
+      let sharedCurrentEmail = false;
+      for (const candidate of candidates) {
+        if (!candidate.supertokens_user_id) continue;
+        const candidateOwner = await SuperTokens.getUser(
+          candidate.supertokens_user_id,
+          context,
+        );
+        if (
+          candidateOwner &&
+          (await immutableId(candidateOwner.id, context)) === owner
+        ) {
+          const forward = await SuperTokens.getUserIdMapping({
+            userId: candidate.rownd_user_id,
+            userIdType: "EXTERNAL",
+            userContext: context,
+          });
+          const stored = await getRawUserMetadata(
+            candidate.supertokens_user_id,
+            context,
+          );
+          if (
+            forward.status === "OK"
+              ? forward.superTokensUserId !== candidate.supertokens_user_id
+              : stored.original_rownd_user?.data.user_id !==
+                candidate.rownd_user_id
+          )
+            fail("a candidate has no literal mapping or source provenance");
+          provenRownd = true;
+          sharedCurrentEmail ||=
+            profile.data.email !== undefined &&
+            profiles.get(candidate.rownd_user_id)?.data.email?.toLowerCase() ===
+              profile.data.email.toLowerCase();
+        }
+      }
+      const nativeCurrent =
+        !user.isPrimaryUser &&
+        user.loginMethods.length === 1 &&
+        source.loginMethods.some(
+          (expected) =>
+            ((expected.recipeId === "thirdparty" &&
+              ["google", "apple"].includes(expected.thirdPartyId)) ||
+              (expected.recipeId === "passwordless" &&
+                expected.phoneNumber !== undefined &&
+                expected.isVerified)) &&
+            matchesImportLoginMethod(user.loginMethods[0]!, expected),
+        );
+      if (!hasEmail && !provenRownd && !nativeCurrent)
+        fail("an owner lacks current exact identity proof");
+      if (
+        owner !== target &&
+        user.isPrimaryUser &&
+        (provenRownd ? !sharedCurrentEmail : !hasEmail)
+      )
+        fail("primary donor merging requires a shared current exact email");
+      for (const method of user.loginMethods) {
+        if (method.tenantIds.length !== 1 || method.tenantIds[0] !== tenantId)
+          fail("a recipe has non-public tenant membership");
+        const id = await immutableId(
+          method.recipeUserId.getAsString(),
+          context,
+        );
+        recipes.set(id, {
+          id,
+          identity: identity(method),
+          verified: method.verified,
+          ...(method.email ? { email: method.email } : {}),
+        });
+        initial.graph.push({ id, owner, primary: user.isPrimaryUser });
+        const mapping = await SuperTokens.getUserIdMapping({
+          userId: id,
+          userIdType: "SUPERTOKENS",
+          userContext: context,
+        });
+        initial.mappings.push({
+          id,
+          ...(mapping.status === "OK"
+            ? {
+                alias: mapping.externalUserId,
+                ...(mapping.externalUserIdInfo !== undefined
+                  ? { info: mapping.externalUserIdInfo }
+                  : {}),
+              }
+            : {}),
+        });
       }
     }
+    initial.graph.sort((a, b) => a.id.localeCompare(b.id));
+    initial.mappings.sort((a, b) => a.id.localeCompare(b.id));
+    const aliases = initial.mappings.flatMap((mapping) =>
+      mapping.alias
+        ? [
+            {
+              id: mapping.alias,
+              from: mapping.id,
+              to: mapping.id,
+              ...(mapping.info !== undefined ? { info: mapping.info } : {}),
+            },
+          ]
+        : [],
+    );
+    const absentAliases: string[] = [];
+    for (const alias of aliases)
+      if (!profiles.has(alias.id)) {
+        if (await optionalProfile(alias.id))
+          fail("a live mapped source was omitted from the election");
+        const ownerId = initial.graph.find(
+          (entry) => entry.id === alias.from,
+        )?.owner;
+        const owner = ownerId && owners.get(ownerId);
+        if (
+          !owner ||
+          !profile.data.email ||
+          !hasNativeContactEmail(owner, profile.data.email)
+        ) {
+          fail("an absent alias has no native exact-email owner proof");
+        }
+        absentAliases.push(alias.id);
+      }
+    const sourceAlias = aliases.find((alias) => alias.id === sourceId);
+    if (recipes.has(sourceId) && sourceId !== target)
+      fail("the canonical alias collides with an immutable recipe ID");
+    if (sourceAlias) sourceAlias.to = target;
+    else aliases.push({ id: sourceId, to: target } as (typeof aliases)[number]);
+    const displaced = aliases.find(
+      (alias) => alias.id !== sourceId && alias.to === target,
+    );
+    if (displaced) {
+      const available = [...recipes.keys()]
+        .filter(
+          (id) =>
+            id !== target &&
+            !aliases.some(
+              (alias) => alias.id !== displaced.id && alias.to === id,
+            ),
+        )
+        .sort();
+      const destination =
+        available.find((id) => id === sourceAlias?.from) ?? available[0];
+      if (!destination)
+        fail("the survivor alias has no vacant final linked recipe");
+      displaced.to = destination;
+    }
+    const literals = new Set([
+      ...recipes.keys(),
+      ...candidates.map((candidate) => candidate.rownd_user_id),
+      ...aliases.map((alias) => alias.id),
+    ]);
+    const emails = new Set(
+      [...recipes.values()].flatMap((recipe) =>
+        recipe.email ? [recipe.email] : [],
+      ),
+    );
+    for (const id of literals)
+      for (const email of emails)
+        initial.verifications.push({
+          id,
+          email,
+          verified: await EmailVerification.isEmailVerified(
+            SuperTokens.convertToRecipeUserId(id),
+            email,
+            context,
+          ),
+        });
+    for (const id of literals) {
+      const metadata = await getRawUserMetadata(id, context);
+      const mappedId =
+        initial.mappings.find((entry) => entry.alias === id)?.id ?? id;
+      const ownerId = initial.graph.find(
+        (entry) => entry.id === mappedId,
+      )?.owner;
+      await assertOwnerEmailPolicy(
+        metadata,
+        ownerId ? owners.get(ownerId) : undefined,
+        profile.data.email,
+        context,
+      );
+      if (
+        metadata[key] !== undefined &&
+        !(
+          id === target &&
+          previous &&
+          isDeepStrictEqual(readOwnerPlanCheckpoint(metadata), previous)
+        )
+      )
+        fail("an owner has another consolidation checkpoint");
+      const values = markers(metadata);
+      const mapping = initial.mappings.find(
+        (entry) => entry.id === id || entry.alias === id,
+      );
+      const candidate = candidates.find(
+        (entry) =>
+          entry.rownd_user_id === id || entry.supertokens_user_id === id,
+      );
+      const expectedId = mapping?.id ?? candidate?.supertokens_user_id;
+      if (
+        [
+          values.rownd_migration_target,
+          values.rownd_migration_canonical_target,
+        ].some((value) => value !== undefined && value !== expectedId) ||
+        values.rownd_migration_superseded !== undefined ||
+        values.rownd_migration_reconciliation !== undefined
+      )
+        fail("an owner has conflicting migration markers");
+      const original = metadata.original_rownd_user?.data.user_id;
+      if (
+        original !== undefined &&
+        !profiles.has(original) &&
+        !absentAliases.includes(original) &&
+        mapping?.alias === undefined
+      ) {
+        const ownerId = initial.graph.find((entry) => entry.id === id)?.owner;
+        const owner = ownerId && owners.get(ownerId);
+        if (
+          owner &&
+          profile.data.email &&
+          hasNativeContactEmail(owner, profile.data.email)
+        ) {
+          const historical = await optionalProfile(original);
+          if (!historical || (await isRetiredHistory(original, historical)))
+            absentAliases.push(original);
+        }
+      }
+      const previousMarkers =
+        previous &&
+        (previous.completion?.state ?? ownerStateAt(previous)).markers.find(
+          (entry) => entry.id === id,
+        )?.values;
+      const recordedProvenance =
+        previousMarkers !== undefined &&
+        isDeepStrictEqual(
+          previousMarkers.original_rownd_user,
+          metadata.original_rownd_user,
+        );
+      if (
+        original !== undefined &&
+        ((!profiles.has(original) && !absentAliases.includes(original)) ||
+          (mapping?.alias !== undefined &&
+            mapping.alias !== original &&
+            !recordedProvenance))
+      )
+        fail("an owner's literal source provenance changed");
+      initial.markers.push({ id, values });
+    }
+    plan = {
+      version: 2,
+      id: randomUUID(),
+      sourceId,
+      target,
+      candidates: candidates.map((candidate) => ({ ...candidate })),
+      absentAliases,
+      recipes: [...recipes.values()].sort((a, b) => a.id.localeCompare(b.id)),
+      aliases,
+      initial,
+      operations: [],
+      cursor: 0,
+      status: "READY",
+    };
+    const decision = planOwnerOperations({
+      ...plan,
+      profile,
+      authenticatedEmail: getAuthenticatedMigrationEmail(source, tenantId),
+    });
+    if (decision.status === "BLOCKED") return fail(decision.reason);
+    plan.operations = decision.actions;
   }
-  const proposedActions: ReconcilePreviewAction[] = [
-    ...(!wasPrimary && pending.length ? [{ action: "create_primary" as const, supertokens_user_id: target }] : []),
-    ...pending.map((member) => ({ action: "link_method" as const, recipeUserId: member.supertokens_user_id, supertokens_user_id: target })),
-    ...(existing?.status !== "COMPLETE" ? [{ action: "update_migration_metadata" as const, supertokens_user_id: target }] : []),
-  ];
-  const assertFresh = async (complete = false) => {
-    if (members.some((member) => !isAdministrativeElectionCandidate(source, member.rownd_user_id))) fail("the private election binding is missing");
+
+  // Core persists JSON; optional undefined activity/profile fields must not turn
+  // a successful checkpoint write into apparent drift on the next read.
+  plan = JSON.parse(JSON.stringify(plan)) as OwnerPlanCheckpoint;
+  let expected: OwnerPlanCheckpoint | undefined = existing ?? previous;
+  let reconciling =
+    existing?.status === "RECONCILING" || existing?.status === "COMPLETE";
+  const normalizeEnginePolicy = async (metadata: JsonRecord, id: string) => {
+    const normalized = { ...metadata };
+    if (!reconciling) return normalized;
+    const introductions = metadata.rownd_migration_provider_introductions;
+    if (introductions !== undefined) {
+      if (id !== target || !Array.isArray(introductions))
+        fail("an unexpected provider introduction appeared");
+      for (const entry of introductions as JsonRecord[]) {
+        if (!isRecord(entry) || typeof entry.recipeUserId !== "string")
+          fail("an unexpected provider introduction appeared");
+        const recipeId = entry.recipeUserId as string;
+        const receipt = [...plan.recipes, ...(plan.createdRecipes ?? [])].find(
+          (recipe) => recipe.id === recipeId,
+        );
+        const user = await SuperTokens.getUser(recipeId, context);
+        const method = user && (await recipeMethod(user, recipeId, context));
+        if (
+          !isRecord(entry) ||
+          entry.recipeUserId !== recipeId ||
+          entry.internalUserId !== target ||
+          entry.rowndUserId !== sourceId ||
+          entry.tenantId !== tenantId ||
+          !receipt ||
+          !method ||
+          identity(method) !== receipt.identity ||
+          method.thirdParty?.id !== entry.provider ||
+          method.thirdParty?.userId !== entry.subject ||
+          !source.loginMethods.some((wanted) =>
+            matchesImportLoginMethod(method, wanted),
+          ) ||
+          (entry.created === true &&
+            !(plan.createdRecipes ?? []).some(
+              (recipe) => recipe.id === recipeId,
+            ))
+        )
+          fail("an unexpected provider introduction appeared");
+      }
+      delete normalized.rownd_migration_provider_introductions;
+    }
+    if (
+      Array.isArray(normalized.rownd_pending_verification) &&
+      normalized.rownd_pending_verification.length === 0
+    )
+      delete normalized.rownd_pending_verification;
+    return normalized;
+  };
+  const reservations = new Map<string, OwnerPlanCheckpoint | undefined>();
+  for (const marker of [
+    ...plan.initial.markers,
+    ...(plan.createdRecipes ?? []).map(({ id }) => ({ id })),
+  ])
+    if (marker.id !== target) {
+      const saved = readOwnerPlanCheckpoint(
+        await getRawUserMetadata(marker.id, context),
+      );
+      if (saved && (!saved.reservation || !sameOwnerPlan(saved, plan)))
+        fail("an owner reservation changed");
+      reservations.set(marker.id, saved);
+    }
+  const assertOwners = async (complete = false) => {
+    clearSuperTokensCoreCallCache(context);
+    if (complete)
+      for (const [id, initial] of profiles) {
+        const current = await requiredProfile(id);
+        if (
+          !isDeepStrictEqual(
+            mapRowndUserToSuperTokens(current, tenantId).loginMethods,
+            mapRowndUserToSuperTokens(initial, tenantId).loginMethods,
+          )
+        )
+          fail("a source identity changed before completion");
+      }
+    if (
+      !isDeepStrictEqual(
+        readOwnerPlanCheckpoint(await getRawUserMetadata(target, context)),
+        expected,
+      )
+    )
+      fail("the consolidation checkpoint changed");
+    for (const [id, saved] of reservations)
+      if (
+        !isDeepStrictEqual(
+          readOwnerPlanCheckpoint(await getRawUserMetadata(id, context)),
+          saved,
+        )
+      )
+        fail("an owner reservation changed");
+    if (plan.status !== "COMPLETE")
+      for (const marker of plan.initial.markers) {
+        const metadata = await getRawUserMetadata(marker.id, context);
+        const recipeId =
+          plan.aliases.find((alias) => alias.id === marker.id)?.from ??
+          marker.id;
+        const user = await SuperTokens.getUser(recipeId, context);
+        await assertOwnerEmailPolicy(
+          await normalizeEnginePolicy(metadata, marker.id),
+          user,
+          profile.data.email,
+          context,
+          [...plan.recipes, ...(plan.createdRecipes ?? [])],
+        );
+      }
+    for (const alias of plan.absentAliases) {
+      const historical = await optionalProfile(alias);
+      if (historical && !(await isRetiredHistory(alias, historical)))
+        fail("an absent source reappeared; rediscovery is required");
+    }
+    if (profile.data.email)
+      for (const user of await SuperTokens.listUsersByAccountInfo(
+        tenantId,
+        { email: profile.data.email },
+        false,
+        context,
+      )) {
+        if (!hasNativeContactEmail(user, profile.data.email)) continue;
+        const owner = await immutableId(user.id, context);
+        if (
+          !(
+            plan.completion?.recipes ?? [
+              ...plan.recipes,
+              ...(reconciling ? (plan.createdRecipes ?? []) : []),
+            ]
+          ).some((recipe) => recipe.id === owner)
+        )
+          fail("an unplanned exact-email owner appeared");
+      }
+    if (plan.status === "COMPLETE") {
+      await assertCompletedPlan(plan, context);
+      return observe(plan, context);
+    }
+    for (const receipt of plan.createdRecipes ?? []) {
+      const user = await SuperTokens.getUser(receipt.id, context);
+      const method = user && (await recipeMethod(user, receipt.id, context));
+      if (
+        !reconciling ||
+        !user ||
+        !method ||
+        identity(method) !== receipt.identity ||
+        !source.loginMethods.some((expected) =>
+          matchesImportLoginMethod(method, expected),
+        ) ||
+        ![receipt.id, target].includes(await immutableId(user.id, context)) ||
+        (
+          await SuperTokens.getUserIdMapping({
+            userId: receipt.id,
+            userIdType: "SUPERTOKENS",
+            userContext: context,
+          })
+        ).status === "OK"
+      )
+        fail("a created recipe receipt changed");
+      if (
+        !receipt.verified &&
+        method?.verified &&
+        receipt.email?.toLowerCase() !==
+          getAuthenticatedMigrationEmail(source, tenantId)
+      )
+        fail("linking verified a created email without matching source proof");
+    }
+    const observed = await observe(plan, context);
+    if (reconciling)
+      for (const entry of observed.state.markers) {
+        const normalized = await normalizeEnginePolicy(entry.values, entry.id);
+        for (const field of [
+          "rownd_migration_provider_introductions",
+          "rownd_pending_verification",
+        ]) {
+          if (
+            normalized[field] === undefined &&
+            ownerStateAt(plan).markers.find((marker) => marker.id === entry.id)
+              ?.values[field] === undefined
+          )
+            delete entry.values[field];
+        }
+      }
+    const state = ownerStateAt(plan);
+    const next =
+      plan.status === "APPLYING" && plan.operations[plan.cursor]
+        ? ownerStateAt(plan, plan.cursor + 1)
+        : undefined;
+    const matches = (candidate: OwnerState) => {
+      if (
+        !isDeepStrictEqual(observed.state.graph, candidate.graph) ||
+        !isDeepStrictEqual(observed.state.mappings, candidate.mappings)
+      )
+        return false;
+      if (
+        !observed.state.verifications.every(
+          (entry, index) =>
+            entry.verified === candidate.verifications[index]?.verified ||
+            (reconciling &&
+              entry.verified &&
+              !candidate.verifications[index]?.verified &&
+              entry.email.toLowerCase() ===
+                getAuthenticatedMigrationEmail(source, tenantId) &&
+              candidate.mappings.some(
+                (mapping) => (mapping.alias ?? mapping.id) === entry.id,
+              )),
+        )
+      )
+        return false;
+      if (reconciling) {
+        // The parent may refresh the authoritative snapshot and publish exact
+        // alias canonical markers, but cannot redirect any literal target.
+        return observed.state.markers.every((entry) => {
+          const wanted = candidate.markers.find(
+            (marker) => marker.id === entry.id,
+          )!;
+          const actual = { ...entry.values };
+          const original = { ...wanted.values };
+          const canonicalPointer = getCanonicalEmailRecipeUserId(
+            actual,
+            tenantId,
+          );
+          const plannedCanonical =
+            entry.id === target &&
+            [...observed.methods.values(), ...observed.extra.values()].some(
+              (method) =>
+                method.recipeUserId.getAsString() === canonicalPointer &&
+                method.recipeId === "passwordless" &&
+                method.tenantIds.includes(tenantId) &&
+                !!profile.data.email &&
+                method.hasSameEmailAs(profile.data.email),
+            );
+          if (plannedCanonical) {
+            if (actual.rownd_email_recipe_user_id === canonicalPointer)
+              actual.rownd_email_recipe_user_id =
+                original.rownd_email_recipe_user_id;
+            if (isRecord(actual.rownd_email_recipe_user_ids)) {
+              const pointers = { ...actual.rownd_email_recipe_user_ids };
+              if (
+                isRecord(original.rownd_email_recipe_user_ids) &&
+                original.rownd_email_recipe_user_ids[tenantId] !== undefined
+              )
+                pointers[tenantId] =
+                  original.rownd_email_recipe_user_ids[tenantId];
+              else delete pointers[tenantId];
+              actual.rownd_email_recipe_user_ids =
+                Object.keys(pointers).length ||
+                original.rownd_email_recipe_user_ids !== undefined
+                  ? pointers
+                  : undefined;
+            }
+            for (const field of [
+              "rownd_email_recipe_user_id",
+              "rownd_email_recipe_user_ids",
+            ])
+              if (actual[field] === undefined) delete actual[field];
+          }
+          if (
+            isRecord(actual.rownd_email_recipe_user_ids) &&
+            !isRecord(original.rownd_email_recipe_user_ids) &&
+            Object.keys(actual.rownd_email_recipe_user_ids).every(
+              (tenant) => tenant === tenantId,
+            )
+          )
+            delete actual.rownd_email_recipe_user_ids;
+          if (entry.id === target) {
+            const snapshot = actual.original_rownd_user as RowndUser;
+            assertRowndSourcePayload(snapshot);
+            if (
+              snapshot.data.user_id !== sourceId ||
+              !isRowndMigrationProfileActive(snapshot) ||
+              !isDeepStrictEqual(
+                mapRowndUserToSuperTokens(snapshot, tenantId).loginMethods,
+                source.loginMethods,
+              )
+            )
+              return false;
+            delete actual.original_rownd_user;
+            delete original.original_rownd_user;
+          }
+          const alias = plan.aliases.find((alias) => alias.id === entry.id);
+          if (
+            alias &&
+            actual.rownd_migration_canonical_target === alias.to &&
+            original.rownd_migration_canonical_target === undefined
+          )
+            delete actual.rownd_migration_canonical_target;
+          return isDeepStrictEqual(actual, original);
+        });
+      }
+      return isDeepStrictEqual(observed.state.markers, candidate.markers);
+    };
+    if (!matches(state) && !(next && matches(next)))
+      fail("recipe graph, mapping, or literal metadata changed");
+    if (
+      complete &&
+      observed.state.graph.some(
+        (entry) => entry.owner !== target || !entry.primary,
+      )
+    )
+      fail("a donor is not linked to the survivor");
+    for (const [id, method] of observed.extra) {
+      if (
+        !reconciling ||
+        !source.loginMethods.some((expected) =>
+          matchesImportLoginMethod(method, expected),
+        )
+      )
+        fail(`an unexpected recipe joined the survivor: ${id}`);
+    }
+    for (const recipe of plan.recipes) {
+      const address =
+        observed.state.mappings.find((entry) => entry.id === recipe.id)
+          ?.alias ?? recipe.id;
+      const expectedVerification = recipe.email
+        ? observed.state.verifications.find(
+            (entry) => entry.id === address && entry.email === recipe.email,
+          )?.verified
+        : recipe.verified;
+      if (expectedVerification !== observed.methods.get(recipe.id)?.verified)
+        fail(
+          "a recipe's verification no longer matches its planned literal address",
+        );
+      if (
+        !recipe.verified &&
+        recipe.email &&
+        observed.methods.get(recipe.id)?.verified &&
+        recipe.email.toLowerCase() !==
+          getAuthenticatedMigrationEmail(source, tenantId)
+      )
+        fail("linking verified an email without matching source proof");
+    }
+    return observed;
+  };
+  const assertFresh = async () => {
+    if (
+      plan.candidates.some(
+        (candidate) =>
+          !isAdministrativeElectionCandidate(source, candidate.rownd_user_id),
+      )
+    )
+      fail("the private election binding is missing");
     await assertAuthenticatedMigrationSource(source, tenantId);
-    await assertOwners(complete);
-    await assertMigrationMapping(target, winner, userContext);
+    return observe(plan, context);
+  };
+  const preflight = async () => {
+    const observed = await assertOwners();
+    const pending = plan.operations.slice(plan.cursor);
+    if (
+      plan.status === "COMPLETE" ||
+      !pending.some((op) => op.kind !== "metadata")
+    )
+      return;
+    for (const op of pending)
+      if (op.kind === "link" && op.verifiedEmail) {
+        const recipe = plan.recipes.find((recipe) => recipe.id === op.id)!;
+        if (
+          !recipe.verified &&
+          op.verifiedEmail.email.toLowerCase() !==
+            getAuthenticatedMigrationEmail(source, tenantId)
+        ) {
+          fail(
+            "linking would verify an unverified email without exact source proof",
+          );
+        }
+      }
+    const primary = await SuperTokens.getUser(target, context);
+    if (primary)
+      for (const method of source.loginMethods) {
+        if (
+          method.recipeId === "passwordless" &&
+          method.email &&
+          !method.isVerified &&
+          !primary.loginMethods.some((existing) =>
+            matchesImportLoginMethod(existing, method),
+          ) &&
+          primary.loginMethods.some(
+            (existing) =>
+              existing.verified && existing.hasSameEmailAs(method.email!),
+          )
+        )
+          fail(
+            "linking would verify an unverified email without exact source proof",
+          );
+      }
+    if (primary && !primary.isPrimaryUser) {
+      const promotion = await AccountLinking.canCreatePrimaryUser(
+        SuperTokens.convertToRecipeUserId(await sdkId(target, context)),
+        context,
+      );
+      const conflictingOwner =
+        promotion.status !== "OK"
+          ? await immutableId(promotion.primaryUserId, context)
+          : undefined;
+      if (
+        promotion.status !== "OK" &&
+        !(
+          promotion.status ===
+            "ACCOUNT_INFO_ALREADY_ASSOCIATED_WITH_ANOTHER_PRIMARY_USER_ID_ERROR" &&
+          plan.operations.some(
+            (op) => op.kind === "detach" && op.id === conflictingOwner,
+          )
+        )
+      )
+        fail("Core cannot promote the survivor");
+    }
+    if (primary?.isPrimaryUser)
+      for (const entry of observed.state.graph) {
+        if (entry.owner === target || entry.primary) continue;
+        if (
+          (
+            await AccountLinking.canLinkAccounts(
+              SuperTokens.convertToRecipeUserId(await sdkId(entry.id, context)),
+              primary.id,
+              context,
+            )
+          ).status !== "OK"
+        )
+          fail("Core cannot link a donor to the survivor");
+      }
+  };
+  await preflight();
+  const pending =
+    plan.status === "COMPLETE" ? [] : plan.operations.slice(plan.cursor);
+  const proposedActions: ReconcilePreviewAction[] = pending.flatMap(
+    (op): ReconcilePreviewAction[] =>
+      op.kind === "link"
+        ? [
+            {
+              action: "link_method",
+              recipeUserId: op.id,
+              supertokens_user_id: target,
+            },
+          ]
+        : op.kind === "detach"
+          ? [
+              {
+                action: "unlink_method",
+                recipeUserId: op.id,
+                supertokens_user_id: target,
+              },
+            ]
+          : op.kind === "promote"
+            ? [{ action: "create_primary", supertokens_user_id: target }]
+            : op.kind === "delete_mapping"
+              ? [
+                  {
+                    action: "remove_mapping",
+                    supertokens_user_id: op.id,
+                    rownd_user_id: op.alias,
+                  },
+                ]
+              : op.kind === "create_mapping"
+                ? [
+                    {
+                      action: "create_mapping",
+                      supertokens_user_id: op.id,
+                      rownd_user_id: op.alias,
+                    },
+                  ]
+                : op.kind === "verify_email"
+                  ? [
+                      {
+                        action: "verify_email",
+                        recipeUserId: op.id,
+                        rownd_user_id: op.id,
+                        email: op.email,
+                      },
+                    ]
+                  : [],
+  );
+  if (pending.length || plan.status !== "COMPLETE")
+    proposedActions.push({
+      action: "update_migration_metadata",
+      supertokens_user_id: target,
+    });
+  if (
+    plan.status !== "COMPLETE" &&
+    profile.data.email &&
+    plan.initial.markers.some(({ values }) => {
+      const pointer = getCanonicalEmailRecipeUserId(values, tenantId);
+      const id =
+        plan.initial.mappings.find((mapping) => mapping.alias === pointer)
+          ?.id ?? pointer;
+      return (
+        pointer &&
+        plan.recipes.some(
+          (recipe) =>
+            recipe.id === id &&
+            recipe.email &&
+            recipe.email.toLowerCase() !== profile.data.email!.toLowerCase(),
+        )
+      );
+    })
+  )
+    proposedActions.push({
+      action: "set_canonical_email",
+      email: profile.data.email,
+      supertokens_user_id: target,
+    });
+  const assertCheckpoint = async () => {
+    invalidateReconciliationReads("metadata", target);
+    clearSuperTokensCoreCallCache(context);
+    if (
+      !isDeepStrictEqual(
+        readOwnerPlanCheckpoint(await getRawUserMetadata(target, context)),
+        expected,
+      )
+    )
+      fail("the consolidation checkpoint changed");
+  };
+  const save = async (next: OwnerPlanCheckpoint) => {
+    await assertCheckpoint();
+    const result = await UserMetadata.updateUserMetadata(
+      target,
+      { [key]: next },
+      context,
+    );
+    if (result.status !== "OK") fail("consolidation checkpoint write failed");
+    plan = next;
+    expected = next;
+    if (
+      !isDeepStrictEqual(
+        readOwnerPlanCheckpoint(await getRawUserMetadata(target, context)),
+        expected,
+      )
+    )
+      fail("consolidation checkpoint write was not persisted");
+  };
+  observeAdministrativeMethodCreation(source, async (id) => {
+    if (
+      !reconciling ||
+      plan.status !== "RECONCILING" ||
+      plan.recipes.some((recipe) => recipe.id === id)
+    )
+      fail("method creation is outside the reconciliation checkpoint");
+    const user = await SuperTokens.getUser(id, context);
+    const method = user && (await recipeMethod(user, id, context));
+    if (
+      !user ||
+      !method ||
+      user.isPrimaryUser ||
+      user.loginMethods.length !== 1 ||
+      !source.loginMethods.some((expected) =>
+        matchesImportLoginMethod(method, expected),
+      )
+    )
+      fail("a created method does not match the live source");
+    const receipt: OwnerRecipe = {
+      id,
+      identity: identity(method!),
+      verified: method!.verified,
+      ...(method!.email ? { email: method!.email } : {}),
+    };
+    plan = {
+      ...plan,
+      createdRecipes: [...(plan.createdRecipes ?? []), receipt],
+    };
+    await save(plan);
+  });
+  const clearRecoveryPointers = async () => {
+    for (const candidate of plan.candidates) {
+      const saved = (
+        await getRawUserMetadata(candidate.rownd_user_id, context)
+      )[recoveryKey];
+      if (saved === undefined) continue;
+      if (!isDeepStrictEqual(saved, { target, planId: plan.id }))
+        fail("a source has another recovery pointer");
+      await UserMetadata.updateUserMetadata(
+        candidate.rownd_user_id,
+        { [recoveryKey]: null },
+        context,
+      );
+    }
   };
   return {
-    assertOwners, proposedActions, plannedOwnerIds: new Set(members.flatMap((member) => [member.rownd_user_id, member.supertokens_user_id])),
-    async beginMethodReconciliation() {
-      await assertFresh(true);
-      reconcilingMethods = true;
+    managesMapping: true as const,
+    sourceId,
+    assertOwners: async (complete = false) => {
+      await assertOwners(complete);
     },
+    proposedActions,
+    plannedOwnerIds: new Set([
+      ...plan.recipes.map((recipe) => recipe.id),
+      ...plan.aliases.map((alias) => alias.id),
+    ]),
     async execute() {
       await assertFresh();
-      if (!pending.length) return;
-      expectedCheckpoint = checkpoint;
-      await UserMetadata.updateUserMetadata(target, { [key]: checkpoint }, userContext);
-      await assertFresh();
-      if (!wasPrimary) {
-        promotionAllowed = true;
-        const promoted = await AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(target), userContext);
-        if (promoted.status !== "OK" && promoted.status !== "RECIPE_USER_ID_ALREADY_LINKED_WITH_PRIMARY_USER_ID_ERROR") fail("primary promotion failed");
-        await assertFresh();
+      if (plan.status === "COMPLETE") return;
+      if (!expected || previous) {
+        await save(plan);
+        previous = undefined;
       }
-      for (const member of pending) {
-        await assertFresh();
-        if ((await AccountLinking.canLinkAccounts(SuperTokens.convertToRecipeUserId(member.rownd_user_id), target, userContext)).status !== "OK") {
-          fail("Core cannot link a donor to the pinned winner");
+      for (const candidate of plan.candidates) {
+        const id = candidate.rownd_user_id;
+        if (id === target) continue;
+        const pointer = { target, planId: plan.id };
+        const saved = (await getRawUserMetadata(id, context))[recoveryKey];
+        if (saved !== undefined && !isDeepStrictEqual(saved, pointer))
+          fail("a source has another recovery pointer");
+        if (saved === undefined)
+          await UserMetadata.updateUserMetadata(
+            id,
+            { [recoveryKey]: pointer },
+            context,
+          );
+      }
+      while (plan.cursor < plan.operations.length) {
+        const op = plan.operations[plan.cursor]!;
+        if (plan.status !== "APPLYING")
+          await save({ ...plan, status: "APPLYING" });
+        const observed = await assertFresh();
+        const after = ownerStateAt(plan, plan.cursor + 1);
+        if (
+          op.kind === "revoke_verification_tokens" ||
+          !isDeepStrictEqual(observed.state, after)
+        ) {
+          if (op.kind === "detach") {
+            const user = await SuperTokens.getUser(op.id, context);
+            if (
+              !user ||
+              (await immutableId(user.id, context)) === target ||
+              ((await immutableId(user.id, context)) === op.id &&
+                user.loginMethods.length !== 1)
+            )
+              fail("unsafe primary donor detach");
+            const result = await AccountLinking.unlinkAccount(
+              SuperTokens.convertToRecipeUserId(await sdkId(op.id, context)),
+              context,
+            );
+            if (result.status !== "OK" || result.wasRecipeUserDeleted)
+              fail("Core failed to preserve a donor recipe during detach");
+          } else if (op.kind === "promote") {
+            const result = await AccountLinking.createPrimaryUser(
+              SuperTokens.convertToRecipeUserId(await sdkId(op.id, context)),
+              context,
+            );
+            if (result.status !== "OK") fail("primary promotion failed");
+          } else if (op.kind === "link") {
+            const donor = SuperTokens.convertToRecipeUserId(
+              await sdkId(op.id, context),
+            );
+            const primary = await sdkId(target, context);
+            if (
+              (await AccountLinking.canLinkAccounts(donor, primary, context))
+                .status !== "OK"
+            )
+              fail("Core cannot link a donor to the survivor");
+            await assertCheckpoint();
+            invalidateReconciliationReads("mapping");
+            invalidateReconciliationReads("user", donor.getAsString());
+            invalidateReconciliationReads("user", primary);
+            clearSuperTokensCoreCallCache(context);
+            const donorUser = await SuperTokens.getUser(
+              donor.getAsString(),
+              context,
+            );
+            const recipient = await SuperTokens.getUser(primary, context);
+            if (
+              !donorUser ||
+              !(await recipeMethod(donorUser, op.id, context)) ||
+              !recipient ||
+              (await immutableId(recipient.id, context)) !== target
+            )
+              fail("link ownership changed");
+            if (
+              (await AccountLinking.linkAccounts(donor, primary, context))
+                .status !== "OK"
+            )
+              fail("donor linking failed");
+          } else if (op.kind === "delete_mapping") {
+            const result = await SuperTokens.deleteUserIdMapping({
+              userId: op.alias,
+              userIdType: "EXTERNAL",
+              force: true,
+              userContext: context,
+            });
+            if (result.status !== "OK") fail("alias mapping deletion failed");
+          } else if (op.kind === "create_mapping") {
+            const result = await SuperTokens.createUserIdMapping({
+              superTokensUserId: op.id,
+              externalUserId: op.alias,
+              ...(op.info !== undefined ? { externalUserIdInfo: op.info } : {}),
+              force: true,
+              userContext: context,
+            });
+            if (result.status !== "OK") fail("alias mapping creation failed");
+          } else if (op.kind === "revoke_verification_tokens") {
+            const result =
+              await EmailVerification.revokeEmailVerificationTokens(
+                tenantId,
+                SuperTokens.convertToRecipeUserId(op.id),
+                op.email,
+                context,
+              );
+            if (result.status !== "OK")
+              fail("old alias verification token revocation failed");
+          } else if (op.kind === "verify_email") {
+            const recipient = plan.aliases.find(
+              (alias) => alias.id === op.id,
+            )?.to;
+            const baseline = plan.recipes.find(
+              (recipe) => recipe.id === recipient,
+            );
+            if (!baseline?.verified || baseline.email !== op.email)
+              fail(
+                "verification transfer has no immutable credential baseline",
+              );
+            const token = await EmailVerification.createEmailVerificationToken(
+              tenantId,
+              SuperTokens.convertToRecipeUserId(op.id),
+              op.email,
+              context,
+            );
+            if (token.status === "OK") {
+              const result = await EmailVerification.verifyEmailUsingToken(
+                tenantId,
+                token.token,
+                false,
+                context,
+              );
+              if (result.status !== "OK") fail("verification transfer failed");
+            }
+          } else if (op.kind === "metadata") {
+            invalidateReconciliationReads("metadata", op.id);
+            clearSuperTokensCoreCallCache(context);
+            if (
+              !isDeepStrictEqual(
+                markers(await getRawUserMetadata(op.id, context)),
+                ownerStateAt(plan).markers.find((entry) => entry.id === op.id)
+                  ?.values,
+              )
+            )
+              fail("literal metadata changed before publication");
+            const result = await UserMetadata.updateUserMetadata(
+              op.id,
+              op.values,
+              context,
+            );
+            if (result.status !== "OK") fail("metadata transition failed");
+          }
         }
-        await assertFresh();
-        permittedLinks.add(member.supertokens_user_id);
-        // SDK post-link checks use Core's externalized recipe ID. Fresh mapping checks pin its immutable recipe owner.
-        const result = await AccountLinking.linkAccounts(SuperTokens.convertToRecipeUserId(member.rownd_user_id), target, userContext);
-        if (result.status !== "OK") fail("donor linking failed");
-        confirmedLinks.add(member.supertokens_user_id);
-        await assertFresh();
+        if (!isDeepStrictEqual((await assertFresh()).state, after))
+          fail("the planned transition did not reach its postcondition");
+        await save({ ...plan, cursor: plan.cursor + 1, status: "READY" });
       }
-      await assertFresh(true);
+      await assertOwners(true);
+    },
+    async beginMethodReconciliation() {
+      await assertOwners(true);
+      if (plan.status !== "COMPLETE" && plan.status !== "RECONCILING")
+        await save({ ...plan, status: "RECONCILING" });
+      reconciling = true;
     },
     async complete() {
-      await assertFresh(true);
-      if (existing?.status !== "COMPLETE") {
-        expectedCheckpoint = { ...checkpoint, status: "COMPLETE" };
-        await UserMetadata.updateUserMetadata(target, { [key]: expectedCheckpoint }, userContext);
-        await assertFresh(true);
+      await assertOwners(true);
+      if (plan.status === "COMPLETE") {
+        await clearRecoveryPointers();
+        return;
       }
+      for (const [id, saved] of reservations) {
+        if (!saved) continue;
+        await UserMetadata.updateUserMetadata(id, { [key]: null }, context);
+        reservations.set(id, undefined);
+      }
+      const current = (await SuperTokens.getUser(target, context))!;
+      const completedRecipes: OwnerRecipe[] = [];
+      for (const method of current.loginMethods)
+        completedRecipes.push({
+          id: await immutableId(method.recipeUserId.getAsString(), context),
+          identity: identity(method),
+          verified: method.verified,
+          ...(method.email ? { email: method.email } : {}),
+        });
+      completedRecipes.sort((a, b) => a.id.localeCompare(b.id));
+      const completedInitial = structuredClone(plan.initial);
+      for (const recipe of completedRecipes) {
+        if (!completedInitial.markers.some((entry) => entry.id === recipe.id))
+          completedInitial.markers.push({
+            id: recipe.id,
+            values: markers(await getRawUserMetadata(recipe.id, context)),
+          });
+        if (recipe.email)
+          for (const id of new Set([
+            recipe.id,
+            await sdkId(recipe.id, context),
+          ])) {
+            if (
+              !completedInitial.verifications.some(
+                (entry) => entry.id === id && entry.email === recipe.email,
+              )
+            )
+              completedInitial.verifications.push({
+                id,
+                email: recipe.email,
+                verified: false,
+              });
+          }
+      }
+      const completedState = (
+        await observe(
+          { ...plan, recipes: completedRecipes, initial: completedInitial },
+          context,
+        )
+      ).state;
+      await save({
+        ...plan,
+        status: "COMPLETE",
+        completion: { recipes: completedRecipes, state: completedState },
+      });
+      await assertCompletedPlan(plan, context);
+      await clearRecoveryPointers();
     },
   };
 }

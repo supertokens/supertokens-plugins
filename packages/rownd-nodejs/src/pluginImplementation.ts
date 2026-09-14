@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import { MigrationTelemetry } from "./telemetry/migrationTelemetry";
 import { assertMigrationMapping } from "./migration-mapping";
 import { resolveConsolidatedTokenOwner } from "./migration-consolidation";
+import { discoverMigrationById, planMigration } from "./migration-plan";
 import { authenticateRowndMigration, assertAuthenticatedMigrationSource } from "./migration-email";
 import { resolveCanonicalEmailForTenant } from "./canonical-email";
 import SuperTokens from "supertokens-node";
@@ -339,14 +340,21 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       }
 
       telemetry.stage = "supertokens_lookup";
-      user = await SuperTokens.getUser(rowndUserId, resolved.userContext);
-      const consolidatedAlias = await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext);
+      const discovery = await discoverMigrationById(rowndUserId, tenantId, resolved.userContext);
+      const plan = planMigration(discovery);
+      if (plan.status === "BLOCKED") throw new Error(plan.reason);
+      user = discovery.user;
+      const consolidatedAlias = plan.status === "NOOP" ? undefined : await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext);
       telemetry.superTokensUserId = user?.id;
-      const existingMetadata = user
+      const existingMetadata = plan.status === "PLAN" && user
         ? await getUserMetadata(user.id, resolved.userContext)
         : undefined;
 
-      if (consolidatedAlias) {
+      if (plan.status === "NOOP") {
+        user = plan.user;
+        superTokensUserId = user.id;
+        recipeUserId = SuperTokens.convertToRecipeUserId(plan.recipeUserId);
+      } else if (consolidatedAlias) {
         user = consolidatedAlias.user;
         superTokensUserId = user.id;
         recipeUserId = consolidatedAlias.recipeUserId;
@@ -400,7 +408,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
           stUserImport,
           tenantId,
           resolved.userContext,
-          { repairUser: user },
+          { repairUser: plan.action.repairUser },
         );
         telemetry.stage = "repaired_user_lookup";
         clearSuperTokensCoreCallCache(resolved.userContext);
@@ -441,7 +449,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       }
 
       telemetry.stage = "tenant_association";
-      if (user) {
+      if (user && plan.status !== "NOOP") {
         await associateUserLoginMethodsToTenant(
           user,
           tenantId,

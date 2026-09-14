@@ -718,6 +718,8 @@ export type RowndConfigResolverContext = {
 
 export interface RowndPluginConfig extends RowndPluginDynamicConfig {
   rowndAppKey?: string;
+  /** App scope for administrative email discovery and uncached profile reads. */
+  rowndAppId?: string;
   rowndAppSecret?: string;
   /**
    * Disables Rownd user and session migration. This must be enabled when
@@ -890,6 +892,7 @@ export interface MigrationResponse {
 
 export interface RowndPluginNormalisedConfig {
   rowndAppKey: string;
+  rowndAppId?: string;
   rowndAppSecret?: string;
   disableRowndUserMigration: boolean;
   enableDebugLogs?: boolean;
@@ -941,6 +944,8 @@ export interface SuperTokensUserImport {
 }
 
 export interface IRowndClient {
+  /** Returns all matching IDs across every page. Each ID is independently fetched and validated before reconciliation. */
+  findUserIdsByEmail?: (opts: { email: string }) => Promise<string[]>;
   validateToken: (token: string) => Promise<{
     user_id: string;
   }>;
@@ -948,6 +953,8 @@ export interface IRowndClient {
     user_id: string;
     app_id?: string;
   }) => Promise<RowndUser | undefined>;
+  /** Administrative reads must bypass profile caches when this method is supplied. */
+  fetchFreshUserInfo?: IRowndClient["fetchUserInfo"];
 }
 
 export type RowndSchemaField = {

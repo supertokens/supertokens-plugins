@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SuperTokens from "supertokens-node";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
-import { assertMigrationSourceActive, retireDuplicateMapping } from "./migration-mapping";
-import { authenticateRowndMigration, fetchAdministrativeMigrationSource } from "./migration-email";
+import {
+  assertMigrationSourceActive,
+  retireDuplicateMapping,
+} from "./migration-mapping";
+import {
+  authenticateRowndMigration,
+  fetchAdministrativeMigrationSource,
+} from "./migration-email";
 import { mapRowndUserToSuperTokens } from "./rownd-compatibility";
 import { setRowndClient } from "./rownd-repository";
 import { reconcileRowndUserWithExistingLoginMethods } from "./supertokens-repository";
@@ -114,19 +120,44 @@ describe("durable duplicate mapping recovery", () => {
     setRowndClient(undefined);
   });
 
-  it.each(["raw", "token", "unbound admin"])("keeps published donor protection without a bound admin election: %s", async (kind) => {
-    setRowndClient({ validateToken: async () => ({ user_id: "A" }), fetchUserInfo: async ({ user_id }) => ({
-      ...profile(user_id), meta: { last_active: user_id === "A" ? "2020-01-02T00:00:00.000Z" : "2020-01-01T00:00:00.000Z" },
-    }) });
-    metadata.set("B", { rownd_migration_canonical_target: internalId });
-    const requested = kind === "token" ? (await authenticateRowndMigration("token", "public", {})).source :
-      kind === "unbound admin" ? (await fetchAdministrativeMigrationSource("A", "public", {}))! : source;
-    await expect(retireDuplicateMapping({ source: requested, ownerInternalId: internalId, targetInternalId: internalId,
-      tenantId: "public", userContext: {} })).rejects.toThrow("The duplicate mapping already has an elected canonical Rownd user");
-    expect(UserMetadata.updateUserMetadata).not.toHaveBeenCalled();
-    expect(SuperTokens.deleteUserIdMapping).not.toHaveBeenCalled();
-    expect(externalId).toBe("B");
-  });
+  it.each(["raw", "token", "unbound admin"])(
+    "keeps published donor protection without a bound admin election: %s",
+    async (kind) => {
+      setRowndClient({
+        validateToken: async () => ({ user_id: "A" }),
+        fetchUserInfo: async ({ user_id }) => ({
+          ...profile(user_id),
+          meta: {
+            last_active:
+              user_id === "A"
+                ? "2020-01-02T00:00:00.000Z"
+                : "2020-01-01T00:00:00.000Z",
+          },
+        }),
+      });
+      metadata.set("B", { rownd_migration_canonical_target: internalId });
+      const requested =
+        kind === "token"
+          ? (await authenticateRowndMigration("token", "public", {})).source
+          : kind === "unbound admin"
+            ? (await fetchAdministrativeMigrationSource("A", "public", {}))!
+            : source;
+      await expect(
+        retireDuplicateMapping({
+          source: requested,
+          ownerInternalId: internalId,
+          targetInternalId: internalId,
+          tenantId: "public",
+          userContext: {},
+        }),
+      ).rejects.toThrow(
+        "The duplicate mapping already has an elected canonical Rownd user",
+      );
+      expect(UserMetadata.updateUserMetadata).not.toHaveBeenCalled();
+      expect(SuperTokens.deleteUserIdMapping).not.toHaveBeenCalled();
+      expect(externalId).toBe("B");
+    },
+  );
 
   it.each([
     "before deletion",
@@ -208,7 +239,9 @@ describe("durable duplicate mapping recovery", () => {
 
   async function missingDuplicate() {
     const freshSource: RowndUser = {
-      ...profile("A"), state: "enabled", auth_level: "verified",
+      ...profile("A"),
+      state: "enabled",
+      auth_level: "verified",
       verified_data: { google_id: "google-subject" },
     };
     const owner = (await SuperTokens.getUser(internalId))!;
@@ -216,7 +249,8 @@ describe("durable duplicate mapping recovery", () => {
     vi.mocked(SuperTokens.getUser).mockResolvedValue(owner);
     setRowndClient({
       validateToken: async () => ({ user_id: "A" }),
-      fetchUserInfo: async ({ user_id }) => user_id === "A" ? freshSource : undefined,
+      fetchUserInfo: async ({ user_id }) =>
+        user_id === "A" ? freshSource : undefined,
     });
     return { owner, freshSource };
   }
@@ -224,76 +258,142 @@ describe("durable duplicate mapping recovery", () => {
   it("retires an absent duplicate profile with freshly verified exact standalone ownership", async () => {
     await missingDuplicate();
 
-    await retireDuplicateMapping({ source, ownerInternalId: internalId, targetInternalId: internalId, tenantId: "public", userContext: {} });
+    await retireDuplicateMapping({
+      source,
+      ownerInternalId: internalId,
+      targetInternalId: internalId,
+      tenantId: "public",
+      userContext: {},
+    });
 
     expect(externalId).toBeUndefined();
     expect(SuperTokens.deleteUserIdMapping).toHaveBeenCalledTimes(1);
-    expect(metadata.get("B")).toMatchObject({ rownd_migration_superseded: { rowndUserId: "A", targetUserId: internalId } });
+    expect(metadata.get("B")).toMatchObject({
+      rownd_migration_superseded: {
+        rowndUserId: "A",
+        targetUserId: internalId,
+      },
+    });
   });
 
   it.each([
-    "foreign primary", "foreign multi-method owner", "wrong tenant", "wrong Core provider",
-    "unverified auth level", "disabled source", "boolean verification", "contradictory verification",
-    "elected duplicate", "different canonical target",
-  ])("rejects absent duplicate profile with %s before mutation", async (failure) => {
-    const { owner, freshSource } = await missingDuplicate();
-    if (failure === "foreign primary") owner.isPrimaryUser = true;
-    if (failure === "foreign multi-method owner") owner.loginMethods.push({ ...owner.loginMethods[0]!, thirdParty: { id: "apple", userId: "unrelated-apple" } });
-    if (failure === "wrong tenant") owner.loginMethods[0]!.tenantIds = ["other"];
-    if (failure === "wrong Core provider") owner.loginMethods[0]!.hasSameThirdPartyInfoAs = () => false;
-    if (failure === "unverified auth level") freshSource.auth_level = "instant";
-    if (failure === "disabled source") freshSource.state = "disabled";
-    if (failure === "boolean verification") freshSource.verified_data!.google_id = true;
-    if (failure === "contradictory verification") freshSource.verified_data!.google_id = "another-subject";
-    if (failure === "elected duplicate") metadata.set("B", { rownd_migration_canonical_target: internalId });
-    if (failure === "different canonical target") metadata.set("A", { rownd_migration_canonical_target: "other-target" });
+    "foreign primary",
+    "foreign multi-method owner",
+    "wrong tenant",
+    "wrong Core provider",
+    "unverified auth level",
+    "disabled source",
+    "boolean verification",
+    "contradictory verification",
+    "elected duplicate",
+    "different canonical target",
+  ])(
+    "rejects absent duplicate profile with %s before mutation",
+    async (failure) => {
+      const { owner, freshSource } = await missingDuplicate();
+      if (failure === "foreign primary") owner.isPrimaryUser = true;
+      if (failure === "foreign multi-method owner")
+        owner.loginMethods.push({
+          ...owner.loginMethods[0]!,
+          thirdParty: { id: "apple", userId: "unrelated-apple" },
+        });
+      if (failure === "wrong tenant")
+        owner.loginMethods[0]!.tenantIds = ["other"];
+      if (failure === "wrong Core provider")
+        owner.loginMethods[0]!.hasSameThirdPartyInfoAs = () => false;
+      if (failure === "unverified auth level")
+        freshSource.auth_level = "instant";
+      if (failure === "disabled source") freshSource.state = "disabled";
+      if (failure === "boolean verification")
+        freshSource.verified_data!.google_id = true;
+      if (failure === "contradictory verification")
+        freshSource.verified_data!.google_id = "another-subject";
+      if (failure === "elected duplicate")
+        metadata.set("B", { rownd_migration_canonical_target: internalId });
+      if (failure === "different canonical target")
+        metadata.set("A", { rownd_migration_canonical_target: "other-target" });
 
-    await expect(retireDuplicateMapping({
-      source, ownerInternalId: internalId, targetInternalId: "apple-target", tenantId: "public", userContext: {},
-    })).rejects.toThrow();
+      await expect(
+        retireDuplicateMapping({
+          source,
+          ownerInternalId: internalId,
+          targetInternalId: "apple-target",
+          tenantId: "public",
+          userContext: {},
+        }),
+      ).rejects.toThrow();
 
-    expect(externalId).toBe("B");
-    expect(SuperTokens.deleteUserIdMapping).not.toHaveBeenCalled();
-    expect(UserMetadata.updateUserMetadata).not.toHaveBeenCalled();
-  });
+      expect(externalId).toBe("B");
+      expect(SuperTokens.deleteUserIdMapping).not.toHaveBeenCalled();
+      expect(UserMetadata.updateUserMetadata).not.toHaveBeenCalled();
+    },
+  );
 
-  it.each(["legacy", "canonical"])("retains an elected %s owner despite stale markers, without resurrecting it after retirement", async (record) => {
-    metadata.set("B", {
-      rownd_migration_target: record === "legacy" ? internalId : "stale-target",
-      ...(record === "canonical" ? { rownd_migration_canonical_target: internalId } : {}),
-      rownd_migration_superseded: { rowndUserId: "A", targetUserId: internalId },
-    });
-    await expect(assertMigrationSourceActive("B", {})).resolves.toEqual(metadata.get("B"));
-    expect(UserMetadata.updateUserMetadata).not.toHaveBeenCalled();
+  it.each(["legacy", "canonical"])(
+    "retains an elected %s owner despite stale markers, without resurrecting it after retirement",
+    async (record) => {
+      metadata.set("B", {
+        rownd_migration_target:
+          record === "legacy" ? internalId : "stale-target",
+        ...(record === "canonical"
+          ? { rownd_migration_canonical_target: internalId }
+          : {}),
+        rownd_migration_superseded: {
+          rowndUserId: "A",
+          targetUserId: internalId,
+        },
+      });
+      await expect(assertMigrationSourceActive("B", {})).resolves.toEqual(
+        metadata.get("B"),
+      );
+      expect(UserMetadata.updateUserMetadata).not.toHaveBeenCalled();
 
-    externalId = undefined;
-    await expect(assertMigrationSourceActive("B", {})).rejects.toThrow("superseded");
-    externalId = "A";
-    await expect(assertMigrationSourceActive("B", {})).rejects.toThrow("superseded");
-  });
+      externalId = undefined;
+      await expect(assertMigrationSourceActive("B", {})).rejects.toThrow(
+        "superseded",
+      );
+      externalId = "A";
+      await expect(assertMigrationSourceActive("B", {})).rejects.toThrow(
+        "superseded",
+      );
+    },
+  );
 
   it("does not let a stale tombstone bypass contradictory reverse mapping", async () => {
     metadata.set("B", {
       rownd_migration_canonical_target: internalId,
-      rownd_migration_superseded: { rowndUserId: "A", targetUserId: internalId },
+      rownd_migration_superseded: {
+        rowndUserId: "A",
+        targetUserId: internalId,
+      },
     });
-    const getMapping = vi.mocked(SuperTokens.getUserIdMapping).getMockImplementation()!;
-    vi.spyOn(SuperTokens, "getUserIdMapping").mockImplementation(async (input) => {
-      const result = await getMapping(input);
-      return input.userIdType === "SUPERTOKENS" && result.status === "OK"
-        ? { ...result, externalUserId: "A" } : result;
-    });
-    await expect(assertMigrationSourceActive("B", {})).rejects.toThrow("superseded");
+    const getMapping = vi
+      .mocked(SuperTokens.getUserIdMapping)
+      .getMockImplementation()!;
+    vi.spyOn(SuperTokens, "getUserIdMapping").mockImplementation(
+      async (input) => {
+        const result = await getMapping(input);
+        return input.userIdType === "SUPERTOKENS" && result.status === "OK"
+          ? { ...result, externalUserId: "A" }
+          : result;
+      },
+    );
+    await expect(assertMigrationSourceActive("B", {})).rejects.toThrow(
+      "superseded",
+    );
   });
 
   it("rejects an external ID collision with an unrelated native account", async () => {
     const getUser = vi.mocked(SuperTokens.getUser).getMockImplementation()!;
     vi.spyOn(SuperTokens, "getUser").mockImplementation(async (id, context) => {
       const owner = await getUser(internalId, context);
-      return id === "A" ? { ...owner!, id: "A", loginMethods: [] } : getUser(id, context);
+      return id === "A"
+        ? { ...owner!, id: "A", loginMethods: [] }
+        : getUser(id, context);
     });
-    await expect(reconcileRowndUserWithExistingLoginMethods(source, "public", {}))
-      .rejects.toThrow("collides with an unrelated internal account");
+    await expect(
+      reconcileRowndUserWithExistingLoginMethods(source, "public", {}),
+    ).rejects.toThrow("collides with an unrelated internal account");
     expect(SuperTokens.deleteUserIdMapping).not.toHaveBeenCalled();
     expect(UserMetadata.updateUserMetadata).not.toHaveBeenCalled();
   });

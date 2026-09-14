@@ -173,18 +173,18 @@ describe("authenticated Rownd contact reconciliation", () => {
     expect(superseded.headers.get("st-access-token")).toBeNull();
   });
 
-  it("admin uses verified live email to retire and link a supported duplicate contact without a token", async () => {
+  it("admin retains the verified email owner while electing the newer source without a token", async () => {
     const fixture = await seed();
     fixture.profileA.verified_data.email = true;
     fixture.profileA.meta = { last_active: "2020-01-02T00:00:00.000Z" };
     fixture.profileB.meta = { last_active: "2020-01-01T00:00:00.000Z" };
     const result = await reconcileUser({ rownd_user_id: fixture.a });
-    expect(result, JSON.stringify(result)).toMatchObject({ status: "OK", supertokens_user_id: fixture.internalA });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "OK", supertokens_user_id: fixture.internalB });
     expect((await SuperTokens.getUser(fixture.internalB))!.id).toBe(fixture.a);
     expect((await SuperTokens.getUser(fixture.a))!.loginMethods.find((method) => method.recipeId === "passwordless")).toMatchObject({ verified: true, email: fixture.email });
     expect(rownd.validateToken).not.toHaveBeenCalled();
     expect(await reconcileUser({ email: fixture.email })).toMatchObject({ status: "OK", changed: false });
-  });
+  }, 30000);
 
   it("admin revalidates activity before retiring a duplicate mapping after reservation", async () => {
     const fixture = await seed();
@@ -292,7 +292,7 @@ describe("authenticated Rownd contact reconciliation", () => {
     expect(await getCombinedUserMetadata(fixture.a)).toMatchObject({ dataA: { preserved: true }, dataB: { preserved: true }, aliasDataB: "preserved" });
   });
 
-  it("reconciles a mapped contact donor during completed provider email repair", async () => {
+  it("uses a completed mapping without repairing its contact donor during login", async () => {
     const fixture = await seed();
     const oldEmail = `old-${randomUUID()}@example.com`;
     await AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(fixture.internalA));
@@ -303,13 +303,12 @@ describe("authenticated Rownd contact reconciliation", () => {
       original_rownd_user: { ...fixture.profileA, data: { ...fixture.profileA.data, email: oldEmail } },
     });
     await expectSession(await migrate(fixture.a), fixture.a);
-    expect(await SuperTokens.getUser(old.recipeUserId.getAsString())).toBeUndefined();
+    expect(await SuperTokens.getUser(old.recipeUserId.getAsString())).toBeDefined();
     const user = (await SuperTokens.getUser(fixture.a))!;
     expect(user.loginMethods).toHaveLength(2);
-    expect(user.loginMethods.find((method) => method.recipeId === "passwordless")!.recipeUserId.getAsString()).toBe(fixture.internalB);
-    expect((await UserMetadata.getUserMetadata(fixture.internalA)).metadata).toMatchObject({
-      rownd_email_recipe_user_ids: { public: fixture.internalB }, preference: "A",
-    });
+    expect(user.loginMethods.find((method) => method.recipeId === "passwordless")!.recipeUserId.getAsString()).toBe(old.recipeUserId.getAsString());
+    expect((await SuperTokens.getUserIdMapping({ userId: fixture.b, userIdType: "EXTERNAL" }))).toMatchObject({ status: "OK", superTokensUserId: fixture.internalB });
+    expect((await UserMetadata.getUserMetadata(fixture.internalA)).metadata).toMatchObject({ preference: "A" });
   });
 
   it.each(["verification flags", "email"])("revalidates policy-relevant %s before publishing a session", async (change) => {

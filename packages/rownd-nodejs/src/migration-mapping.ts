@@ -1,6 +1,5 @@
-import SuperTokens from "supertokens-node";
+import { reconciliationSuperTokens as SuperTokens, reconciliationUserMetadata as UserMetadata } from "./reconciliation-sdk";
 import { RowndMigrationPolicyError } from "./errors";
-import UserMetadata from "supertokens-node/recipe/usermetadata";
 import {
   getRawUserMetadata,
   isInternalMetadataField,

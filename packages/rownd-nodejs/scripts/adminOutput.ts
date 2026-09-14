@@ -9,6 +9,13 @@ const safeDiagnostics = new Set([
   "Duplicate owner consolidation blocked: Core cannot promote the pinned winner",
   "Duplicate owner consolidation blocked: Core cannot link a donor to the pinned winner",
   "Duplicate owner consolidation blocked: linking would verify an unverified email",
+  "Duplicate owner consolidation blocked: linking would verify an unverified email without exact source proof",
+  "Duplicate owner consolidation blocked: the survivor alias has no vacant final linked recipe",
+  "Duplicate owner consolidation blocked: a checkpoint source disappeared",
+  "Duplicate owner consolidation blocked: Core cannot link a donor to the survivor",
+  "Active sessions block owner consolidation",
+  "CANONICAL_EMAIL_POLICY",
+  "The survivor canonical mapping changed during election",
   "Rownd election owner changed",
   "Rownd activity election changed before reconciliation completion",
   "The SuperTokens selector belongs to a different canonical Rownd owner",
@@ -26,6 +33,21 @@ const safeDiagnostics = new Set([
   "Reconciled user could not be resolved",
   "Live Rownd user not found",
   "No Rownd source mapping or metadata found in SuperTokens",
+  "No existing SuperTokens email owner found; use a Rownd user ID to import a user",
+  "ROWND_EMAIL_SEARCH_UNSUPPORTED: configure an app-scoped Rownd email search client",
+  "ROWND_EMAIL_LOOKUP_NO_MATCH: no enabled exact-email source found through verified-value lookup; use a Rownd user ID for other profiles",
+  "ROWND_EMAIL_SEARCH_INVALID_RESPONSE",
+  "ROWND_EMAIL_SEARCH_CHANGED: retry discovery",
+  "ROWND_EMAIL_SEARCH_INCOMPLETE: pagination did not advance",
+  "ROWND_EMAIL_SEARCH_INCOMPLETE: pagination limit reached",
+  "Rownd email discovery source disappeared; retry discovery",
+  "Rownd email discovery source changed",
+  "SOURCE_ID_MISMATCH: email discovery returned another Rownd user",
+  "Rownd administrative lookup request failed",
+  "Invalid Rownd administrative lookup response",
+  "Invalid Rownd administrative lookup scope",
+  "Invalid Rownd email lookup value",
+  "Administrative metadata backfill is incomplete",
   "Rownd source is not the requested enabled user",
   "Rownd source identity changed before migration completion",
   "Rownd verified email proof changed before reconciliation completion",
@@ -47,6 +69,7 @@ const safeDiagnostics = new Set([
 
 function safeDiagnostic(message: string | undefined) {
   return message && (safeDiagnostics.has(message) ||
+    /^Rownd administrative lookup failed \(HTTP [1-5]\d{2}\)$/.test(message) ||
     /^SOURCE_PAYLOAD_INVALID: (?:(?:data|verified_data)(?:\.(?:user_id|email|phone_number|google_id|apple_id))?)(?:, (?:data|verified_data)(?:\.(?:user_id|email|phone_number|google_id|apple_id))?)*$/.test(message) ||
     /^Migrated login method postcondition failed: (?:missing_user|unexpected_owner|missing_method|missing_tenant|unverified_authenticated_email)$/.test(message)) ? message : undefined;
 }

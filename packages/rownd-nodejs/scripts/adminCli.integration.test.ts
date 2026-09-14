@@ -14,9 +14,10 @@ beforeAll(async () => {
 }, 30000);
 afterAll(async () => { await rm(home, { recursive: true, force: true }); });
 
-async function cli(args: string[], preload?: string) {
+async function cli(args: string[], preload?: string, runtime: "node" | "bun" = "node") {
   try {
-    const result = await exec(process.execPath, [...(preload ? ["--require", preload] : []), "dist/cli.js", ...args], {
+    const result = await exec(runtime === "bun" ? "bun" : process.execPath, [...(preload ? [runtime === "bun" ? "--preload" : "--require", preload] : []),
+      runtime === "bun" ? "scripts/adminCli.ts" : "dist/cli.js", ...args], {
       env: { ...process.env, HOME: home, ...(preload ? { NODE_OPTIONS: `--require=${preload}` } : {}) }, timeout: 15000,
     });
     return { ...result, code: 0 };
@@ -53,10 +54,17 @@ it("bundles plural commands and reports safe validation failures with nonzero ex
 it("initializes packaged reconciliation against a local failing Core and emits safe JSON", async () => {
   // Prevent SDK construction from contacting Rownd; only the local Core is exercised.
   const preload = join(home, "rownd-stub.cjs");
-  await writeFile(preload, `const Module = require('node:module');
+  await writeFile(preload, `const originalFetch = globalThis.fetch;
+globalThis.fetch = (input, options) => {
+  if (!['127.0.0.1', 'localhost'].includes(new URL(String(input)).hostname)) throw new Error('unexpected remote request');
+  return originalFetch(input, options);
+};
+const stub = { createInstance: () => ({ validateToken: async () => { throw new Error('unexpected token'); }, fetchUserInfo: async () => undefined }) };
+if (process.versions.bun) require('bun:test').mock.module('@rownd/node', () => stub);
+const Module = require('node:module');
 const original = Module._load;
 Module._load = function(id, ...args) {
-  if (id === '@rownd/node') return { createInstance: () => ({ validateToken: async () => { throw new Error('unexpected token'); }, fetchUserInfo: async () => undefined }) };
+  if (id === '@rownd/node') return stub;
   return original.call(this, id, ...args);
 };\n`);
   let requests = 0;
@@ -71,9 +79,16 @@ Module._load = function(id, ...args) {
     const result = await cli(["reconcile-user", "--profile", "local", "--supertokens-user-id", "missing"], preload);
     expect(result.code).toBe(1);
     expect(JSON.parse(result.stdout)).toMatchObject({ status: "ERROR", changed: false });
+    expect(result.stderr).toContain("[reconcile] discovery");
+    expect(result.stdout).not.toContain("[reconcile]");
     expect(requests).toBeGreaterThan(0);
     expect(result.stdout + result.stderr).not.toContain("pass%22word");
     expect(result.stdout + result.stderr).not.toContain("secret");
+    const bunResult = await cli(["reconcile-user", "--profile", "local", "--supertokens-user-id", "missing", "--dry-run"], preload, "bun");
+    expect(bunResult.code, bunResult.stderr).toBe(1);
+    expect(JSON.parse(bunResult.stdout)).toMatchObject({ status: "ERROR", dryRun: true, changed: false });
+    expect(bunResult.stdout + bunResult.stderr).not.toContain("pass%22word");
+    expect(bunResult.stdout + bunResult.stderr).not.toContain("secret");
     const csv = join(home, "users.csv");
     await writeFile(csv, 'note,Rownd ID\r\n"quoted, note",user_a\r\nsecond,user_b\r\nduplicate,user_a\r\n');
     const profilePath = join(home, ".config", "rownd-nodejs", "profiles.json");

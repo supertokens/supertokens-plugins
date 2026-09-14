@@ -87,7 +87,7 @@ RowndMigrationPlugin.init({
 });
 ```
 
-`rowndAppKey`, `rowndAppSecret`, `disableRowndUserMigration`, debug logging,
+`rowndAppKey`, `rowndAppSecret`, `rowndAppId`, `disableRowndUserMigration`, debug logging,
 and telemetry remain startup-static. Resolver failures and malformed results
 fail the operation instead of falling back to another tenant. The plugin keeps
 the resolved snapshot tenant-bound and does not place static credentials in the
@@ -349,7 +349,8 @@ Unauthenticated migration and guest routes accept an optional `tenantId` query p
 - **Non-public tenant**: `POST /auth/plugin/rownd/migrate?tenantId=tenant-a`
 - **Headers**: `Authorization: Bearer <Rownd_JWT>`. Header-token clients should also send `rid: session`, `fdi-version: 1.18`, and `st-auth-mode: header`.
 - **Description**: Validates the Rownd JWT, imports new users with their Rownd profile data, ensures the selected login method is associated with the requested SuperTokens tenant, and then creates a new SuperTokens session in that tenant. Header-token clients must receive `st-access-token`, `st-refresh-token`, and `front-token` response headers.
-- **Identity reconciliation**: Rownd passwordless identifiers are authoritative during migration. When an exact third-party identity and an existing Passwordless email belong to separate users, the plugin links the Passwordless method only if Rownd verifies that email, its owner is not already primary, and it is not mapped to another Rownd user. `verified_data.email` must be `true` or match `data.email` case-insensitively. Other ownership conflicts still fail migration.
+- **Completed users**: An existing completed user with the authenticated Rownd external mapping, matching reverse ownership, an eligible tenant method, and no pending substantive operation uses an ID-only fast path. Contact/provider repair remains available through explicit administrative reconciliation. Native session creation adds Rownd claims without enforcing migration snapshots.
+- **Identity reconciliation**: JWT-authenticated migration treats the validated token's current Rownd profile email as authenticated email proof; it does not require `verified_data.email` for that proof. When an exact third-party identity and an existing Passwordless email belong to separate users, linking still requires an eligible owner and consistent Rownd mappings. Existing JWT ownership and native canonical-email protections apply. Administrative reconciliation uses separate server-fetched contact authority and requires explicit current-email verification evidence before verifying an email; its primary-consolidation and canonical-override policies do not automatically apply to JWT migration.
 - **Provider changes**: Google and Apple identities prefer a non-empty string in `verified_data.google_id` or `verified_data.apple_id`, falling back to the corresponding `data` field. Reconciliation links a changed identity to the same SuperTokens account before retiring obsolete methods proven by the migration snapshot. Retirement removes access only in the requested tenant, preserves the primary account and other tenants, and can resume after interruption. An identity owned by a conflicting primary account still fails migration.
 - **Reconciliation recovery**: If the final account or login-method check fails, the plugin makes one fresh verification attempt against the same internal account, revalidating the Rownd source and external mapping. Unresolved ownership, tenant, method, or verification failures still fail migration. Reconciliation publishes its completion marker only after the required checks and email reconciliation succeed; that marker does not prove session creation succeeded.
 
@@ -488,6 +489,21 @@ defaults to `public`; the operation resolves the initialized dynamic plugin
 configuration for that tenant and user context. The API uses the initialized
 Rownd client and Core connection; it never reads local CLI profiles.
 
+For email-based discovery when the matching SuperTokens account has no Rownd
+mapping or migration metadata, configure the optional startup-static `rowndAppId`
+alongside `rowndAppKey` and `rowndAppSecret`. The default client uses it for Rownd's
+filtered profile lookup and fresh administrative profile reads. CLI profiles
+already supply their configured Rownd app ID.
+
+This fallback requires an existing SuperTokens account matching the email. Rownd's
+lookup is documented to match **verified values**, so an empty result does not
+prove that no profile contains the email in unverified data. Unsupported lookup,
+no matching verified lookup source, and incomplete pagination return explicit
+diagnostics rather than selecting an unproven source. When necessary, supply a
+known Rownd ID with the `rownd_user_id` selector instead. Search results identify
+candidates only; each is fetched by ID and checked against its current enabled
+profile and exact email before reconciliation proceeds.
+
 `OK` includes `changed`, observed `actions`, `rownd_user_id`, the actual internal
 `supertokens_user_id`, and `recipe_user_ids`. Other outcomes are `NOT_FOUND`,
 `AMBIGUOUS` (with source/owner candidates), `BLOCKED`, or `ERROR`. Failures after
@@ -520,6 +536,7 @@ rownd-nodejs profiles show --profile stardust
 rownd-nodejs reconcile-user --profile stardust --rownd-user-id ROWND_USER_ID
 rownd-nodejs reconcile-user --profile stardust --rownd-user-id ROWND_USER_ID --dry-run
 rownd-nodejs reconcile-user --profile stardust --email user@example.com
+rownd-nodejs reconcile-user --profile stardust --email user@example.com --dry-run
 rownd-nodejs reconcile-user --profile stardust --supertokens-user-id SUPERTOKENS_ID
 rownd-nodejs profiles remove --profile stardust
 ```
@@ -564,15 +581,51 @@ disabled by default.
 Dry-run results include `dryRun: true`, `changed: false`, `actions: []` and
 `snapshotOnly: true`. Proposed changes are returned separately:
 
-- `proposedActions`: candidate repairs based on the inspected state.
+- `proposedActions`: candidate repairs based on the inspected state, including
+  primary demotion, method linking or creation, external-mapping moves, and
+  checkpoint recovery work.
 - `missingMethods`: expected identities absent from the selected owner.
-- `matchesSource`: whether the inspected account satisfies the source checks.
+- `matchesSource`: whether the inspected account satisfies the source checks and
+  required consolidation postconditions.
 - `canReconcile`: whether inspection can establish that reconciliation may
   proceed without unresolved blockers or execution-time proof requirements.
 - `blockers` and `requiresExecutionProof`: conflicts or checks that inspection
   cannot resolve. Conditional retirement and checkpoint recovery can require
   execution-time proof, so `canReconcile: false` does not always mean execution
   will fail.
+
+Administrative donor-session reservation metadata from older versions is inert.
+Provider introduction, retirement, mapping-publication, and owner-operation
+checkpoints still support recovery after interrupted writes.
+Existing provider revocation debt is recovered independently before checking a
+new replacement's eligibility. Retirement history for another tenant does not
+force the completed-login repair path.
+
+Reconciliation discovers immutable IDs first, then current email, phone, and
+exact provider-subject owners. A normalized snapshot feeds the shared pure method
+planner used by preview and execution. Its actions specify primary election,
+provider/passwordless creation, linking, and email verification; created recipes
+use symbolic references resolved by the executor. Administrative reconciliation
+checks method blockers before owner consolidation writes. Fresh executor reads
+may acknowledge already-completed actions, but cannot authorize additional work.
+Substantive repair clears the existing completion flag before mutations and
+restores it after postconditions, covering interruptions before detailed cleanup
+checkpoints have been written.
+
+Each reconciliation invocation shares in-flight Rownd profile, Core user,
+mapping, literal metadata, exact account-search, and verification reads. Writes
+invalidate affected read categories; checkpoint saves only refresh their literal
+metadata owner. A retry starts with an independent snapshot. Single-owner mapping
+repairs use a mapping-publication checkpoint rather than whole-owner consolidation.
+Older owner-operation checkpoints remain resumable.
+
+Source election and ownership discovery run once per invocation. Execution checks
+affected transitions, then freshly verifies source, mapping, methods, tenants,
+verification, and metadata before completing. This is not a transaction: concurrent
+native logins are allowed, and a final conflict can report partial progress. No
+donor-session reservations are created. Single-user CLI progress prints stage and
+action kinds to stderr; the final JSON result remains on stdout. API callers can
+observe the same events through `onProgress`.
 
 Successful inspection returns `PREVIEW`; known failures retain `BLOCKED`,
 `AMBIGUOUS`, `NOT_FOUND` or `ERROR`. A preview is a snapshot, not authorization or
@@ -658,53 +711,130 @@ interrupted. Results are emitted as each user finishes.
   and support retirement evidence; they do not override its current profile.
   Provider IDs use `verified_data` first, then `data`.
 - Email selection searches SuperTokens in the selected tenant, then resolves
-  Rownd IDs from mappings and migration metadata. There is no Rownd email search.
+  Rownd IDs from mappings and migration metadata. If an existing email owner has
+  no discoverable Rownd provenance, the configured client can fall back to Rownd's
+  verified-value lookup. All pages are collected before candidate selection;
+  incomplete or inconsistent results block rather than electing from a partial
+  set. Administrative candidate and revalidation reads bypass the default SDK's
+  profile cache when using the fresh-read adapter; JWT fetching remains separate.
   Results are deduplicated by actual internal owner. Competing live Rownd sources
   sharing the relevant identity are compared using the most recent valid timestamp
-  across `meta.last_sign_in` and `meta.last_active`. A unique most-recent source
-  wins; an explicit Rownd selector does not make an older source win. Ties or
-  insufficient activity evidence leave the sources ambiguous. Activity does not
-  authorize merging unrelated identities or bypass ownership safeguards.
-  Election alone is not a completed repair: eligible losing owners must join the
-  canonical owner, and their existing IDs must resolve to the shared account.
-  Unsupported consolidation returns `BLOCKED` even if the winner already has all
-  its expected methods. Dry run includes the required account-linking work.
-  Supported consolidation promotes the winner's existing account and links
-  eligible standalone donor recipes. Existing recipe IDs and their Rownd aliases
-  are retained so old and new IDs resolve to the shared primary account. A losing
-  method is not deleted simply because it is absent from the winner's current
-  profile. Checkpoints allow interrupted linking to resume, and incomplete
-  consolidation blocks both migration and native sign-in sessions. Session
-  creation checks consolidation before and after issuance; a failed post-check
-  revokes the new session before returning credentials. A required Rownd source
+  across `meta.last_sign_in` and `meta.last_active`. The latest source wins;
+  an explicit Rownd selector does not make an older source win. When the latest
+  valid activity is tied, retain the surviving owner's established canonical
+  reference only if it is among those tied candidates; otherwise return
+  `AMBIGUOUS`. Candidates
+  without valid activity do not displace candidates with valid activity. If all
+  lack valid activity, retain a uniquely established existing canonical reference;
+  otherwise return `AMBIGUOUS`. Activity does not authorize merging unrelated
+  identities or bypass ownership safeguards.
+- **Reference selection and primary selection are separate.** The elected Rownd
+  source supplies the current profile. Survivor selection favors the existing
+  same-email SuperTokens account, particularly an established primary with more
+  login methods. An unmigrated winning source can supply the reference for that
+  existing account. An unmigrated losing source contributes election evidence,
+  but has no SuperTokens account to consolidate.
+  Election alone is not a completed repair: all required existing owners must be
+  consolidated. Unsupported consolidation returns `BLOCKED` even if the reference
+  profile's expected methods already exist. Dry run includes the required work.
+  Whole-owner consolidation requires the `public` tenant, and every participating
+  recipe must belong exclusively to `public`. Non-public or multi-tenant owner
+  graphs are blocked rather than reparented.
+  Supported consolidation preserves internal recipe IDs. To demote a multi-method
+  donor primary, detach its secondary recipes before demoting its remaining
+  primary recipe, then link the preserved recipes into the surviving account.
+  The elected Rownd external ID belongs on the surviving primary recipe; moving
+  that mapping can change which recipe carries the alias. Other alias retention
+  or relocation requires explicit ownership proof. A losing method is not deleted
+  simply because it is absent from the reference profile.
+  Reparenting, mapping publication, and standalone-donor linking accept concurrent
+  native logins; active sessions are not migration preconditions. Administrative
+  donor reservations are no longer created or consulted.
+  Checkpoints allow interrupted consolidation to resume. Native session creation
+  does not inspect consolidation or provider checkpoints. The migration endpoint
+  buffers credentials until its final session ownership and tenant binding checks
+  pass; a failed binding check revokes only that newly issued session.
+  A required Rownd source
   disappearing during recovery leaves the operation blocked rather than dropping
-  that owner from the repair.
+  that owner from the repair. An optional historical donor's Rownd lookup returning
+  404 does not alone block same-email linking independently authorized by the
+  current live reference profile.
   No discoverable Rownd source for an email or
   SuperTokens selector returns `BLOCKED`; a resolved Rownd source absent from
   live lookup returns `NOT_FOUND`.
 - An explicit Rownd ID can import an absent user, add missing methods, link
-  eligible related standalone accounts, repair external mappings, and retire
+  eligible related accounts, repair external mappings, and retire
   supported replaced providers through the existing reconciliation engine.
-  Internal primary IDs remain stable: “updating user IDs” means changing the
-  external Rownd mapping, not recreating the primary account.
+  The surviving internal primary ID and existing internal recipe IDs remain
+  stable. Former primaries may become linked recipes; “updating user IDs” means
+  changing external Rownd mappings, not recreating the surviving account.
 - Server-fetched authorization is separate from JWT authorization. Administrative
   contact ownership uses the live Rownd `data.email`, including when
-  `verified_data.email` is absent. This can authorize linking an eligible
-  standalone email method, but does not make that email verified. Email
+  `verified_data.email` is absent. This can authorize eligible same-email
+  consolidation, but does not make that email verified. Email
   verification still requires `verified_data.email === true` or a string matching
   the current email case-insensitively. Arbitrary mapped imports and caller flags
   cannot supply server-fetched proof. Evidence is revalidated before mutations.
   Independently anchored phone donors may also be eligible; a shared phone number
   alone is not authority to merge accounts.
-- Foreign primaries, conflicting mappings, stale evidence, and unsupported
-  canonical/pending email transitions are not force-merged or overwritten.
-  Native canonical choices remain protected. If that policy leaves any current
-  Rownd method missing, the result is `BLOCKED` with the mismatch, never `OK`.
-  Success checks **all** source methods, including methods skipped by native
-  canonical policy, and verification of matching email methods. Even with all
-  methods present, a canonical email conflicting with the currently verified
-  Rownd email or a pending email-verification transition in the selected tenant
-  returns `BLOCKED`. Existing token-login behavior is unchanged.
+- An absent, null, or exactly empty (`""`) optional email allows provider-only
+  reconciliation using the existing deterministic Google/Apple dummy email.
+  A dummy email is not a real
+  contact identity, does not create a Passwordless email method, and does not
+  supply contact-ownership or email-verification proof. Whitespace-only and other
+  nonempty malformed emails remain invalid.
+- Reconciliation backfills missing top-level application metadata fields from the
+  normal Rownd profile mapper. Existing values, including `false`, `0`, `""`,
+  `null`, and objects, are preserved; this is not a recursive merge. An absent
+  optional key whose Rownd value is `null` needs no backfill because Core's patch
+  API interprets null as deletion. Proven linked storage is checked before
+  writing a minimal patch to the surviving owner.
+  A missing `original_rownd_user` snapshot is supplied from the validated live
+  profile, including when an existing completion marker is present. Application
+  data cannot supply reserved migration, checkpoint, or session-reservation
+  fields. Metadata-only repairs appear as `update_migration_metadata` in preview
+  and keep `matchesSource: false` until complete; a completed retry is a no-op.
+- Core's user-metadata API reads literal storage, not migration references. A
+  Rownd alias can contain only `rownd_migration_target` while its profile lives
+  under the referenced immutable owner ID. The plugin's combined metadata reader
+  follows retired alias references, preserves missing custom fields from aliases,
+  and prefers owner values without copying alias migration checkpoints. Missing
+  targets and reference cycles leave the original literal record unchanged.
+  Reads do not backfill or duplicate metadata into aliases.
+- Administrative reconciliation can replace a completed native canonical-email
+  choice with the live Rownd email. The change must be explicit in the repair;
+  it does not authorize deleting the former email credential or transferring its
+  verification to another credential. Native email changes in `PENDING` or
+  `COMMITTING` remain blockers even without active sessions. JWT and unbound
+  migration paths retain their existing canonical-email protections.
+  A proven internal migration already in `COMMITTING` may resume through its
+  existing retirement-recovery checks. This requires the independently validated
+  retirement checkpoint, provider and snapshot evidence, canonical-target graph,
+  and fresh privately bound source with matching verified email. A marker prefix
+  alone does not authorize recovery or bypass a native pending change.
+- External-mapping changes require explicit preservation of email verification:
+  Core verification records do not automatically follow a moved alias. Evidence
+  must prove the same immutable credential's pre-existing verification or the
+  exact current Rownd email. Verification stored under an alias is not evidence
+  for whichever credential later receives that alias.
+  Fresh mapping publication checkpoints the immutable credentials' pre-mapping
+  verification state and retains that baseline until reconciliation completes,
+  including recovery after a lost mapping response.
+- Recovery of newly created methods requires a receipt binding the actual SDK
+  creation response to the reconciliation source and durable checkpoint. If Core
+  commits creation but the response is lost before its generated ID is captured,
+  automatic recovery blocks rather than assuming a newly discovered account
+  belongs to this operation. Checkpoints do not make separate Core calls atomic.
+- Provider replacement that would delete the surviving immutable primary recipe
+  is unsupported and returns `BLOCKED` before writes. This includes restoring a
+  missing mapping for an old provider primary when retiring that provider would
+  delete the primary anchor. Provider replacements that preserve the anchor can
+  still proceed through the supported retirement checks.
+- Unrelated or unproven primaries, conflicting mappings, stale evidence, and
+  unfinished native transitions are not force-merged or overwritten. Success
+  checks **all** source methods and required consolidation, mapping, canonical
+  email, and verification postconditions. Missing required methods or unresolved
+  transitions cannot be reported as `OK`.
 
 ### Interpreting saved audit findings
 

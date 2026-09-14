@@ -1,11 +1,15 @@
-import SuperTokens from "supertokens-node";
-import EmailVerification from "supertokens-node/recipe/emailverification";
-import { assertAuthenticatedMigrationSource, getAuthenticatedMigrationEmail, getMigrationContactEmail, isCurrentRowndEmailReconciliationPlan, prepareCurrentRowndEmailReconciliation } from "./migration-email";
+import { reconciliationSuperTokens as SuperTokens, reconciliationEmailVerification as EmailVerification } from "./reconciliation-sdk";
+import { inspectAdministrativeMetadataBackfill } from "./migration-admin-metadata";
+import { inspectAdministrativeProviderIntroductions } from "./migration-admin-provider";
+import { assertAuthenticatedMigrationSource, getAuthenticatedMigrationEmail, isCurrentRowndEmailReconciliationPlan, prepareCurrentRowndEmailReconciliation } from "./migration-email";
 import { assertMigrationOwnerGraph } from "./migration-postconditions";
 import { inspectProviderMigrationCheckpoints } from "./migration-provider";
-import { assertMigrationContactElection, classifyMigrationForeignOwner, getCanonicalEmailRecipeUserId, getMigrationImportMethods, getPendingVerifications, getUserMetadata, inspectMigrationMethods, matchesImportLoginMethod } from "./supertokens-repository";
+import { discoverMethodSnapshot, getCanonicalEmailRecipeUserId, getMigrationImportMethods, getPendingVerifications, getUserMetadata, inspectMigrationMethods, matchesImportLoginMethod } from "./supertokens-repository";
+import { planMethods, type MethodPlan } from "./migration-method-plan";
 import { getRawUserMetadata } from "./rownd-compatibility";
 import { isProtectedDuplicateMapping } from "./migration-mapping";
+import { inspectAdministrativeEmailPolicy } from "./migration-admin-email";
+import { assertVerificationCellInheritance } from "./migration-verification";
 import type { SuperTokensUserImport } from "./types";
 import type { JsonRecord } from "./utils";
 
@@ -13,11 +17,12 @@ type User = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
 type Method = SuperTokensUserImport["loginMethods"][number];
 
 export type ReconcilePreviewAction = {
-  action: "import_user" | "restore_mapping" | "create_mapping" | "create_primary" | "create_method" |
-    "link_method" | "verify_email" | "update_migration_metadata" | "review_provider_retirement" | "review_email_retirement";
+  action: "import_user" | "restore_mapping" | "create_mapping" | "remove_mapping" | "create_primary" | "create_method" |
+    "link_method" | "unlink_method" | "verify_email" | "set_canonical_email" | "update_migration_metadata" | "review_provider_retirement" | "review_email_retirement";
   method?: Method;
   recipeUserId?: string;
   supertokens_user_id?: string;
+  rownd_user_id?: string;
   email?: string;
   conditional?: boolean;
 };
@@ -42,11 +47,12 @@ export async function previewReconciliation(input: {
   source: SuperTokensUserImport; selected?: User; internalId?: string; restoreMapping: boolean;
   tenantId: string; userContext: JsonRecord;
   plannedOwnerIds?: Set<string>;
+  mappingPlanned?: boolean;
+  onMethodPlan?: (plan: MethodPlan) => void;
 }): Promise<ReconcilePreview> {
   const { source, selected, restoreMapping, tenantId, userContext } = input;
   const result: ReconcilePreview = { status: "PREVIEW", dryRun: true, changed: false, actions: [], canReconcile: false,
     matchesSource: false, proposedActions: [], blockers: [], requiresExecutionProof: [], missingMethods: [], snapshotOnly: true };
-  const email = getMigrationContactEmail(source, tenantId);
   const verifiedEmail = getAuthenticatedMigrationEmail(source, tenantId);
   const inspections = await inspectMigrationMethods(source, source.loginMethods, tenantId, userContext);
   const owners = new Map(inspections.flatMap(({ owners }) => owners.map(({ user }) => [user.id, user] as const)));
@@ -60,13 +66,13 @@ export async function previewReconciliation(input: {
     result.missingMethods = source.loginMethods;
   } else {
     await assertMigrationOwnerGraph(target, tenantId, userContext);
-    assertMigrationContactElection(source, tenantId, target, selected ? target.loginMethods[0]! : match!.loginMethod, selected !== undefined, provider !== undefined);
     const mapping = await SuperTokens.getUserIdMapping({ userId: target.id, userIdType: "EXTERNAL", userContext });
     const id = input.internalId ?? (mapping.status === "OK" ? mapping.superTokensUserId : target.id);
     result.supertokens_user_id = id;
     result.recipe_user_ids = target.loginMethods.map((method) => method.recipeUserId.getAsString());
     const metadata = await getUserMetadata(id, userContext);
     const canonicalId = getCanonicalEmailRecipeUserId(metadata, tenantId);
+    const administrativeEmail = await inspectAdministrativeEmailPolicy(source, target, metadata, tenantId, userContext);
     const pendingPlans = getPendingVerifications(metadata).filter((entry) => entry.field === "email" && (entry.tenantId ?? "public") === tenantId);
     const pending = pendingPlans.length > 0;
     const committingMigration = pendingPlans.some((entry) => entry.status === "COMMITTING" && isCurrentRowndEmailReconciliationPlan(entry));
@@ -77,23 +83,15 @@ export async function previewReconciliation(input: {
     const currentEmail = source.loginMethods.find((method) => method.recipeId === "passwordless" && method.email);
     const importMethods = getMigrationImportMethods(source, tenantId, selected, canonicalId, pending);
     const activeInspections = inspections.filter(({ importMethod }) => importMethods.includes(importMethod));
-    const foreignOwners = activeInspections.flatMap(({ importMethod, owners }) => owners
-      .filter(({ user }) => user.id !== target.id && !input.plannedOwnerIds?.has(user.id)).map((owner) => ({ ...owner, importMethod })));
-    for (const owner of foreignOwners) {
-      const eligible = classifyMigrationForeignOwner(owner, selected, email, tenantId);
-      if (!eligible.provider && !eligible.phone && !eligible.authenticatedContact) {
-        result.blockers.push({ code: "FOREIGN_OWNER_NOT_ELIGIBLE", recipeUserId: owner.loginMethod.recipeUserId.getAsString() });
-      }
-    }
-    if (foreignOwners.length > 0 || activeInspections.some(({ match }) => !match)) {
-      for (const { user } of activeInspections.flatMap(({ incidentalEmailOwners }) => incidentalEmailOwners)) {
-        if (user.id !== target.id && !input.plannedOwnerIds?.has(user.id)) result.blockers.push({ code: "INCIDENTAL_CONTACT_CONFLICT", supertokens_user_id: user.id });
-      }
-    }
-    if (!committingMigration && currentEmail?.recipeId === "passwordless" && ((canonicalId && !target.loginMethods.some((method) =>
+    const methodPlan = planMethods(await discoverMethodSnapshot({ source, tenantId, userContext, preferred: selected,
+      inspections: activeInspections, plannedOwnerIds: input.plannedOwnerIds }));
+    input.onMethodPlan?.(methodPlan);
+    if (methodPlan.status === "BLOCKED") result.blockers.push({ code: methodPlan.code });
+    if (!administrativeEmail && !committingMigration && currentEmail?.recipeId === "passwordless" && ((canonicalId && !target.loginMethods.some((method) =>
       method.recipeUserId.getAsString() === canonicalId && method.tenantIds.includes(tenantId) && method.hasSameEmailAs(currentEmail.email!))) || pending)) {
       result.blockers.push({ code: "CANONICAL_EMAIL_POLICY" });
     }
+    if (administrativeEmail?.changesCanonical) result.proposedActions.push({ action: "set_canonical_email", email: administrativeEmail.email, supertokens_user_id: id });
     if (!canonicalId && !pending && selected) {
       const emailPlan = await prepareCurrentRowndEmailReconciliation(source, target, metadata, tenantId);
       if (emailPlan) {
@@ -101,7 +99,7 @@ export async function previewReconciliation(input: {
         result.requiresExecutionProof.push({ code: "EMAIL_RETIREMENT_CHECKPOINT_REQUIRED" });
       }
     }
-    if (restoreMapping) result.proposedActions.push({ action: "restore_mapping", supertokens_user_id: id });
+    if (restoreMapping) result.proposedActions.push({ action: "create_mapping", supertokens_user_id: id });
     else if (!selected && id !== source.externalUserId) {
       result.proposedActions.push({ action: "create_mapping", supertokens_user_id: id, conditional: true });
       if (mapping.status !== "OK") {
@@ -112,12 +110,10 @@ export async function previewReconciliation(input: {
           ? "MAPPING_METADATA_REQUIRES_EXECUTION_PROOF" : "NATIVE_MAPPING_PUBLICATION_REQUIRES_EXECUTION_PROOF", supertokens_user_id: id });
       }
     }
-    if (mapping.status === "OK" && mapping.externalUserId !== source.externalUserId) {
+    if (!input.mappingPlanned && mapping.status === "OK" && mapping.externalUserId !== source.externalUserId) {
       result.requiresExecutionProof.push({ code: "DUPLICATE_SOURCE_PROOF_REQUIRED", supertokens_user_id: id });
     }
-    const contactOnly = email !== undefined && source.loginMethods.length === 1 && target.loginMethods.length === 1 &&
-      target.loginMethods[0]!.recipeId === "passwordless" && target.loginMethods[0]!.hasSameEmailAs(email);
-    if (!target.isPrimaryUser && !contactOnly && (metadata.rownd_migration_complete !== true || activeInspections.length > 0)) {
+    if (methodPlan.status !== "BLOCKED" && methodPlan.actions.some((action) => action.kind === "ENSURE_PRIMARY")) {
       result.proposedActions.push({ action: "create_primary", supertokens_user_id: id });
     }
     for (const inspection of inspections) {
@@ -132,13 +128,13 @@ export async function previewReconciliation(input: {
       }
       const existing = inspection.match;
       if (!existing) {
-        if (expected.recipeId === "emailpassword") result.blockers.push({ code: "UNSUPPORTED_METHOD_CREATION" });
-        else result.proposedActions.push({ action: "create_method", method: expected });
+        if (methodPlan.status !== "BLOCKED" && methodPlan.actions.some((action) => (action.kind === "CREATE_THIRDPARTY" || action.kind === "CREATE_PASSWORDLESS") && action.method === expected)) {
+          result.proposedActions.push({ action: "create_method", method: expected });
+        }
       } else {
         if (input.plannedOwnerIds?.has(existing.user.id)) continue;
         const recipeUserId = existing.loginMethod.recipeUserId.getAsString();
-        const eligible = classifyMigrationForeignOwner({ ...existing, importMethod: expected }, selected, email, tenantId);
-        if (eligible.provider || eligible.phone || eligible.authenticatedContact) {
+        if (methodPlan.status !== "BLOCKED" && methodPlan.actions.some((action) => action.kind === "LINK" && action.method === expected)) {
           const donorMapping = await SuperTokens.getUserIdMapping({ userId: recipeUserId, userIdType: "ANY", userContext });
           if (donorMapping.status === "OK" && donorMapping.externalUserId !== source.externalUserId && await isProtectedDuplicateMapping({
             source, duplicateId: donorMapping.externalUserId, ownerInternalId: donorMapping.superTokensUserId, targetInternalId: id, tenantId, userContext,
@@ -155,6 +151,15 @@ export async function previewReconciliation(input: {
       const verificationId = restoreMapping && method.recipeUserId.getAsString() === id
         ? SuperTokens.convertToRecipeUserId(source.externalUserId!) : recipeMapping.status === "OK"
           ? SuperTokens.convertToRecipeUserId(recipeMapping.externalUserId) : method.recipeUserId;
+      if (restoreMapping && method.recipeUserId.getAsString() === id) {
+        const emails = new Set([...(method.email ? [method.email] : []), ...source.loginMethods.flatMap((entry) => "email" in entry && entry.email ? [entry.email] : [])]);
+        for (const email of emails) {
+          const baseline = method.email === email && await EmailVerification.isEmailVerified(method.recipeUserId, email, userContext);
+          const effective = await EmailVerification.isEmailVerified(verificationId, email, userContext);
+          assertVerificationCellInheritance(email, baseline, effective, verifiedEmail);
+          if (baseline && !effective && email !== verifiedEmail) result.proposedActions.push({ action: "verify_email", recipeUserId: verificationId.getAsString(), email });
+        }
+      }
       if (verifiedEmail !== undefined && method.hasSameEmailAs(verifiedEmail) && !await EmailVerification.isEmailVerified(verificationId, verifiedEmail, userContext)) {
         result.proposedActions.push({ action: "verify_email", recipeUserId: verificationId.getAsString(), email: verifiedEmail });
       }
@@ -164,7 +169,10 @@ export async function previewReconciliation(input: {
         result.requiresExecutionProof.push({ code: "PROVIDER_RETIREMENT_PROOF_REQUIRED", recipeUserId: method.recipeUserId.getAsString() });
       }
     }
-    if (metadata.rownd_migration_complete !== true) result.proposedActions.push({ action: "update_migration_metadata" });
+    if (metadata.rownd_migration_complete !== true || Object.keys(await inspectAdministrativeMetadataBackfill({
+      source, tenantId, internalUserId: id, userContext,
+    })).length > 0) result.proposedActions.push({ action: "update_migration_metadata", supertokens_user_id: id });
+    await inspectAdministrativeProviderIntroductions(source, tenantId, id, userContext);
     if (await inspectProviderMigrationCheckpoints(id, source.externalUserId!, tenantId, userContext)) {
       result.requiresExecutionProof.push({ code: "MIGRATION_CHECKPOINT_REVIEW_REQUIRED" });
     }

@@ -3,6 +3,7 @@ import { reconcileUser, validateReconcileSelector, type ReconcileUserInput } fro
 import { fetchAdministrativeMigrationSource, getAuthenticatedMigrationEmail, getMigrationContactEmail, assertAuthenticatedMigrationSource } from "./migration-email";
 import { setRowndClient } from "./rownd-repository";
 import { mapRowndUserToSuperTokens } from "./rownd-compatibility";
+import { assertAdministrativeDuplicateWinner, assertAdministrativeElection, bindAdministrativeElection, inspectAdministrativeElection, isAdministrativeElectionCandidate } from "./migration-election";
 import type { RowndUser } from "./types";
 vi.mock("./migration-mapping", () => ({ assertMigrationSourceActive: vi.fn() }));
 
@@ -76,5 +77,50 @@ describe("admin source authorization", () => {
       expect.objectContaining({ thirdPartyId: "apple", thirdPartyUserId: "fallback" }),
     ]));
     expect(getAuthenticatedMigrationEmail(source, "public")).toBe("current@example.com");
+  });
+
+  it.each([undefined, "", "   "])("preserves the mandatory non-empty data.user_id (%j)", async (user_id) => {
+    setRowndClient({ validateToken: vi.fn(), fetchUserInfo: vi.fn().mockResolvedValue({ data: { user_id }, verified_data: {} }) });
+    await expect(fetchAdministrativeMigrationSource("rownd", "public", {})).rejects.toThrow("SOURCE_PAYLOAD_INVALID");
+  });
+
+  it("treats an exact empty Apple email as absent without inventing contact proof", async () => {
+    setRowndClient({ validateToken: vi.fn(), fetchUserInfo: vi.fn().mockResolvedValue({
+      data: { user_id: "rownd", email: "", apple_id: "apple-subject" }, verified_data: { email: "" },
+    }) });
+    const source = (await fetchAdministrativeMigrationSource("rownd", "public", {}))!;
+    expect(getAuthenticatedMigrationEmail(source, "public")).toBeUndefined();
+    expect(getMigrationContactEmail(source, "public")).toBeUndefined();
+    expect(source.loginMethods).toEqual([
+      expect.objectContaining({ recipeId: "thirdparty", thirdPartyId: "apple", thirdPartyUserId: "apple-subject" }),
+    ]);
+  });
+
+  it("binds an unopposed ownerless winner without valid activity so it stays revalidated", async () => {
+    const profile: RowndUser = { state: "enabled", data: { user_id: "rownd", email: "test@example.com" }, verified_data: { email: true } };
+    setRowndClient({ validateToken: vi.fn(), fetchUserInfo: vi.fn().mockResolvedValue(profile) });
+    const source = (await fetchAdministrativeMigrationSource("rownd", "public", {}))!;
+    const election = await inspectAdministrativeElection([{ rownd_user_id: "rownd" }]);
+    expect(election.winner).toMatchObject({ rownd_user_id: "rownd" });
+    expect(election.winner.activity).toBeUndefined();
+    expect(isAdministrativeElectionCandidate(source, "rownd")).toBe(false);
+    const assertOwners = vi.fn(async () => {});
+    bindAdministrativeElection(source, "public", election, assertOwners);
+    expect(isAdministrativeElectionCandidate(source, "rownd")).toBe(true);
+    await expect(assertAdministrativeElection(source)).resolves.toBeUndefined();
+    expect(assertOwners).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains the canonical tie decision when rechecking a privately bound duplicate", async () => {
+    const profiles = new Map<string, RowndUser>(["canonical", "duplicate"].map((user_id) => [user_id, {
+      data: { user_id, email: "shared@example.com" }, meta: { last_active: "2020-01-01T00:00:00Z" },
+    }]));
+    setRowndClient({ validateToken: vi.fn(), fetchUserInfo: vi.fn(async ({ user_id }) => profiles.get(user_id)) });
+    const source = (await fetchAdministrativeMigrationSource("canonical", "public", {}))!;
+    const election = await inspectAdministrativeElection([{ rownd_user_id: "canonical" }, { rownd_user_id: "duplicate" }], { canonicalRowndId: "canonical" });
+    bindAdministrativeElection(source, "public", election, async () => {});
+    await expect(assertAdministrativeDuplicateWinner(source, "public", "duplicate")).resolves.toBeUndefined();
+    profiles.get("duplicate")!.meta = { last_active: "2021-01-01T00:00:00Z" };
+    await expect(assertAdministrativeDuplicateWinner(source, "public", "duplicate")).rejects.toThrow(/activity election changed/i);
   });
 });

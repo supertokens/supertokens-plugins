@@ -1,9 +1,7 @@
 import type { RowndMigrationEmailRetirement, RowndUser, SuperTokensUserImport } from "./types";
 import { isDeepStrictEqual } from "node:util";
-import SuperTokens from "supertokens-node";
-import Passwordless from "supertokens-node/recipe/passwordless";
+import { reconciliationSuperTokens as SuperTokens, reconciliationPasswordless as Passwordless, reconciliationUserMetadata as UserMetadata } from "./reconciliation-sdk";
 import Session from "supertokens-node/recipe/session";
-import UserMetadata from "supertokens-node/recipe/usermetadata";
 import type { RowndMetadata, RowndPendingVerification, SuperTokensUser } from "./rownd-compatibility";
 import { getCombinedUserMetadata, isSuperTokensFakeEmail, mapRowndUserToSuperTokens } from "./rownd-compatibility";
 import { fetchOptionalRowndUserInfo, validateRowndToken } from "./rownd-repository";
@@ -24,6 +22,7 @@ type AuthenticatedMigration = Readonly<{
 
 const authenticatedMigrations = new WeakMap<SuperTokensUserImport, AuthenticatedMigration>();
 const administrativeMigrations = new WeakMap<SuperTokensUserImport, AuthenticatedMigration>();
+const administrativeSourceGuards = new WeakMap<SuperTokensUserImport, () => Promise<void>>();
 
 function verifiedProfileEmail(profile: RowndUser) {
   const email = profile.data.email?.toLowerCase();
@@ -44,6 +43,9 @@ export function assertRowndSourcePayload(profile: RowndUser) {
     for (const field of ["user_id", "email", "phone_number", "google_id", "apple_id"]) {
       const value = values[field];
       if (value === undefined || value === null) continue;
+      // An exactly empty optional email is absence, not malformed input. The mapper
+      // still derives a deterministic provider placeholder for the provider method.
+      if (field === "email" && value === "") continue;
       const marker = container === "verified_data" && typeof value === "boolean";
       if (!marker && (typeof value !== "string" || !value.trim() ||
           (field === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) ||
@@ -155,6 +157,11 @@ export function getMigrationContactEmail(source: SuperTokensUserImport, tenantId
   return administrativeMigrations.get(source)?.contactEmail ?? verifiedEmail;
 }
 
+export function bindAdministrativeSourceGuard(source: SuperTokensUserImport, tenantId: string, guard: () => Promise<void>) {
+  if (!isAdministrativeMigration(source, tenantId)) throw new RowndMigrationPolicyError("Administrative source guard requires private authorization");
+  administrativeSourceGuards.set(source, guard);
+}
+
 export async function assertAuthenticatedMigrationSource(source: SuperTokensUserImport, tenantId: string) {
   const proof = authenticatedMigrations.get(source) ?? administrativeMigrations.get(source);
   if (!proof) return undefined;
@@ -165,6 +172,7 @@ export async function assertAuthenticatedMigrationSource(source: SuperTokensUser
   if (administrativeMigrations.has(source) && verifiedProfileEmail(fresh) !== proof.email) {
     throw new RowndMigrationPolicyError("Rownd verified email proof changed before reconciliation completion");
   }
+  await administrativeSourceGuards.get(source)?.();
   return fresh;
 }
 

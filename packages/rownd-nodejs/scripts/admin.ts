@@ -6,10 +6,8 @@ import EmailVerification from "supertokens-node/recipe/emailverification";
 import Session from "supertokens-node/recipe/session";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
-import { createInstance } from "@rownd/node";
 import { init } from "../src/plugin";
 import { reconcileUser, validateReconcileSelector, type ReconcileUserInput } from "../src/reconcile-user";
-import { setRowndClient } from "../src/rownd-repository";
 import { maskProfile, profileSchema, readProfiles, writeProfiles } from "./profiles";
 import { promptProfileValue, type ProfilePrompt } from "./profilePrompt";
 import { CliValidationError } from "./cliError";
@@ -101,15 +99,13 @@ export async function runAdmin(args: string[], output: (value: unknown) => void 
       recipeList: [AccountLinking.init({ shouldDoAutomaticAccountLinking: async () => ({ shouldAutomaticallyLink: false }) }),
         Session.init(), UserMetadata.init(), EmailVerification.init({ mode: "OPTIONAL" }),
         Passwordless.init({ contactMethod: "EMAIL_OR_PHONE", flowType: "MAGIC_LINK" }), ThirdParty.init()],
-      experimental: { plugins: [init({ rowndAppKey: profile.rownd.appKey, rowndAppSecret: profile.rownd.appSecret })] },
+      experimental: { plugins: [init({ rowndAppKey: profile.rownd.appKey, rowndAppSecret: profile.rownd.appSecret, rowndAppId: profile.rownd.appId })] },
     });
-    const client = createInstance({ app_key: profile.rownd.appKey, app_secret: profile.rownd.appSecret });
-    setRowndClient({ validateToken: (token) => client.validateToken(token),
-      fetchUserInfo: (opts) => client.fetchUserInfo({ ...opts, app_id: profile.rownd.appId }) });
     if (csv) return await reconcileCsv({ ...csv, profile, dryRun: values["dry-run"] ?? false, concurrency,
       recordFailure: failures ? (id) => failures.append(id) : undefined,
       onProgress: (progress) => console.error(formatReconcileProgress(progress)) }, output);
-    const result = await reconcileUser({ ...input, tenantId: profile.supertokens.tenantId, dryRun: values["dry-run"] ?? false } as ReconcileUserInput);
+    const result = await reconcileUser({ ...input, tenantId: profile.supertokens.tenantId, dryRun: values["dry-run"] ?? false,
+      onProgress: ({ stage, action }) => console.error(`[reconcile] ${stage}${action ? ` ${action}` : ""}`) } as ReconcileUserInput);
     output(formatReconcileResult(result, profile));
     return result.status === "OK" || (result.status === "PREVIEW" && result.canReconcile === true) ? 0 : 1;
   } finally {

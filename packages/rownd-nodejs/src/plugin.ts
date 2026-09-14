@@ -1,6 +1,4 @@
 import { SuperTokensPlugin, type UserContext } from "supertokens-node/types";
-import { assertProviderSessionMembership } from "./migration-provider";
-import { assertConsolidationSessionMembership } from "./migration-consolidation";
 import {
   EmailVerificationClaim,
   type APIInterface as EmailVerificationAPIInterface,
@@ -18,7 +16,7 @@ import type {
 } from "supertokens-node/recipe/session/types";
 import { createPluginInitFunction } from "@shared/js";
 import { withRequestHandler } from "@shared/nodejs";
-import { createInstance } from "@rownd/node";
+import { createRowndClient } from "./rownd-client";
 import supertokens from "supertokens-node";
 import {
   HANDLE_BASE_PATH,
@@ -166,9 +164,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
     (pluginConfig) => {
       const rowndClient =
         !pluginConfig.disableRowndUserMigration && pluginConfig.rowndAppSecret
-          ? createInstance({
-            app_key: pluginConfig.rowndAppKey,
-            app_secret: pluginConfig.rowndAppSecret,
+          ? createRowndClient({
+            appKey: pluginConfig.rowndAppKey,
+            appSecret: pluginConfig.rowndAppSecret,
+            appId: pluginConfig.rowndAppId,
           })
           : undefined;
       const telemetryClient = createClient(pluginConfig.telemetry);
@@ -1081,20 +1080,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   ...rowndIsAnonymousClaim,
                 };
 
-                await assertProviderSessionMembership(input.userId, input.recipeUserId.getAsString(), input.tenantId, resolved.userContext);
-                await assertConsolidationSessionMembership(input.userId, input.recipeUserId.getAsString(), input.tenantId, resolved.userContext);
-                const session = await originalImplementation.createNewSession({
+                return originalImplementation.createNewSession({
                   ...input,
                   userContext: resolved.userContext,
                 });
-                try {
-                  await assertProviderSessionMembership(input.userId, input.recipeUserId.getAsString(), input.tenantId, resolved.userContext);
-                  await assertConsolidationSessionMembership(input.userId, input.recipeUserId.getAsString(), input.tenantId, resolved.userContext);
-                  return session;
-                } catch (error) {
-                  await session.revokeSession();
-                  throw error;
-                }
               },
             }),
           },
@@ -1296,8 +1285,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         }
       }
       validateDynamicConfig(config);
+      if (config.rowndAppId !== undefined && (typeof config.rowndAppId !== "string" || !config.rowndAppId.trim() || config.rowndAppId.trim() !== config.rowndAppId)) {
+        throw new Error("rowndAppId must be a non-empty app ID in plugin config");
+      }
       return {
         rowndAppKey: config.rowndAppKey ?? DISABLED_MIGRATION_ROWND_APP_KEY,
+        rowndAppId: config.rowndAppId,
         rowndAppSecret: config.rowndAppSecret,
         disableRowndUserMigration: config.disableRowndUserMigration === true,
         enableDebugLogs: config.enableDebugLogs,

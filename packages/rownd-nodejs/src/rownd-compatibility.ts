@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
 import { resolveRowndProviderSubject } from "./provider-identity";
 
-import SuperTokens from "supertokens-node";
-import AccountLinking from "supertokens-node/recipe/accountlinking";
-import UserMetadata from "supertokens-node/recipe/usermetadata";
+import { reconciliationSuperTokens as SuperTokens, reconciliationAccountLinking as AccountLinking, reconciliationUserMetadata as UserMetadata } from "./reconciliation-sdk";
 import type { JSONObject } from "supertokens-node/types";
 
 import {
@@ -97,10 +95,16 @@ const INTERNAL_METADATA_FIELDS = new Set([
   "rownd_migration_canonical_target",
   "rownd_migration_reconciliation",
   "rownd_migration_owner_consolidation",
+  "rownd_migration_owner_recovery",
+  "rownd_migration_admin_donor_sessions",
+  "rownd_migration_mapping_publication",
 ]);
 
 const LINKED_OPERATIONAL_METADATA_FIELDS = new Set([
   "rownd_migration_owner_consolidation",
+  "rownd_migration_owner_recovery",
+  "rownd_migration_admin_donor_sessions",
+  "rownd_migration_mapping_publication",
   "rownd_migration_superseded",
   "rownd_migration_target",
   "rownd_migration_canonical_target",
@@ -271,7 +275,19 @@ export async function inspectLinkedUserMetadata(
   userContext?: Record<string, any>,
   userSnapshot?: SuperTokensUser,
 ): Promise<LinkedUserMetadataInspection> {
-  const user = userSnapshot ?? (await SuperTokens.getUser(userId, userContext));
+  let user = userSnapshot ?? (await SuperTokens.getUser(userId, userContext));
+  const references = new Set<string>([userId]);
+  let referenceId = userId;
+  // Retired aliases are literal metadata records, not SDK users. Resolve their
+  // profile references here only; migration checkpoints must keep using raw reads.
+  while (!user) {
+    const metadata = await getRawUserMetadata(referenceId, userContext);
+    const target = metadata.rownd_migration_canonical_target ?? metadata.rownd_migration_target;
+    if (typeof target !== "string" || !target || references.has(target)) break;
+    references.add(target);
+    referenceId = target;
+    user = await SuperTokens.getUser(target, userContext);
+  }
   if (!user) {
     const metadata = await getRawUserMetadata(userId, userContext);
     return {
@@ -292,9 +308,9 @@ export async function inspectLinkedUserMetadata(
   const primaryUserId = mapping?.superTokensUserId ?? user.id;
   const linkedUserIds = [
     ...new Set(
-      user.loginMethods
-        .map((method) => method.recipeUserId.getAsString())
-        .filter((recipeUserId) => recipeUserId !== primaryUserId),
+      [...references, ...(mapping ? [mapping.externalUserId] : []),
+        ...user.loginMethods.map((method) => method.recipeUserId.getAsString())]
+        .filter((id) => id !== primaryUserId),
     ),
   ];
   const [primaryMetadata, linkedMetadata] = await Promise.all([
