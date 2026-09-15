@@ -6,7 +6,7 @@ import { expect, it } from "vitest";
 import type { ReconcileUserInput, ReconcileUserResult } from "../src/reconcile-user";
 import type { Profile } from "./profiles";
 import { parseRowndCsv, reconcileCsv } from "./reconcileCsv";
-import { createFailedIdsFile } from "./failedIds";
+import { createFailedIdsFile, type ReconcileFailure } from "./failedIds";
 
 const profile: Profile = { rownd: { appId: "app", appKey: "secret-key", appSecret: 'secret"\\value' },
   supertokens: { connectionURI: "http://localhost:3567", tenantId: "public" } };
@@ -80,6 +80,26 @@ it("preserves the dry-run contract after an unexpected rejected call", async () 
   expect(lines.join("\n")).not.toContain("private");
 });
 
+it("records sanitized failure messages, policy codes and execution-proof requirements", async () => {
+  const failures: Array<{ id: string } & ReconcileFailure> = [];
+  const results: ReconcileUserResult[] = [
+    { status: "BLOCKED", changed: false, actions: [], message: "Rownd election owner changed", blockers: [{ code: "POLICY_BLOCKED" }] },
+    { status: "PREVIEW", changed: false, actions: [], canReconcile: false,
+      requiresExecutionProof: [{ code: "NATIVE_MAPPING_PUBLICATION_REQUIRES_EXECUTION_PROOF" }] },
+    { status: "BLOCKED", changed: false, actions: [], message: "MAPPING_TARGET_MISSING: external mapping target does not exist" },
+    { status: "ERROR", changed: false, actions: [], message: `Request included ${profile.rownd.appSecret}` },
+  ];
+  await reconcileCsv({ userIds: ["policy", "proof", "mapping", "transport"], duplicates: 0, profile, dryRun: true,
+    recordFailure: async (id, failure) => { failures.push({ id, ...failure }); } }, () => {}, async () => results.shift()!);
+  expect(failures).toEqual([
+    { id: "policy", status: "BLOCKED", error_code: "POLICY_BLOCKED", error_message: "Rownd election owner changed" },
+    { id: "proof", status: "PREVIEW", error_code: "NATIVE_MAPPING_PUBLICATION_REQUIRES_EXECUTION_PROOF",
+      error_message: "Reconciliation requires execution-time proof; dry run cannot confirm success" },
+    { id: "mapping", status: "BLOCKED", error_code: "MAPPING_TARGET_MISSING", error_message: "MAPPING_TARGET_MISSING: external mapping target does not exist" },
+    { id: "transport", status: "ERROR", error_code: "ERROR", error_message: "Reconciliation failed; check profile configuration and service availability" },
+  ]);
+});
+
 it("preserves elected canonical IDs and records the original CSV ID for retries", async () => {
   const lines: string[] = [];
   const failed: string[] = [];
@@ -149,15 +169,17 @@ it("writes concurrent failures as a private retryable CSV without overwriting fi
   try {
     const path = join(dir, "failed.csv");
     const file = await createFailedIdsFile(path);
-    try { await Promise.all(["user_a", 'user_"b', "user_c,d"].map((id) => file.append(id))); } finally { await file.close(); }
+    const failure = { status: "BLOCKED", error_code: "POLICY_BLOCKED", error_message: 'A "quoted", multiline\nreason' };
+    try { await Promise.all(["user_a", 'user_"b', "user_c,d"].map((id) => file.append(id, failure))); } finally { await file.close(); }
     const text = await readFile(path, "utf8");
     expect(parseRowndCsv(text)).toEqual({ userIds: ["user_a", 'user_"b', "user_c,d"], duplicates: 0 });
+    expect(text).toContain('"BLOCKED","POLICY_BLOCKED","A ""quoted"", multiline\nreason"');
     expect((await stat(path)).mode & 0o777).toBe(0o600);
     await expect(createFailedIdsFile(path)).rejects.toThrow("choose a new file");
     expect(await readFile(path, "utf8")).toBe(text);
     const emptyPath = join(dir, "no-failures.csv");
     await (await createFailedIdsFile(emptyPath)).close();
-    expect(await readFile(emptyPath, "utf8")).toBe("rownd_user_id\n");
+    expect(await readFile(emptyPath, "utf8")).toBe("rownd_user_id,status,error_code,error_message\n");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

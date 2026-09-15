@@ -189,6 +189,113 @@ async function expectGraph(target: string, canonicalId: string, aliases: string[
 }
 
 describe("revised reconciliation separates the canonical Rownd profile from the surviving Core owner", { timeout: 30000, sequential: true }, () => {
+  async function secondaryAliasFixture() {
+    const rowndId = `secondary-alias-${randomUUID()}`;
+    const email = uniqueEmail("secondary-alias");
+    const appleId = randomUUID();
+    const googleId = randomUUID();
+    const apple = await ThirdParty.manuallyCreateOrUpdateUser("public", "apple", appleId, email, true);
+    const google = await ThirdParty.manuallyCreateOrUpdateUser("public", "google", googleId, email, true);
+    if (apple.status !== "OK" || google.status !== "OK") throw new Error("Provider fixture failed");
+    const passwordless = await Passwordless.signInUp({ tenantId: "public", email });
+    const target = apple.user.id;
+    const secondary = google.recipeUserId.getAsString();
+    expect(await AccountLinking.createPrimaryUser(apple.recipeUserId)).toMatchObject({ status: "OK" });
+    for (const recipe of [google.recipeUserId, passwordless.recipeUserId]) {
+      expect(await AccountLinking.linkAccounts(recipe, target)).toMatchObject({ status: "OK" });
+    }
+    const profile = verifiedProfile(rowndId, { email, googleId });
+    profile.data.apple_id = appleId;
+    profile.verified_data!.apple_id = appleId;
+    await mapAlias(secondary, rowndId);
+    await setSnapshot(secondary, profile);
+    rownd.fetchUserInfo.mockImplementation(async ({ user_id }) => user_id === rowndId ? profile : undefined);
+    const recipes = await recipeIdentities((await SuperTokens.getUser(target))!);
+    return { rowndId, target, secondary, email, recipes };
+  }
+
+  it.each(["rownd", "email", "internal"])("relocates a single secondary alias through %s selection and retries without writes", async (selector) => {
+    const fixture = await secondaryAliasFixture();
+    const input: ReconcileUserInput = selector === "email" ? { email: fixture.email } :
+      selector === "internal" ? { supertokens_user_id: fixture.secondary } : { rownd_user_id: fixture.rowndId };
+    const writes = await spyOnAuthWrites();
+    const preview = await reconcileUser({ ...input, dryRun: true });
+    expect(preview, JSON.stringify(preview)).toMatchObject({ status: "PREVIEW", canReconcile: true, supertokens_user_id: fixture.target });
+    expect(preview.proposedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "remove_mapping", supertokens_user_id: fixture.secondary, rownd_user_id: fixture.rowndId }),
+      expect.objectContaining({ action: "create_mapping", supertokens_user_id: fixture.target, rownd_user_id: fixture.rowndId }),
+    ]));
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    const result = await reconcileUser(input);
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "OK", changed: true, supertokens_user_id: fixture.target });
+    await expectGraph(fixture.target, fixture.rowndId, [], fixture.recipes);
+    for (const write of writes) write.mockClear();
+    const retry = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(retry, JSON.stringify(retry)).toMatchObject({ status: "OK", changed: false });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each(["mapping delete", "mapping create"] as const)("resumes a single secondary alias repair after a lost %s response", async (phase) => {
+    const fixture = await secondaryAliasFixture();
+    const { spy, committed } = interruptAfterCommit(phase);
+    const interrupted = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(interrupted, JSON.stringify(interrupted)).toMatchObject({ status: "ERROR", partialProgress: true });
+    expect(committed).toHaveLength(1);
+    spy.mockRestore();
+    const retry = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(retry, JSON.stringify(retry)).toMatchObject({ status: "OK", supertokens_user_id: fixture.target });
+    await expectGraph(fixture.target, fixture.rowndId, [], fixture.recipes);
+  });
+
+  it("blocks secondary recipe detachment during election even when its alias mapping is unchanged", async () => {
+    const fixture = await secondaryAliasFixture();
+    const electionModule = await import("./migration-election");
+    const inspect = electionModule.inspectAdministrativeElection;
+    vi.spyOn(electionModule, "inspectAdministrativeElection").mockImplementationOnce(async (...args) => {
+      const election = await inspect(...args);
+      const unlink = await AccountLinking.unlinkAccount(SuperTokens.convertToRecipeUserId(fixture.rowndId));
+      expect(unlink, JSON.stringify(unlink)).toMatchObject({ status: "OK" });
+      return election;
+    });
+    const writes = [vi.spyOn(SuperTokens, "createUserIdMapping"), vi.spyOn(SuperTokens, "deleteUserIdMapping"), vi.spyOn(UserMetadata, "updateUserMetadata")];
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "BLOCKED", changed: false, message: "Rownd election owner changed" });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    await expectMapped(fixture.rowndId, fixture.secondary);
+  });
+
+  it("blocks ownership drift while resuming a single secondary alias mapping gap", async () => {
+    const fixture = await secondaryAliasFixture();
+    const { spy } = interruptAfterCommit("mapping delete");
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "ERROR", partialProgress: true });
+    spy.mockRestore();
+    expect(await AccountLinking.unlinkAccount(SuperTokens.convertToRecipeUserId(fixture.secondary))).toMatchObject({ status: "OK" });
+    const writes = await spyOnAuthWrites();
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "BLOCKED", changed: false });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect(await SuperTokens.getUserIdMapping({ userId: fixture.rowndId, userIdType: "EXTERNAL" })).toMatchObject({ status: "UNKNOWN_MAPPING_ERROR" });
+  });
+
+  it("blocks secondary alias mapping drift during election even when the primary owner is unchanged", async () => {
+    const fixture = await secondaryAliasFixture();
+    const remove = SuperTokens.deleteUserIdMapping.bind(SuperTokens);
+    const create = SuperTokens.createUserIdMapping.bind(SuperTokens);
+    const electionModule = await import("./migration-election");
+    const inspect = electionModule.inspectAdministrativeElection;
+    vi.spyOn(electionModule, "inspectAdministrativeElection").mockImplementationOnce(async (...args) => {
+      const election = await inspect(...args);
+      expect(await remove({ userId: fixture.rowndId, userIdType: "EXTERNAL", force: true })).toMatchObject({ status: "OK" });
+      expect(await create({ superTokensUserId: fixture.target, externalUserId: fixture.rowndId, force: true })).toMatchObject({ status: "OK" });
+      return election;
+    });
+    const writes = await spyOnAuthWrites();
+    const result = await reconcileUser({ rownd_user_id: fixture.rowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "BLOCKED", changed: false, message: "Rownd election owner changed" });
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    await expectMapped(fixture.rowndId, fixture.target);
+  });
+
   it("reconciles a single source and two-method primary with missing mapping using one discovery profile read", async () => {
     const rowndId = `performance-${randomUUID()}`;
     const email = uniqueEmail("performance");

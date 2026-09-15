@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, expect, it } from "vitest";
+import { parseRowndCsv } from "./reconcileCsv";
 
 const exec = promisify(execFile);
 let home: string;
@@ -116,9 +117,11 @@ Module._load = function(id, ...args) {
     expect(batch.stderr).toContain("[reconcile-csv] complete | 2/2 (100.0%)");
     expect(batch.stderr).toContain("users/s avg");
     expect(batch.stdout).not.toContain("[reconcile-csv]");
-    const savedIds = (await readFile(failedFile, "utf8")).trim().split("\n");
-    expect(savedIds[0]).toBe("rownd_user_id");
-    expect(savedIds.slice(1).sort()).toEqual(['"user_a"', '"user_b"']);
+    const saved = await readFile(failedFile, "utf8");
+    expect(saved.split("\n")[0]).toBe("rownd_user_id,status,error_code,error_message");
+    expect(parseRowndCsv(saved).userIds.sort()).toEqual(["user_a", "user_b"]);
+    expect(saved).toContain('"ERROR"');
+    expect(saved).toContain("Reconciliation failed; check profile configuration and service availability");
     const beforeRejected = requests;
     const cannotOverwrite = await cli(["reconcile-csv", "--profile", "local", "--file", csv, "--id-column", "Rownd ID", "--failed-file", csv], preload);
     expect(cannotOverwrite.code).toBe(1);

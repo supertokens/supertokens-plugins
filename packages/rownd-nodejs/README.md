@@ -685,8 +685,12 @@ bun packages/rownd-nodejs/scripts/adminCli.ts reconcile-csv \
 ```
 
 With `--failed-file`, unsuccessful IDs are saved as they finish to a CSV with a
-`rownd_user_id` header. This includes blocked/ambiguous/not-found/error results
-and previews with `canReconcile: false`. The output must be a new file in an
+`rownd_user_id,status,error_code,error_message` header. This includes
+blocked/ambiguous/not-found/error results and previews with `canReconcile: false`.
+Codes include policy blockers and execution-proof requirements, separated by
+semicolons when there are several; otherwise an authored message code or the
+result status is used. Messages use the same sanitized diagnostics as JSON output.
+The extra columns are ignored when retrying this CSV. The output must be a new file in an
 existing directory; existing files are never overwritten. It is owner-only
 (`0600`) and contains only the header if every user succeeds. Dry run still
 writes this requested local report while leaving authentication state unchanged.
@@ -748,6 +752,12 @@ interrupted. Results are emitted as each user finishes.
   that mapping can change which recipe carries the alias. Other alias retention
   or relocation requires explicit ownership proof. A losing method is not deleted
   simply because it is absent from the reference profile.
+  This also applies to a single Rownd alias mapped to a secondary recipe of an
+  existing primary: reconciliation checkpoints the mapping move to that primary,
+  preserving the account and all internal recipe IDs. Discovery pins both the
+  literal mapped recipe and its primary owner; an unchanged alias mapping cannot
+  hide concurrent reparenting. Dry run previews the move without writes, and retries
+  resume an interrupted mapping removal or publication using the owner checkpoint.
   If the survivor's previous Rownd alias has no vacant linked recipe, reconciliation
   retires that alias instead of blocking or creating an extra account. This includes
   an ownerless elected source replacing the mapping on a standalone Apple recipe:

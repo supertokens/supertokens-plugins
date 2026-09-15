@@ -243,6 +243,31 @@ async function inspectSourceElection(source: Source, selected: User | undefined,
   const survivor = checkpoint ? await SuperTokens.getUser(checkpoint.target, userContext) :
     (email ? await selectSurvivor(users, tenantId, userContext, email) : undefined) ?? selected;
   const canonicalRowndId = await survivorCanonicalId(survivor, userContext);
+  // Candidate IDs retain literal mapping provenance. A linked recipe's owner is
+  // a separate invariant, pinned before election and handed off to the owner plan.
+  const mappedOwners = await Promise.all(entries.map(async (candidate) => {
+    const mapping = await SuperTokens.getUserIdMapping({ userId: candidate.rownd_user_id, userIdType: "EXTERNAL", userContext });
+    if (mapping.status !== "OK") return undefined;
+    const user = await SuperTokens.getUser(mapping.superTokensUserId, userContext);
+    if (!user || mapping.superTokensUserId !== candidate.supertokens_user_id) throw new RowndMigrationPolicyError("Rownd election owner changed");
+    return { candidate, mapping, owner: await internalOwner(user, userContext) };
+  }));
+  const assertMappedOwners = async () => {
+    if (!mappedOwners.some((observed) => observed !== undefined)) return;
+    invalidateReconciliationReads("user");
+    invalidateReconciliationReads("mapping");
+    clearSuperTokensCoreCallCache(userContext);
+    for (const observed of mappedOwners) {
+      if (!observed) continue;
+      const { candidate, mapping, owner } = observed;
+      const current = await SuperTokens.getUserIdMapping({ userId: candidate.rownd_user_id, userIdType: "EXTERNAL", userContext });
+      const user = await SuperTokens.getUser(mapping.superTokensUserId, userContext);
+      if (!isDeepStrictEqual(current, mapping) || !user || await internalOwner(user, userContext) !== owner ||
+        !user.loginMethods.some((method) => [mapping.superTokensUserId, mapping.externalUserId].includes(method.recipeUserId.getAsString()))) {
+        throw new RowndMigrationPolicyError("Rownd election owner changed");
+      }
+    }
+  };
   const election = await inspectAdministrativeElection(entries, { canonicalRowndId, contactEmail });
   const ownerIds = new Set<string>();
   for (const user of users) {
@@ -251,7 +276,7 @@ async function inspectSourceElection(source: Source, selected: User | undefined,
       ["passwordless", "emailpassword"].includes(method.recipeId) && method.hasSameEmailAs(email))) ||
       entries.some((candidate) => candidate.supertokens_user_id === id)) ownerIds.add(id);
   }
-  return { election, survivor, canonicalRowndId, ownerIds: [...ownerIds] };
+  return { election, survivor, canonicalRowndId, ownerIds: [...ownerIds], assertMappedOwners };
 }
 
 async function assertElectionOwners(election: Awaited<ReturnType<typeof inspectAdministrativeElection>>, tenantId: string, userContext: JsonRecord) {
@@ -477,6 +502,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput): Promise
       throw new RowndMigrationPolicyError("Rownd election owner changed");
     }
     const { election } = inspection;
+    await inspection.assertMappedOwners();
     selected = inspection.survivor ?? selected;
     selectedOwner = selected ? await internalOwner(selected, userContext) : undefined;
     if (election.candidates.length > 1) result.election = { candidates: election.candidates, basis: "latest_valid_activity", canonical_rownd_user_id: election.canonicalRowndId };
@@ -516,10 +542,11 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput): Promise
           throw new RowndMigrationPolicyError("Contradictory historical snapshots cannot authorize mapping restoration");
         }
         const needsOwnerPlan = metadata.rownd_migration_owner_consolidation !== undefined || election.candidates.length > 1 ||
-          inspection.ownerIds.length > 1;
+          inspection.ownerIds.length > 1 || (mapping.status === "OK" && mapping.superTokensUserId !== selectedOwner);
         if (needsOwnerPlan) consolidation = await prepareOwnerConsolidation({ source, candidates: election.candidates,
           target: selectedOwner, ownerIds: inspection.ownerIds, tenantId, userContext });
       }
+      await inspection.assertMappedOwners();
       if (!consolidation) await assertElectionOwners(election, tenantId, userContext);
       bindAdministrativeElection(source, tenantId, election, consolidation ? () => consolidation!.assertOwners() : () => assertElectionOwners(election, tenantId, userContext));
     }

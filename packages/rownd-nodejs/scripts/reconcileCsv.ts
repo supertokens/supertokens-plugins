@@ -4,6 +4,7 @@ import { formatReconcileResult } from "./adminOutput";
 import { CliValidationError } from "./cliError";
 import type { Profile } from "./profiles";
 import type { ReconcileProgress } from "./reconcileProgress";
+import type { ReconcileFailure } from "./failedIds";
 
 function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
@@ -72,7 +73,7 @@ export async function readRowndCsv(file: string, idColumn?: string) {
 
 export async function reconcileCsv(
   input: { userIds: string[]; duplicates: number; profile: Profile; dryRun: boolean; concurrency?: number;
-    recordFailure?: (id: string) => Promise<void>; onProgress?: (progress: ReconcileProgress) => void },
+    recordFailure?: (id: string, failure: ReconcileFailure) => Promise<void>; onProgress?: (progress: ReconcileProgress) => void },
   output: (value: string) => void,
   reconcile: (input: ReconcileUserInput) => Promise<ReconcileUserResult> = reconcileUser,
 ) {
@@ -106,10 +107,22 @@ export async function reconcileCsv(
     const success = result.status === "OK" || (result.status === "PREVIEW" && result.canReconcile === true);
     if (success) succeeded++;
     statuses[result.status] = (statuses[result.status] ?? 0) + 1;
-    output(JSON.stringify({ type: "result", index: index + 1,
-      result: JSON.parse(formatReconcileResult({ ...result, rownd_user_id: result.rownd_user_id ?? id,
-        requested_rownd_user_id: id }, input.profile)) }));
-    if (!success) await input.recordFailure?.(id);
+    const formatted: ReconcileUserResult = JSON.parse(formatReconcileResult({ ...result, rownd_user_id: result.rownd_user_id ?? id,
+      requested_rownd_user_id: id }, input.profile));
+    output(JSON.stringify({ type: "result", index: index + 1, result: formatted }));
+    if (!success) {
+      const codes = [...new Set([
+        ...(formatted.blockers ?? []).map(({ code }) => code),
+        ...(formatted.requiresExecutionProof ?? []).map(({ code }) => code),
+      ])];
+      await input.recordFailure?.(id, {
+        status: formatted.status,
+        error_code: codes.join("; ") || formatted.message?.match(/^([A-Z][A-Z0-9_]+):/)?.[1] || formatted.status,
+        error_message: formatted.message ?? (formatted.requiresExecutionProof?.length
+          ? "Reconciliation requires execution-time proof; dry run cannot confirm success"
+          : "Reconciliation preview could not confirm success"),
+      });
+    }
   };
   let next = 0;
   let stopped = false;

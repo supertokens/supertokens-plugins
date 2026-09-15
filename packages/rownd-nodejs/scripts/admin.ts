@@ -102,7 +102,7 @@ export async function runAdmin(args: string[], output: (value: unknown) => void 
       experimental: { plugins: [init({ rowndAppKey: profile.rownd.appKey, rowndAppSecret: profile.rownd.appSecret, rowndAppId: profile.rownd.appId })] },
     });
     if (csv) return await reconcileCsv({ ...csv, profile, dryRun: values["dry-run"] ?? false, concurrency,
-      recordFailure: failures ? (id) => failures.append(id) : undefined,
+      recordFailure: failures ? (id, failure) => failures.append(id, failure) : undefined,
       onProgress: (progress) => console.error(formatReconcileProgress(progress)) }, output);
     const result = await reconcileUser({ ...input, tenantId: profile.supertokens.tenantId, dryRun: values["dry-run"] ?? false,
       onProgress: ({ stage, action }) => console.error(`[reconcile] ${stage}${action ? ` ${action}` : ""}`) } as ReconcileUserInput);
