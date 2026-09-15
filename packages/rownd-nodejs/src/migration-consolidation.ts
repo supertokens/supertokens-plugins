@@ -466,7 +466,7 @@ async function observe(plan: OwnerPlanCheckpoint, context: JsonRecord) {
         );
     }
   }
-  for (const alias of plan.aliases) {
+  for (const alias of [...plan.aliases, ...(plan.retiredAliases ?? [])]) {
     const mapping = await SuperTokens.getUserIdMapping({
       userId: alias.id,
       userIdType: "EXTERNAL",
@@ -483,6 +483,12 @@ async function observe(plan: OwnerPlanCheckpoint, context: JsonRecord) {
         "Consolidation alias moved outside the planned graph",
       );
     }
+    if (
+      mapping.status !== "OK" &&
+      plan.retiredAliases?.some((retired) => retired.id === alias.id) &&
+      await SuperTokens.getUser(alias.id, context)
+    )
+      throw new RowndMigrationPolicyError("A retired consolidation alias acquired a literal owner");
   }
   for (const candidate of plan.candidates) {
     if (
@@ -1017,6 +1023,7 @@ export async function prepareOwnerConsolidation(input: {
         }
         absentAliases.push(alias.id);
       }
+    const retiredAliases: NonNullable<OwnerPlanCheckpoint["retiredAliases"]> = [];
     const sourceAlias = aliases.find((alias) => alias.id === sourceId);
     if (recipes.has(sourceId) && sourceId !== target)
       fail("the canonical alias collides with an immutable recipe ID");
@@ -1037,14 +1044,23 @@ export async function prepareOwnerConsolidation(input: {
         .sort();
       const destination =
         available.find((id) => id === sourceAlias?.from) ?? available[0];
-      if (!destination)
-        fail("the survivor alias has no vacant final linked recipe");
-      displaced.to = destination;
+      if (destination) displaced.to = destination;
+      else {
+        if (recipes.has(displaced.id))
+          fail("the retiring alias collides with an immutable recipe ID");
+        retiredAliases.push({
+          id: displaced.id,
+          from: displaced.from,
+          ...(displaced.info !== undefined ? { info: displaced.info } : {}),
+        });
+        aliases.splice(aliases.indexOf(displaced), 1);
+      }
     }
     const literals = new Set([
       ...recipes.keys(),
       ...candidates.map((candidate) => candidate.rownd_user_id),
       ...aliases.map((alias) => alias.id),
+      ...retiredAliases.map((alias) => alias.id),
     ]);
     const emails = new Set(
       [...recipes.values()].flatMap((recipe) =>
@@ -1151,6 +1167,7 @@ export async function prepareOwnerConsolidation(input: {
       absentAliases,
       recipes: [...recipes.values()].sort((a, b) => a.id.localeCompare(b.id)),
       aliases,
+      ...(retiredAliases.length ? { retiredAliases } : {}),
       initial,
       operations: [],
       cursor: 0,
@@ -1262,7 +1279,7 @@ export async function prepareOwnerConsolidation(input: {
       for (const marker of plan.initial.markers) {
         const metadata = await getRawUserMetadata(marker.id, context);
         const recipeId =
-          plan.aliases.find((alias) => alias.id === marker.id)?.from ??
+          [...plan.aliases, ...(plan.retiredAliases ?? [])].find((alias) => alias.id === marker.id)?.from ??
           marker.id;
         const user = await SuperTokens.getUser(recipeId, context);
         await assertOwnerEmailPolicy(
@@ -1748,6 +1765,7 @@ export async function prepareOwnerConsolidation(input: {
     plannedOwnerIds: new Set([
       ...plan.recipes.map((recipe) => recipe.id),
       ...plan.aliases.map((alias) => alias.id),
+      ...(plan.retiredAliases ?? []).map((alias) => alias.id),
     ]),
     async execute() {
       await assertFresh();

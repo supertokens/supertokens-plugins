@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { RowndMigrationPolicyError } from "./errors";
 import type { ActivityCandidate } from "./migration-election";
-import { isRecord, type JsonRecord } from "./utils";
+import { isRecord, type JsonRecord, type JsonValue } from "./utils";
 import { assertVerificationCellInheritance } from "./migration-verification";
 import type { RowndUser } from "./types";
 
@@ -10,10 +10,24 @@ export type OwnerPlanningResult =
   | { status: "PLAN"; actions: OwnerOperation[] }
   | { status: "BLOCKED"; reason: string };
 
+function preserveRetiredEmailPointers(values: JsonRecord, retiredAliases: NonNullable<OwnerPlanCheckpoint["retiredAliases"]>, aliases?: OwnerAlias[]) {
+  const next = structuredClone(values);
+  const resolve = (pointer: JsonValue) => {
+    const retired = retiredAliases.find((alias) => alias.id === pointer || (aliases && alias.from === pointer));
+    return retired ? aliases?.find((alias) => alias.to === retired.from)?.id ?? retired.from : pointer;
+  };
+  if (next.rownd_email_recipe_user_id !== undefined)
+    next.rownd_email_recipe_user_id = resolve(next.rownd_email_recipe_user_id);
+  if (isRecord(next.rownd_email_recipe_user_ids))
+    next.rownd_email_recipe_user_ids = Object.fromEntries(Object.entries(next.rownd_email_recipe_user_ids)
+      .map(([tenant, pointer]) => [tenant, resolve(pointer)]));
+  return next;
+}
+
 export function planOwnerOperations(
   input: Pick<
     OwnerPlanCheckpoint,
-    "sourceId" | "target" | "recipes" | "aliases" | "initial"
+    "sourceId" | "target" | "recipes" | "aliases" | "retiredAliases" | "initial"
   > & {
     profile: RowndUser;
     authenticatedEmail?: string;
@@ -26,6 +40,7 @@ export function planOwnerOperations(
     input.recipes.flatMap((recipe) => (recipe.email ? [recipe.email] : [])),
   );
   const actions: OwnerOperation[] = [];
+  const retiredAliases = input.retiredAliases ?? [];
   let state = initial;
   const append = (operation: OwnerOperation) => {
     state = applyOwnerOperation(state, operation, target);
@@ -96,7 +111,10 @@ export function planOwnerOperations(
           ...(verifiedEmail ? { verifiedEmail } : {}),
         });
       }
-    for (const alias of aliases)
+    for (const alias of [
+      ...aliases,
+      ...retiredAliases.map((alias) => ({ ...alias, to: undefined })),
+    ])
       if (alias.from !== alias.to)
         for (const email of emails)
           append({ kind: "revoke_verification_tokens", id: alias.id, email });
@@ -116,6 +134,26 @@ export function planOwnerOperations(
           );
         }
     };
+    // Persist retirement before removing ownership so a retry or token migration
+    // cannot restore the losing alias during the mapping gap.
+    for (const marker of [...state.markers]) {
+      const values = preserveRetiredEmailPointers(marker.values, retiredAliases);
+      if (!isDeepStrictEqual(values, marker.values))
+        append({ kind: "metadata", id: marker.id, values });
+    }
+    for (const alias of retiredAliases) {
+      const marker = state.markers.find((entry) => entry.id === alias.id)!;
+      append({
+        kind: "metadata",
+        id: alias.id,
+        values: {
+          ...marker.values,
+          rownd_migration_superseded: { rowndUserId: sourceId, targetUserId: target },
+        },
+      });
+      append({ kind: "delete_mapping", id: alias.from, alias: alias.id });
+      assertInheritance();
+    }
     for (const alias of aliases)
       if (alias.from !== undefined && alias.from !== alias.to) {
         append({ kind: "delete_mapping", id: alias.from, alias: alias.id });
@@ -140,11 +178,11 @@ export function planOwnerOperations(
         )
           append({ kind: "verify_email", id: alias.id, email: recipe.email });
       }
-    for (const marker of initial.markers) {
+    for (const marker of [...state.markers]) {
       const destination =
         aliases.find((entry) => entry.id === marker.id)?.to ??
         aliases.find((entry) => entry.to === marker.id)?.to;
-      const values = structuredClone(marker.values);
+      const values = preserveRetiredEmailPointers(marker.values, retiredAliases, aliases);
       if (destination !== undefined)
         for (const field of [
           "rownd_migration_target",
@@ -222,6 +260,7 @@ export type OwnerPlanCheckpoint = {
   absentAliases: string[];
   recipes: OwnerRecipe[];
   aliases: OwnerAlias[];
+  retiredAliases?: { id: string; from: string; info?: string }[];
   initial: OwnerState;
   operations: OwnerOperation[];
   cursor: number;
@@ -311,6 +350,13 @@ function assertState(
 
 function assertFinalAliases(plan: OwnerPlanCheckpoint, state: OwnerState) {
   if (
+    (plan.retiredAliases ?? []).some((alias) =>
+      state.mappings.some((entry) => entry.alias === alias.id) ||
+      !isDeepStrictEqual(
+        state.markers.find((entry) => entry.id === alias.id)?.values.rownd_migration_superseded,
+        { rowndUserId: plan.sourceId, targetUserId: plan.target },
+      ),
+    ) ||
     plan.aliases.some(
       (alias) =>
         !state.mappings.some(
@@ -395,6 +441,23 @@ export function readOwnerPlanCheckpoint(
   assertState(plan.initial, plan.recipes);
   const ids = new Set(plan.recipes.map((recipe) => recipe.id));
   if (
+    plan.retiredAliases !== undefined &&
+    (!Array.isArray(plan.retiredAliases) ||
+      plan.retiredAliases.some((alias) =>
+        !isRecord(alias) ||
+        typeof alias.id !== "string" || !alias.id ||
+        typeof alias.from !== "string" || !ids.has(alias.from) ||
+        ids.has(alias.id) ||
+        (alias.info !== undefined && typeof alias.info !== "string") ||
+        plan.aliases.some((active) => active.id === alias.id) ||
+        !plan.initial.mappings.some((entry) =>
+          entry.id === alias.from && entry.alias === alias.id && entry.info === alias.info,
+        ),
+      ) ||
+      new Set(plan.retiredAliases.map((alias) => alias.id)).size !== plan.retiredAliases.length)
+  )
+    invalid();
+  if (
     plan.createdRecipes !== undefined &&
     (!Array.isArray(plan.createdRecipes) ||
       !["RECONCILING", "COMPLETE"].includes(plan.status) ||
@@ -438,7 +501,7 @@ export function readOwnerPlanCheckpoint(
     plan.initial.mappings.some(
       (entry) =>
         entry.alias !== undefined &&
-        !plan.aliases.some(
+        ![...plan.aliases, ...(plan.retiredAliases ?? [])].some(
           (alias) => alias.id === entry.alias && alias.from === entry.id,
         ),
     )
@@ -447,6 +510,7 @@ export function readOwnerPlanCheckpoint(
   const literals = new Set([
     ...ids,
     ...plan.aliases.map((alias) => alias.id),
+    ...(plan.retiredAliases ?? []).map((alias) => alias.id),
     ...plan.candidates.map((candidate) => candidate.rownd_user_id),
   ]);
   if (
@@ -504,6 +568,19 @@ export function readOwnerPlanCheckpoint(
               plan.initial.markers.find((entry) => entry.id === op.id)?.values[
                 field
               ],
+            ) && !isDeepStrictEqual(
+              op.values[field],
+              preserveRetiredEmailPointers(
+                plan.initial.markers.find((entry) => entry.id === op.id)!.values,
+                plan.retiredAliases ?? [],
+              )[field],
+            ) && !isDeepStrictEqual(
+              op.values[field],
+              preserveRetiredEmailPointers(
+                plan.initial.markers.find((entry) => entry.id === op.id)!.values,
+                plan.retiredAliases ?? [],
+                plan.aliases,
+              )[field],
             ),
         )
       )

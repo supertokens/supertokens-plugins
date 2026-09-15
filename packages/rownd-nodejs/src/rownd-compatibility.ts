@@ -25,6 +25,8 @@ import type {
 } from "./types";
 import type { JsonRecord, JsonValue } from "./utils";
 import { getStringList, isJsonRecord } from "./utils";
+import { readOwnerPlanCheckpoint } from "./migration-owner-plan";
+import { RowndMigrationPolicyError } from "./errors";
 
 export type RowndMetadata = RowndUserMetadata & JsonRecord;
 
@@ -322,6 +324,28 @@ export async function inspectLinkedUserMetadata(
       })),
     ),
   ]);
+
+  // Retired aliases no longer appear in the SDK graph, but their application
+  // metadata still belongs to the preserved owner. Checkpoint provenance keeps
+  // these literal records discoverable without restoring their login mapping.
+  let plan: ReturnType<typeof readOwnerPlanCheckpoint>;
+  try {
+    plan = readOwnerPlanCheckpoint(primaryMetadata);
+  } catch (error) {
+    // Profile enrichment must not turn administrative checkpoint drift into a
+    // native-login gate. Reconciliation validates these checkpoints separately.
+    if (!(error instanceof RowndMigrationPolicyError)) throw error;
+  }
+  if (plan?.target === primaryUserId)
+    for (const alias of plan.retiredAliases ?? []) {
+      if (linkedUserIds.includes(alias.id)) continue;
+      const metadata = await getRawUserMetadata(alias.id, userContext);
+      const retirement = metadata.rownd_migration_superseded;
+      if (!isJsonRecord(retirement) || retirement.rowndUserId !== plan.sourceId ||
+        retirement.targetUserId !== primaryUserId) continue;
+      linkedUserIds.push(alias.id);
+      linkedMetadata.push({ userId: alias.id, metadata });
+    }
 
   return {
     ...combineLinkedMetadata({

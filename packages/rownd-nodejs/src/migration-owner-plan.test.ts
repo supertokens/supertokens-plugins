@@ -11,6 +11,7 @@ import { fetchAdministrativeMigrationSource } from "./migration-email";
 import { applyOwnerOperation, OWNER_PLAN_KEY, readOwnerPlanCheckpoint } from "./migration-owner-plan";
 import { setRowndClient } from "./rownd-repository";
 import { recordAdministrativeMethodCreation } from "./migration-method-receipts";
+import { assertMigrationSourceActive } from "./migration-mapping";
 import type { RowndUser } from "./types";
 import type { JsonRecord } from "./utils";
 
@@ -164,6 +165,107 @@ async function prepare(bind = true, sourceId = "newer", ownerIds = ["T", "D"]) {
 }
 
 describe("durable owner transitions", () => {
+  function singleAppleOwner() {
+    recipes = new Map([["T", { id: "T", owner: "T", primary: false, verified: false,
+      thirdParty: { id: "apple", userId: "apple-subject" } }]]);
+    mappings = new Map([["T", "older"]]);
+    profiles = new Map([
+      ["older", { data: { user_id: "older", apple_id: "apple-subject" } }],
+      ["newer", { data: { user_id: "newer", apple_id: "apple-subject" }, meta: { last_active: "2025-11-20T07:57:01.703Z" } }],
+    ]);
+    metadata = new Map([
+      ["T", { original_rownd_user: structuredClone(profiles.get("older")), preference: "keep" }],
+      ["older", { rownd_migration_canonical_target: "T", preference: "literal" }],
+    ]);
+  }
+
+  it("retires a single Apple owner's alias for an ownerless winner, preserving the immutable recipe", async () => {
+    singleAppleOwner();
+    const plan = await prepare(true, "newer", ["T"]);
+    expect(writes).toEqual([]);
+    expect(plan.proposedActions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "remove_mapping", rownd_user_id: "older" }),
+      expect.objectContaining({ action: "create_mapping", rownd_user_id: "newer", supertokens_user_id: "T" }),
+    ]));
+    await plan.execute();
+    await plan.beginMethodReconciliation();
+    await plan.complete();
+    expect([...recipes.values()]).toEqual([{ id: "T", owner: "T", primary: true, verified: false,
+      thirdParty: { id: "apple", userId: "apple-subject" } }]);
+    expect([...mappings]).toEqual([["T", "newer"]]);
+    expect(metadata.get("T")).toMatchObject({ original_rownd_user: profiles.get("newer"), preference: "keep" });
+    expect(metadata.get("older")).toMatchObject({ preference: "literal",
+      rownd_migration_superseded: { rowndUserId: "newer", targetUserId: "T" } });
+    const checkpoint = readOwnerPlanCheckpoint(metadata.get("T")!)!;
+    expect(checkpoint.retiredAliases).toEqual([{ id: "older", from: "T" }]);
+    expect(checkpoint.initial.markers.find(({ id }) => id === "T")?.values.original_rownd_user).toEqual(profiles.get("older"));
+    await expect(assertMigrationSourceActive("older", {})).rejects.toThrow("superseded");
+    await expect(assertConsolidationSessionMembership("newer", "newer", "public", {})).resolves.toBeUndefined();
+    await expect(assertConsolidationSessionMembership("older", "T", "public", {})).rejects.toThrow();
+    const count = writes.length;
+    const retry = await prepare(true, "newer", ["T"]);
+    await retry.execute();
+    await retry.complete();
+    expect(writes).toHaveLength(count);
+    metadata.get("older")!.rownd_migration_superseded = { rowndUserId: "other", targetUserId: "T" };
+    await expect(plan.assertOwners()).rejects.toThrow("literal metadata changed");
+  });
+
+  it.each(["retirement", "delete", "create"])("resumes a single-recipe alias retirement after a lost %s response", async (phase) => {
+    singleAppleOwner();
+    let lost = false;
+    const update = vi.mocked(UserMetadata.updateUserMetadata).getMockImplementation()!;
+    vi.mocked(UserMetadata.updateUserMetadata).mockImplementation(async (...args) => {
+      const result = await update(...args);
+      if (!lost && phase === "retirement" && args[1].rownd_migration_superseded) {
+        lost = true;
+        throw new Error("Lost response");
+      }
+      return result;
+    });
+    const remove = vi.mocked(SuperTokens.deleteUserIdMapping).getMockImplementation()!;
+    vi.mocked(SuperTokens.deleteUserIdMapping).mockImplementation(async (...args) => {
+      expect(metadata.get("older")?.rownd_migration_superseded).toEqual({ rowndUserId: "newer", targetUserId: "T" });
+      const result = await remove(...args);
+      if (!lost && phase === "delete") { lost = true; throw new Error("Lost response"); }
+      return result;
+    });
+    const create = vi.mocked(SuperTokens.createUserIdMapping).getMockImplementation()!;
+    vi.mocked(SuperTokens.createUserIdMapping).mockImplementation(async (...args) => {
+      const result = await create(...args);
+      if (!lost && phase === "create") { lost = true; throw new Error("Lost response"); }
+      return result;
+    });
+    await expect((await prepare(true, "newer", ["T"])).execute()).rejects.toThrow("Lost response");
+    const retry = await prepare(true, "newer", ["T"]);
+    await retry.execute();
+    await retry.beginMethodReconciliation();
+    await retry.complete();
+    expect([...mappings]).toEqual([["T", "newer"]]);
+    expect(writes.filter((write) => write === "delete:older")).toHaveLength(1);
+    expect(writes.filter((write) => write === "map:newer:T")).toHaveLength(1);
+    await expect(assertMigrationSourceActive("older", {})).rejects.toThrow("superseded");
+  });
+
+  it.each(["mapping", "literal owner", "missing tombstone", "changed provenance"])("rejects completed retirement drift: %s", async (drift) => {
+    singleAppleOwner();
+    const plan = await prepare(true, "newer", ["T"]);
+    await plan.execute();
+    await plan.beginMethodReconciliation();
+    await plan.complete();
+    if (drift === "mapping") mappings.set("outside", "older");
+    else if (drift === "literal owner") recipes.set("older", { id: "older", owner: "older", primary: false, verified: false });
+    else {
+      const checkpoint = metadata.get("T")![OWNER_PLAN_KEY];
+      if (drift === "missing tombstone") {
+        const operation = checkpoint.operations.find((op: JsonRecord) => op.kind === "metadata" && op.id === "older");
+        delete operation.values.rownd_migration_superseded;
+      } else checkpoint.retiredAliases[0].from = "outside";
+      expect(() => readOwnerPlanCheckpoint(metadata.get("T")!)).toThrow("Invalid duplicate owner consolidation plan");
+    }
+    await expect(plan.assertOwners()).rejects.toThrow();
+  });
+
   it("admits an engine provider introduction only for the recorded recipe and current subject", async () => {
     profiles.get("newer")!.data.google_id = "new-subject";
     const candidates = [{ rownd_user_id: "older", supertokens_user_id: "T" }, { rownd_user_id: "newer", supertokens_user_id: "D" }];

@@ -748,6 +748,20 @@ interrupted. Results are emitted as each user finishes.
   that mapping can change which recipe carries the alias. Other alias retention
   or relocation requires explicit ownership proof. A losing method is not deleted
   simply because it is absent from the reference profile.
+  If the survivor's previous Rownd alias has no vacant linked recipe, reconciliation
+  retires that alias instead of blocking or creating an extra account. This includes
+  an ownerless elected source replacing the mapping on a standalone Apple recipe:
+  the same internal account and credential survive. Existing alias relocation
+  remains available when a proven linked recipe has capacity.
+  The losing alias receives `rownd_migration_superseded` with the elected Rownd ID
+  and immutable target before its mapping is removed. The owner checkpoint records
+  the retired mapping and original provenance, validates retirement on retry and
+  completion, and keeps alias application metadata available to combined reads.
+  Retired IDs cannot restore ownership through reconciliation or token migration.
+  Verification tokens for the losing alias are revoked before mapping removal;
+  verification transfer still requires the immutable credential's existing evidence.
+  Canonical-email pointers that name the retiring alias are first changed to the
+  same immutable recipe ID, preserving their meaning through the mapping gap.
   Reparenting, mapping publication, and standalone-donor linking accept concurrent
   native logins; active sessions are not migration preconditions. Administrative
   donor reservations are no longer created or consulted.

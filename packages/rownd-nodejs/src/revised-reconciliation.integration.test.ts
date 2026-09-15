@@ -1016,17 +1016,99 @@ describe("revised reconciliation separates the canonical Rownd profile from the 
     await expectGraph(fixture.survivor.internalId, fixture.survivorRowndId, [fixture.donor.rowndId], fixture.recipes);
   });
 
-  it("blocks an ownerless winner with no spare recipe for alias relocation before any writes", async () => {
+  it("retires the losing alias when an ownerless winner has no spare recipe", async () => {
     const fixture = await seedOwnerlessCanonical(false);
+    await UserMetadata.updateUserMetadata(fixture.owner.internalId, {
+      rownd_email_recipe_user_id: fixture.ownerRowndId,
+      rownd_email_recipe_user_ids: { public: fixture.ownerRowndId },
+    });
     const ids = [fixture.owner.internalId, fixture.ownerRowndId, fixture.ownerlessRowndId];
     const before = await snapshot(ids);
     const writes = await spyOnAuthWrites();
-    for (const dryRun of [true, false]) {
-      const result = await expectNoWrites(writes, () => reconcileUser({ rownd_user_id: fixture.ownerlessRowndId, dryRun }));
-      expect(result, JSON.stringify(result)).toMatchObject({ status: "BLOCKED", changed: false });
-    }
+    const preview = await expectNoWrites(writes, () => reconcileUser({ rownd_user_id: fixture.ownerlessRowndId, dryRun: true }));
+    expect(preview, JSON.stringify(preview)).toMatchObject({ status: "PREVIEW", canReconcile: true });
     expect(await snapshot(ids)).toEqual(before);
-    expect(await captureRecipes([fixture.owner])).toEqual(fixture.recipes);
+    const result = await reconcileUser({ rownd_user_id: fixture.ownerlessRowndId });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "OK", supertokens_user_id: fixture.owner.internalId });
+    await expectGraph(fixture.owner.internalId, fixture.ownerlessRowndId, [], fixture.recipes);
+    expect((await SuperTokens.getUserIdMapping({ userId: fixture.ownerRowndId, userIdType: "EXTERNAL" })).status).toBe("UNKNOWN_MAPPING_ERROR");
+    expect((await UserMetadata.getUserMetadata(fixture.ownerRowndId)).metadata).toMatchObject({
+      rownd_migration_superseded: { rowndUserId: fixture.ownerlessRowndId, targetUserId: fixture.owner.internalId },
+    });
+    expect(await EmailVerification.isEmailVerified(SuperTokens.convertToRecipeUserId(fixture.ownerlessRowndId), fixture.email)).toBe(true);
+    const retry = await reconcileUser({ rownd_user_id: fixture.ownerlessRowndId });
+    expect(retry, JSON.stringify(retry)).toMatchObject({ status: "OK", changed: false, actions: [] });
+    const retired = await reconcileUser({ rownd_user_id: fixture.ownerRowndId });
+    expect(retired, JSON.stringify(retired)).toMatchObject({ status: "BLOCKED" });
+    fixture.profiles.get(fixture.ownerRowndId)!.meta = { last_active: "2026-01-01T00:00:00Z" };
+    const reclaim = await reconcileUser({ rownd_user_id: fixture.ownerlessRowndId });
+    expect(reclaim, JSON.stringify(reclaim)).toMatchObject({ status: "BLOCKED" });
+    await expectMapped(fixture.ownerlessRowndId, fixture.owner.internalId);
+  });
+
+  it.each(["none", "retirement", "delete", "create"])("replaces a standalone Apple mapping with an ownerless winner (lost response: %s)", async (phase) => {
+    const winner = `apple-winner-${randomUUID()}`, loser = `apple-loser-${randomUUID()}`;
+    const subject = randomUUID();
+    const email = uniqueEmail("apple");
+    const apple = await ThirdParty.manuallyCreateOrUpdateUser("public", "apple", subject, email, false);
+    if (apple.status !== "OK") throw new Error(apple.status);
+    const target = apple.user.id;
+    expect(apple.user.isPrimaryUser).toBe(false);
+    const profiles = new Map<string, RowndUser>([
+      [winner, { data: { user_id: winner, apple_id: subject, email }, meta: { last_active: "2025-11-20T07:57:01.703Z" } }],
+      [loser, { data: { user_id: loser, apple_id: subject, email } }],
+    ]);
+    rownd.fetchUserInfo.mockImplementation(async ({ user_id }) => profiles.get(user_id));
+    await mapAlias(target, loser);
+    await setSnapshot(target, profiles.get(loser)!);
+    await UserMetadata.updateUserMetadata(loser, { applicationPreference: "preserve", original_rownd_user: profiles.get(loser)! });
+    const recipes = await recipeIdentities((await SuperTokens.getUser(target))!);
+    let lost = false;
+    const update = UserMetadata.updateUserMetadata.bind(UserMetadata);
+    vi.spyOn(UserMetadata, "updateUserMetadata").mockImplementation(async (...args) => {
+      const result = await update(...args);
+      if (!lost && phase === "retirement" && args[0] === loser && args[1].rownd_migration_superseded) {
+        lost = true; throw new Error("Lost retirement response");
+      }
+      return result;
+    });
+    const remove = SuperTokens.deleteUserIdMapping.bind(SuperTokens);
+    vi.spyOn(SuperTokens, "deleteUserIdMapping").mockImplementation(async (...args) => {
+      const result = await remove(...args);
+      if (!lost && phase === "delete" && args[0].userId === loser) {
+        lost = true; throw new Error("Lost mapping deletion response");
+      }
+      return result;
+    });
+    const create = SuperTokens.createUserIdMapping.bind(SuperTokens);
+    vi.spyOn(SuperTokens, "createUserIdMapping").mockImplementation(async (...args) => {
+      const result = await create(...args);
+      if (!lost && phase === "create" && args[0].externalUserId === winner) {
+        lost = true; throw new Error("Lost mapping creation response");
+      }
+      return result;
+    });
+    if (phase !== "none") {
+      const interrupted = await reconcileUser({ rownd_user_id: winner });
+      expect(interrupted, JSON.stringify(interrupted)).toMatchObject({ status: "ERROR" });
+      expect(lost).toBe(true);
+    }
+    const result = await reconcileUser({ rownd_user_id: winner });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "OK", rownd_user_id: winner, supertokens_user_id: target });
+    const completedRecipes = await recipeIdentities((await SuperTokens.getUser(target))!);
+    expect(completedRecipes).toEqual(expect.arrayContaining(recipes));
+    await expectGraph(target, winner, [], completedRecipes);
+    expect(await SuperTokens.getUser(loser)).toBeUndefined();
+    const retry = await reconcileUser({ rownd_user_id: winner });
+    expect(retry, JSON.stringify(retry)).toMatchObject({ status: "OK", changed: false, actions: [] });
+    const { getCombinedUserMetadata } = await import("./rownd-compatibility");
+    expect(await getCombinedUserMetadata(winner)).toMatchObject({ applicationPreference: "preserve", original_rownd_user: profiles.get(winner)! });
+    rownd.validateToken.mockResolvedValue({ user_id: loser });
+    const response = await fetch(`${baseUrl}/auth/plugin/rownd/migrate`, { method: "POST",
+      headers: { Authorization: "Bearer retired-token", "st-auth-mode": "header", rid: "session", "fdi-version": "1.18" } });
+    expect(await response.json()).not.toMatchObject({ status: "OK" });
+    expect(response.headers.get("st-access-token")).toBeNull();
+    await expectMapped(winner, target);
   });
 
   it("elects the newer mapped source over an ownerless requested loser without fabricating a losing alias", async () => {
