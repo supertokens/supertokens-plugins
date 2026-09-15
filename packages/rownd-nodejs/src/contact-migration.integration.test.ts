@@ -73,7 +73,7 @@ describe("authenticated Rownd contact reconciliation", () => {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ licenseKey: "N2uEOdEzd1XZZ5VBSTGYaM7Ia4s8wAqRWFAxLqTYrB6GQ=vssOLo3c=PkFgcExkaXs=IA-d9UWccoNKsyUgNhOhcKtM1bjC5OLrYRpTAgN-2EbKYsQGGQRQHuUN4EO1V" }),
     });
-    expect(response.ok).toBe(true);
+    expect({ status: response.status, body: await response.text() }).toMatchObject({ status: 200 });
   }, 120000);
   afterAll(async () => { await core?.stop(); await postgres?.stop(); await network?.stop(); });
   beforeEach(async () => {
@@ -150,6 +150,100 @@ describe("authenticated Rownd contact reconciliation", () => {
     const session = await Session.getSessionWithoutRequestResponse(response.headers.get("st-access-token")!);
     expect(session.getUserId()).toBe(rowndId);
   }
+
+  it.each([undefined, null, ""])("migrates and retries email-only profiles with absent optional identities %j", async (absent) => {
+    const id = randomUUID();
+    const profile = { data: { user_id: id, email: `${id}@example.com`, phone_number: absent, google_id: absent, apple_id: absent },
+      verified_data: { phone_number: absent, google_id: absent, apple_id: absent } };
+    const original = structuredClone(profile);
+    rownd.validateToken.mockResolvedValue({ user_id: id });
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    await expectSession(await migrate(id), id);
+    const search = vi.spyOn(SuperTokens, "listUsersByAccountInfo");
+    const create = vi.spyOn(Passwordless, "signInUp");
+    const link = vi.spyOn(AccountLinking, "linkAccounts");
+    await expectSession(await migrate(id), id);
+    expect(search).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(link).not.toHaveBeenCalled();
+    expect((await SuperTokens.getUser(id))?.loginMethods).toHaveLength(1);
+    expect(profile).toEqual(original);
+  });
+
+  it("adds Apple to a completed Google-only owner with empty contact fields", async () => {
+    const id = randomUUID();
+    const profile: RowndUser = { data: { user_id: id, email: "", phone_number: "", google_id: "", apple_id: "" }, verified_data: { google_id: randomUUID() } };
+    rownd.validateToken.mockResolvedValue({ user_id: id });
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    await expectSession(await migrate(id), id);
+    profile.verified_data!.apple_id = randomUUID();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expectSession(await migrate(id), id);
+      const owner = await SuperTokens.getUser(id);
+      expect(owner?.loginMethods).toHaveLength(2);
+      expect(owner?.loginMethods.map((method) => method.thirdParty?.id).sort()).toEqual(["apple", "google"]);
+    }
+  });
+
+  it("retires a snapshot-proven provider when its replacement is already attached", async () => {
+    const id = randomUUID();
+    const profile: RowndUser = { data: { user_id: id, email: "" }, verified_data: { google_id: randomUUID(), apple_id: randomUUID() } };
+    rownd.validateToken.mockResolvedValue({ user_id: id });
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    await expectSession(await migrate(id), id);
+    const previous = profile.verified_data!.apple_id;
+    const subject = randomUUID();
+    profile.verified_data!.apple_id = subject;
+    const method = mapRowndUserToSuperTokens(profile).loginMethods.find((entry) => entry.recipeId === "thirdparty" && entry.thirdPartyId === "apple")!;
+    const replacement = await ThirdParty.manuallyCreateOrUpdateUser("public", "apple", subject, method.email!, false);
+    if (replacement.status !== "OK") throw new Error("Missing replacement Apple fixture");
+    await AccountLinking.linkAccounts(replacement.recipeUserId, id);
+    // The replacement already exists, but the snapshot-proven old method still
+    // needs retirement even without an introduction or retirement checkpoint.
+    await expectSession(await migrate(id), id);
+    const owner = await SuperTokens.getUser(id);
+    expect(owner?.loginMethods).toHaveLength(2);
+    expect(owner?.loginMethods.some((entry) => entry.thirdParty?.userId === previous)).toBe(false);
+    expect(owner?.loginMethods.some((entry) => entry.thirdParty?.userId === subject)).toBe(true);
+  });
+
+  it.each([{ email: "bad" }, { phone_number: " " }, { apple_id: 123 }, { user_id: "" }])("rejects malformed initial profiles before writes: %j", async (invalid) => {
+    const id = randomUUID();
+    rownd.validateToken.mockResolvedValue({ user_id: id });
+    rownd.fetchUserInfo.mockResolvedValue({ data: { user_id: id, email: `${id}@example.com`, ...invalid } });
+    const metadata = vi.spyOn(UserMetadata, "updateUserMetadata");
+    const passwordless = vi.spyOn(Passwordless, "signInUp");
+    const provider = vi.spyOn(ThirdParty, "manuallyCreateOrUpdateUser");
+    expect((await migrate(id)).status).toBeGreaterThanOrEqual(400);
+    expect(metadata).not.toHaveBeenCalled();
+    expect(passwordless).not.toHaveBeenCalled();
+    expect(provider).not.toHaveBeenCalled();
+    expect(await SuperTokens.getUser(id)).toBeUndefined();
+  });
+
+  it.each(["canonical", "pending"])("keeps %s native email authoritative during completed migration", async (protection) => {
+    const id = randomUUID();
+    const email = `${id}@example.com`;
+    const profile = { data: { user_id: id, email } };
+    rownd.validateToken.mockResolvedValue({ user_id: id });
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    await expectSession(await migrate(id), id);
+    const mapping = await SuperTokens.getUserIdMapping({ userId: id, userIdType: "EXTERNAL" });
+    if (mapping.status !== "OK") throw new Error("Missing native fixture mapping");
+    const metadata = protection === "canonical" ? { rownd_email_recipe_user_ids: { public: id } } : {
+      rownd_pending_verification: [{ id: randomUUID(), field: "email", value: `pending-${email}`, tenantId: "public", status: "PENDING", created_at: new Date().toISOString() }],
+    };
+    await UserMetadata.updateUserMetadata(mapping.superTokensUserId, metadata);
+    const before = (await SuperTokens.getUser(id))!.toJson();
+    profile.data.email = `stale-${email}`;
+    const search = vi.spyOn(SuperTokens, "listUsersByAccountInfo");
+    const create = vi.spyOn(Passwordless, "signInUp");
+    await expectSession(await migrate(id), id);
+    expect(search).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect((await SuperTokens.getUser(id))!.toJson()).toEqual(before);
+    expect((await UserMetadata.getUserMetadata(mapping.superTokensUserId)).metadata).toMatchObject(metadata);
+  });
 
   it.each(["missing", "stale"])("links Maja's standalone B contact into token A with %s verification flags", async (flags) => {
     const fixture = await seed();
@@ -292,7 +386,7 @@ describe("authenticated Rownd contact reconciliation", () => {
     expect(await getCombinedUserMetadata(fixture.a)).toMatchObject({ dataA: { preserved: true }, dataB: { preserved: true }, aliasDataB: "preserved" });
   });
 
-  it("uses a completed mapping without repairing its contact donor during login", async () => {
+  it("repairs a completed mapping's eligible current email and retires its historical contact", async () => {
     const fixture = await seed();
     const oldEmail = `old-${randomUUID()}@example.com`;
     await AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(fixture.internalA));
@@ -303,12 +397,73 @@ describe("authenticated Rownd contact reconciliation", () => {
       original_rownd_user: { ...fixture.profileA, data: { ...fixture.profileA.data, email: oldEmail } },
     });
     await expectSession(await migrate(fixture.a), fixture.a);
-    expect(await SuperTokens.getUser(old.recipeUserId.getAsString())).toBeDefined();
+    expect(await SuperTokens.getUser(old.recipeUserId.getAsString())).toBeUndefined();
     const user = (await SuperTokens.getUser(fixture.a))!;
     expect(user.loginMethods).toHaveLength(2);
-    expect(user.loginMethods.find((method) => method.recipeId === "passwordless")!.recipeUserId.getAsString()).toBe(old.recipeUserId.getAsString());
-    expect((await SuperTokens.getUserIdMapping({ userId: fixture.b, userIdType: "EXTERNAL" }))).toMatchObject({ status: "OK", superTokensUserId: fixture.internalB });
+    expect(user.loginMethods.find((method) => method.recipeId === "passwordless")!.recipeUserId.getAsString()).toBe(fixture.internalB);
+    expect((await SuperTokens.getUserIdMapping({ userId: fixture.b, userIdType: "EXTERNAL" }))).toMatchObject({ status: "UNKNOWN_MAPPING_ERROR" });
     expect((await UserMetadata.getUserMetadata(fixture.internalA)).metadata).toMatchObject({ preference: "A" });
+  });
+
+  it("rejects completed migration when ownership changes after ID discovery without issuing credentials or sessions", async () => {
+    const id = randomUUID();
+    const profile = { data: { user_id: id, email: `${id}@example.com` } };
+    rownd.validateToken.mockResolvedValue({ user_id: id });
+    rownd.fetchUserInfo.mockResolvedValue(profile);
+    await expectSession(await migrate(id), id);
+    const originalMapping = await SuperTokens.getUserIdMapping({ userId: id, userIdType: "EXTERNAL" });
+    if (originalMapping.status !== "OK") throw new Error("Missing completed fixture mapping");
+    await Session.revokeAllSessionsForUser(id, true, "public");
+
+    const foreign = await Passwordless.signInUp({ tenantId: "public", email: `${randomUUID()}@foreign.example.com`,
+      userContext: { rowndDisableAutomaticAccountLinking: true } });
+    expect((await AccountLinking.createPrimaryUser(foreign.recipeUserId)).status).toBe("OK");
+    const ownerIds = [originalMapping.superTokensUserId, foreign.user.id];
+    for (const owner of ownerIds) expect(await Session.getAllSessionHandlesForUser(owner, true, "public")).toEqual([]);
+    const coreURI = `http://${core.getHost()}:${core.getMappedPort(3567)}`;
+    const cdiVersion = await Querier.getNewInstanceOrThrowError(SuperTokensRaw.getInstanceOrThrowError()).getAPIVersion({});
+
+    const discoveryModule = await import("./migration-plan");
+    const discover = discoveryModule.discoverMigrationById;
+    let reassignedAfterDiscovery = false;
+    let discoveryError: unknown;
+    vi.spyOn(discoveryModule, "discoverMigrationById").mockImplementationOnce(async (...args) => {
+      try {
+        const snapshot = await discover(...args);
+        expect(snapshot.mapping).toMatchObject(originalMapping);
+        expect(snapshot.user?.id).toBe(id);
+        expect(snapshot.metadataById.get(id)?.rownd_migration_complete).toBe(true);
+        // Direct Core writes model another process without invalidating this SDK's
+        // caches; the request must reject its captured snapshot using fresh checks.
+        for (const [path, body] of [
+          ["/recipe/userid/map/remove", { userId: id, userIdType: "EXTERNAL", force: true }],
+          ["/recipe/userid/map", { superTokensUserId: foreign.user.id, externalUserId: id, force: true }],
+        ] as const) {
+          const mutation = await fetch(`${coreURI}${path}`, { method: "POST",
+            headers: { "Content-Type": "application/json", "cdi-version": cdiVersion }, body: JSON.stringify(body) });
+          expect(mutation.status).toBe(200);
+          expect(await mutation.json()).toMatchObject({ status: "OK" });
+        }
+        reassignedAfterDiscovery = true;
+        return snapshot;
+      } catch (error) {
+        // The endpoint catches hook failures; surface them outside its error handler.
+        discoveryError = error;
+        throw error;
+      }
+    });
+
+    const response = await migrate(id);
+    if (discoveryError) throw discoveryError;
+    expect(reassignedAfterDiscovery).toBe(true);
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    for (const header of ["st-access-token", "st-refresh-token", "front-token", "set-cookie"]) {
+      expect(response.headers.get(header), header).toBeNull();
+    }
+    for (const owner of ownerIds) expect(await Session.getAllSessionHandlesForUser(owner, true, "public")).toEqual([]);
+    expect(await SuperTokens.getUserIdMapping({ userId: id, userIdType: "EXTERNAL" })).toMatchObject({
+      status: "OK", superTokensUserId: foreign.user.id,
+    });
   });
 
   it.each(["verification flags", "email"])("revalidates policy-relevant %s before publishing a session", async (change) => {

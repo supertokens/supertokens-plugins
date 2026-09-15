@@ -618,7 +618,7 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
     await expectRejectedMigration(await requestMigration(fixture.tokenB));
   });
 
-  it("leaves completed Apple A and duplicate Google B separate while preserving a native canonical email", async () => {
+  it("repairs completed Apple A with Google B while preserving a native canonical email", async () => {
     const appleId = `apple-${randomUUID()}`;
     const fixture = duplicateProfiles(appleId);
     const appleInternalId = await createMappedProvider("apple", appleId, fixture.canonicalId);
@@ -640,11 +640,13 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
     await migrate(fixture.tokenA, fixture.canonicalId);
     await expectCanonicalMapping(fixture.canonicalId, appleInternalId);
     const user = await SuperTokens.getUser(fixture.canonicalId);
-    expect(user?.loginMethods).toHaveLength(2);
+    expect(user?.loginMethods).toHaveLength(3);
     expect(user?.loginMethods.some((method) => method.email === oldEmail)).toBe(false);
-    await expect(UserMetadata.getUserMetadata(appleInternalId)).resolves.toMatchObject({ metadata });
-    await expectCanonicalMapping(fixture.duplicateId, googleInternalId);
-    expect((await SuperTokens.getUser(fixture.duplicateId))?.loginMethods).toHaveLength(1);
+    await expect(UserMetadata.getUserMetadata(appleInternalId)).resolves.toMatchObject({ metadata: {
+      rownd_email_recipe_user_ids: metadata.rownd_email_recipe_user_ids, preference: metadata.preference,
+    } });
+    expect((await SuperTokens.getUser(googleInternalId))?.id).toBe(fixture.canonicalId);
+    await expectRejectedMigration(await requestMigration(fixture.tokenB));
   });
 
   async function seedMissingDuplicate() {
@@ -1277,7 +1279,7 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
     { verification: "stale", completed: true },
     { verification: "missing", completed: true },
     { verification: "stale", completed: false },
-  ])("reconciles current-profile phone only while migration is incomplete ($verification verified_data, completed=$completed)", async ({ verification, completed }) => {
+  ])("reconciles eligible current-profile phone ($verification verified_data, completed=$completed)", async ({ verification, completed }) => {
     const fixture = await seedPhoneOwner(completed);
     if (verification === "missing") delete fixture.profiles.get(fixture.canonicalId)!.verified_data!.phone_number;
     const googleBefore = (await SuperTokens.getUser(fixture.googleInternalId))!.loginMethods[0]!.toJson();
@@ -1290,13 +1292,13 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
     await expectCanonicalMapping(fixture.canonicalId, fixture.googleInternalId);
     const user = await SuperTokens.getUser(fixture.canonicalId);
     expect(user?.isPrimaryUser).toBe(true);
-    expect(user?.loginMethods.map((method) => method.toJson())).toEqual(expect.arrayContaining(completed ? [googleBefore] : [googleBefore, phoneBefore]));
-    expect(user?.loginMethods).toHaveLength(completed ? 1 : 2);
-    await expect(SuperTokens.getUser(fixture.phoneInternalId)).resolves.toMatchObject({ id: completed ? fixture.phoneInternalId : fixture.canonicalId });
+    expect(user?.loginMethods.map((method) => method.toJson())).toEqual(expect.arrayContaining([googleBefore, phoneBefore]));
+    expect(user?.loginMethods).toHaveLength(2);
+    await expect(SuperTokens.getUser(fixture.phoneInternalId)).resolves.toMatchObject({ id: fixture.canonicalId });
     await expect(UserMetadata.getUserMetadata(fixture.phoneInternalId)).resolves.toMatchObject({ metadata: { phonePreference: "keep" } });
     expect(deleteMapping).not.toHaveBeenCalled();
     await migrate(fixture.tokenA, fixture.canonicalId);
-    expect((await SuperTokens.getUser(fixture.canonicalId))?.loginMethods).toHaveLength(completed ? 1 : 2);
+    expect((await SuperTokens.getUser(fixture.canonicalId))?.loginMethods).toHaveLength(2);
   });
 
   it.each([
@@ -1421,7 +1423,7 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
     return { ...fixture, phoneInternalId, phoneNumber, email, profile };
   }
 
-  it.each([true, false])("links verified email into phone-only A only before completion (completed=%s)", async (completed) => {
+  it.each([true, false])("links eligible verified email into phone-only A (completed=%s)", async (completed) => {
     const fixture = await seedCanonicalPhone(completed);
     const email = await Passwordless.signInUp({ tenantId: "public", email: fixture.email });
     const emailInternalId = email.recipeUserId.getAsString();
@@ -1434,13 +1436,13 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
 
     await expectCanonicalMapping(fixture.canonicalId, fixture.phoneInternalId);
     const user = await SuperTokens.getUser(fixture.canonicalId);
-    expect(user?.isPrimaryUser).toBe(!completed);
-    expect(user?.loginMethods).toHaveLength(completed ? 1 : 2);
-    expect(user?.loginMethods.map((method) => method.toJson())).toEqual(expect.arrayContaining(completed ? [phoneBefore] : [phoneBefore, emailBefore]));
-    await expect(SuperTokens.getUser(emailInternalId)).resolves.toMatchObject({ id: completed ? emailInternalId : fixture.canonicalId });
+    expect(user?.isPrimaryUser).toBe(true);
+    expect(user?.loginMethods).toHaveLength(2);
+    expect(user?.loginMethods.map((method) => method.toJson())).toEqual(expect.arrayContaining([phoneBefore, emailBefore]));
+    await expect(SuperTokens.getUser(emailInternalId)).resolves.toMatchObject({ id: fixture.canonicalId });
     expect(deleteMapping).not.toHaveBeenCalled();
     await migrate(fixture.tokenA, fixture.canonicalId);
-    expect((await SuperTokens.getUser(fixture.canonicalId))?.loginMethods).toHaveLength(completed ? 1 : 2);
+    expect((await SuperTokens.getUser(fixture.canonicalId))?.loginMethods).toHaveLength(2);
   });
 
   it("creates an absent verified email method under canonical phone-only A", async () => {

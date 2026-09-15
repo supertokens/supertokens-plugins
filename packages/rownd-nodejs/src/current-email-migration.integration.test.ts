@@ -81,7 +81,7 @@ describe("Apple relay migration and explicit administrative reconciliation", { t
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ licenseKey: "N2uEOdEzd1XZZ5VBSTGYaM7Ia4s8wAqRWFAxLqTYrB6GQ=vssOLo3c=PkFgcExkaXs=IA-d9UWccoNKsyUgNhOhcKtM1bjC5OLrYRpTAgN-2EbKYsQGGQRQHuUN4EO1V" }),
     });
-    expect(response.ok).toBe(true);
+    expect({ status: response.status, body: await response.text() }).toMatchObject({ status: 200 });
   }, 120000);
 
   afterAll(async () => { await core?.stop(); await postgres?.stop(); await network?.stop(); });
@@ -1520,26 +1520,19 @@ Module._load = function(id, ...args) {
     expect((await UserMetadata.getUserMetadata(id)).metadata).toMatchObject({ administrative_test_progress: true });
   });
 
-  it.each([false, true])("completed migration leaves current-email drift untouched (standalone=%s)", async (standalone) => {
+  it.each([false, true])("completed migration repairs eligible current-email drift (standalone=%s)", async (standalone) => {
     const fixture = await seed(standalone);
     await UserMetadata.updateUserMetadata(fixture.rowndId, { rownd_migration_canonical_target: fixture.internalId });
-    const before = (await SuperTokens.getUser(fixture.rowndId))!.toJson();
-    const metadata = (await UserMetadata.getUserMetadata(fixture.internalId)).metadata;
-    const writes = (await spyOnReconciliationWrites()).filter((write) =>
-      write !== Session.createNewSession && write !== Session.createNewSessionWithoutRequestResponse && write !== UserMetadata.updateUserMetadata);
     const response = await fetch(`${baseUrl}/auth/plugin/rownd/migrate`, {
       method: "POST", headers: { Authorization: "Bearer fixture-token", "st-auth-mode": "header", rid: "session", "fdi-version": "1.18" },
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "OK" });
     expect((await Session.getSessionWithoutRequestResponse(response.headers.get("st-access-token")!)).getUserId()).toBe(fixture.rowndId);
-    for (const write of writes) expect(write).not.toHaveBeenCalled();
-    expect(UserMetadata.updateUserMetadata).toHaveBeenCalledTimes(1);
-    expect(UserMetadata.updateUserMetadata).toHaveBeenCalledWith(fixture.rowndId,
-      { rownd_migration_canonical_target: fixture.internalId }, expect.any(Object));
-    expect((await SuperTokens.getUser(fixture.rowndId))!.toJson()).toEqual(before);
-    expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata).toEqual(metadata);
-    if (fixture.separate) expect((await SuperTokens.getUser(fixture.separate.user.id))!.id).toBe(fixture.separate.user.id);
+    const target = await expectCanonical(fixture);
+    if (fixture.separate) expect(target.recipeUserId.getAsString()).toBe(fixture.separate.recipeUserId.getAsString());
+    await migrate(fixture);
+    await expectCanonical(fixture);
   });
 
   it.each([false, true])("incomplete migration publishes current email on original primary and retires relay (standalone=%s)", async (standalone) => {
@@ -1560,6 +1553,16 @@ Module._load = function(id, ...args) {
     expect(await response.json()).toMatchObject({ status: "OK", user: { id: fixture.rowndId } });
     const session = await Session.getSessionWithoutRequestResponse(response.headers.get("st-access-token")!);
     expect(session.getUserId()).toBe(fixture.rowndId);
+  });
+
+  it("completed migration retires a historical relay when the verified current email is already attached", async () => {
+    const fixture = await seed(true);
+    expect((await AccountLinking.linkAccounts(fixture.separate!.recipeUserId, fixture.internalId)).status).toBe("OK");
+    await migrate(fixture);
+    const target = await expectCanonical(fixture);
+    expect(target.recipeUserId.getAsString()).toBe(fixture.separate!.recipeUserId.getAsString());
+    await migrate(fixture);
+    await expectCanonical(fixture);
   });
 
   it("resumes canonical publication after linking committed but metadata storage failed", async () => {

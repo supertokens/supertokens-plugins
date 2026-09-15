@@ -348,7 +348,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
 
       telemetry.stage = "supertokens_lookup";
       const discovery = await discoverMigrationById(rowndUserId, tenantId, resolved.userContext);
-      const plan = planMigration(discovery);
+      const plan = planMigration(discovery, stUserImport);
       if (plan.status === "BLOCKED") throw new Error(plan.reason);
       user = discovery.user;
       const consolidatedAlias = plan.status === "NOOP" ? undefined : await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext);

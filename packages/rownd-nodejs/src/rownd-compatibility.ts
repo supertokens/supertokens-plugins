@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { resolveRowndProviderSubject } from "./provider-identity";
+import { normalizeOptionalRowndIdentities, resolveRowndProviderSubject } from "./provider-identity";
 
 import { reconciliationSuperTokens as SuperTokens, reconciliationAccountLinking as AccountLinking, reconciliationUserMetadata as UserMetadata } from "./reconciliation-sdk";
 import type { JSONObject } from "supertokens-node/types";
@@ -389,6 +389,7 @@ export function mapRowndUserToSuperTokens(
   rowndUser: RowndUser,
   tenantId?: string,
 ): SuperTokensUserImport {
+  rowndUser = normalizeOptionalRowndIdentities(rowndUser);
   const loginMethods: SuperTokensUserImport["loginMethods"] = [];
   const rowndUserData = rowndUser.data || {};
   const rowndUserVerifiedData = rowndUser.verified_data || {};

@@ -114,14 +114,10 @@ async function inspectProviderRevocations(
   rowndUserId: string,
   tenantId: string,
   userContext: JsonRecord,
+  snapshot?: ProviderCheckpointSnapshot,
 ) {
-  clearSuperTokensCoreCallCache(userContext);
-  const ledger = (
-    await UserMetadata.getUserMetadata(
-      revocationLedgerId(internalUserId, tenantId),
-      userContext,
-    )
-  ).metadata;
+  if (!snapshot) clearSuperTokensCoreCallCache(userContext);
+  const ledger = await checkpointMetadata(revocationLedgerId(internalUserId, tenantId), userContext, snapshot);
   return Object.entries(ledger).map(([id, value]) => {
     if (
       !isRecord(value) ||
@@ -137,42 +133,60 @@ async function inspectProviderRevocations(
   });
 }
 
+type ProviderCheckpointSnapshot = {
+  user: SuperTokensUser | undefined;
+  metadataById: ReadonlyMap<string, JsonRecord>;
+};
+
+async function checkpointMetadata(id: string, context: JsonRecord, snapshot?: ProviderCheckpointSnapshot) {
+  return snapshot?.metadataById.get(id) ?? (await UserMetadata.getUserMetadata(id, context)).metadata;
+}
+
 export async function inspectProviderMigrationCheckpoints(
   internalUserId: string,
   rowndUserId: string,
   tenantId: string,
   userContext: JsonRecord,
+  snapshot?: ProviderCheckpointSnapshot,
 ) {
-  const ledger = await inspectProviderRevocations(
-    internalUserId,
-    rowndUserId,
-    tenantId,
-    userContext,
-  );
-  const metadata = (
-    await UserMetadata.getUserMetadata(internalUserId, userContext)
-  ).metadata;
-  const retired = readRetirements(metadata[key]);
-  let pending =
-    ledger.length > 0 ||
-    (await inspectProviderIntroductions(internalUserId, userContext)).length >
-      0;
-  for (const entry of retired) {
-    const owner = await SuperTokens.getUser(entry.recipeUserId, userContext);
-    if (
-      entry.pendingTenantIds?.includes(tenantId) ||
-      owner?.loginMethods.some(
-        (method) =>
-          method.tenantIds.includes(tenantId) &&
-          method.hasSameThirdPartyInfoAs({
-            id: entry.provider,
-            userId: entry.subject,
-          }),
-      )
-    )
-      pending = true;
+  if (!snapshot) {
+    clearSuperTokensCoreCallCache(userContext);
+    const user = await SuperTokens.getUser(internalUserId, userContext);
+    const ids = [...new Set([internalUserId, ...user?.loginMethods.map((method) => method.recipeUserId.getAsString()) ?? []])];
+    const metadataById = new Map<string, JsonRecord>();
+    for (let index = 0; index < ids.length; index += 16) {
+      await Promise.all(ids.slice(index, index + 16).map(async (id) => {
+        metadataById.set(id, await checkpointMetadata(id, userContext));
+      }));
+    }
+    snapshot = { user, metadataById };
   }
-  return pending;
+  const [ledger, metadata, introduced] = await Promise.all([
+    inspectProviderRevocations(internalUserId, rowndUserId, tenantId, userContext, snapshot),
+    checkpointMetadata(internalUserId, userContext, snapshot),
+    inspectProviderIntroductions(internalUserId, userContext, snapshot),
+  ]);
+  const retired = readRetirements(metadata[key]);
+  if (ledger.length || introduced.length || retired.some((entry) => entry.pendingTenantIds?.includes(tenantId))) return true;
+  // History still detects reintroduced credentials, including ones moved to another
+  // owner. Reuse attached recipes; only detached historical IDs need another read.
+  const owners = new Map<string, SuperTokensUser | undefined>();
+  owners.set(internalUserId, snapshot.user);
+  for (const method of snapshot.user?.loginMethods ?? []) owners.set(method.recipeUserId.getAsString(), snapshot.user);
+  const missing = [...new Set(retired.map((entry) => entry.recipeUserId))].filter((id) => !owners.has(id));
+  for (let index = 0; index < missing.length; index += 16) {
+    await Promise.all(missing.slice(index, index + 16).map(async (id) => {
+      owners.set(id, await SuperTokens.getUser(id, userContext));
+    }));
+  }
+  return retired.some((entry) => owners.get(entry.recipeUserId)?.loginMethods.some(
+    (method) =>
+      method.tenantIds.includes(tenantId) &&
+      method.hasSameThirdPartyInfoAs({
+        id: entry.provider,
+        userId: entry.subject,
+      }),
+  ));
 }
 
 export function readRetirements(value: unknown): Retirement[] {
@@ -196,6 +210,20 @@ export function readRetirements(value: unknown): Retirement[] {
     );
   }
   return value as Retirement[];
+}
+
+export function selectRowndProviderRetirements(source: SuperTokensUserImport, user: SuperTokensUser, metadata: RowndMetadata) {
+  const snapshot = metadata.original_rownd_user;
+  if (!snapshot || snapshot.data.user_id !== source.externalUserId) return [];
+  return user.loginMethods.flatMap((method) => {
+    const provider = method.thirdParty;
+    if (!provider || !["google", "apple"].includes(provider.id)) return [];
+    const expected = source.loginMethods.find((entry) => entry.recipeId === "thirdparty" && entry.thirdPartyId === provider.id);
+    if (!expected || expected.recipeId !== "thirdparty" || expected.thirdPartyUserId === provider.userId) return [];
+    // Legacy imports selected data first, even in contradictory snapshots.
+    if (![snapshot.data[`${provider.id}_id`], resolveRowndProviderSubject(snapshot, provider.id)].includes(provider.userId)) return [];
+    return [{ recipeUserId: method.recipeUserId.getAsString(), provider: provider.id, subject: provider.userId, tenantIds: method.tenantIds }];
+  });
 }
 
 // Preserve historical proof across snapshot refreshes and tenant-by-tenant retries.
@@ -227,46 +255,23 @@ export async function prepareRowndProviderRetirement(input: {
     )
       retirements.push(retired);
   }
-  const snapshot = metadata.original_rownd_user;
-  if (snapshot && snapshot.data.user_id === source.externalUserId) {
-    for (const method of user.loginMethods) {
-      const provider = method.thirdParty;
-      if (!provider || !["google", "apple"].includes(provider.id)) continue;
-      const expected = source.loginMethods.find(
-        (entry) =>
-          entry.recipeId === "thirdparty" && entry.thirdPartyId === provider.id,
-      );
-      if (
-        !expected ||
-        expected.recipeId !== "thirdparty" ||
-        expected.thirdPartyUserId === provider.userId
-      )
-        continue;
-      // Legacy imports selected data first, even in contradictory snapshots.
-      if (
-        ![
-          snapshot.data[`${provider.id}_id`],
-          resolveRowndProviderSubject(snapshot, provider.id),
-        ].includes(provider.userId)
-      )
-        continue;
-      const mapping = await SuperTokens.getUserIdMapping({
-        userId: method.recipeUserId.getAsString(),
-        userIdType: "EXTERNAL",
-        userContext,
+  for (const retired of selectRowndProviderRetirements(source, user, metadata)) {
+    const mapping = await SuperTokens.getUserIdMapping({
+      userId: retired.recipeUserId,
+      userIdType: "EXTERNAL",
+      userContext,
+    });
+    const recipeUserId =
+      mapping.status === "OK"
+        ? mapping.superTokensUserId
+        : retired.recipeUserId;
+    if (!retirements.some((entry) => entry.recipeUserId === recipeUserId)) {
+      retirements.push({
+        rowndUserId: source.externalUserId!,
+        recipeUserId,
+        provider: retired.provider,
+        subject: retired.subject,
       });
-      const recipeUserId =
-        mapping.status === "OK"
-          ? mapping.superTokensUserId
-          : method.recipeUserId.getAsString();
-      if (!retirements.some((entry) => entry.recipeUserId === recipeUserId)) {
-        retirements.push({
-          rowndUserId: source.externalUserId!,
-          recipeUserId,
-          provider: provider.id,
-          subject: provider.userId,
-        });
-      }
     }
   }
   if (retirements.length === 0) return undefined;
@@ -690,16 +695,18 @@ export async function checkpointProviderIntroduction(input: {
 async function inspectProviderIntroductions(
   internalUserId: string,
   userContext: JsonRecord,
+  snapshot?: ProviderCheckpointSnapshot,
 ) {
-  const metadata = (
-    await UserMetadata.getUserMetadata(internalUserId, userContext)
-  ).metadata;
-  const pending = introductions(metadata[introductionKey]);
-  const target = await SuperTokens.getUser(internalUserId, userContext);
-  for (const method of target?.loginMethods ?? []) {
-    const recipeId = method.recipeUserId.getAsString();
-    const stored = (await UserMetadata.getUserMetadata(recipeId, userContext))
-      .metadata[recipeIntroductionKey];
+  const metadata = await checkpointMetadata(internalUserId, userContext, snapshot);
+  const pending = [...introductions(metadata[introductionKey])];
+  const target = snapshot ? snapshot.user : await SuperTokens.getUser(internalUserId, userContext);
+  const ids = [...new Set(target?.loginMethods.map((method) => method.recipeUserId.getAsString()) ?? [])];
+  const records: JsonRecord[] = [];
+  for (let index = 0; index < ids.length; index += 16) {
+    records.push(...await Promise.all(ids.slice(index, index + 16).map((id) => checkpointMetadata(id, userContext, snapshot))));
+  }
+  for (const record of records) {
+    const stored = record[recipeIntroductionKey];
     if (stored === undefined) continue;
     const entry = introductions([stored])[0]!;
     if (

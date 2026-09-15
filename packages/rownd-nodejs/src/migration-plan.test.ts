@@ -1,12 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import SuperTokens from "supertokens-node";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
-import { User } from "supertokens-node/lib/build/user";
+import { LoginMethod, User } from "supertokens-node/lib/build/user";
 import {
   discoverMigrationById,
-  planMigration,
+  planMigration as planAuthenticatedMigration,
   type MigrationIdDiscovery,
 } from "./migration-plan";
+import { mapRowndUserToSuperTokens } from "./rownd-compatibility";
+import type { SuperTokensUserImport } from "./types";
+
+function planMigration(input: MigrationIdDiscovery, source: SuperTokensUserImport = mapRowndUserToSuperTokens({ data: { user_id: "rownd", email: "native@example.test" } }, "public")) {
+  return planAuthenticatedMigration(input, source);
+}
 
 function discovered(): MigrationIdDiscovery {
   const mapping = {
@@ -20,6 +26,7 @@ function discovered(): MigrationIdDiscovery {
     mapping,
     reverse: mapping,
     metadata: [{ rownd_migration_complete: true }],
+    metadataById: new Map([["internal", { rownd_migration_complete: true }]]),
     user: new User({
       id: "rownd",
       isPrimaryUser: true,
@@ -46,11 +53,58 @@ function discovered(): MigrationIdDiscovery {
 afterEach(() => vi.restoreAllMocks());
 
 describe("ID-first migration planning", () => {
+  it.each(["unchanged", "recipe introduction", "ledger only", "other tenant history", "reintroduced history"])(
+    "reads each discovery ID once with linked methods and %s", async (scenario) => {
+      const input = discovered();
+      input.user!.loginMethods.push(new LoginMethod({ recipeId: "thirdparty", recipeUserId: "google", timeJoined: 1,
+        tenantIds: ["public"], thirdParty: { id: "google", userId: "subject" }, verified: false }));
+      const retired = { rowndUserId: "rownd", recipeUserId: scenario === "other tenant history" ? "old-google" : "google",
+        provider: "google", subject: "subject", pendingTenantIds: [] };
+      const records = new Map(input.metadataById);
+      if (scenario === "recipe introduction") records.set("internal", { rownd_migration_complete: true, rownd_migration_provider_introductions: [] });
+      if (scenario.includes("history")) records.set("internal", { rownd_migration_complete: true, rownd_migration_provider_retirements: [retired, retired] });
+      if (scenario === "recipe introduction") records.set("google", { rownd_migration_provider_introduction: {
+        ...retired, internalUserId: "internal", tenantId: "public", created: true,
+      } });
+      vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue(input.mapping);
+      const users = vi.spyOn(SuperTokens, "getUser").mockImplementation(async (id) => id === "old-google" ? undefined : input.user);
+      const metadata = vi.spyOn(UserMetadata, "getUserMetadata").mockImplementation(async (id) => ({ status: "OK", metadata:
+        records.get(id) ?? (scenario === "ledger only" && id.startsWith("rownd-provider-revocations-") ? {
+          debt: { ...retired, internalUserId: "internal", tenantId: "public" },
+        } : {}),
+      }));
+      const discovery = await discoverMigrationById("rownd", "public", {});
+      expect(discovery.pendingProviderOperations).toBe(!["unchanged", "other tenant history"].includes(scenario));
+      if (scenario === "recipe introduction") expect(records.get("internal")!.rownd_migration_provider_introductions).toEqual([]);
+      const ids = metadata.mock.calls.map(([id]) => id);
+      expect(ids).toContain("google");
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(users.mock.calls.map(([id]) => id)).toEqual(scenario === "other tenant history" ? ["internal", "old-google"] : ["internal"]);
+    },
+  );
+
+  it("plans added providers without looking for foreign owners", () => {
+    const search = vi.spyOn(SuperTokens, "listUsersByAccountInfo");
+    expect(planMigration(discovered(), mapRowndUserToSuperTokens({ data: { user_id: "rownd", email: "native@example.test", apple_id: "new" } })))
+      .toMatchObject({ status: "PLAN" });
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { rownd_email_recipe_user_ids: { public: "native" } },
+    { rownd_pending_verification: [{ id: "pending", field: "email", value: "pending@example.test", tenantId: "public", status: "PENDING", created_at: "2026-01-01" }] },
+  ])("preserves protected native email: %j", (protection) => {
+    const input = discovered();
+    input.metadataById = new Map([["internal", { rownd_migration_complete: true, ...protection }]]);
+    expect(planMigration(input, mapRowndUserToSuperTokens({ data: { user_id: "rownd", email: "stale@example.test" } })))
+      .toMatchObject({ status: "NOOP" });
+  });
+
   it("accepts a completed mapped user without rediscovering native identities", async () => {
     const input = discovered();
     vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue(input.mapping);
-    vi.spyOn(SuperTokens, "getUser").mockResolvedValue(input.user);
-    vi.spyOn(UserMetadata, "getUserMetadata").mockImplementation(
+    const users = vi.spyOn(SuperTokens, "getUser").mockResolvedValue(input.user);
+    const metadata = vi.spyOn(UserMetadata, "getUserMetadata").mockImplementation(
       async (id) => ({
         status: "OK",
         metadata: id.startsWith("rownd-provider-revocations-")
@@ -67,6 +121,9 @@ describe("ID-first migration planning", () => {
       recipeUserId: "rownd",
     });
     expect(search).not.toHaveBeenCalled();
+    expect(users).toHaveBeenCalledTimes(1);
+    const ids = metadata.mock.calls.map(([id]) => id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 
   it("blocks contradictory reverse ownership", () => {
@@ -149,6 +206,10 @@ describe("ID-first migration planning", () => {
           { rownd_migration_complete: false },
           { rownd_migration_complete: true },
         ],
+        metadataById: new Map([
+          ["internal", { rownd_migration_complete: false }],
+          ["rownd", { rownd_migration_complete: true }],
+        ]),
       }),
     ).toMatchObject({ status: "PLAN" });
   });

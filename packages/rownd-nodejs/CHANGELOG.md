@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## Unreleased
+
+- Repair eligible missing credentials, token-authorized email verification, and added or replaced provider identities on repeat `/migrate` calls. Native canonical emails and pending contact changes remain authoritative.
+- Accept exactly empty optional email, phone, Google, and Apple fields as absent; validate authenticated profiles before migration writes.
+- Reuse ID discovery snapshots for provider checkpoints, deduplicate reads, and parallelize independent historical checks while preserving revocation recovery.
+
 ## 0.7.9
 
 ### Patch Changes

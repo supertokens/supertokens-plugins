@@ -9,7 +9,7 @@ import { assertMigrationMapping, assertMigrationSourceActive } from "./migration
 import { migrationTelemetry } from "./telemetry/migrationTelemetry";
 import { clearSuperTokensCoreCallCache, isRecord, type JsonRecord } from "./utils";
 import { RowndLegacyUserNotFoundError, RowndMigrationPolicyError } from "./errors";
-import { resolveRowndProviderSubject } from "./provider-identity";
+import { normalizeOptionalRowndIdentities, resolveRowndProviderSubject } from "./provider-identity";
 import { assertAdministrativeElection } from "./migration-election";
 
 type AuthenticatedMigration = Readonly<{
@@ -36,6 +36,7 @@ export function assertRowndSourcePayload(profile: RowndUser) {
   if (!isRecord(profile) || !isRecord(profile.data)) {
     throw new RowndMigrationPolicyError("SOURCE_PAYLOAD_INVALID: data");
   }
+  profile = normalizeOptionalRowndIdentities(profile);
   for (const container of ["data", "verified_data"] as const) {
     const values = profile[container];
     if (values == null) continue;
@@ -43,9 +44,6 @@ export function assertRowndSourcePayload(profile: RowndUser) {
     for (const field of ["user_id", "email", "phone_number", "google_id", "apple_id"]) {
       const value = values[field];
       if (value === undefined || value === null) continue;
-      // An exactly empty optional email is absence, not malformed input. The mapper
-      // still derives a deterministic provider placeholder for the provider method.
-      if (field === "email" && value === "") continue;
       const marker = container === "verified_data" && typeof value === "boolean";
       if (!marker && (typeof value !== "string" || !value.trim() ||
           (field === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) ||
@@ -73,7 +71,7 @@ export async function fetchAdministrativeMigrationSource(rowndUserId: string, te
   if (profile.data?.user_id !== rowndUserId || !isRowndMigrationProfileActive(profile)) {
     throw new RowndMigrationPolicyError("Rownd source is not the requested enabled user");
   }
-  const source = mapRowndUserToSuperTokens(structuredClone(profile), tenantId);
+  const source = mapRowndUserToSuperTokens(profile, tenantId);
   const email = verifiedProfileEmail(profile);
   const contactEmail = profile.data.email?.toLowerCase();
   administrativeMigrations.set(source, Object.freeze({ rowndUserId, tenantId, email,
@@ -119,10 +117,11 @@ export async function authenticateRowndMigration(token: string, tenantId: string
     throw error;
   }
   if (!rowndUser) throw new Error("Rownd profile lookup returned no authoritative result");
+  assertRowndSourcePayload(rowndUser);
   if (rowndUser.data?.user_id !== rowndUserId || !isRowndMigrationProfileActive(rowndUser)) {
     throw new Error("Rownd profile does not match an enabled validated token user ID");
   }
-  const source = mapRowndUserToSuperTokens(structuredClone(rowndUser), tenantId);
+  const source = mapRowndUserToSuperTokens(rowndUser, tenantId);
   const email = typeof rowndUser.data.email === "string" && rowndUser.data.email.trim() &&
     !isSuperTokensFakeEmail(rowndUser.data.email.toLowerCase())
     ? rowndUser.data.email.toLowerCase() : undefined;
@@ -377,6 +376,17 @@ export async function prepareCurrentRowndEmailReconciliation(
   metadata: RowndMetadata,
   tenantId: string,
 ) {
+  const plan = inspectCurrentRowndEmailReconciliation(source, user, metadata, tenantId);
+  await plan?.assertFreshSource();
+  return plan;
+}
+
+export function inspectCurrentRowndEmailReconciliation(
+  source: SuperTokensUserImport,
+  user: SuperTokensUser,
+  metadata: RowndMetadata,
+  tenantId: string,
+) {
   const emails = source.loginMethods.filter((method) =>
     method.recipeId === "passwordless" && method.email !== undefined &&
     !isSuperTokensFakeEmail(method.email));
@@ -437,7 +447,6 @@ export async function prepareCurrentRowndEmailReconciliation(
       throw new RowndMigrationPolicyError("Current Rownd email or provider identity changed before reconciliation");
     }
   };
-  await assertFreshSource();
   return {
     email, placeholderIds, assertFreshSource, assertCompatibleMethods,
     migrationSource: {

@@ -1,8 +1,12 @@
 import { reconciliationSuperTokens as SuperTokens } from "./reconciliation-sdk";
-import { getRawUserMetadata } from "./rownd-compatibility";
+import { combineLinkedMetadata, getRawUserMetadata } from "./rownd-compatibility";
+import { getCanonicalEmailRecipeUserId, getMigrationImportMethods, getPendingVerifications } from "./supertokens-repository";
+import type { SuperTokensUserImport } from "./types";
+import { inspectCurrentRowndEmailReconciliation } from "./migration-email";
 import {
   inspectProviderMigrationCheckpoints,
   readRetirements,
+  selectRowndProviderRetirements,
 } from "./migration-provider";
 import { isRecord, type JsonRecord } from "./utils";
 
@@ -15,6 +19,7 @@ export type MigrationIdDiscovery = {
   mapping: Mapping;
   reverse?: Mapping;
   metadata: JsonRecord[];
+  metadataById: ReadonlyMap<string, JsonRecord>;
   pendingProviderOperations?: boolean;
 };
 export type MigrationPlan =
@@ -91,18 +96,17 @@ export async function discoverMigrationById(
     userIdType: "EXTERNAL",
     userContext: context,
   });
-  const user = await SuperTokens.getUser(
+  const [user, reverse] = await Promise.all([SuperTokens.getUser(
     mapping.status === "OK" ? mapping.superTokensUserId : sourceId,
     context,
-  );
-  const reverse =
-    mapping.status === "OK"
-      ? await SuperTokens.getUserIdMapping({
-          userId: mapping.superTokensUserId,
-          userIdType: "SUPERTOKENS",
-          userContext: context,
-        })
-      : undefined;
+  ),
+  mapping.status === "OK"
+    ? SuperTokens.getUserIdMapping({
+      userId: mapping.superTokensUserId,
+      userIdType: "SUPERTOKENS",
+      userContext: context,
+    })
+    : undefined]);
   const ids = new Set([
     ...(mapping.status === "OK" ? [mapping.superTokensUserId] : []),
     sourceId,
@@ -115,17 +119,21 @@ export async function discoverMigrationById(
         ]
       : []),
   ]);
-  const metadata = await Promise.all(
-    [...ids].map((id) => getRawUserMetadata(id, context)),
-  );
+  const metadata: JsonRecord[] = [];
+  const uniqueIds = [...ids];
+  for (let index = 0; index < uniqueIds.length; index += 16) {
+    metadata.push(...await Promise.all(uniqueIds.slice(index, index + 16).map((id) => getRawUserMetadata(id, context))));
+  }
+  const metadataById = new Map([...ids].map((id, index) => [id, metadata[index]!]));
   const pendingProviderOperations =
-    mapping.status === "OK" && user?.id === sourceId
+    mapping.status === "OK" && user && [sourceId, mapping.superTokensUserId].includes(user.id)
       ? await inspectProviderMigrationCheckpoints(
-          mapping.superTokensUserId,
-          sourceId,
-          tenantId,
-          context,
-        )
+        mapping.superTokensUserId,
+        sourceId,
+        tenantId,
+        context,
+        { user, metadataById },
+      )
       : false;
   return {
     sourceId,
@@ -134,11 +142,12 @@ export async function discoverMigrationById(
     mapping,
     reverse,
     metadata,
+    metadataById,
     pendingProviderOperations,
   };
 }
 
-export function planMigration(input: MigrationIdDiscovery): MigrationPlan {
+export function planMigration(input: MigrationIdDiscovery, source: SuperTokensUserImport): MigrationPlan {
   const { sourceId, tenantId, user, mapping, reverse, metadata } = input;
   try {
     for (const entry of metadata)
@@ -175,8 +184,8 @@ export function planMigration(input: MigrationIdDiscovery): MigrationPlan {
     );
     // Only the immutable owner and its authenticated alias can establish completion.
     const complete =
-      metadata
-        .slice(0, sourceId === mapping.superTokensUserId ? 1 : 2)
+      [input.metadataById.get(mapping.superTokensUserId), input.metadataById.get(sourceId)]
+        .filter((entry): entry is JsonRecord => entry !== undefined)
         .find((entry) => entry.rownd_migration_complete !== undefined)
         ?.rownd_migration_complete === true;
     if (
@@ -184,6 +193,7 @@ export function planMigration(input: MigrationIdDiscovery): MigrationPlan {
       method &&
       complete &&
       !input.pendingProviderOperations &&
+      !needsMethodRepair(input, source, mapping.superTokensUserId) &&
       !metadata.some((entry) =>
         pending(entry, tenantId, sourceId, mapping.superTokensUserId),
       )
@@ -200,4 +210,29 @@ export function planMigration(input: MigrationIdDiscovery): MigrationPlan {
     status: "PLAN",
     action: { kind: "reconcile", ...(user ? { repairUser: user } : {}) },
   };
+}
+
+function needsMethodRepair(input: MigrationIdDiscovery, source: SuperTokensUserImport, internalUserId: string) {
+  const metadata = combineLinkedMetadata({
+    primaryUserId: internalUserId,
+    primaryMetadata: input.metadataById.get(internalUserId) ?? {},
+    linkedMetadata: [...input.metadataById].filter(([id]) => id !== internalUserId)
+      .map(([userId, metadata]) => ({ userId, metadata })),
+    canonicalRowndUserId: input.sourceId,
+  }).combinedMetadata;
+  const canonical = getCanonicalEmailRecipeUserId(metadata, input.tenantId);
+  const pendingEmail = getPendingVerifications(metadata).some((entry) => entry.field === "email" &&
+    (entry.tenantId ?? "public") === input.tenantId);
+  if (getMigrationImportMethods(source, input.tenantId, input.user, canonical, pendingEmail).length) return true;
+  if (input.user && selectRowndProviderRetirements(source, input.user, metadata)
+    .some((entry) => entry.tenantIds.includes(input.tenantId))) return true;
+  if (!canonical && !pendingEmail && input.user) {
+    try {
+      return inspectCurrentRowndEmailReconciliation(source, input.user, metadata, input.tenantId) !== undefined;
+    } catch {
+      // Let the repair path report incompatible source/history without publishing a session.
+      return true;
+    }
+  }
+  return false;
 }

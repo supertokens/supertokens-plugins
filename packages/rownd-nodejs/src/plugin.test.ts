@@ -4795,7 +4795,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it.each(["missing", "existing unverified"])(
-        "leaves completed migrations with %s passwordless unchanged",
+        "repairs completed migrations with %s passwordless while preserving native profile fields",
         async (scenario) => {
           const { server: s, port } = await setup(
             importCoreConnectionURI,
@@ -4856,7 +4856,6 @@ describe("rownd-nodejs plugin", () => {
             verified_data: { email: true, google_id: googleId },
           });
 
-          const before = (await SuperTokens.getUser(rowndUserId))!.toJson();
           for (let attempt = 0; attempt < 2; attempt++) {
             const response = await fetch(
               `http://localhost:${testPORT}/auth/plugin/rownd/migrate`,
@@ -4867,16 +4866,17 @@ describe("rownd-nodejs plugin", () => {
             );
             await expect(response.json()).resolves.toEqual({ status: "OK" });
             const user = await SuperTokens.getUser(rowndUserId);
-            expect(user?.toJson()).toEqual(before);
-            expect(user?.loginMethods).toHaveLength(scenario === "missing" ? 1 : 2);
+            expect(user?.id).toBe(rowndUserId);
+            expect(user?.loginMethods).toHaveLength(2);
+            expect(user?.loginMethods.find((method) => method.recipeId === "passwordless" && method.email === email)?.verified).toBe(true);
             await expect(
               UserMetadata.getUserMetadata(provider.user.id),
-            ).resolves.toMatchObject({ metadata });
+            ).resolves.toMatchObject({ metadata: { first_name: metadata.first_name } });
           }
         },
       );
 
-      it("does not inspect or adopt a foreign passwordless owner for a completed migration", async () => {
+      it("rejects a foreign primary passwordless owner during completed migration repair", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;
         testPORT = port;
@@ -4920,9 +4920,7 @@ describe("rownd-nodejs plugin", () => {
             headers: { Authorization: "Bearer some-token" },
           },
         );
-        await expect(response.json()).resolves.toEqual({
-          status: "OK",
-        });
+        expect(response.status).toBeGreaterThanOrEqual(400);
         expect(
           (await SuperTokens.getUser(rowndUserId))?.loginMethods,
         ).toHaveLength(1);

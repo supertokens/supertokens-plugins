@@ -1,10 +1,38 @@
 import { describe, expect, it } from "vitest";
 import { resolveRowndProviderSubject } from "./provider-identity";
 import { mapRowndUserToSuperTokens } from "./rownd-compatibility";
-import { prepareCurrentRowndEmailReconciliation } from "./migration-email";
+import { assertRowndSourcePayload, prepareCurrentRowndEmailReconciliation } from "./migration-email";
 import type { RowndUser } from "./types";
 import type { SuperTokensUser } from "./rownd-compatibility";
 import { LoginMethod } from "supertokens-node/lib/build/user";
+
+describe("optional Rownd identity normalization", () => {
+  it.each([undefined, null, ""])("maps absent optional fields %j without changing the source", (absent) => {
+    const profile = { data: { user_id: "rownd", email: "valid@example.com", phone_number: absent, google_id: absent, apple_id: absent },
+      verified_data: { email: true, phone_number: absent, google_id: absent, apple_id: absent } } as RowndUser;
+    const before = structuredClone(profile);
+    expect(() => assertRowndSourcePayload(profile)).not.toThrow();
+    expect(mapRowndUserToSuperTokens(profile).loginMethods).toEqual([
+      { recipeId: "passwordless", email: "valid@example.com", isVerified: true },
+    ]);
+    expect(profile).toEqual(before);
+  });
+
+  it("keeps verified provider precedence when the unverified subject and email are empty", () => {
+    const profile: RowndUser = { data: { user_id: "rownd", email: "", google_id: "" }, verified_data: { google_id: "verified-subject", email: "" } };
+    expect(() => assertRowndSourcePayload(profile)).not.toThrow();
+    expect(mapRowndUserToSuperTokens(profile).loginMethods).toEqual([
+      expect.objectContaining({ recipeId: "thirdparty", thirdPartyId: "google", thirdPartyUserId: "verified-subject" }),
+    ]);
+  });
+
+  it.each([
+    ["user_id", ""], ["user_id", "   "], ["email", "   "], ["email", "bad"],
+    ["phone_number", "123"], ["phone_number", " "], ["google_id", " "], ["apple_id", 1], ["email", false],
+  ])("rejects malformed %s=%j", (field, value) => {
+    expect(() => assertRowndSourcePayload({ data: { user_id: "rownd", [field as string]: value } } as RowndUser)).toThrow("SOURCE_PAYLOAD_INVALID");
+  });
+});
 
 describe.each(["google", "apple"])("Rownd %s identity", (provider) => {
   it.each([undefined, false, true, "", "   ", 123])("falls back from non-subject verification %j", (verified) => {
