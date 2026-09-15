@@ -1,4 +1,5 @@
 import type { SuperTokensUserImport } from "./types";
+import { sameCorePhoneNumber } from "./migration-phone-identity";
 
 export type ImportMethod = SuperTokensUserImport["loginMethods"][number];
 export type MethodRecipe = {
@@ -78,7 +79,7 @@ export function matchesMethod(recipe: MethodRecipe, method: ImportMethod) {
       recipe.thirdParty.userId === method.thirdPartyUserId
     );
   if (method.recipeId === "passwordless" && !method.email)
-    return recipe.phoneNumber === method.phoneNumber;
+    return sameCorePhoneNumber(recipe.phoneNumber, method.phoneNumber);
   return recipe.email?.toLowerCase() === method.email?.toLowerCase();
 }
 

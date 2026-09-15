@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { bindOwnerEmailPlan, checkpointEmailPointer } from "./migration-owner-email";
 import {
   reconciliationSuperTokens as SuperTokens,
   reconciliationAccountLinking as AccountLinking,
@@ -16,6 +17,7 @@ import {
 } from "./migration-email";
 import {
   isAdministrativeElectionCandidate,
+  sharesAdministrativeElectionPhone,
   type ActivityCandidate,
 } from "./migration-election";
 import {
@@ -278,6 +280,7 @@ async function assertOwnerEmailPolicy(
   email: string | undefined,
   context: JsonRecord,
   plannedRecipes?: OwnerRecipe[],
+  plan?: OwnerPlanCheckpoint,
 ) {
   const fail = () => {
     throw new RowndMigrationPolicyError("CANONICAL_EMAIL_POLICY");
@@ -323,8 +326,10 @@ async function assertOwnerEmailPolicy(
     fail();
   const pointer = getCanonicalEmailRecipeUserId(metadata, "public");
   if (pointer === undefined) return;
-  if (typeof pointer !== "string" || !pointer || !user || !email) return fail();
-  const id = await immutableId(pointer, context);
+  if (typeof pointer !== "string" || !pointer || !email) return fail();
+  const resolved = await immutableId(pointer, context);
+  const id = resolved === pointer && plan ? checkpointEmailPointer(plan, pointer) ?? resolved : resolved;
+  if (resolved === pointer && id !== pointer && await SuperTokens.getUser(pointer, context)) fail();
   const planned = plannedRecipes?.find((recipe) => recipe.id === id);
   const pointerOwner = planned ? await SuperTokens.getUser(id, context) : user;
   const method =
@@ -511,11 +516,16 @@ async function observe(plan: OwnerPlanCheckpoint, context: JsonRecord) {
       );
     }
   }
-  for (const marker of plan.initial.markers)
+  for (const marker of plan.initial.markers) {
+    if (marker.values.rownd_migration_superseded !== undefined &&
+      ((await SuperTokens.getUserIdMapping({ userId: marker.id, userIdType: "EXTERNAL", userContext: context })).status === "OK" ||
+        await SuperTokens.getUser(marker.id, context)))
+      throw new RowndMigrationPolicyError("A retired consolidation alias acquired a literal owner");
     state.markers.push({
       id: marker.id,
       values: markers(await getRawUserMetadata(marker.id, context)),
     });
+  }
   state.verifications = await Promise.all(
     plan.initial.verifications.map(async (entry) => ({
       ...entry,
@@ -529,7 +539,7 @@ async function observe(plan: OwnerPlanCheckpoint, context: JsonRecord) {
   return { state, methods, extra };
 }
 
-async function assertCompletedPlan(
+export async function assertCompletedPlan(
   plan: OwnerPlanCheckpoint,
   context: JsonRecord,
 ) {
@@ -829,14 +839,14 @@ export async function prepareOwnerConsolidation(input: {
       retired.targetUserId === target &&
       mapping.status !== "OK" &&
       !(await SuperTokens.getUser(id, context)) &&
-      sharedProfile(profile, historical)
+      (sharedProfile(profile, historical) || sharesAdministrativeElectionPhone(source, profile, historical))
     );
   };
   const profiles = new Map<string, RowndUser>();
   for (const candidate of candidates) {
     const current = await requiredProfile(candidate.rownd_user_id);
     if (
-      !sharedProfile(profile, current) &&
+      !sharedProfile(profile, current) && !sharesAdministrativeElectionPhone(source, profile, current) &&
       candidate.rownd_user_id !== sourceId
     )
       fail("a source no longer shares the current identity");
@@ -853,7 +863,8 @@ export async function prepareOwnerConsolidation(input: {
   if (existing) {
     plan = existing;
     for (const candidate of plan.candidates)
-      if (!profiles.has(candidate.rownd_user_id))
+      if (!profiles.has(candidate.rownd_user_id) && !(plan.status === "COMPLETE" &&
+        plan.retiredAliases?.some((alias) => alias.id === candidate.rownd_user_id)))
         fail("a checkpoint source is missing");
     for (const id of ownerIds)
       if (
@@ -1056,11 +1067,14 @@ export async function prepareOwnerConsolidation(input: {
         aliases.splice(aliases.indexOf(displaced), 1);
       }
     }
+    const previousState = previous?.completion?.state ?? (previous ? ownerStateAt(previous) : undefined);
+    const inheritedRetirements = previousState?.markers.filter((marker) => marker.values.rownd_migration_superseded !== undefined) ?? [];
     const literals = new Set([
       ...recipes.keys(),
       ...candidates.map((candidate) => candidate.rownd_user_id),
       ...aliases.map((alias) => alias.id),
       ...retiredAliases.map((alias) => alias.id),
+      ...inheritedRetirements.map((marker) => marker.id),
     ]);
     const emails = new Set(
       [...recipes.values()].flatMap((recipe) =>
@@ -1080,6 +1094,14 @@ export async function prepareOwnerConsolidation(input: {
         });
     for (const id of literals) {
       const metadata = await getRawUserMetadata(id, context);
+      const inherited = inheritedRetirements.find((marker) => marker.id === id);
+      if (inherited) {
+        if (!isDeepStrictEqual(markers(metadata), inherited.values) ||
+          (await SuperTokens.getUserIdMapping({ userId: id, userIdType: "EXTERNAL", userContext: context })).status === "OK" ||
+          await SuperTokens.getUser(id, context)) fail("retired owner lineage changed");
+        initial.markers.push({ id, values: markers(metadata) });
+        continue;
+      }
       const mappedId =
         initial.mappings.find((entry) => entry.alias === id)?.id ?? id;
       const ownerId = initial.graph.find(
@@ -1137,11 +1159,7 @@ export async function prepareOwnerConsolidation(input: {
             absentAliases.push(original);
         }
       }
-      const previousMarkers =
-        previous &&
-        (previous.completion?.state ?? ownerStateAt(previous)).markers.find(
-          (entry) => entry.id === id,
-        )?.values;
+      const previousMarkers = previousState?.markers.find((entry) => entry.id === id)?.values;
       const recordedProvenance =
         previousMarkers !== undefined &&
         isDeepStrictEqual(
@@ -1288,6 +1306,7 @@ export async function prepareOwnerConsolidation(input: {
           profile.data.email,
           context,
           [...plan.recipes, ...(plan.createdRecipes ?? [])],
+          plan,
         );
       }
     for (const alias of plan.absentAliases) {
@@ -1518,6 +1537,7 @@ export async function prepareOwnerConsolidation(input: {
     if (
       plan.candidates.some(
         (candidate) =>
+          !(plan.status === "COMPLETE" && plan.retiredAliases?.some((alias) => alias.id === candidate.rownd_user_id)) &&
           !isAdministrativeElectionCandidate(source, candidate.rownd_user_id),
       )
     )
@@ -1602,6 +1622,7 @@ export async function prepareOwnerConsolidation(input: {
       }
   };
   await preflight();
+  bindOwnerEmailPlan(source, plan);
   const pending =
     plan.status === "COMPLETE" ? [] : plan.operations.slice(plan.cursor);
   const proposedActions: ReconcilePreviewAction[] = pending.flatMap(

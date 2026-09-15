@@ -4,11 +4,11 @@ import { inspectAdministrativeProviderIntroductions } from "./migration-admin-pr
 import { assertAuthenticatedMigrationSource, getAuthenticatedMigrationEmail, isCurrentRowndEmailReconciliationPlan, prepareCurrentRowndEmailReconciliation } from "./migration-email";
 import { assertMigrationOwnerGraph } from "./migration-postconditions";
 import { inspectProviderMigrationCheckpoints } from "./migration-provider";
-import { discoverMethodSnapshot, getCanonicalEmailRecipeUserId, getMigrationImportMethods, getPendingVerifications, getUserMetadata, inspectMigrationMethods, matchesImportLoginMethod } from "./supertokens-repository";
+import { discoverMethodSnapshot, getCanonicalEmailRecipeUserId, getMigrationImportMethods, getPendingVerifications, inspectMigrationMethods, matchesImportLoginMethod } from "./supertokens-repository";
 import { planMethods, type MethodPlan } from "./migration-method-plan";
 import { getRawUserMetadata } from "./rownd-compatibility";
 import { isProtectedDuplicateMapping } from "./migration-mapping";
-import { inspectAdministrativeEmailPolicy } from "./migration-admin-email";
+import { getAdministrativeRepairMetadata, inspectAdministrativeEmailPolicy } from "./migration-admin-email";
 import { assertVerificationCellInheritance } from "./migration-verification";
 import type { SuperTokensUserImport } from "./types";
 import type { JsonRecord } from "./utils";
@@ -70,7 +70,7 @@ export async function previewReconciliation(input: {
     const id = input.internalId ?? (mapping.status === "OK" ? mapping.superTokensUserId : target.id);
     result.supertokens_user_id = id;
     result.recipe_user_ids = target.loginMethods.map((method) => method.recipeUserId.getAsString());
-    const metadata = await getUserMetadata(id, userContext);
+    const metadata = await getAdministrativeRepairMetadata(id, source.externalUserId!, userContext);
     const canonicalId = getCanonicalEmailRecipeUserId(metadata, tenantId);
     const administrativeEmail = await inspectAdministrativeEmailPolicy(source, target, metadata, tenantId, userContext);
     const pendingPlans = getPendingVerifications(metadata).filter((entry) => entry.field === "email" && (entry.tenantId ?? "public") === tenantId);
@@ -92,7 +92,7 @@ export async function previewReconciliation(input: {
       result.blockers.push({ code: "CANONICAL_EMAIL_POLICY" });
     }
     if (administrativeEmail?.changesCanonical) result.proposedActions.push({ action: "set_canonical_email", email: administrativeEmail.email, supertokens_user_id: id });
-    if (!canonicalId && !pending && selected) {
+    if (!canonicalId && !pending && selected && !administrativeEmail?.changesCanonical) {
       const emailPlan = await prepareCurrentRowndEmailReconciliation(source, target, metadata, tenantId);
       if (emailPlan) {
         result.proposedActions.push({ action: "review_email_retirement", conditional: true, email: emailPlan.email });

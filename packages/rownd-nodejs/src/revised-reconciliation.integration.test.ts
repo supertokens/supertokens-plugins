@@ -1167,8 +1167,9 @@ describe("revised reconciliation separates the canonical Rownd profile from the 
     const retired = await reconcileUser({ rownd_user_id: fixture.ownerRowndId });
     expect(retired, JSON.stringify(retired)).toMatchObject({ status: "BLOCKED" });
     fixture.profiles.get(fixture.ownerRowndId)!.meta = { last_active: "2026-01-01T00:00:00Z" };
-    const reclaim = await reconcileUser({ rownd_user_id: fixture.ownerlessRowndId });
-    expect(reclaim, JSON.stringify(reclaim)).toMatchObject({ status: "BLOCKED" });
+    const reclaim = await expectNoWrites(writes, () => reconcileUser({ rownd_user_id: fixture.ownerlessRowndId }));
+    expect(reclaim, JSON.stringify(reclaim)).toMatchObject({ status: "OK", changed: false, actions: [] });
+    expect(await expectNoWrites(writes, () => reconcileUser({ rownd_user_id: fixture.ownerRowndId }))).toMatchObject({ status: "BLOCKED", changed: false });
     await expectMapped(fixture.ownerlessRowndId, fixture.owner.internalId);
   });
 

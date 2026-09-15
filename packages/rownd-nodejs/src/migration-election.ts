@@ -9,6 +9,7 @@ import {
 import { isSuperTokensFakeEmail } from "./rownd-compatibility";
 import { fetchOptionalRowndUserInfo } from "./rownd-repository";
 import { resolveRowndProviderSubject } from "./provider-identity";
+import { isVerifiedPhoneSurvivor, type VerifiedPhoneSurvivor } from "./migration-phone-election";
 import type { RowndUser, SuperTokensUserImport } from "./types";
 
 export type ActivityCandidate = {
@@ -19,6 +20,7 @@ export type ActivityCandidate = {
 export type AdministrativeElectionOptions = {
   canonicalRowndId?: string;
   contactEmail?: string;
+  verifiedPhoneSurvivor?: VerifiedPhoneSurvivor;
 };
 export class AmbiguousAdministrativeElection extends Error {
   constructor(readonly candidates: ActivityCandidate[]) {
@@ -62,6 +64,8 @@ function activity(profile: RowndUser, now: number) {
 function fingerprint(profile: RowndUser) {
   return JSON.stringify([
     identityKeys(profile),
+    profile.data.phone_number,
+    profile.verified_data?.phone_number,
     profile.meta?.last_sign_in,
     profile.meta?.last_active,
   ]);
@@ -152,7 +156,16 @@ export async function inspectAdministrativeElection(
   const shared = identityKeys(profiles[0]!).filter((key) =>
     profiles.every((profile) => identityKeys(profile).includes(key)),
   );
-  if (unique.length > 1 && !shared.length)
+  const phone = options.verifiedPhoneSurvivor;
+  const phoneEvidence = unique.length > 1 && !shared.length && phone !== undefined &&
+    isVerifiedPhoneSurvivor(phone) &&
+    phone.phoneNumber.length > 0 &&
+    unique.some((candidate) => candidate.supertokens_user_id === phone.supertokensUserId) &&
+    unique.every((candidate) => candidate.supertokens_user_id === undefined ||
+      candidate.supertokens_user_id === phone.supertokensUserId) &&
+    profiles.every((profile) => profile.data.phone_number === phone.phoneNumber &&
+      profile.verified_data?.phone_number === phone.phoneNumber);
+  if (unique.length > 1 && !shared.length && !phoneEvidence)
     throw new AmbiguousAdministrativeElection(observed);
   const winner = activityWinner(observed, options.canonicalRowndId);
   if (!winner) throw new AmbiguousAdministrativeElection(observed);
@@ -161,6 +174,7 @@ export async function inspectAdministrativeElection(
     candidates: observed,
     fingerprints: profiles.map(fingerprint),
     canonicalRowndId: options.canonicalRowndId,
+    ...(phoneEvidence ? { verifiedPhoneSurvivor: phone } : {}),
     ...(options.contactEmail !== undefined
       ? { contactEmail: options.contactEmail }
       : {}),
@@ -206,6 +220,19 @@ export function isAdministrativeElectionCandidate(
   );
 }
 
+export function sharesAdministrativeElectionPhone(
+  source: SuperTokensUserImport,
+  left: RowndUser,
+  right: RowndUser,
+) {
+  const election = elections.get(source)?.election;
+  const phone = election?.verifiedPhoneSurvivor?.phoneNumber;
+  return phone !== undefined && [left, right].every((profile) =>
+    election!.candidates.some((candidate) => candidate.rownd_user_id === profile.data.user_id) &&
+    profile.data.phone_number === phone && profile.verified_data?.phone_number === phone,
+  );
+}
+
 export async function assertAdministrativeElection(
   source: SuperTokensUserImport,
 ) {
@@ -221,6 +248,7 @@ export async function assertAdministrativeElection(
       {
         canonicalRowndId: previous.election.canonicalRowndId,
         contactEmail: previous.election.contactEmail,
+        verifiedPhoneSurvivor: previous.election.verifiedPhoneSurvivor,
       },
     );
     if (

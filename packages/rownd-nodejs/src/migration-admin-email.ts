@@ -1,7 +1,9 @@
 import {
+  reconciliationEmailVerification as EmailVerification,
   reconciliationSuperTokens as SuperTokens,
   reconciliationUserMetadata as UserMetadata,
 } from "./reconciliation-sdk";
+import { isDeepStrictEqual } from "node:util";
 import { RowndMigrationPolicyError } from "./errors";
 import {
   assertAuthenticatedMigrationSource,
@@ -28,8 +30,35 @@ import {
   type JsonRecord,
 } from "./utils";
 import type { SuperTokensUserImport } from "./types";
-import { readOwnerPlanCheckpoint } from "./migration-owner-plan";
 import { invalidateReconciliationReads } from "./reconciliation-reads";
+import { checkpointEmailPointer, getOwnerEmailPlan, hasCheckpointEmailHistory } from "./migration-owner-email";
+
+export async function getAdministrativeRepairMetadata(userId: string, sourceId: string, context: JsonRecord) {
+  const requested = await getRawUserMetadata(sourceId, context);
+  const primary = await getUserMetadata(userId, context);
+  const sourceMetadata = requested.original_rownd_user?.data.user_id === sourceId ? requested : {};
+  const combined = { ...sourceMetadata, ...primary } as RowndMetadata;
+  // Pending copies can be cleared independently. A primary [] must not hide a
+  // source-alias copy left behind by an interrupted cleanup.
+  if (sourceMetadata.rownd_pending_verification !== undefined || primary.rownd_pending_verification !== undefined) {
+    const pending = new Map<string, ReturnType<typeof getPendingVerifications>[number]>();
+    for (const metadata of [primary, sourceMetadata]) for (const entry of validatedPendingEntries(metadata)) {
+      const previous = pending.get(entry.id);
+      if (previous && !isDeepStrictEqual(previous, entry)) throw new RowndMigrationPolicyError("Administrative pending email copies disagree");
+      pending.set(entry.id, entry);
+    }
+    combined.rownd_pending_verification = [...pending.values()];
+  }
+  return combined;
+}
+
+function validatedPendingEntries(metadata: RowndMetadata) {
+  const entries = getPendingVerifications(metadata);
+  if (metadata.rownd_pending_verification !== undefined && (!Array.isArray(metadata.rownd_pending_verification) ||
+    metadata.rownd_pending_verification.length !== entries.length || new Set(entries.map((entry) => entry.id)).size !== entries.length))
+    throw new RowndMigrationPolicyError("Administrative pending email changed");
+  return entries;
+}
 
 export async function inspectAdministrativeEmailPolicy(
   source: SuperTokensUserImport,
@@ -42,17 +71,42 @@ export async function inspectAdministrativeEmailPolicy(
   const fail = () => {
     throw new RowndMigrationPolicyError("CANONICAL_EMAIL_POLICY");
   };
+  const immutable = async (id: string) => {
+    const mapping = await SuperTokens.getUserIdMapping({ userId: id, userIdType: "EXTERNAL", userContext: context });
+    return mapping.status === "OK" ? mapping.superTokensUserId : id;
+  };
   const pending = getPendingVerifications(metadata);
+  const completedAdditions: typeof pending = [];
   if (
     metadata.rownd_pending_verification !== undefined &&
     (!Array.isArray(metadata.rownd_pending_verification) ||
       metadata.rownd_pending_verification.length !== pending.length)
   )
     fail();
+  if (new Set(pending.map((entry) => entry.id)).size !== pending.length) fail();
   for (const entry of pending.filter(
     (value) =>
       value.field === "email" && (value.tenantId ?? "public") === tenantId,
   )) {
+    const email = getAuthenticatedMigrationEmail(source, tenantId);
+    const current = user.loginMethods.filter((method) => method.recipeId === "passwordless" &&
+      method.tenantIds.includes(tenantId) && email && method.hasSameEmailAs(email));
+    const verificationId = entry.verificationRecipeUserId && await immutable(entry.verificationRecipeUserId);
+    const verificationOwned = verificationId === undefined || (await Promise.all(user.loginMethods
+      .filter((method) => method.tenantIds.includes(tenantId)).map(async (method) =>
+        await immutable(method.recipeUserId.getAsString()) === verificationId))).some(Boolean);
+    // Exact live Rownd proof can finish an already-added first email without
+    // authorizing a different pending address or retiring another credential.
+    if (entry.purpose === "ADD_PASSWORDLESS" && (entry.status === undefined || entry.status === "PENDING") &&
+      email && entry.value.toLowerCase() === email && current.length === 1 &&
+      !user.loginMethods.some((method) => method.recipeId === "passwordless" && method.email &&
+        method.tenantIds.includes(tenantId) && !method.hasSameEmailAs(email)) &&
+      entry.targetCanonicalRecipeUserId === undefined && entry.retiredMethods === undefined &&
+      Reflect.get(entry, "migrationSource") === undefined &&
+      verificationOwned) {
+      completedAdditions.push(entry);
+      continue;
+    }
     if (
       !isCurrentRowndEmailReconciliationPlan(entry) ||
       entry.status !== "COMMITTING" ||
@@ -91,15 +145,12 @@ export async function inspectAdministrativeEmailPolicy(
     pointers === undefined
   )
     fail();
-  const immutable = async (id: string) => {
-    const mapping = await SuperTokens.getUserIdMapping({
-      userId: id,
-      userIdType: "EXTERNAL",
-      userContext: context,
-    });
-    return mapping.status === "OK" ? mapping.superTokensUserId : id;
-  };
-  const canonicalInternal = canonicalId && (await immutable(canonicalId));
+  const validatedPlan = getOwnerEmailPlan(source);
+  const resolvedCanonical = canonicalId && (await immutable(canonicalId));
+  const canonicalInternal = canonicalId && resolvedCanonical === canonicalId && validatedPlan
+    ? checkpointEmailPointer(validatedPlan, canonicalId) ?? resolvedCanonical : resolvedCanonical;
+  if (canonicalId && resolvedCanonical === canonicalId && canonicalInternal !== canonicalId &&
+    await SuperTokens.getUser(canonicalId, context)) fail();
   let canonical;
   if (canonicalInternal)
     for (const method of user.loginMethods) {
@@ -117,7 +168,13 @@ export async function inspectAdministrativeEmailPolicy(
   )
     fail();
   const email = getMigrationContactEmail(source, tenantId);
-  const plan = readOwnerPlanCheckpoint(metadata);
+  if (completedAdditions.length && canonicalId && !canonical!.hasSameEmailAs(email!)) fail();
+  const plan = validatedPlan;
+  const historicalMethods = user.loginMethods.filter((method) => method.recipeId === "passwordless" &&
+    method.email && method.tenantIds.includes(tenantId) && email && !method.hasSameEmailAs(email));
+  const historicalEmail = validatedPlan && email === getAuthenticatedMigrationEmail(source, tenantId) &&
+    historicalMethods.length > 0 && (await Promise.all(historicalMethods.map(async (method) =>
+    hasCheckpointEmailHistory(validatedPlan, source, await immutable(method.recipeUserId.getAsString()), method.email!)))).every(Boolean);
   const priorCanonical =
     email &&
     plan?.initial.markers.some(({ values }) => {
@@ -138,10 +195,11 @@ export async function inspectAdministrativeEmailPolicy(
   return {
     email,
     canonicalId,
+    completedAdditions,
     changesCanonical: !!(
       email &&
-      ((canonicalId && !canonical!.hasSameEmailAs(email)) ||
-        (!canonicalId && priorCanonical))
+      (completedAdditions.length || (canonicalId && !canonical!.hasSameEmailAs(email)) ||
+        (!canonicalId && (priorCanonical || historicalEmail)))
     ),
   };
 }
@@ -173,11 +231,12 @@ export async function prepareAdministrativeCanonicalEmail(
     const latest = await inspectAdministrativeEmailPolicy(
       source,
       current,
-      await getUserMetadata(internalId, context),
+      await getAdministrativeRepairMetadata(internalId, source.externalUserId!, context),
       tenantId,
       context,
     );
     if (
+      latest?.completedAdditions.some((entry) => !policy.completedAdditions.some((initial) => isDeepStrictEqual(initial, entry))) ||
       latest?.canonicalId !== policy.canonicalId &&
       (publishedId === undefined || latest?.canonicalId !== publishedId)
     )
@@ -185,7 +244,7 @@ export async function prepareAdministrativeCanonicalEmail(
         "Administrative canonical email changed",
       );
   };
-  if (policy.canonicalId)
+  if (policy.canonicalId || policy.completedAdditions.length)
     bindAdministrativeSourceGuard(source, tenantId, assertState);
   return {
     ...policy,
@@ -219,6 +278,25 @@ export async function prepareAdministrativeCanonicalEmail(
         context,
       );
       await assertAuthenticatedMigrationSource(source, tenantId);
+      for (const pending of policy.completedAdditions) {
+        if (pending.verificationRecipeUserId) await EmailVerification.revokeEmailVerificationTokens(
+          tenantId, SuperTokens.convertToRecipeUserId(pending.verificationRecipeUserId), pending.value, context);
+        for (const id of new Set([internalId, source.externalUserId!])) {
+          await assertAuthenticatedMigrationSource(source, tenantId);
+          invalidateReconciliationReads("metadata", id);
+          clearSuperTokensCoreCallCache(context);
+          const metadata = await getRawUserMetadata(id, context);
+          const entries = validatedPendingEntries(metadata);
+          const recorded = entries.find((entry) => entry.id === pending.id);
+          if (!recorded) continue;
+          if (!isDeepStrictEqual(recorded, pending) || (id === source.externalUserId &&
+            metadata.original_rownd_user?.data.user_id !== source.externalUserId))
+            throw new RowndMigrationPolicyError("Administrative pending email changed");
+          // Core has no metadata compare-and-swap. Keep the final read/write
+          // adjacent so source validation cannot stale the pending array.
+          await UserMetadata.updateUserMetadata(id, { rownd_pending_verification: entries.filter((entry) => entry.id !== pending.id) }, context);
+        }
+      }
       if (
         getCanonicalEmailRecipeUserId(
           await getRawUserMetadata(internalId, context),

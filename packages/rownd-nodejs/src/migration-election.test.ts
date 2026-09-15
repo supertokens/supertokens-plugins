@@ -7,6 +7,24 @@ import { setRowndClient } from "./rownd-repository";
 
 afterEach(() => setRowndClient(undefined));
 
+it("fingerprints exact phone verification even when email independently establishes identity", async () => {
+  let verifiedPhone = "+15551234567";
+  setRowndClient({
+    validateToken: vi.fn(),
+    fetchUserInfo: vi.fn(async ({ user_id }) => ({
+      data: { user_id, email: "shared@example.com", phone_number: "+15551234567" },
+      verified_data: { phone_number: verifiedPhone },
+      meta: { last_active: user_id === "newer" ? "2021-01-01T00:00:00Z" : "2020-01-01T00:00:00Z" },
+    })),
+  });
+  const candidates = [{ rownd_user_id: "older" }, { rownd_user_id: "newer" }];
+  const previous = await inspectAdministrativeElection(candidates);
+  verifiedPhone = "+15557654321";
+  const fresh = await inspectAdministrativeElection(candidates);
+  expect(fresh.winner).toEqual(previous.winner);
+  expect(fresh.fingerprints).not.toEqual(previous.fingerprints);
+});
+
 it.each([false, true])(
   "elects the most recent valid activity independently of input order (%s)",
   async (reverse) => {

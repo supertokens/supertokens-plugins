@@ -9,10 +9,12 @@ import { assertMigrationMapping, assertMigrationSourceActive, assertSelectorName
 import { clearSuperTokensCoreCallCache, isRecord, type JsonRecord } from "./utils";
 import { getRawUserMetadata, mapRowndUserToSuperTokens } from "./rownd-compatibility";
 import { RowndMigrationPolicyError } from "./errors";
+import { inspectVerifiedPhoneSurvivor, inspectCheckpointVerifiedPhoneSurvivor } from "./migration-phone-election";
+import { migrationPhoneAccountInfos } from "./migration-phone-identity";
 import { fetchOptionalRowndUserInfo, findRowndUserIdsByEmail, withFreshRowndReads } from "./rownd-repository";
 import { previewReconciliation, type ReconcilePreview } from "./reconcile-preview";
 import { AmbiguousAdministrativeElection, bindAdministrativeElection, inspectAdministrativeElection, isAdministrativeElectionCandidate, type ActivityCandidate } from "./migration-election";
-import { prepareOwnerConsolidation, readConsolidationCheckpoint, readOwnerRecoveryCheckpoint, UnresolvedConsolidationOwners } from "./migration-consolidation";
+import { assertCompletedPlan, prepareOwnerConsolidation, readConsolidationCheckpoint, readOwnerRecoveryCheckpoint, UnresolvedConsolidationOwners } from "./migration-consolidation";
 import { readOwnerPlanCheckpoint } from "./migration-owner-plan";
 import { assertFreshAliasVerification, completeMappingPublication, inspectMappingPublication, publishFreshMapping } from "./migration-publication";
 import { assertAdministrativeMetadataBackfilled } from "./migration-admin-metadata";
@@ -117,7 +119,9 @@ async function discover(users: User[], userContext: JsonRecord, provenRecovery?:
     }
     const ownerPlan = readOwnerPlanCheckpoint(await getRawUserMetadata(id, userContext));
     if (ownerPlan) {
+      if (ownerPlan.status === "COMPLETE") await assertCompletedPlan(ownerPlan, userContext);
       for (const member of ownerPlan.candidates) {
+        if (ownerPlan.status === "COMPLETE" && ownerPlan.retiredAliases?.some((alias) => alias.id === member.rownd_user_id)) continue;
         const mapping = await SuperTokens.getUserIdMapping({ userId: member.rownd_user_id, userIdType: "EXTERNAL", userContext });
         const candidate = { rownd_user_id: member.rownd_user_id,
           ...(mapping.status === "OK" ? { supertokens_user_id: mapping.superTokensUserId } :
@@ -218,7 +222,9 @@ async function inspectSourceElection(source: Source, selected: User | undefined,
       method.recipeId === "passwordless" && method.phoneNumber ? { phoneNumber: method.phoneNumber } :
       method.recipeId === "thirdparty" && ["google", "apple"].includes(method.thirdPartyId)
         ? { thirdParty: { id: method.thirdPartyId, userId: method.thirdPartyUserId } } : undefined;
-    if (accountInfo) users.push(...await SuperTokens.listUsersByAccountInfo(tenantId, accountInfo, false, userContext));
+    for (const info of accountInfo && "phoneNumber" in accountInfo
+      ? migrationPhoneAccountInfos(accountInfo.phoneNumber!) : accountInfo ? [accountInfo] : [])
+      users.push(...await SuperTokens.listUsersByAccountInfo(tenantId, info, false, userContext));
   }
   let provenRecovery: ReconcileCandidate | undefined;
   if (selected) {
@@ -240,9 +246,20 @@ async function inspectSourceElection(source: Source, selected: User | undefined,
       provenRecovery ? { supertokens_user_id: provenRecovery.supertokens_user_id } : {}) });
   }
   const email = getMigrationContactEmail(source, tenantId);
-  const survivor = checkpoint ? await SuperTokens.getUser(checkpoint.target, userContext) :
+  const phoneOwners = await Promise.all(users.map(async (user) => ({ id: await internalOwner(user, userContext), user })));
+  const verifiedPhoneSurvivor = checkpoint ? inspectCheckpointVerifiedPhoneSurvivor(checkpoint, tenantId) :
+    inspectVerifiedPhoneSurvivor(phoneOwners, entries, tenantId);
+  let survivor = checkpoint ? await SuperTokens.getUser(checkpoint.target, userContext) :
     (email ? await selectSurvivor(users, tenantId, userContext, email) : undefined) ?? selected;
-  const canonicalRowndId = await survivorCanonicalId(survivor, userContext);
+  const phoneSurvivor = verifiedPhoneSurvivor ? await SuperTokens.getUser(verifiedPhoneSurvivor.supertokensUserId, userContext) : undefined;
+  if (verifiedPhoneSurvivor && !checkpoint && (!phoneSurvivor ||
+    !inspectVerifiedPhoneSurvivor([{ id: verifiedPhoneSurvivor.supertokensUserId, user: phoneSurvivor }], entries, tenantId)))
+    throw new RowndMigrationPolicyError("Rownd phone election survivor changed");
+  const phoneGraph = (user: User) => JSON.stringify([user.isPrimaryUser, user.loginMethods.map((method) => [
+    method.recipeUserId.getAsString(), method.recipeId, method.phoneNumber, method.email, method.verified, method.tenantIds, method.thirdParty,
+  ])]);
+  const phoneGraphSnapshot = phoneSurvivor ? phoneGraph(phoneSurvivor) : undefined;
+  const canonicalRowndId = await survivorCanonicalId(survivor ?? phoneSurvivor, userContext);
   // Candidate IDs retain literal mapping provenance. A linked recipe's owner is
   // a separate invariant, pinned before election and handed off to the owner plan.
   const mappedOwners = await Promise.all(entries.map(async (candidate) => {
@@ -257,6 +274,11 @@ async function inspectSourceElection(source: Source, selected: User | undefined,
     invalidateReconciliationReads("user");
     invalidateReconciliationReads("mapping");
     clearSuperTokensCoreCallCache(userContext);
+    if (election.verifiedPhoneSurvivor) {
+      const current = await SuperTokens.getUser(election.verifiedPhoneSurvivor.supertokensUserId, userContext);
+      if (!current || phoneGraph(current) !== phoneGraphSnapshot)
+        throw new RowndMigrationPolicyError("Rownd phone election survivor changed");
+    }
     for (const observed of mappedOwners) {
       if (!observed) continue;
       const { candidate, mapping, owner } = observed;
@@ -268,7 +290,8 @@ async function inspectSourceElection(source: Source, selected: User | undefined,
       }
     }
   };
-  const election = await inspectAdministrativeElection(entries, { canonicalRowndId, contactEmail });
+  const election = await inspectAdministrativeElection(entries, { canonicalRowndId, contactEmail, verifiedPhoneSurvivor });
+  if (election.verifiedPhoneSurvivor) survivor = phoneSurvivor;
   const ownerIds = new Set<string>();
   for (const user of users) {
     const id = await internalOwner(user, userContext);
@@ -541,6 +564,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput): Promise
           literalSource.original_rownd_user.data.user_id !== metadata.original_rownd_user.data.user_id) {
           throw new RowndMigrationPolicyError("Contradictory historical snapshots cannot authorize mapping restoration");
         }
+        bindAdministrativeElection(source, tenantId, election, inspection.assertMappedOwners);
         const needsOwnerPlan = metadata.rownd_migration_owner_consolidation !== undefined || election.candidates.length > 1 ||
           inspection.ownerIds.length > 1 || (mapping.status === "OK" && mapping.superTokensUserId !== selectedOwner);
         if (needsOwnerPlan) consolidation = await prepareOwnerConsolidation({ source, candidates: election.candidates,
@@ -617,6 +641,13 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput): Promise
         await consolidation.execute();
         await consolidation.beginMethodReconciliation();
         selected = await SuperTokens.getUser(beforeId!, userContext);
+        // Alias publication changes effective verification cells. Pin the method
+        // plan again after the owner checkpoint has validated that transition.
+        const refreshed = await previewReconciliation({ source, selected, internalId: beforeId!, restoreMapping: false,
+          tenantId, userContext, plannedOwnerIds: consolidation.plannedOwnerIds, mappingPlanned: true,
+          onMethodPlan: (plan) => { methodPlan = plan; } });
+        if (refreshed.blockers.length) throw new RowndMigrationPolicyError(refreshed.blockers.map((entry) => entry.code).join(", "));
+        await consolidation.assertOwners();
       }
       if (publication) await publishFreshMapping(beforeId!, source, tenantId, userContext);
       const reconciled = await reconcileRowndUserWithExistingLoginMethods(source, tenantId, userContext,

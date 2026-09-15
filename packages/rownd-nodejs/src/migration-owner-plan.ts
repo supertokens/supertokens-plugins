@@ -183,6 +183,8 @@ export function planOwnerOperations(
         aliases.find((entry) => entry.id === marker.id)?.to ??
         aliases.find((entry) => entry.to === marker.id)?.to;
       const values = preserveRetiredEmailPointers(marker.values, retiredAliases, aliases);
+      if (isRecord(values.rownd_migration_superseded) && values.rownd_migration_superseded.targetUserId === target)
+        values.rownd_migration_superseded = { rowndUserId: sourceId, targetUserId: target };
       if (destination !== undefined)
         for (const field of [
           "rownd_migration_target",

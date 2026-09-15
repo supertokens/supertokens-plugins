@@ -1,8 +1,9 @@
 import { reconciliationSuperTokens as SuperTokens, reconciliationAccountLinking as AccountLinking, reconciliationEmailVerification as EmailVerification, reconciliationUserMetadata as UserMetadata, reconciliationPasswordless as Passwordless, reconciliationThirdParty as ThirdParty, reconciliationMultitenancy as MultiTenancy } from "./reconciliation-sdk";
 import { classifyMethodOwner, resolveMethodInspection, selectMigrationMethods, planMethods, methodPlanAllows, type MethodRecipe, type MethodSnapshot, type MethodPlan } from "./migration-method-plan";
 import { recordAdministrativeMethodCreation } from "./migration-method-receipts";
+import { migrationPhoneAccountInfos, sameCorePhoneNumber } from "./migration-phone-identity";
 import { backfillAdministrativeMetadata } from "./migration-admin-metadata";
-import { prepareAdministrativeCanonicalEmail } from "./migration-admin-email";
+import { getAdministrativeRepairMetadata, prepareAdministrativeCanonicalEmail } from "./migration-admin-email";
 import { RowndMigrationPolicyError } from "./errors";
 import { assertMigrationPostconditions, assertMigrationOwnerGraph, reconcileAdministrativeEmailVerification } from "./migration-postconditions";
 import { assertCurrentRowndProviders, checkpointProviderIntroduction, finishProviderIntroductions, prepareRowndProviderRetirement, recoverProviderRevocations, type ProviderIntroduction } from "./migration-provider";
@@ -224,7 +225,7 @@ export function matchesImportLoginMethod(
   if (importMethod.recipeId === "passwordless") {
     return importMethod.email
       ? loginMethod.hasSameEmailAs(importMethod.email)
-      : loginMethod.hasSamePhoneNumberAs(importMethod.phoneNumber);
+      : sameCorePhoneNumber(loginMethod.phoneNumber, importMethod.phoneNumber);
   }
 
   return loginMethod.hasSameEmailAs(importMethod.email);
@@ -247,11 +248,9 @@ function getImportMethodAccountInfos(importMethod: ImportLoginMethod) {
     return [{ email: importMethod.email }];
   }
 
-  return [
-    importMethod.email
-      ? { email: importMethod.email }
-      : { phoneNumber: importMethod.phoneNumber! },
-  ];
+  return importMethod.email
+    ? [{ email: importMethod.email }]
+    : migrationPhoneAccountInfos(importMethod.phoneNumber!);
 }
 
 function ownsImportAccountInfo(
@@ -270,7 +269,7 @@ function ownsImportAccountInfo(
     return loginMethod.hasSameEmailAs(importMethod.email);
   }
   if (importMethod.recipeId === "passwordless" && !importMethod.email) {
-    return loginMethod.hasSamePhoneNumberAs(importMethod.phoneNumber);
+    return sameCorePhoneNumber(loginMethod.phoneNumber, importMethod.phoneNumber);
   }
   return loginMethod.hasSameEmailAs(importMethod.email);
 }
@@ -793,11 +792,7 @@ async function reconcileRowndUserOnce(
   // Bulk import stored migration state under the Rownd alias. Only that exact,
   // token-bound alias may supply missing state; primary metadata stays authoritative.
   const repairMetadata = currentUser
-    ? {
-      ...(requestedMetadata.original_rownd_user?.data.user_id === stUser.externalUserId
-        ? requestedMetadata : {}),
-      ...await getUserMetadata(currentUser.id, userContext),
-    } as RowndMetadata
+    ? await getAdministrativeRepairMetadata(currentUser.id, stUser.externalUserId, userContext)
     : undefined;
   const originalRowndUserId = repairMetadata?.original_rownd_user?.data?.user_id;
   if (mappedUser && pinnedId === undefined && originalRowndUserId !== stUser.externalUserId &&
