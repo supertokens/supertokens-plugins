@@ -790,6 +790,9 @@ interrupted. Results are emitted as each user finishes.
   verification still requires `verified_data.email === true` or a string matching
   the current email case-insensitively. Arbitrary mapped imports and caller flags
   cannot supply server-fetched proof. Evidence is revalidated before mutations.
+  A verified current Rownd phone can also elect an exact matching standalone
+  Passwordless phone account with one login method in the initiating tenant only.
+  Dry run may still require execution proof for publishing a new external mapping.
   Independently anchored phone donors may also be eligible; a shared phone number
   alone is not authority to merge accounts.
 - An absent, null, or exactly empty (`""`) optional email allows provider-only

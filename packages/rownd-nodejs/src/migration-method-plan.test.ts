@@ -11,6 +11,18 @@ function snapshot(): MethodSnapshot {
 }
 
 describe("pure method reconciliation planning", () => {
+  it.each(["verified", "unverified", "primary", "multiple methods", "multiple tenants", "different tenant"])(
+    "checks administrative phone ownership before electing a %s contact", (kind) => {
+      const phone: ImportMethod = { recipeId: "passwordless", phoneNumber: "+12025550101", isVerified: kind !== "unverified" };
+      const recipe: MethodRecipe = { ...target, email: undefined, phoneNumber: phone.phoneNumber,
+        primary: kind === "primary", ownerMethodCount: kind === "multiple methods" ? 2 : 1,
+        tenantIds: kind === "multiple tenants" ? ["public", "other"] : kind === "different tenant" ? ["other"] : ["public"] };
+      const plan = planMethods({ ...snapshot(), preferred: undefined, contactEmail: undefined, sourceMethods: [phone], recipes: [recipe],
+        inspections: [{ method: phone, owners: [recipe], incidentalOwners: [] }] });
+      expect(plan).toMatchObject(kind === "verified" ? { status: "PLAN", target: { id: recipe.owner } } : { status: "BLOCKED", code: "CONTACT_ELECTION" });
+    },
+  );
+
   it("plans creation followed by a symbolic link, without changing the discovery snapshot", () => {
     const input = snapshot();
     const before = structuredClone(input);

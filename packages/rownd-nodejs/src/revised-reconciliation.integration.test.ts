@@ -543,6 +543,25 @@ describe("revised reconciliation separates the canonical Rownd profile from the 
     return { search, fresh };
   }
 
+  it("maps a verified Rownd phone to its standalone native owner and retries without writes", async () => {
+    const phoneNumber = uniquePhone();
+    const owner = await createPwlOwner({ phoneNumber });
+    const id = `phone-discovery-${randomUUID()}`;
+    const profile = verifiedProfile(id, { phoneNumber });
+    profile.verified_data = { phone_number: phoneNumber };
+    emailSearch([profile]);
+    const writes = await spyOnAuthWrites();
+    const preview = await expectNoWrites(writes, () => reconcileUser({ rownd_user_id: id, dryRun: true }));
+    expect(preview, JSON.stringify(preview)).toMatchObject({ status: "PREVIEW", blockers: [], changed: false, supertokens_user_id: owner.internalId,
+      requiresExecutionProof: [{ code: "NATIVE_MAPPING_PUBLICATION_REQUIRES_EXECUTION_PROOF" }] });
+    const result = await reconcileUser({ rownd_user_id: id });
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "OK", changed: null, supertokens_user_id: owner.internalId });
+    await expectMapped(id, owner.internalId);
+    expect((await SuperTokens.getUser(id))?.loginMethods).toHaveLength(1);
+    const retry = await expectNoWrites(writes, () => reconcileUser({ rownd_user_id: id }));
+    expect(retry, JSON.stringify(retry)).toMatchObject({ status: "OK", changed: false });
+  });
+
   it.each([[true, true], [false, true], [false, false], [true, false]])("email lookup binds the native owner and backfills metadata (source verified %s, native verified %s)", async (verified, nativeVerified) => {
     const email = uniqueEmail("email-discovery");
     const owner = await createPwlOwner({ email });

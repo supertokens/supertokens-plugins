@@ -224,15 +224,24 @@ export function planMethods(snapshot: MethodSnapshot): MethodPlan {
   }
   const target = { id: preferred?.id ?? elected.owner, recipe: elected };
   if (!preferred && !providerMatches.length) {
+    const verifiedPhoneMatch = inspections.some(({ method }) =>
+      method.recipeId === "passwordless" &&
+      method.email === undefined &&
+      method.phoneNumber !== undefined &&
+      method.isVerified &&
+      matchesMethod(elected, method) &&
+      elected.tenantIds.includes(tenantId),
+    );
     if (
       administrative &&
+      !verifiedPhoneMatch &&
       (elected.recipeId !== "passwordless" ||
         contactEmail === undefined ||
         elected.email?.toLowerCase() !== contactEmail)
     ) {
       return blocked(
         "CONTACT_ELECTION",
-        "Administrative contact election requires a current Rownd email identity",
+        "Administrative contact election requires a current Rownd email or verified phone identity",
       );
     }
     if (
