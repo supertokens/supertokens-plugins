@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { withProvenSessionAuthentication } from "./session-authentication";
 import { MigrationTelemetry } from "./telemetry/migrationTelemetry";
 import { assertMigrationMapping } from "./migration-mapping";
 import { resolveConsolidatedTokenOwner } from "./migration-consolidation";
@@ -465,7 +466,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       }
 
       telemetry.stage = "session_creation";
-      await assertAuthenticatedMigrationSource(stUserImport, tenantId);
+      const authenticatedSession = await assertAuthenticatedMigrationSource(stUserImport, tenantId);
       if (consolidatedAlias && (await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext))?.canonicalRowndId !== consolidatedAlias.canonicalRowndId) {
         throw new Error("Consolidated Rownd alias ownership changed before session creation");
       }
@@ -492,17 +493,22 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       sessionResponse.setCookie = (...args) => {
         responseWrites.push(() => res.setCookie(...args));
       };
-      const createdSession = await Session.createNewSession(
+      const sessionTenantId = tenantId;
+      const sessionRecipeUserId = recipeUserId;
+      const createSession = () => Session.createNewSession(
         req,
         sessionResponse,
-        tenantId,
-        recipeUserId,
+        sessionTenantId,
+        sessionRecipeUserId,
         {
           ...buildRowndAudience({}, appVariantId, resolved.config),
         },
         {},
         resolved.userContext,
       );
+      const hasAuthenticatedMethod = stUserImport.loginMethods.some((method) => method.recipeId !== "thirdparty" ||
+        !["instant", "guest"].includes(method.thirdPartyId));
+      const createdSession = await (authenticatedSession && hasAuthenticatedMethod ? withProvenSessionAuthentication(createSession) : createSession());
       try {
         if (createdSession.getUserId(resolved.userContext) !== (consolidatedAlias?.canonicalRowndId ?? rowndUserId) ||
             createdSession.getRecipeUserId(resolved.userContext).getAsString() !== recipeUserId.getAsString() ||

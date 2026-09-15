@@ -5,6 +5,7 @@ import { migrationPhoneAccountInfos, sameCorePhoneNumber } from "./migration-pho
 import { backfillAdministrativeMetadata } from "./migration-admin-metadata";
 import { getAdministrativeRepairMetadata, prepareAdministrativeCanonicalEmail } from "./migration-admin-email";
 import { RowndMigrationPolicyError } from "./errors";
+import { sessionAuthenticationOrigin } from "./session-authentication";
 import { assertMigrationPostconditions, assertMigrationOwnerGraph, reconcileAdministrativeEmailVerification } from "./migration-postconditions";
 import { assertCurrentRowndProviders, checkpointProviderIntroduction, finishProviderIntroductions, prepareRowndProviderRetirement, recoverProviderRevocations, type ProviderIntroduction } from "./migration-provider";
 import { finishAdministrativeProviderIntroductions, inspectAdministrativeProviderIntroductions } from "./migration-admin-provider";
@@ -1322,13 +1323,14 @@ export const RowndIsAnonymousClaim = new BooleanClaim({
   key: "is_anonymous",
   fetchValue: async (
     userId,
-    _recipeUserId,
+    recipeUserId,
     _tenantId,
-    _payload,
+    payload,
     userContext,
   ) => {
     const user = await SuperTokens.getUser(userId, userContext);
-    const effectiveAuthLevel = getEffectiveAuthLevel(user);
+    const origin = await sessionAuthenticationOrigin(user, recipeUserId.getAsString(), payload ?? {}, userContext);
+    const effectiveAuthLevel = origin === "instant" ? "instant" : getEffectiveAuthLevel(user);
     return [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(
       effectiveAuthLevel,
     );
@@ -1360,6 +1362,8 @@ export async function buildRowndSessionAndAnonymousClaims(
   currentPayload: JsonRecord,
   appVariantId: string | undefined,
   userContext: UserContext,
+  recipeUserId?: string,
+  creating = false,
 ) {
   const inspection = await inspectLinkedUserMetadata(userId, userContext);
   const user = inspection.user;
@@ -1370,9 +1374,10 @@ export async function buildRowndSessionAndAnonymousClaims(
     currentPayload,
     appVariantId,
     pluginConfig: getConfigForUserContext(userContext),
+    authenticationOrigin: await sessionAuthenticationOrigin(user, recipeUserId, currentPayload, userContext, creating),
   });
   const isAnonymous = [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(
-    getEffectiveAuthLevel(user),
+    rowndSessionClaims.auth_level,
   );
   return {
     rowndSessionClaims,

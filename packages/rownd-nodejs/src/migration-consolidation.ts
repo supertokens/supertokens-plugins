@@ -18,6 +18,9 @@ import {
 import {
   isAdministrativeElectionCandidate,
   sharesAdministrativeElectionPhone,
+  sharesAdministrativeInstantPrimary,
+  assertAdministrativeInstantProfiles,
+  hasAdministrativeInstantProof,
   type ActivityCandidate,
 } from "./migration-election";
 import {
@@ -32,6 +35,8 @@ import {
   ownerStateAt,
   readOwnerPlanCheckpoint,
   sameOwnerPlan,
+  instantPrimaryAnchor,
+  ambiguousOwnerSessionAliases,
   type OwnerPlanCheckpoint,
   type OwnerRecipe,
   type OwnerState,
@@ -57,7 +62,7 @@ import {
 } from "./utils";
 import type { RowndUser, SuperTokensUserImport } from "./types";
 import type { ReconcilePreviewAction } from "./reconcile-preview";
-import { invalidateReconciliationReads } from "./reconciliation-reads";
+import { invalidateReconciliationReads, reconciliationReadRevision } from "./reconciliation-reads";
 
 type User = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
 type Method = User["loginMethods"][number];
@@ -846,7 +851,7 @@ export async function prepareOwnerConsolidation(input: {
   for (const candidate of candidates) {
     const current = await requiredProfile(candidate.rownd_user_id);
     if (
-      !sharedProfile(profile, current) && !sharesAdministrativeElectionPhone(source, profile, current) &&
+      !sharedProfile(profile, current) && !sharesAdministrativeElectionPhone(source, profile, current) && !sharesAdministrativeInstantPrimary(source, profile, current) &&
       candidate.rownd_user_id !== sourceId
     )
       fail("a source no longer shares the current identity");
@@ -1191,6 +1196,18 @@ export async function prepareOwnerConsolidation(input: {
       cursor: 0,
       status: "READY",
     };
+    const instantAnchor = instantPrimaryAnchor(plan);
+    const inheritedSessionAliases = previous ? ambiguousOwnerSessionAliases(previous) : [];
+    if (inheritedSessionAliases.length && instantPrimaryAnchor(previous!)?.identity !== instantAnchor?.identity)
+      fail("legacy session alias history changed its immutable instant primary");
+    const ambiguousSessionAliases = [...new Set([...inheritedSessionAliases, ...ambiguousOwnerSessionAliases(plan)])].sort();
+    if (instantAnchor && ambiguousSessionAliases.length) {
+      plan.legacySessionAliasHistory = {
+        instantRecipeId: target,
+        instantRecipeIdentity: instantAnchor.identity,
+        aliases: ambiguousSessionAliases,
+      };
+    }
     const decision = planOwnerOperations({
       ...plan,
       profile,
@@ -1265,11 +1282,23 @@ export async function prepareOwnerConsolidation(input: {
         fail("an owner reservation changed");
       reservations.set(marker.id, saved);
     }
+  let instantProfileRevision: object | undefined;
   const assertOwners = async (complete = false) => {
     clearSuperTokensCoreCallCache(context);
-    if (complete)
-      for (const [id, initial] of profiles) {
-        const current = await requiredProfile(id);
+    if (complete) {
+      const instant = hasAdministrativeInstantProof(source);
+      // Adjacent completion checks share fresh evidence only until a cache
+      // invalidation (including SDK mutations). Outside a read scope, always refresh.
+      if (instant && (instantProfileRevision === undefined || instantProfileRevision !== reconciliationReadRevision()))
+        invalidateReconciliationReads("rownd");
+      const profileRevision = reconciliationReadRevision();
+      const currentProfiles = await Promise.all([...profiles.keys()].map(requiredProfile));
+      if (instant) {
+        assertAdministrativeInstantProfiles(source, currentProfiles);
+        instantProfileRevision = profileRevision;
+      }
+      for (const current of currentProfiles) {
+        const initial = profiles.get(current.data.user_id)!;
         if (
           !isDeepStrictEqual(
             mapRowndUserToSuperTokens(current, tenantId).loginMethods,
@@ -1278,6 +1307,7 @@ export async function prepareOwnerConsolidation(input: {
         )
           fail("a source identity changed before completion");
       }
+    }
     if (
       !isDeepStrictEqual(
         readOwnerPlanCheckpoint(await getRawUserMetadata(target, context)),

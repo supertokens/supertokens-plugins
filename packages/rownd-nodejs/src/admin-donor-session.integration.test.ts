@@ -106,13 +106,18 @@ describe("administrative reconciliation with concurrent native sessions", { time
     resetST();
   });
 
-  async function seed() {
+  async function seed(verifiedEmail = false) {
     const alias = `rownd-${randomUUID()}`;
     const email = `${randomUUID()}@example.com`;
     const subject = randomUUID();
     const target = await Passwordless.signInUp({ tenantId: "public", email });
     expect(await AccountLinking.createPrimaryUser(target.recipeUserId)).toMatchObject({ status: "OK" });
     expect(await SuperTokens.createUserIdMapping({ superTokensUserId: target.recipeUserId.getAsString(), externalUserId: alias, force: true })).toMatchObject({ status: "OK" });
+    if (verifiedEmail) {
+      const verification = await EmailVerification.createEmailVerificationToken("public", SuperTokens.convertToRecipeUserId(alias), email);
+      if (verification.status !== "OK") throw new Error("Failed to seed verified email");
+      expect(await EmailVerification.verifyEmailUsingToken("public", verification.token)).toMatchObject({ status: "OK" });
+    }
     const original: RowndUser = { state: "enabled", auth_level: "verified", data: { user_id: alias, email }, verified_data: { email: true } };
     await UserMetadata.updateUserMetadata(target.recipeUserId.getAsString(), { original_rownd_user: original, rownd_migration_complete: true });
     const current = { ...original, data: { ...original.data, google_id: subject }, verified_data: { email: true, google_id: subject } };
@@ -249,26 +254,36 @@ describe("administrative reconciliation with concurrent native sessions", { time
     expect(await (await fetch(`${baseUrl}/native`, { method: "POST", headers: { "x-recipe-id": fixture.alias } })).json()).toMatchObject({ status: "OK" });
   });
 
-  it("uses the completed /migrate mapping without contact discovery while admin still repairs it", async () => {
-    const fixture = await seed();
+  it.each([false, true])("only repairs a completed /migrate mapping when the live source adds a method (added=%s)", async (added) => {
+    const fixture = await seed(true);
+    if (!added) rownd.fetchUserInfo.mockResolvedValue({ ...fixture.current,
+      data: { user_id: fixture.alias, email: fixture.current.data.email }, verified_data: { email: true } });
     const search = vi.spyOn(SuperTokens, "listUsersByAccountInfo");
     const link = vi.spyOn(AccountLinking, "linkAccounts");
     const response = await fetch(`${baseUrl}/auth/plugin/rownd/migrate`, {
       method: "POST", headers: { Authorization: "Bearer fixture-token", "st-auth-mode": "header", rid: "session", "fdi-version": "1.18" },
     });
     expect(await response.json()).toMatchObject({ status: "OK" });
-    expect(search).not.toHaveBeenCalled();
-    expect(link).not.toHaveBeenCalled();
+    if (added) {
+      expect(search).toHaveBeenCalled();
+      expect(link).toHaveBeenCalled();
+    } else {
+      expect(search).not.toHaveBeenCalled();
+      expect(link).not.toHaveBeenCalled();
+    }
     const session = await Session.getSessionWithoutRequestResponse(response.headers.get("st-access-token")!);
     expect(session.getUserId()).toBe(fixture.alias);
     expect(session.getTenantId()).toBe("public");
+    rownd.fetchUserInfo.mockResolvedValue(fixture.current);
     expect(await fixture.run()).toMatchObject({ status: "OK" });
     expect((await SuperTokens.getUser(fixture.donorId))?.id).toBe(fixture.alias);
   });
 
   it("does not reconcile /migrate for retirement history confined to another tenant", async () => {
     const engine = vi.spyOn(await import("./supertokens-repository"), "reconcileRowndUserWithExistingLoginMethods");
-    const fixture = await seed();
+    const fixture = await seed(true);
+    rownd.fetchUserInfo.mockResolvedValue({ ...fixture.current,
+      data: { user_id: fixture.alias, email: fixture.current.data.email }, verified_data: { email: true } });
     const tenantId = `other-${randomUUID()}`;
     expect(await Multitenancy.createOrUpdateTenant(tenantId, { firstFactors: ["thirdparty"] })).toMatchObject({ status: "OK" });
     const oldSubject = randomUUID();

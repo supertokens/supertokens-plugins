@@ -10,6 +10,7 @@ import { clearSuperTokensCoreCallCache, isRecord, type JsonRecord } from "./util
 import { getRawUserMetadata, mapRowndUserToSuperTokens } from "./rownd-compatibility";
 import { RowndMigrationPolicyError } from "./errors";
 import { inspectVerifiedPhoneSurvivor, inspectCheckpointVerifiedPhoneSurvivor } from "./migration-phone-election";
+import { inspectInstantPrimaryProof } from "./migration-instant-election";
 import { migrationPhoneAccountInfos } from "./migration-phone-identity";
 import { fetchOptionalRowndUserInfo, findRowndUserIdsByEmail, withFreshRowndReads } from "./rownd-repository";
 import { previewReconciliation, type ReconcilePreview } from "./reconcile-preview";
@@ -21,6 +22,7 @@ import { assertAdministrativeMetadataBackfilled } from "./migration-admin-metada
 import { recoverProviderRevocations } from "./migration-provider";
 import type { MethodPlan } from "./migration-method-plan";
 import { resolveRowndProviderSubject } from "./provider-identity";
+import { recoverOrphanMapping } from "./migration-orphan-mapping";
 
 export type ReconcileUserInput = (
   | { rownd_user_id: string; email?: never; supertokens_user_id?: never }
@@ -267,13 +269,20 @@ async function inspectSourceElection(source: Source, selected: User | undefined,
     if (mapping.status !== "OK") return undefined;
     const user = await SuperTokens.getUser(mapping.superTokensUserId, userContext);
     if (!user || mapping.superTokensUserId !== candidate.supertokens_user_id) throw new RowndMigrationPolicyError("Rownd election owner changed");
-    return { candidate, mapping, owner: await internalOwner(user, userContext) };
+    const mappedRecipePresent = user.loginMethods.some((method) =>
+      [mapping.superTokensUserId, mapping.externalUserId].includes(method.recipeUserId.getAsString()));
+    return { candidate, mapping, owner: await internalOwner(user, userContext), mappedRecipePresent };
   }));
   const assertMappedOwners = async () => {
     if (!mappedOwners.some((observed) => observed !== undefined)) return;
     invalidateReconciliationReads("user");
     invalidateReconciliationReads("mapping");
     clearSuperTokensCoreCallCache(userContext);
+    if (instantPrimaryProof) {
+      const current = await SuperTokens.getUser(instantPrimaryProof.target, userContext);
+      if (!current || phoneGraph(current) !== instantGraphSnapshot)
+        throw new RowndMigrationPolicyError("Rownd instant primary graph changed");
+    }
     if (election.verifiedPhoneSurvivor) {
       const current = await SuperTokens.getUser(election.verifiedPhoneSurvivor.supertokensUserId, userContext);
       if (!current || phoneGraph(current) !== phoneGraphSnapshot)
@@ -281,16 +290,23 @@ async function inspectSourceElection(source: Source, selected: User | undefined,
     }
     for (const observed of mappedOwners) {
       if (!observed) continue;
-      const { candidate, mapping, owner } = observed;
+      const { candidate, mapping, owner, mappedRecipePresent } = observed;
       const current = await SuperTokens.getUserIdMapping({ userId: candidate.rownd_user_id, userIdType: "EXTERNAL", userContext });
       const user = await SuperTokens.getUser(mapping.superTokensUserId, userContext);
       if (!isDeepStrictEqual(current, mapping) || !user || await internalOwner(user, userContext) !== owner ||
-        !user.loginMethods.some((method) => [mapping.superTokensUserId, mapping.externalUserId].includes(method.recipeUserId.getAsString()))) {
+        (mappedRecipePresent
+          ? !user.loginMethods.some((method) => [mapping.superTokensUserId, mapping.externalUserId].includes(method.recipeUserId.getAsString()))
+          // Provider replacement can retire the primary recipe without deleting
+          // its immutable owner. A missing secondary is never such an anchor.
+          : !user.isPrimaryUser || mapping.superTokensUserId !== owner)) {
         throw new RowndMigrationPolicyError("Rownd election owner changed");
       }
     }
   };
-  const election = await inspectAdministrativeElection(entries, { canonicalRowndId, contactEmail, verifiedPhoneSurvivor });
+  const instantPrimaryProof = await inspectInstantPrimaryProof(entries, tenantId, userContext);
+  const instantGraph = instantPrimaryProof ? await SuperTokens.getUser(instantPrimaryProof.target, userContext) : undefined;
+  const instantGraphSnapshot = instantGraph ? phoneGraph(instantGraph) : undefined;
+  const election = await inspectAdministrativeElection(entries, { canonicalRowndId, contactEmail, verifiedPhoneSurvivor, instantPrimaryProof });
   if (election.verifiedPhoneSurvivor) survivor = phoneSurvivor;
   const ownerIds = new Set<string>();
   for (const user of users) {
@@ -428,7 +444,7 @@ async function discoverEmailSources(email: string, userContext: JsonRecord): Pro
   return candidates;
 }
 
-async function reconcileUserWithFreshSources(input: ReconcileUserInput): Promise<ReconcileUserResult> {
+async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHandoff?: { target: string; assertReady: () => Promise<void>; pinnedWinner?: string }): Promise<ReconcileUserResult> {
   const result: ReconcileUserResult = { status: "ERROR", changed: false, actions: [], ...(input?.dryRun === true ? {
     dryRun: true as const, canReconcile: false, matchesSource: false, proposedActions: [], blockers: [], requiresExecutionProof: [], missingMethods: [], snapshotOnly: true as const,
   } : {}) };
@@ -445,11 +461,19 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput): Promise
     const tenantId = input.tenantId ?? "public";
     const { userContext } = await resolvePluginConfigSnapshot(config, { tenantId, userContext: input.userContext ?? {} });
     clearSuperTokensCoreCallCache(userContext);
+    if (input.rownd_user_id && !orphanHandoff) {
+      const recovered = await recoverOrphanMapping({ sourceId: input.rownd_user_id, tenantId, userContext, dryRun: input.dryRun,
+        onMutation: () => { mutationStarted = true; result.changed = null; },
+        reconcile: (sourceId, target, assertReady, pinnedWinner) => withFreshRowndReads(() => reconcileUserWithFreshSources(
+          { rownd_user_id: sourceId, tenantId, userContext, dryRun: input.dryRun }, { target, assertReady, pinnedWinner })),
+      });
+      if (recovered) return recovered;
+    }
     if (input.supertokens_user_id) await assertSelectorNamespace(input.supertokens_user_id, userContext);
     if (input.rownd_user_id) await assertSelectorNamespace(input.rownd_user_id, userContext);
     let selected: User | undefined;
     let selectedOwner: string | undefined;
-    let constrainedOwner: string | undefined;
+    let constrainedOwner: string | undefined = orphanHandoff?.target;
     let resolvedElection: Awaited<ReturnType<typeof inspectAdministrativeElection>> | undefined;
     let discoveredEmail: string | undefined;
     let consolidation: Awaited<ReturnType<typeof prepareOwnerConsolidation>>;
@@ -471,7 +495,8 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput): Promise
       selected = await selectSurvivor(users, tenantId, userContext, selectorEmail);
       constrainedOwner = input.supertokens_user_id && users[0] ? await internalOwner(users[0], userContext) : undefined;
       const elected = candidates.length > 1 || discoveredEmail !== undefined
-        ? await inspectAdministrativeElection(candidates, { canonicalRowndId: await survivorCanonicalId(selected, userContext), contactEmail: discoveredEmail }) : undefined;
+        ? await inspectAdministrativeElection(candidates, { canonicalRowndId: await survivorCanonicalId(selected, userContext), contactEmail: discoveredEmail,
+          instantPrimaryProof: await inspectInstantPrimaryProof(candidates, tenantId, userContext) }) : undefined;
       resolvedElection = elected;
       const candidate = elected?.winner ?? candidates[0]!;
       rowndId = candidate.rownd_user_id;
@@ -525,6 +550,9 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput): Promise
       throw new RowndMigrationPolicyError("Rownd election owner changed");
     }
     const { election } = inspection;
+    if (orphanHandoff?.pinnedWinner !== undefined && election.winner.rownd_user_id !== orphanHandoff.pinnedWinner) {
+      throw new RowndMigrationPolicyError("Orphan recovery election changed before handoff");
+    }
     await inspection.assertMappedOwners();
     selected = inspection.survivor ?? selected;
     selectedOwner = selected ? await internalOwner(selected, userContext) : undefined;
@@ -633,6 +661,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput): Promise
     let importedNewUser = false;
     try {
       await assertAuthenticatedMigrationSource(source, tenantId);
+      await orphanHandoff?.assertReady();
       mutationStarted = true;
       if (restoreMapping) {
         await publishPinnedMapping(beforeId!, source, tenantId, userContext);

@@ -10,6 +10,7 @@ import { isSuperTokensFakeEmail } from "./rownd-compatibility";
 import { fetchOptionalRowndUserInfo } from "./rownd-repository";
 import { resolveRowndProviderSubject } from "./provider-identity";
 import { isVerifiedPhoneSurvivor, type VerifiedPhoneSurvivor } from "./migration-phone-election";
+import { matchesInstantPrimaryProof, type InstantPrimaryProof } from "./migration-instant-election";
 import type { RowndUser, SuperTokensUserImport } from "./types";
 
 export type ActivityCandidate = {
@@ -21,6 +22,7 @@ export type AdministrativeElectionOptions = {
   canonicalRowndId?: string;
   contactEmail?: string;
   verifiedPhoneSurvivor?: VerifiedPhoneSurvivor;
+  instantPrimaryProof?: InstantPrimaryProof;
 };
 export class AmbiguousAdministrativeElection extends Error {
   constructor(readonly candidates: ActivityCandidate[]) {
@@ -165,9 +167,10 @@ export async function inspectAdministrativeElection(
       candidate.supertokens_user_id === phone.supertokensUserId) &&
     profiles.every((profile) => profile.data.phone_number === phone.phoneNumber &&
       profile.verified_data?.phone_number === phone.phoneNumber);
-  if (unique.length > 1 && !shared.length && !phoneEvidence)
+  const instantEvidence = matchesInstantPrimaryProof(options.instantPrimaryProof, profiles);
+  if (unique.length > 1 && !shared.length && !phoneEvidence && !instantEvidence)
     throw new AmbiguousAdministrativeElection(observed);
-  const winner = activityWinner(observed, options.canonicalRowndId);
+  const winner = activityWinner(instantEvidence ? observed.filter((candidate) => candidate.rownd_user_id !== options.instantPrimaryProof!.instantAlias) : observed, options.canonicalRowndId);
   if (!winner) throw new AmbiguousAdministrativeElection(observed);
   return {
     winner,
@@ -175,6 +178,7 @@ export async function inspectAdministrativeElection(
     fingerprints: profiles.map(fingerprint),
     canonicalRowndId: options.canonicalRowndId,
     ...(phoneEvidence ? { verifiedPhoneSurvivor: phone } : {}),
+    ...(instantEvidence ? { instantPrimaryProof: options.instantPrimaryProof } : {}),
     ...(options.contactEmail !== undefined
       ? { contactEmail: options.contactEmail }
       : {}),
@@ -233,6 +237,20 @@ export function sharesAdministrativeElectionPhone(
   );
 }
 
+export function sharesAdministrativeInstantPrimary(source: SuperTokensUserImport, left: RowndUser, right: RowndUser) {
+  return matchesInstantPrimaryProof(elections.get(source)?.election.instantPrimaryProof, [left, right]);
+}
+
+export function assertAdministrativeInstantProfiles(source: SuperTokensUserImport, profiles: RowndUser[]) {
+  const proof = elections.get(source)?.election.instantPrimaryProof;
+  if (proof && !matchesInstantPrimaryProof(proof, profiles))
+    throw new RowndMigrationPolicyError("Instant primary source evidence changed before completion");
+}
+
+export function hasAdministrativeInstantProof(source: SuperTokensUserImport) {
+  return elections.get(source)?.election.instantPrimaryProof !== undefined;
+}
+
 export async function assertAdministrativeElection(
   source: SuperTokensUserImport,
 ) {
@@ -249,6 +267,7 @@ export async function assertAdministrativeElection(
         canonicalRowndId: previous.election.canonicalRowndId,
         contactEmail: previous.election.contactEmail,
         verifiedPhoneSurvivor: previous.election.verifiedPhoneSurvivor,
+        instantPrimaryProof: previous.election.instantPrimaryProof,
       },
     );
     if (

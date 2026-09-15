@@ -614,18 +614,23 @@ export function buildRowndSessionClaimPayload(input: {
   currentPayload?: JsonRecord;
   appVariantId?: string;
   pluginConfig?: RowndPluginNormalisedConfig;
+  authenticationOrigin?: "instant" | "authenticated";
 }) {
   const currentPayload = input.currentPayload ?? {};
   const originalRowndUser = input.metadata?.original_rownd_user;
   const verifiedData = originalRowndUser?.verified_data as
     JsonRecord | undefined;
-  const authLevel = getEffectiveAuthLevel(
-    input.user,
-    typeof currentPayload.auth_level === "string"
-      ? currentPayload.auth_level
-      : originalRowndUser?.auth_level,
-    verifiedData,
-  );
+  const recordedOrigin = currentPayload.rownd_session_authentication;
+  const authenticationOrigin = input.authenticationOrigin ??
+    (recordedOrigin === "instant" || recordedOrigin === "authenticated" ? recordedOrigin : undefined);
+  const authLevel = authenticationOrigin === "instant" ||
+    (authenticationOrigin === undefined && currentPayload.auth_level === "instant") ? "instant" : getEffectiveAuthLevel(
+      input.user,
+      typeof currentPayload.auth_level === "string"
+        ? currentPayload.auth_level
+        : originalRowndUser?.auth_level,
+      verifiedData,
+    );
   const appUserId = getRowndAppUserId(
     input.userId,
     input.user,
@@ -641,7 +646,7 @@ export function buildRowndSessionClaimPayload(input: {
     input.metadata,
     currentPayload,
   );
-  const isVerifiedUser = authLevel !== "unverified";
+  const isVerifiedUser = authLevel !== "instant" && authLevel !== "unverified";
   const audience = buildRowndAudience(
     currentPayload,
     input.appVariantId,
@@ -656,6 +661,7 @@ export function buildRowndSessionClaimPayload(input: {
     ...configuredClaims,
     app_user_id: appUserId,
     auth_level: authLevel,
+    ...(input.authenticationOrigin ? { rownd_session_authentication: input.authenticationOrigin } : {}),
     is_verified_user: isVerifiedUser,
     [ROWND_JWT_CLAIMS.AppUserId]: appUserId,
     [ROWND_JWT_CLAIMS.AuthLevel]: authLevel,

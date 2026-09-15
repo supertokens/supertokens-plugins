@@ -2,15 +2,20 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 type ReadKind = "rownd" | "user" | "mapping" | "metadata" | "search" | "verification";
 export type ReconciliationProgress = { stage: "discovery" | "execution" | "verification"; action?: string };
-type Context = { reads: Map<ReadKind, Map<string, Promise<unknown>>>; onProgress?: (event: ReconciliationProgress) => void };
+type Context = { reads: Map<ReadKind, Map<string, Promise<unknown>>>; revision: object; onProgress?: (event: ReconciliationProgress) => void };
 const contexts = new AsyncLocalStorage<Context>();
 
 export function withReconciliationReads<T>(action: () => Promise<T>, onProgress?: Context["onProgress"]) {
-  return contexts.run({ reads: new Map(), onProgress }, action);
+  return contexts.run({ reads: new Map(), revision: {}, onProgress }, action);
 }
 
 export function hasReconciliationReads() {
   return contexts.getStore() !== undefined;
+}
+
+// A token is valid only within this read scope and until any invalidation.
+export function reconciliationReadRevision() {
+  return contexts.getStore()?.revision;
 }
 
 export function reconciliationProgress(event: ReconciliationProgress) {
@@ -31,7 +36,9 @@ export function reconciliationRead<T>(kind: ReadKind, key: string, load: () => P
 }
 
 export function invalidateReconciliationReads(kind?: ReadKind, key?: string) {
-  const reads = contexts.getStore()?.reads;
+  const context = contexts.getStore();
+  if (context) context.revision = {};
+  const reads = context?.reads;
   if (!kind) reads?.clear();
   else if (key === undefined) reads?.delete(kind);
   else reads?.get(kind)?.delete(key);

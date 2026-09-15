@@ -37,6 +37,7 @@ export const RESERVED_SESSION_CLAIMS = new Set<string>([
   "app_user_id",
   "auth_level",
   "is_verified_user",
+  "rownd_session_authentication",
   "is_anonymous",
   "anonymous_id",
   "sessionHandle",

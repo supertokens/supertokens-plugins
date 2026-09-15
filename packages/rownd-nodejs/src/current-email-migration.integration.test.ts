@@ -305,9 +305,11 @@ describe("Apple relay migration and explicit administrative reconciliation", { t
       return result;
     });
     const writes = [vi.spyOn(EmailVerification, "createEmailVerificationToken"), vi.spyOn(EmailVerification, "verifyEmailUsingToken")];
-    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED", message: "Rownd source identity changed before migration completion" });
+    expect(await reconcileUser({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED",
+      message: expect.stringMatching(/source identity changed before (?:migration )?completion/) });
     for (const write of writes) expect(write).not.toHaveBeenCalled();
     expect((await SuperTokens.getUser(fixture.rowndId))!.loginMethods.find((method) => method.recipeId === "passwordless" && method.hasSameEmailAs(fixture.email))).toMatchObject({ verified: false });
+    expect((await UserMetadata.getUserMetadata(fixture.donor.user.id)).metadata.rownd_migration_owner_consolidation.status).not.toBe("COMPLETE");
   });
 
   it.each([false, true])("admin consolidates the older phone owner under the newer email source (newerRequestedFirst=%s)", async (newerRequested) => {

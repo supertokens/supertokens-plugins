@@ -86,6 +86,8 @@ import {
   handleValidatePasswordlessConfirmationBypass,
 } from "./pluginImplementation";
 
+import { withProvenSessionAuthentication } from "./session-authentication";
+
 const DISABLED_MIGRATION_ROWND_APP_KEY = "migration-disabled";
 const PENDING_EMAIL_VERIFICATION_SESSION_ERROR =
   "email change verification requires the initiating session";
@@ -96,15 +98,19 @@ async function refreshRowndSessionClaims(input: {
   userId: string;
   appVariantId?: string;
   userContext: UserContext;
+  provenAuthentication: boolean;
 }) {
   const currentPayload = input.session.getAccessTokenPayload();
-  const { rowndSessionClaims, rowndIsAnonymousClaim } =
-    await buildRowndSessionAndAnonymousClaims(
-      input.userId,
-      currentPayload,
-      input.appVariantId,
-      input.userContext,
-    );
+  const buildClaims = () => buildRowndSessionAndAnonymousClaims(
+    input.userId,
+    currentPayload,
+    input.appVariantId,
+    input.userContext,
+    input.session.getRecipeUserId(input.userContext).getAsString(),
+    input.provenAuthentication,
+  );
+  const { rowndSessionClaims, rowndIsAnonymousClaim } = await (input.provenAuthentication
+    ? withProvenSessionAuthentication(buildClaims) : buildClaims());
   delete rowndSessionClaims.aud;
   await input.session.mergeIntoAccessTokenPayload(
     {
@@ -956,6 +962,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     userId: response.user.id,
                     appVariantId,
                     userContext: operationContext,
+                    provenAuthentication: true,
                   });
                 }
 
@@ -1011,6 +1018,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     userId: response.user.id,
                     appVariantId,
                     userContext: operationContext,
+                    provenAuthentication: !["instant", "guest"].includes(input.provider.id),
                   });
                 }
 
@@ -1073,6 +1081,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     input.accessTokenPayload,
                     appVariantId,
                     resolved.userContext,
+                    input.recipeUserId.getAsString(),
+                    true,
                   );
                 input.accessTokenPayload = {
                   ...input.accessTokenPayload,

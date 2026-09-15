@@ -129,10 +129,11 @@ describe("rownd-nodejs plugin", () => {
     authenticatedRecipeUserId: Parameters<
       typeof AccountLinking.createPrimaryUser
     >[0],
+    origin: "guest" | "instant" = "guest",
   ) {
     const guestResult = await ThirdParty.manuallyCreateOrUpdateUser(
       "public",
-      "guest",
+      origin,
       `guest-${randomUUID()}`,
       `guest-${randomUUID()}@anonymous.local`,
       false,
@@ -148,7 +149,7 @@ describe("rownd-nodejs plugin", () => {
       true,
     );
     const anonymousId = session.getAccessTokenPayload().anonymous_id;
-    if (typeof anonymousId !== "string") {
+    if (origin === "guest" && typeof anonymousId !== "string") {
       throw new Error("guest session has no anonymous_id");
     }
 
@@ -2518,7 +2519,7 @@ describe("rownd-nodejs plugin", () => {
       expect(rewrittenUrl.searchParams.get("displayContext")).toBe("browser");
     });
 
-    it("records app variant membership and refreshes a linked guest session after passwordless code consumption", async () => {
+    it.each(["guest", "instant"] as const)("refreshes a linked %s session after proven passwordless consumption", async (origin) => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
@@ -2536,7 +2537,7 @@ describe("rownd-nodejs plugin", () => {
       testPORT = port;
 
       const signInUpResult = await Passwordless.signInUp({
-        email: "passwordless-variant@example.com",
+        email: `passwordless-variant-${origin}@example.com`,
         tenantId: "public",
       });
       const rowndMetadataUserId = signInUpResult.recipeUserId.getAsString();
@@ -2550,7 +2551,7 @@ describe("rownd-nodejs plugin", () => {
         },
       });
       const { session, anonymousId, linkedUser } =
-        await createLinkedGuestSession(signInUpResult.recipeUserId);
+        await createLinkedGuestSession(signInUpResult.recipeUserId, origin);
       const mergeIntoAccessTokenPayload = vi.spyOn(
         session,
         "mergeIntoAccessTokenPayload",
@@ -2601,7 +2602,7 @@ describe("rownd-nodejs plugin", () => {
         is_verified_user: true,
         [ROWND_JWT_CLAIMS.AuthLevel]: "verified",
         [ROWND_JWT_CLAIMS.IsVerifiedUser]: true,
-        anonymous_id: anonymousId,
+        ...(anonymousId ? { anonymous_id: anonymousId } : {}),
         aud: "app:app_xyz",
       });
       expect(refreshedPayload).not.toHaveProperty(ROWND_JWT_CLAIMS.IsAnonymous);
@@ -3799,7 +3800,7 @@ describe("rownd-nodejs plugin", () => {
       expect(originalConsumeCodePOST).not.toHaveBeenCalled();
     });
 
-    it("records app variant membership and refreshes a linked guest session after third-party sign in", async () => {
+    it.each(["guest", "instant"] as const)("refreshes a linked %s session after proven third-party sign in", async (origin) => {
       const pluginConfig: RowndPluginConfig = {
         rowndAppKey: "test-key",
         rowndAppSecret: "test-secret",
@@ -3820,7 +3821,7 @@ describe("rownd-nodejs plugin", () => {
         "public",
         "google",
         `google-${randomUUID()}`,
-        "thirdparty-variant@example.com",
+        `thirdparty-variant-${origin}@example.com`,
         true,
       );
       expect(signInUpResult.status).toBe("OK");
@@ -3828,7 +3829,7 @@ describe("rownd-nodejs plugin", () => {
         throw new Error("failed to create thirdparty user");
       }
       const { session, anonymousId, linkedUser } =
-        await createLinkedGuestSession(signInUpResult.recipeUserId);
+        await createLinkedGuestSession(signInUpResult.recipeUserId, origin);
       const mergeIntoAccessTokenPayload = vi.spyOn(
         session,
         "mergeIntoAccessTokenPayload",
@@ -3847,6 +3848,7 @@ describe("rownd-nodejs plugin", () => {
       });
 
       await thirdPartyApis.signInUpPOST({
+        provider: { id: "google" },
         options: { req: makeVariantRequest("variant_123") },
         userContext,
       });
@@ -3867,7 +3869,7 @@ describe("rownd-nodejs plugin", () => {
         is_verified_user: true,
         [ROWND_JWT_CLAIMS.AuthLevel]: "verified",
         [ROWND_JWT_CLAIMS.IsVerifiedUser]: true,
-        anonymous_id: anonymousId,
+        ...(anonymousId ? { anonymous_id: anonymousId } : {}),
         aud: "app:app_xyz",
       });
       expect(refreshedPayload).not.toHaveProperty(ROWND_JWT_CLAIMS.IsAnonymous);
@@ -7145,7 +7147,8 @@ describe("rownd-nodejs plugin", () => {
         ).resolves.toBe(true);
         const accessTokenPayload = session!.getAccessTokenPayload();
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.AuthLevel]).toBe("instant");
-        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(true);
+        expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsVerifiedUser]).toBe(false);
+        expect(accessTokenPayload.rownd_session_authentication).toBe("instant");
         expect(accessTokenPayload).not.toHaveProperty("anonymous_id");
         expect(accessTokenPayload[ROWND_JWT_CLAIMS.IsAnonymous]).toBe(true);
       });

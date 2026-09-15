@@ -153,6 +153,11 @@ export async function completeMappingPublication(id: string, source: SuperTokens
 
 export async function assertMappingPublicationSessionMembership(userId: string, recipeId: string, context: JsonRecord) {
   for (const id of new Set([userId, recipeId, await immutable(userId, context), await immutable(recipeId, context)])) {
-    if (read((await getRawUserMetadata(id, context))[key])) throw new RowndMigrationPolicyError("Fresh mapping publication is incomplete");
+    const metadata = await getRawUserMetadata(id, context);
+    if (read(metadata[key])) throw new RowndMigrationPolicyError("Fresh mapping publication is incomplete");
+    const orphan = metadata.rownd_migration_orphan_mapping_repair;
+    if (orphan !== undefined && (!isRecord(orphan) || orphan.phase !== "COMPLETE")) {
+      throw new RowndMigrationPolicyError("Orphan mapping recovery is incomplete");
+    }
   }
 }

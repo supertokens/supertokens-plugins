@@ -98,7 +98,8 @@ describe("verified Rownd provider replacement", { timeout: 30000 }, () => {
     const result = await reconcileUser({ supertokens_user_id: fixture.internalId });
     expect(result).toMatchObject({ status: "OK", changed: true, supertokens_user_id: fixture.internalId, rownd_user_id: fixture.rowndId });
     expect(rownd.validateToken).not.toHaveBeenCalled();
-    expect(await reconcileUser({ email: fixture.current.data.email! })).toMatchObject({ status: "OK", changed: false });
+    const replay = await reconcileUser({ email: fixture.current.data.email! });
+    expect(replay, JSON.stringify(replay)).toMatchObject({ status: "OK", changed: false });
     const recipeId = (await SuperTokens.getUser(fixture.internalId))!.loginMethods[0]!.recipeUserId.getAsString();
     expect(await reconcileUser({ supertokens_user_id: recipeId })).toMatchObject({ status: "OK", changed: false });
   });

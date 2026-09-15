@@ -12,6 +12,9 @@ import { applyOwnerOperation, OWNER_PLAN_KEY, readOwnerPlanCheckpoint } from "./
 import { setRowndClient } from "./rownd-repository";
 import { recordAdministrativeMethodCreation } from "./migration-method-receipts";
 import { assertMigrationSourceActive } from "./migration-mapping";
+import { inspectInstantPrimaryProof } from "./migration-instant-election";
+import { withReconciliationReads } from "./reconciliation-reads";
+import { reconciliationUserMetadata } from "./reconciliation-sdk";
 import type { RowndUser } from "./types";
 import type { JsonRecord } from "./utils";
 
@@ -165,6 +168,59 @@ async function prepare(bind = true, sourceId = "newer", ownerIds = ["T", "D"]) {
 }
 
 describe("durable owner transitions", () => {
+  it("ordinary consolidation reuses discovery profiles across completion boundaries", async () => {
+    const fetchUserInfo = vi.fn(async ({ user_id }: { user_id: string }) => structuredClone(profiles.get(user_id)));
+    setRowndClient({ validateToken: async () => ({ user_id: "newer" }), fetchUserInfo });
+    await withReconciliationReads(async () => {
+      const plan = await prepare();
+      expect(fetchUserInfo).toHaveBeenCalledTimes(2);
+      await plan.execute();
+      await plan.beginMethodReconciliation();
+      await plan.complete();
+      expect(fetchUserInfo).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it.each(["unchanged", "drift"])("instant consolidation reuses adjacent fresh evidence and refreshes after metadata writes (%s)", async (mode) => {
+    recipes = new Map([
+      ["T", { id: "T", owner: "T", primary: true, verified: false, thirdParty: { id: "instant", userId: "older" } }],
+      ["D", { id: "D", owner: "T", primary: true, verified: false, email, thirdParty: { id: "google", userId: "subject" } }],
+    ]);
+    profiles = new Map([
+      ["older", { data: { user_id: "older" }, auth_level: "instant" }],
+      ["newer", { data: { user_id: "newer", email, google_id: "subject" }, verified_data: { email, google_id: "subject" } }],
+    ]);
+    metadata = new Map([
+      ["T", { original_rownd_user: structuredClone(profiles.get("older")), rownd_migration_complete: true }],
+      ["D", { original_rownd_user: structuredClone(profiles.get("newer")), rownd_migration_complete: true }],
+    ]);
+    const fetchUserInfo = vi.fn(async ({ user_id }: { user_id: string }) => structuredClone(profiles.get(user_id)));
+    setRowndClient({ validateToken: async () => ({ user_id: "newer" }), fetchUserInfo });
+    await withReconciliationReads(async () => {
+      const candidates = [{ rownd_user_id: "older", supertokens_user_id: "T" }, { rownd_user_id: "newer", supertokens_user_id: "D" }];
+      const source = (await fetchAdministrativeMigrationSource("newer", "public", {}))!;
+      const instantPrimaryProof = await inspectInstantPrimaryProof(candidates, "public", {});
+      expect(instantPrimaryProof).toBeDefined();
+      bindAdministrativeElection(source, "public", await inspectAdministrativeElection(candidates, { instantPrimaryProof }), async () => {});
+      const plan = (await prepareOwnerConsolidation({ source, candidates, target: "T", tenantId: "public", userContext: {} }))!;
+      fetchUserInfo.mockClear();
+      await plan.execute();
+      expect(fetchUserInfo).toHaveBeenCalledTimes(2);
+      await plan.beginMethodReconciliation();
+      expect(fetchUserInfo).toHaveBeenCalledTimes(2);
+      await plan.assertOwners(true);
+      expect(fetchUserInfo).toHaveBeenCalledTimes(4);
+      await plan.assertOwners(true);
+      expect(fetchUserInfo).toHaveBeenCalledTimes(4);
+      // Even a non-policy metadata write must end reuse of the earlier evidence.
+      await reconciliationUserMetadata.updateUserMetadata("D", { preference: "kept" });
+      if (mode === "drift") profiles.get("older")!.auth_level = "verified";
+      if (mode === "drift") await expect(plan.assertOwners(true)).rejects.toThrow("Instant primary source evidence changed");
+      else await plan.assertOwners(true);
+      expect(fetchUserInfo).toHaveBeenCalledTimes(6);
+    });
+  });
+
   function singleAppleOwner() {
     recipes = new Map([["T", { id: "T", owner: "T", primary: false, verified: false,
       thirdParty: { id: "apple", userId: "apple-subject" } }]]);

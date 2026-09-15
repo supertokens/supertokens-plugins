@@ -263,6 +263,11 @@ export type OwnerPlanCheckpoint = {
   recipes: OwnerRecipe[];
   aliases: OwnerAlias[];
   retiredAliases?: { id: string; from: string; info?: string }[];
+  legacySessionAliasHistory?: {
+    instantRecipeId: string;
+    instantRecipeIdentity: string;
+    aliases: string[];
+  };
   initial: OwnerState;
   operations: OwnerOperation[];
   cursor: number;
@@ -442,6 +447,19 @@ export function readOwnerPlanCheckpoint(
   const plan = value as OwnerPlanCheckpoint;
   assertState(plan.initial, plan.recipes);
   const ids = new Set(plan.recipes.map((recipe) => recipe.id));
+  const history = plan.legacySessionAliasHistory;
+  if (history !== undefined) {
+    const anchor = instantPrimaryAnchor(plan);
+    if (!isRecord(history) || !anchor || history.instantRecipeId !== plan.target ||
+      history.instantRecipeIdentity !== anchor.identity || !Array.isArray(history.aliases) ||
+      !history.aliases.length || new Set(history.aliases).size !== history.aliases.length || history.aliases.some((alias) =>
+      typeof alias !== "string" || !alias || ids.has(alias) ||
+        !plan.initial.markers.some((marker) => marker.id === alias) ||
+        (!plan.aliases.some((entry) => entry.id === alias) &&
+          !(Array.isArray(plan.retiredAliases) && plan.retiredAliases.some((entry) => entry.id === alias)) &&
+          !plan.initial.markers.some((marker) => marker.id === alias &&
+            isRecord(marker.values.rownd_migration_superseded) && marker.values.rownd_migration_superseded.targetUserId === plan.target)))) invalid();
+  }
   if (
     plan.retiredAliases !== undefined &&
     (!Array.isArray(plan.retiredAliases) ||
@@ -743,6 +761,30 @@ export function ownerStateAt(
       (state, operation) => applyOwnerOperation(state, operation, plan.target),
       plan.initial,
     );
+}
+
+export function instantPrimaryAnchor(plan: Pick<OwnerPlanCheckpoint, "target" | "recipes">) {
+  const recipe = plan.recipes.find((entry) => entry.id === plan.target);
+  if (!recipe) return undefined;
+  let identity: unknown;
+  try { identity = JSON.parse(recipe.identity); } catch { return undefined; }
+  if (!Array.isArray(identity) || identity[0] !== "thirdparty" || !isRecord(identity[3]) ||
+    identity[3].id !== "instant" || typeof identity[3].userId !== "string" || !identity[3].userId ||
+    !Array.isArray(identity[4]) || identity[4].length !== 1 || identity[4][0] !== "public") return undefined;
+  return { identity: recipe.identity, alias: identity[3].userId };
+}
+
+export function ambiguousOwnerSessionAliases(plan: OwnerPlanCheckpoint) {
+  const anchor = instantPrimaryAnchor(plan);
+  if (!anchor) return [];
+  return [...new Set([
+    ...(plan.legacySessionAliasHistory?.aliases ?? []),
+    ...plan.aliases.filter((alias) => alias.from !== undefined && alias.from !== alias.to).map((alias) => alias.id),
+    ...(plan.retiredAliases ?? []).map((alias) => alias.id),
+    // Older checkpoints may predate cumulative history. The immutable instant
+    // subject still binds its original alias even after its mapping has moved.
+    ...plan.aliases.filter((alias) => alias.id === anchor.alias && alias.to !== plan.target).map((alias) => alias.id),
+  ])].sort();
 }
 
 export function sameOwnerPlan(
