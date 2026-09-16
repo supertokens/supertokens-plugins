@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.7.10
+
+### Patch Changes
+
+- Refactor the reconciliation process
+
 ## Unreleased
 
 - Repair eligible missing credentials, token-authorized email verification, and added or replaced provider identities on repeat `/migrate` calls. Native canonical emails and pending contact changes remain authoritative.
