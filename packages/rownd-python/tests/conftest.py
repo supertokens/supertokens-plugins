@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import time
 from os import environ
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Callable, Dict, Literal, Optional
+from uuid import uuid4
 
 environ["SUPERTOKENS_ENV"] = "testing"
 
 import httpx
 import pytest
+from docker.errors import APIError, NotFound
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from testcontainers.core.container import DockerContainer
@@ -116,6 +118,40 @@ class LogMessageWaitStrategy(WaitStrategy):
             raise TimeoutError("Timed out waiting for log message: %s" % self.message)
 
 
+def start_container(container_factory: Callable[[], DockerContainer]) -> DockerContainer:
+    for attempt in range(3):
+        name = "rownd-tests-%s" % uuid4().hex
+        container = container_factory().with_name(name)
+        try:
+            container.start()
+            return container
+        except Exception as error:
+            # Docker's run() can create the container then fail before testcontainers
+            # receives its handle. A unique name lets us remove only our attempt.
+            client = container.get_docker_client().client
+            try:
+                try:
+                    failed_container = client.containers.get(name)
+                except NotFound:
+                    pass
+                else:
+                    failed_container.remove(force=True, v=True)
+            finally:
+                client.close()
+
+            explanation = str(getattr(error, "explanation", "")).lower()
+            port_collision = isinstance(error, APIError) and (
+                "failed to set up container networking" in explanation
+                or "driver failed programming external connectivity" in explanation
+            ) and (
+                "address already in use" in explanation
+                or "port is already allocated" in explanation
+            )
+            if not port_collision or attempt == 2:
+                raise
+    raise AssertionError("Unreachable")
+
+
 @pytest.fixture(scope="session")
 def core_url():
     network = Network()
@@ -123,20 +159,18 @@ def core_url():
     postgres = None
     core = None
     try:
-        postgres = (
-            DockerContainer("postgres:14")
+        postgres = start_container(
+            lambda: DockerContainer("postgres:14")
             .with_network(network)
             .with_network_aliases("postgres")
             .with_env("POSTGRES_USER", "supertokens")
             .with_env("POSTGRES_PASSWORD", "somepassword")
             .with_env("POSTGRES_DB", "supertokens")
-            .with_exposed_ports(5432)
             .waiting_for(LogMessageWaitStrategy("database system is ready to accept connections").with_startup_timeout(60))
         )
-        postgres.start()
 
-        core = (
-            DockerContainer("supertokens/supertokens-postgresql:12.0.10")
+        core = start_container(
+            lambda: DockerContainer("supertokens/supertokens-postgresql:12.0.10")
             .with_network(network)
             .with_env(
                 "POSTGRESQL_CONNECTION_URI",
@@ -144,7 +178,6 @@ def core_url():
             )
             .with_exposed_ports(3567)
         )
-        core.start()
         url = "http://%s:%s" % (core.get_container_host_ip(), core.get_exposed_port(3567))
         deadline = time.time() + 60
         while time.time() < deadline:
@@ -173,8 +206,9 @@ def core_url():
 def memory_core_url():
     core = None
     try:
-        core = DockerContainer("supertokens/supertokens-postgresql").with_exposed_ports(3567)
-        core.start()
+        core = start_container(
+            lambda: DockerContainer("supertokens/supertokens-postgresql").with_exposed_ports(3567)
+        )
         url = "http://%s:%s" % (core.get_container_host_ip(), core.get_exposed_port(3567))
         deadline = time.time() + 60
         while time.time() < deadline:
