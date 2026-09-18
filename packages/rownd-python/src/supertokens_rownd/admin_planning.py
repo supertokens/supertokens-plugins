@@ -88,7 +88,7 @@ def administrative_source(profile: JsonDict, tenant_id: str) -> JsonDict:
 def identity_keys(profile: JsonDict) -> set[str]:
     keys = set()
     email = profile["data"].get("email")
-    if isinstance(email, str) and email and not email.endswith("@anonymous.local"):
+    if isinstance(email, str) and email and not email.lower().endswith(("@anonymous.local", "@stfakeemail.supertokens.com")):
         keys.add("email:" + email.lower())
     for provider in ("google", "apple"):
         subject = provider_subject(profile, provider)
@@ -249,7 +249,18 @@ def owner_state_at(plan: JsonDict, cursor: Optional[int] = None) -> JsonDict:
     return state
 
 
-def plan_owner_operations(plan: JsonDict, profile: JsonDict) -> list[JsonDict]:
+def plan_owner_operations(plan: JsonDict, profile: JsonDict, *, node_compatible: bool = False) -> list[JsonDict]:
+    def repair(values: JsonDict, replacements: dict[str, str]) -> JsonDict:
+        if not node_compatible:
+            return repair_metadata_references(values, replacements)
+        result = copy.deepcopy(values)
+        pointer = result.get("rownd_email_recipe_user_id")
+        if isinstance(pointer, str):
+            result["rownd_email_recipe_user_id"] = replacements.get(pointer, pointer)
+        pointers = result.get("rownd_email_recipe_user_ids")
+        if isinstance(pointers, dict):
+            result["rownd_email_recipe_user_ids"] = {k: replacements.get(v, v) if isinstance(v, str) else v for k, v in pointers.items()}
+        return result
     state = copy.deepcopy(plan["initial"])
     actions: list[JsonDict] = []
     target = plan["target"]
@@ -264,7 +275,8 @@ def plan_owner_operations(plan: JsonDict, profile: JsonDict) -> list[JsonDict]:
         nonlocal state
         state = apply_owner_operation(state, operation, target)
         actions.append(operation)
-    for owner in sorted({e["owner"] for e in state["graph"] if e["primary"] and e["owner"] != target}):
+    owners = list(dict.fromkeys(e["owner"] for e in state["graph"] if e["primary"] and e["owner"] != target))
+    for owner in owners if node_compatible else sorted(owners):
         for entry in list(state["graph"]):
             if entry["owner"] == owner and entry["id"] != owner:
                 append({"kind": "detach", "id": entry["id"]})
@@ -285,24 +297,26 @@ def plan_owner_operations(plan: JsonDict, profile: JsonDict) -> list[JsonDict]:
             append(operation)
     retired = plan.get("retiredAliases", [])
     changed_aliases = [a for a in plan["aliases"] if a.get("from") != a["to"]] + retired
-    emails = {r["email"] for r in recipes.values() if r.get("email")}
+    emails = list(dict.fromkeys(r["email"] for r in recipes.values() if r.get("email")))
     for alias in changed_aliases:
-        for email in sorted(emails):
+        for email in emails if node_compatible else sorted(emails):
             append({"kind": "revoke_verification_tokens", "id": alias["id"], "email": email})
     replacements = {a["id"]: a["from"] for a in retired}
-    for alias in plan["aliases"]:
+    for alias in [] if node_compatible else plan["aliases"]:
         if alias.get("from") and alias["from"] != alias["to"]:
             replacements[alias["id"]] = next((a["id"] for a in plan["aliases"] if a["to"] == alias["from"]), alias["from"])
     for marker in list(state["markers"]):
-        values = repair_metadata_references(marker["values"], replacements)
+        values = repair(marker["values"], replacements)
         if values != marker["values"]:
             append({"kind": "metadata", "id": marker["id"], "values": values})
     for alias in retired:
         marker = next(e for e in state["markers"] if e["id"] == alias["id"])
         append({"kind": "metadata", "id": alias["id"], "values": {
-            **marker["values"], "rownd_migration_canonical_target": target,
+            **marker["values"], **({} if node_compatible else {"rownd_migration_canonical_target": target}),
             "rownd_migration_superseded": {"rowndUserId": plan["sourceId"], "targetUserId": target}}})
-    for alias in changed_aliases:
+        if node_compatible:
+            append({"kind": "delete_mapping", "id": alias["from"], "alias": alias["id"]})
+    for alias in (changed_aliases[:-len(retired)] if retired and node_compatible else changed_aliases):
         if alias.get("from"):
             append({"kind": "delete_mapping", "id": alias["from"], "alias": alias["id"]})
     for alias in plan["aliases"]:
@@ -310,10 +324,21 @@ def plan_owner_operations(plan: JsonDict, profile: JsonDict) -> list[JsonDict]:
             append({"kind": "create_mapping", "id": alias["to"], "alias": alias["id"],
                     **({"info": alias["info"]} if "info" in alias else {})})
             recipe = recipes[alias["to"]]
-            if recipe.get("email") and recipe["verified"]:
+            already_verified = any(c["id"] == alias["id"] and c["email"] == recipe.get("email") and c["verified"] for c in state["verifications"])
+            if recipe.get("email") and recipe["verified"] and not (node_compatible and already_verified):
                 append({"kind": "verify_email", "id": alias["id"], "email": recipe["email"]})
     for marker in list(state["markers"]):
         values = copy.deepcopy(marker["values"])
+        if node_compatible:
+            replacements = {}
+            for retired_alias in retired:
+                destination_alias = next((a["id"] for a in plan["aliases"] if a["to"] == retired_alias["from"]), retired_alias["from"])
+                replacements[retired_alias["id"]] = destination_alias
+                replacements[retired_alias["from"]] = destination_alias
+            values = repair(values, replacements)
+            superseded = values.get("rownd_migration_superseded")
+            if isinstance(superseded, dict) and superseded.get("targetUserId") == target:
+                values["rownd_migration_superseded"] = {"rowndUserId": plan["sourceId"], "targetUserId": target}
         destination = next((a["to"] for a in plan["aliases"] if a["id"] == marker["id"] or a["to"] == marker["id"]), None)
         if destination:
             for field in ("rownd_migration_target", "rownd_migration_canonical_target"):
@@ -347,16 +372,39 @@ def read_owner_plan(metadata: JsonDict) -> Optional[JsonDict]:
             raise AdministrativePolicyError("Invalid duplicate owner consolidation plan")
 
     plan = metadata.get(OWNER_PLAN_KEY)
-    if plan is None:
+    if OWNER_PLAN_KEY not in metadata:
         return None
+    if not isinstance(plan, dict):
+        raise AdministrativePolicyError("Invalid duplicate owner consolidation plan")
     try:
         require(isinstance(plan, dict) and type(plan["version"]) is int and plan["version"] == 2)
         require(all(valid_lookup_id(plan[k]) for k in ("id", "sourceId", "target")))
         require(plan["status"] in {"READY", "APPLYING", "RECONCILING", "COMPLETE"})
+        require("reservation" not in plan or plan["reservation"] is True)
         require(type(plan["cursor"]) is int and 0 <= plan["cursor"] <= len(plan["operations"]))
         ids = {r["id"] for r in plan["recipes"]}
         require(ids and len(ids) == len(plan["recipes"]) and plan["target"] in ids)
         require(all(valid_lookup_id(i) for i in ids))
+        created = plan.get("createdRecipes", [])
+        require(isinstance(created, list))
+        created_ids = set()
+        for receipt in created:
+            require(isinstance(receipt, dict) and valid_lookup_id(receipt.get("id")))
+            require(receipt["id"] not in ids and receipt["id"] not in created_ids)
+            require(type(receipt.get("verified")) is bool and isinstance(receipt.get("identity"), str))
+            identity = json.loads(receipt["identity"])
+            require(isinstance(identity, list) and len(identity) == 7 and identity[4] == ["public"])
+            require(type(identity[5]) in (int, float) and math.isfinite(identity[5]) and identity[5] >= 0)
+            require(identity[1] == receipt.get("email"))
+            require(identity[0] in {"passwordless", "thirdparty", "emailpassword", "webauthn"})
+            require(identity[1] is None or isinstance(identity[1], str) and bool(identity[1]))
+            require(identity[2] is None or isinstance(identity[2], str) and bool(identity[2]))
+            if identity[0] == "thirdparty":
+                require(isinstance(identity[3], dict) and valid_lookup_id(identity[3].get("id")) and valid_lookup_id(identity[3].get("userId")))
+            else:
+                require(identity[3] is None)
+            created_ids.add(receipt["id"])
+        require(not created or plan["status"] in {"RECONCILING", "COMPLETE"})
         require(isinstance(plan["candidates"], list) and plan["candidates"])
         candidate_ids = [c["rownd_user_id"] for c in plan["candidates"]]
         require(len(set(candidate_ids)) == len(candidate_ids) and plan["sourceId"] in candidate_ids)
@@ -418,6 +466,16 @@ def read_owner_plan(metadata: JsonDict) -> Optional[JsonDict]:
             if kind in {"verify_email", "revoke_verification_tokens"}:
                 require(operation.get("email") in emails)
         require(plan["status"] in {"READY", "APPLYING"} or plan["cursor"] == len(plan["operations"]))
+        profile = plan.get("sourceProfile")
+        if profile is None:
+            profile = next((op["values"]["original_rownd_user"] for op in reversed(plan["operations"])
+                if op["kind"] == "metadata" and op["id"] == plan["target"] and "original_rownd_user" in op["values"]), None)
+        if profile is None:
+            profile = next((m["values"].get("original_rownd_user") for m in initial["markers"] if m["id"] == plan["target"]), None)
+        require(isinstance(profile, dict) and profile.get("data", {}).get("user_id") == plan["sourceId"])
+        if not isinstance(profile, dict):
+            raise AdministrativePolicyError("Missing owner source profile")
+        require(any(json.dumps(plan["operations"], sort_keys=True) == json.dumps(plan_owner_operations(plan, profile, node_compatible=node), sort_keys=True) for node in (False, True)))
         final = owner_state_at(plan, len(plan["operations"]))
         require(all(e["owner"] == plan["target"] and e["primary"] for e in final["graph"]))
         require(all(any(m["id"] == a["to"] and m.get("alias") == a["id"] for m in final["mappings"]) for a in plan["aliases"]))
@@ -430,12 +488,28 @@ def read_owner_plan(metadata: JsonDict) -> Optional[JsonDict]:
         if plan["status"] == "READY":
             require(plan["cursor"] == 0)
         if plan["status"] == "COMPLETE":
-            completion = plan["completion"]
+            completion = plan.get("completion", {"recipes": plan["recipes"], "state": final})
             require(isinstance(completion, dict) and isinstance(completion["recipes"], list) and completion["recipes"])
             completed_ids = [r["id"] for r in completion["recipes"]]
             require(len(set(completed_ids)) == len(completed_ids) and plan["target"] in completed_ids)
             for recipe in completion["recipes"]:
                 identity = json.loads(recipe["identity"])
+                require(isinstance(identity, list) and len(identity) == 7)
+                require(valid_lookup_id(recipe["id"]) and identity[1] == recipe.get("email"))
+                require(identity[0] in {"passwordless", "thirdparty", "emailpassword", "webauthn"})
+                require(identity[1] is None or isinstance(identity[1], str) and bool(identity[1]))
+                require(identity[2] is None or isinstance(identity[2], str) and bool(identity[2]))
+                if identity[0] == "thirdparty":
+                    require(isinstance(identity[3], dict) and valid_lookup_id(identity[3].get("id")) and valid_lookup_id(identity[3].get("userId")))
+                else:
+                    require(identity[3] is None)
+                original = next((r for r in plan["recipes"] if r["id"] == recipe["id"]), None)
+                if original is not None:
+                    initial_identity = json.loads(original["identity"])
+                    require(all(type(identity[i]) is type(initial_identity[i]) and identity[i] == initial_identity[i]
+                                for i in (0, 2, 3, 4, 5, 6)))
+                    if initial_identity[0] != "passwordless":
+                        require(identity[1] == initial_identity[1])
                 require(isinstance(identity, list) and len(identity) == 7 and identity[4] == ["public"])
                 require(type(identity[5]) in (int, float) and math.isfinite(identity[5]) and identity[5] >= 0)
                 require(type(recipe["verified"]) is bool)
@@ -455,6 +529,6 @@ def read_owner_plan(metadata: JsonDict) -> Optional[JsonDict]:
             require(isinstance(history["aliases"], list) and history["aliases"])
             require(all(valid_lookup_id(a) and a not in ids for a in history["aliases"]))
             require(len(set(history["aliases"])) == len(history["aliases"]))
-    except (KeyError, TypeError, ValueError, AssertionError, StopIteration, AdministrativePolicyError):
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError, OverflowError, AssertionError, StopIteration, AdministrativePolicyError):
         raise AdministrativePolicyError("Invalid duplicate owner consolidation plan") from None
     return copy.deepcopy(plan)

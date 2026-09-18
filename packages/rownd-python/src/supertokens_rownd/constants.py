@@ -107,6 +107,7 @@ INTERNAL_METADATA_FIELDS = {
     "rownd_migration_provider_introductions",
     "rownd_migration_provider_introduction",
     "rownd_migration_admin_methods",
+    "rownd_migration_admin_finalization",
     "rownd_migration_admin_creation",
     "rownd_migration_reconciliation",
     "rownd_migration_owner_recovery",

@@ -36,8 +36,10 @@ def method_identity(method: Any) -> str:
 
 
 class AdministrativeCore:
-    def __init__(self, context: JsonDict):
+    def __init__(self, context: JsonDict, tenant_id: str = "public"):
         self.context = context
+        self.tenant_id = tenant_id
+        self.actions: list[str] = []
 
     def fresh(self) -> None:
         clear_supertokens_core_call_cache(self.context)
@@ -90,6 +92,16 @@ class AdministrativeCore:
                 if method.tenant_ids != ["public"]:
                     raise AdministrativePolicyError("Owner consolidation requires public-only recipes")
                 recipe_id = await self.immutable(method.recipe_user_id.get_as_string())
+                member = await self.user(recipe_id)
+                if (member is None or await self.immutable(member.id) != owner
+                        or member.is_primary_user != user.is_primary_user):
+                    raise AdministrativePolicyError("Recipe reverse ownership changed")
+                matching = []
+                for entry in member.login_methods:
+                    if await self.immutable(entry.recipe_user_id.get_as_string()) == recipe_id:
+                        matching.append(entry)
+                if len(matching) != 1 or not same_json(json.loads(method_identity(matching[0])), json.loads(method_identity(method))):
+                    raise AdministrativePolicyError("Recipe reverse identity changed")
                 mapping = await self.mapping(recipe_id, "SUPERTOKENS")
                 recipes[recipe_id] = {"id": recipe_id, "identity": method_identity(method),
                                       "verified": method.verified,
@@ -137,16 +149,24 @@ class AdministrativeCore:
         recipe_mapping = await self.mapping(recipe_id, "SUPERTOKENS")
         effective_id = recipe_mapping["alias"] if recipe_mapping else recipe_id
         if kind == "detach":
+            donor = await self.user(recipe_id)
+            if donor is None or not donor.is_primary_user or await self.immutable(donor.id) == target:
+                raise AdministrativePolicyError("Donor ownership changed before unlink")
+            if await self.immutable(donor.id) == recipe_id and len(donor.login_methods) != 1:
+                raise AdministrativePolicyError("Donor primary still has linked recipes")
             result = await linking.unlink_account(RecipeUserId(effective_id), self.context)
+            if getattr(result, "was_recipe_user_deleted", False):
+                raise AdministrativePolicyError("Unlink unexpectedly deleted a recipe")
         elif kind == "promote":
             result = await linking.create_primary_user(RecipeUserId(effective_id), self.context)
         elif kind == "link":
             result = await linking.link_accounts(RecipeUserId(effective_id), target, self.context)
         elif kind == "delete_mapping":
             current = await self.mapping(operation["alias"])
-            if current is None or current["id"] != recipe_id:
+            reverse = await self.mapping(recipe_id, "SUPERTOKENS")
+            if current is None or current["id"] != recipe_id or not same_json(current, reverse):
                 raise AdministrativePolicyError("Mapping changed before deletion")
-            result = await core.delete_user_id_mapping(recipe_id, "SUPERTOKENS", True, self.context)
+            result = await core.delete_user_id_mapping(operation["alias"], "EXTERNAL", True, self.context)
         elif kind == "create_mapping":
             if await self.mapping(operation["alias"]) or await self.mapping(recipe_id, "SUPERTOKENS"):
                 raise AdministrativePolicyError("Mapping changed before publication")
@@ -162,14 +182,16 @@ class AdministrativeCore:
             patch.update(operation["values"])
             await metadata.update_user_metadata(recipe_id, patch, self.context)
         elif kind == "revoke_verification_tokens":
+            # Revocation is repeated until the mapping transition is committed.
+            # Tokens issued in that gap must not survive alias reassignment.
             result = await verification.revoke_email_verification_tokens(
-                "public", RecipeUserId(recipe_id), operation["email"], self.context)
+                self.tenant_id, RecipeUserId(recipe_id), operation["email"], self.context)
         elif kind == "verify_email":
             if not await verification.is_email_verified(RecipeUserId(recipe_id), operation["email"], self.context):
                 token = await verification.create_email_verification_token(
-                    "public", RecipeUserId(recipe_id), operation["email"], self.context)
+                    self.tenant_id, RecipeUserId(recipe_id), operation["email"], self.context)
                 if getattr(token, "token", None):
-                    result = await verification.verify_email_using_token("public", getattr(token, "token"), False, self.context)
+                    result = await verification.verify_email_using_token(self.tenant_id, getattr(token, "token"), False, self.context)
                 elif getattr(token, "status", None) != "EMAIL_ALREADY_VERIFIED_ERROR":
                     raise AdministrativePolicyError("Email verification failed")
         else:
@@ -177,3 +199,4 @@ class AdministrativeCore:
         self.fresh()
         if result is not None and getattr(result, "status", "OK") != "OK":
             raise AdministrativePolicyError("Core rejected administrative operation: " + kind)
+        self.actions.append(kind)

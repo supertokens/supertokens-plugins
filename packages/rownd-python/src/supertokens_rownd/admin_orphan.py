@@ -10,6 +10,7 @@ from supertokens_python.types.base import AccountInfoInput
 from .admin_core import AdministrativeCore, same_json
 from .admin_planning import AdministrativePolicyError, provider_subject, read_owner_plan
 from .rownd_compatibility import is_rownd_email_verified
+from .admin_source import source_evidence
 
 ORPHAN_KEY = "rownd_migration_orphan_mapping_repair"
 
@@ -26,12 +27,12 @@ async def inspect_orphan(store: AdministrativeCore, source_id: str, profile: dic
             raise AdministrativePolicyError("Invalid orphan mapping checkpoint")
         if prior["phase"] == "COMPLETE":
             return None
-        if not same_json(prior["profile"], profile):
+        if not same_json(source_evidence(prior["profile"]), source_evidence(profile)):
             raise AdministrativePolicyError("Orphan recovery source changed")
         if prior["phase"] == "HANDOFF":
             owner_plan = read_owner_plan(await store.raw(prior["target"]))
             if owner_plan is not None:
-                if (owner_plan["target"] != prior["target"] or owner_plan["sourceId"] != source_id
+                if (owner_plan["target"] != prior["target"] or owner_plan["sourceId"] != prior.get("winner", source_id)
                         or await store.user(prior["absentId"]) is not None
                         or (mapping is not None and mapping["id"] != prior["target"])):
                     raise AdministrativePolicyError("Orphan handoff lineage changed")
@@ -72,6 +73,16 @@ async def inspect_orphan(store: AdministrativeCore, source_id: str, profile: dic
         literal = marker["id"]
         record = await store.raw(literal)
         record.pop(ORPHAN_KEY, None)
+        if prior and literal == source_id and prior.get("winner", source_id) != source_id:
+            expected_marker = {"rowndUserId": prior["winner"], "targetUserId": target}
+            if record.get("rownd_migration_superseded") == expected_marker:
+                for field in ("rownd_migration_superseded", "rownd_migration_canonical_target"):
+                    record.pop(field, None)
+                    marker["values"].pop(field, None)
+                    original = prior["evidence"]["metadata"][literal]
+                    if field in original:
+                        record[field] = original[field]
+                        marker["values"][field] = original[field]
         evidence["metadata"][literal] = record
         if literal not in {source_id, old["id"]}:
             evidence["mappings"].append({"id": literal, "external": await store.mapping(literal),
@@ -100,6 +111,11 @@ async def retire_orphan(store: AdministrativeCore, checkpoint: dict[str, Any]) -
     if current is None or not same_json(current["evidence"], checkpoint["evidence"]):
         raise AdministrativePolicyError("Orphan evidence changed before handoff")
     await metadata.update_user_metadata(checkpoint["sourceId"], {ORPHAN_KEY: checkpoint}, store.context)
+    winner = checkpoint.get("winner", checkpoint["sourceId"])
+    if winner != checkpoint["sourceId"]:
+        await metadata.update_user_metadata(checkpoint["sourceId"], {
+            "rownd_migration_superseded": {"rowndUserId": winner, "targetUserId": checkpoint["target"]},
+            "rownd_migration_canonical_target": checkpoint["target"]}, store.context)
     mapping = await store.mapping(checkpoint["sourceId"])
     if mapping:
         if not same_json(mapping, checkpoint["oldMapping"]):

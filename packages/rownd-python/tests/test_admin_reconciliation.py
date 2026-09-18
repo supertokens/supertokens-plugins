@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import uuid
+import json
 from contextlib import closing
 from urllib.parse import urlsplit
 from typing import Any, cast
@@ -27,7 +28,7 @@ from supertokens_rownd.admin_planning import (
 from supertokens_rownd.rownd_repository import RowndClient
 from supertokens_rownd.supertokens_repository import import_user
 from supertokens_rownd.supertokens_repository import get_user_metadata, get_raw_user_metadata
-from supertokens_rownd.admin_validation import validate_completed_owner_plan
+from supertokens_rownd.admin_validation import validate_completed_owner_plan, resolve_consolidated_token_owner
 from supertokens_rownd.types import RowndPluginConfig
 
 
@@ -197,6 +198,10 @@ async def test_real_core_two_primary_merge_preserves_recipes_and_alias_reverse(c
     assert (await mapping_for(new_id)).supertokens_user_id == target
     assert (await mapping_for(target, "SUPERTOKENS")).external_user_id == new_id
     assert (await existing_user(old_id)).id == new_id
+    historical = await resolve_consolidated_token_owner(old_id, "public", {}, client.fetch_optional_user_info)
+    assert historical is not None and historical["target"] == target and historical["canonical_rownd_id"] == new_id
+    assert historical["recipe_user_id"].get_as_string() == old_id
+    assert await resolve_consolidated_token_owner(new_id, "public", {}, client.fetch_optional_user_info) is None
     assert await sessions.get_session_information(session_handle) is not None
 
 
@@ -241,6 +246,8 @@ async def test_real_core_standalone_verified_phone_election(core_url):
     assert result["status"] == "OK", result
     assert result["supertokens_user_id"] == target
     assert (await existing_user(new_id)).login_methods[0].phone_number == phone
+    with pytest.raises(AdministrativePolicyError, match="superseded"):
+        await resolve_consolidated_token_owner(old_id, "public", {}, client.fetch_optional_user_info)
 
 
 async def test_real_core_proven_instant_primary_alias_move_and_validator(core_url):
@@ -274,6 +281,20 @@ async def test_real_core_proven_instant_primary_alias_move_and_validator(core_ur
     corrupted["recipes"] = []
     with pytest.raises(AdministrativePolicyError):
         read_owner_plan({OWNER_PLAN_KEY: corrupted})
+    corrupted = copy.deepcopy(plan)
+    anchor = next(r for r in corrupted["recipes"] if r["id"] == target)
+    identity = json.loads(anchor["identity"])
+    identity[3] = {"id": "google", "userId": "forged-provider"}
+    anchor["identity"] = json.dumps(identity, separators=(",", ":"))
+    corrupted.pop("legacySessionAliasHistory", None)
+    with pytest.raises(AdministrativePolicyError):
+        read_owner_plan({OWNER_PLAN_KEY: corrupted})
+    corrupted = copy.deepcopy(plan)
+    corrupted.pop("sourceProfile", None)
+    corrupted["operations"].insert(0, {"kind": "verify_email", "id": target, "email": email})
+    corrupted["cursor"] += 1
+    with pytest.raises(AdministrativePolicyError):
+        read_owner_plan({OWNER_PLAN_KEY: corrupted})
     for field, value in (("version", True), ("version", 2.0), ("cursor", True), ("cursor", -1)):
         corrupted = {**plan, field: value}
         with pytest.raises(AdministrativePolicyError):
@@ -299,7 +320,9 @@ async def test_real_core_metadata_references_are_readonly_and_cycles_return_lite
     assert (await get_user_metadata(alias))["custom"] == "literal"
 
 
-async def test_real_core_narrow_orphan_mapping_handoff(core_url):
+@pytest.mark.parametrize("source_wins", [True, False])
+@pytest.mark.parametrize("lose_response", [True, False])
+async def test_real_core_narrow_orphan_mapping_handoff(core_url, source_wins, lose_response, monkeypatch):
     import docker
 
     suffix = uuid.uuid4().hex
@@ -307,6 +330,8 @@ async def test_real_core_narrow_orphan_mapping_handoff(core_url):
     email = suffix + "@example.com"
     profiles = {alias: profile(alias, email, "2025-01-01T00:00:00Z"),
                 source_id: profile(source_id, email, "2025-02-01T00:00:00Z")}
+    if not source_wins:
+        profiles[alias]["meta"]["last_active"] = "2025-03-01T00:00:00Z"
     for value in profiles.values():
         value["data"]["google_id"] = suffix
     client = ProfilesClient(profiles)
@@ -338,10 +363,28 @@ async def test_real_core_narrow_orphan_mapping_handoff(core_url):
     preview = await reconcile_user(rownd_user_id=source_id, dry_run=True)
     assert preview["status"] == "PREVIEW", preview
     assert (await mapping_for(source_id)).supertokens_user_id == absent
+    if lose_response:
+        original_delete = core.delete_user_id_mapping
+        async def lost_delete(*args, **kwargs):
+            await original_delete(*args, **kwargs)
+            raise ConnectionError("orphan deletion committed")
+        monkeypatch.setattr(core, "delete_user_id_mapping", lost_delete)
+        interrupted = await reconcile_user(rownd_user_id=source_id)
+        assert interrupted["status"] == "ERROR" and interrupted["partialProgress"], interrupted
+        monkeypatch.setattr(core, "delete_user_id_mapping", original_delete)
     result = await reconcile_user(rownd_user_id=source_id)
     assert result["status"] == "OK", result
     assert result["supertokens_user_id"] == target
-    assert (await mapping_for(source_id)).supertokens_user_id == target
+    assert result["requested_rownd_user_id"] == source_id
+    assert result["rownd_user_id"] == (source_id if source_wins else alias)
+    if source_wins:
+        assert (await mapping_for(source_id)).supertokens_user_id == target
+    else:
+        assert (await mapping_for(alias)).supertokens_user_id == target
+        assert await core.get_user(source_id) is None
+        retired = await get_raw_user_metadata(source_id)
+        assert retired["rownd_migration_superseded"] == {"rowndUserId": alias, "targetUserId": target}
+        assert cast(dict[str, Any], retired["rownd_migration_orphan_mapping_repair"])["phase"] == "COMPLETE"
 
 
 async def test_real_core_recovers_method_import_committed_before_receipt(core_url, monkeypatch):
