@@ -519,6 +519,15 @@ Uncommitted sole anchors remain quarantined rather than deleting the primary acc
 JWT lifecycle repair does not merge a separate primary owner. An obsolete recipe that
 originally anchored the current primary may nevertheless be retired using recipe-only
 deletion after a replacement is linked; the primary user ID and mapping remain intact.
+Repeated completed migrations use ID-only discovery when the bidirectional mapping,
+source identities, tenant membership, canonical email, and checkpoint state are stable.
+Unknown operational markers or repair/debt conditions fall back to account discovery.
+Fresh source, mapping, method, and final session checks still run; no completion result
+is cached across requests or writes.
+Provider membership introductions record the original tenant set before association;
+source drift removes only the newly introduced membership. Native session creation and
+refresh reject pending provider introductions and recipes missing the requested tenant.
+Email retirement revocation debt is settled before evaluating a changed current source.
 
 Phone migration remains verified-only: missing verification preserves the phone in original
 profile metadata, not as a Core login method; contradictory phone evidence blocks migration.

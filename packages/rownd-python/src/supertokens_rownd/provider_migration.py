@@ -79,7 +79,7 @@ async def _write(target: str, tenant: str, key: str, value: Optional[JsonDict], 
 
 async def checkpoint_introduction(
     source: FreshMigrationSource, target: str, identity: ExpectedIdentity,
-    context: UserContext, recipe: Optional[str] = None,
+    context: UserContext, recipe: Optional[str] = None, membership: bool = False,
 ) -> JsonDict:
     if identity.provider_id not in {"google", "apple"}:
         return {}
@@ -89,6 +89,7 @@ async def checkpoint_introduction(
         "tenant": source.snapshot.tenant_id, "provider": identity.provider_id,
         "subject": identity.provider_user_id, "recipe": recipe,
         "created": recipe is None, "kind": "introduction", "state": "prepared",
+        "membership": membership,
     }
     if recipe is not None:
         from . import supertokens_repository as repo
@@ -96,8 +97,13 @@ async def checkpoint_introduction(
         method = next((method for method in owner.login_methods
                        if method.recipe_user_id.get_as_string() == recipe
                        and repo._migration_method_matches_identity(method, identity)), None) if owner else None
-        if method is None or source.snapshot.tenant_id not in method.tenant_ids:
+        if method is None or (not membership and source.snapshot.tenant_id not in method.tenant_ids):
             raise _invalid()
+        if membership:
+            if owner is None or not await repo.sdk_user_id_matches_internal_target(owner.id, target, context):
+                raise _invalid()
+            if source.snapshot.tenant_id in method.tenant_ids:
+                return {}
         receipt.update(cast(JsonDict, {"joined": method.time_joined, "tenants": sorted(method.tenant_ids),
                         "email": method.email, "phone": method.phone_number,
                         "internal_recipe": await repo.resolve_supertokens_user_id(recipe, context)}))
@@ -190,12 +196,18 @@ async def _repair_provider_lifecycle(
             owner, method = candidates[0]
             recipe = method.recipe_user_id.get_as_string()
             if entry.get("recipe") is None:
-                if replacement is None or replacement.provider_user_id != subject:
+                local = (await repo.get_raw_user_metadata(recipe, context)).get("rownd_migration_provider_introduction")
+                proven = isinstance(local, dict) and local == {**entry, "checkpoint": key}
+                if proven and owner.id != user.id:
+                    internal_owner = await repo.resolve_supertokens_user_id(owner.id, context)
+                    if (owner.is_primary_user or len(owner.login_methods) != 1
+                        or repo._mapping_lookup(await repo.get_user_id_mapping(internal_owner, "SUPERTOKENS", context)) is not None):
+                        raise _invalid()
+                if not proven and (replacement is None or replacement.provider_user_id != subject):
                     raise _invalid()
-                # A lost create response cannot prove creation. Recover as a native
-                # donor: normal source/provenance classification still authorizes
-                # linking, and rollback must restore rather than delete it.
-                entry = {**entry, "created": False, "recipe": recipe,
+                # Only the exact atomically imported receipt proves creation. A
+                # lookup alone recovers as a native donor, never deletion authority.
+                entry = {**entry, "created": proven, "recipe": recipe,
                          "joined": method.time_joined, "tenants": sorted(method.tenant_ids),
                          "email": method.email, "phone": method.phone_number,
                          "internal_recipe": await repo.resolve_supertokens_user_id(recipe, context)}
@@ -204,7 +216,10 @@ async def _repair_provider_lifecycle(
                 entry.get("internal_recipe") != await repo.resolve_supertokens_user_id(recipe, context)
             ) or entry.get("email") != method.email or entry.get("phone") != method.phone_number:
                 raise _invalid()
+            if entry.get("membership") and tenant in entry.get("tenants", []):
+                raise _invalid()
             if (entry.get("tenants") != sorted(method.tenant_ids)
+                and not (entry.get("membership") and sorted(set(entry.get("tenants", [])) | {tenant}) == sorted(method.tenant_ids))
                 and not (entry["state"] == "removing" and
                          [value for value in entry.get("tenants", []) if value != tenant] == sorted(method.tenant_ids))):
                 raise _invalid()
@@ -218,6 +233,8 @@ async def _repair_provider_lifecycle(
             ):
                 # A timed-out create may have raced a native credential; never adopt it as ours.
                 raise _invalid()
+            if entry["state"] == "removing":
+                await repo.session_asyncio.revoke_all_sessions_for_user(target_id, True, tenant, context)
             if replacement and replacement.provider_user_id == subject:
                 if owner.id == user.id and tenant in method.tenant_ids:
                     fresh = await read_fresh_source()
@@ -233,7 +250,7 @@ async def _repair_provider_lifecycle(
             preserve_anchor = owner.id == user.id and (
                 len(owner.login_methods) == 1 or entry.get("internal_recipe") == target_id
             )
-            if not entry.get("created") and not preserve_anchor:
+            if not entry.get("created") and not entry.get("membership") and not preserve_anchor:
                 if owner.id == user.id:
                     await repo.accountlinking_asyncio.unlink_account(method.recipe_user_id, context)
                 await repo.session_asyncio.revoke_all_sessions_for_user(recipe, False, None, context)
@@ -244,8 +261,8 @@ async def _repair_provider_lifecycle(
             await repo.session_asyncio.revoke_all_sessions_for_user(target_id, True, tenant, context)
             clear_supertokens_core_call_cache(context)
             after = await repo.get_user(recipe, context)
-            if after and ((entry.get("created") or preserve_anchor) and any(matching(item) and tenant in item.tenant_ids for item in after.login_methods)
-                          or (not entry.get("created") and not preserve_anchor and after.id == user.id)):
+            if after and ((entry.get("created") or entry.get("membership") or preserve_anchor) and any(matching(item) and tenant in item.tenant_ids for item in after.login_methods)
+                          or (not entry.get("created") and not entry.get("membership") and not preserve_anchor and after.id == user.id)):
                 raise _invalid()
             # Quarantine retains the anchor and receipt for recovery in other tenants.
             await _write(target_id, tenant, key, None, context)

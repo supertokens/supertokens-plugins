@@ -216,6 +216,181 @@ async def test_online_current_email_uses_jwt_authority_and_retires_snapshot_emai
     assert not any(method.email == profile["data"]["email"] for method in user.login_methods)
 
 
+async def test_email_revocation_debt_survives_source_drift(core_url, rownd_client, monkeypatch):
+    client = make_client(core_url, rownd_client)
+    rownd_client.user_id = "email-debt-" + str(uuid.uuid4())
+    old = rownd_client.user_id + "@old.example"
+    rownd_client.user_info = {"data": {"user_id": rownd_client.user_id, "google_id": rownd_client.user_id, "email": old},
+                              "verified_data": {"google_id": True}}
+    assert migrate(client).status_code == 200
+    native_remove = tenants.disassociate_user_from_tenant
+    issued = []
+
+    async def remove(tenant, recipe, *args, **kwargs):
+        result = await native_remove(tenant, recipe, *args, **kwargs)
+        if not issued:
+            # Model issuance already past its membership check when removal commits.
+            from supertokens_rownd import provider_session
+            with monkeypatch.context() as inflight:
+                inflight.setattr(provider_session, "assert_provider_session_membership", AsyncMock())
+                issued.append(await sessions.create_new_session_without_request_response(tenant, recipe, {}, {}, True))
+            rownd_client.user_info["data"]["email"] = rownd_client.user_id + "@third.example"
+            raise TimeoutError("committed email removal followed by source drift")
+        return result
+
+    monkeypatch.setattr(tenants, "disassociate_user_from_tenant", remove)
+    rownd_client.user_info["data"]["email"] = rownd_client.user_id + "@new.example"
+    migrate(client)
+    migrate(client)
+    assert issued
+    assert await sessions.get_session_information(issued[0].get_handle()) is None
+
+
+@pytest.mark.parametrize("operation", ["import", "membership"])
+async def test_provider_introduction_source_drift_recovers_exact_scope(core_url, rownd_client, monkeypatch, operation):
+    client = make_client(core_url, rownd_client)
+    rownd_client.user_id = "drift-" + str(uuid.uuid4())
+    old, intermediate, current = [prefix + rownd_client.user_id for prefix in ("a", "b", "c")]
+    rownd_client.user_info = {"data": {"user_id": rownd_client.user_id, "google_id": old}, "verified_data": {"google_id": True}}
+    assert migrate(client).status_code == 200
+    mapping = await get_user_id_mapping(rownd_client.user_id, "EXTERNAL")
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    other = "other-" + str(uuid.uuid4())
+    donor = None
+    if operation == "membership":
+        await tenants.create_or_update_tenant(other, None)
+        donor = await providers.manually_create_or_update_user(other, "google", intermediate, intermediate + "@example.com", True)
+        assert isinstance(donor, ManuallyCreateOrUpdateUserOkResult)
+        await linking.link_accounts(donor.recipe_user_id, mapping.supertokens_user_id)
+    native = repo.import_user if operation == "import" else tenants.associate_user_to_tenant
+    interrupted = False
+
+    async def interrupt(*args, **kwargs):
+        nonlocal interrupted
+        result = await native(*args, **kwargs)
+        if not interrupted:
+            interrupted = True
+            rownd_client.user_info["verified_data"]["google_id"] = current
+            raise TimeoutError("committed introduction before source change")
+        return result
+
+    monkeypatch.setattr(repo if operation == "import" else tenants,
+                        "import_user" if operation == "import" else "associate_user_to_tenant", interrupt)
+    rownd_client.user_info["verified_data"]["google_id"] = intermediate
+    response = migrate(client)
+    if response.status_code != 200:
+        response = migrate(client)
+    assert interrupted
+    assert response.status_code == 200, response.json()
+    user = await get_user(rownd_client.user_id)
+    assert not any(subject(method) == intermediate and "public" in method.tenant_ids for method in user.login_methods)
+    if donor is not None:
+        restored = next(method for method in user.login_methods if method.recipe_user_id == donor.recipe_user_id)
+        assert restored.tenant_ids == [other]
+
+
+@pytest.mark.parametrize("change", [None, "stable_email", "missing", "canonical", "provider", "email", "tenant", "checkpoint", "email_debt", "provider_debt"])
+async def test_completed_discovery_avoids_searches_only_for_stable_state(core_url, rownd_client, monkeypatch, change):
+    client = make_client(core_url, rownd_client)
+    rownd_client.user_id = "discovery-" + str(uuid.uuid4())
+    rownd_client.user_info = {"data": {"user_id": rownd_client.user_id, "google_id": rownd_client.user_id},
+                              "verified_data": {"google_id": True}}
+    if change in {"stable_email", "missing", "canonical"}:
+        rownd_client.user_info["data"]["email"] = rownd_client.user_id + "@example.com"
+    assert migrate(client).status_code == 200
+    if change == "missing":
+        user = await get_user(rownd_client.user_id)
+        method = next(method for method in user.login_methods if method.third_party)
+        await repo.delete_user(method.recipe_user_id.get_as_string(), remove_all_linked_accounts=False)
+    if change == "canonical":
+        mapping = await get_user_id_mapping(rownd_client.user_id, "EXTERNAL")
+        assert isinstance(mapping, GetUserIdMappingOkResult)
+        await metadata_api.update_user_metadata(mapping.supertokens_user_id, {"rownd_email_recipe_user_ids": {"public": "unknown"}})
+    if change in {"provider", "email"}:
+        rownd_client.user_info["data"]["apple_id" if change == "provider" else "email"] = (
+            "apple-" + rownd_client.user_id if change == "provider" else rownd_client.user_id + "@example.com")
+    tenant = "public"
+    if change == "tenant":
+        tenant = "new-" + str(uuid.uuid4())
+        await tenants.create_or_update_tenant(tenant, None)
+    if change == "checkpoint":
+        await metadata_api.update_user_metadata(rownd_client.user_id, {"rownd_migration_owner_recovery": {"pending": True}})
+    if change in {"email_debt", "provider_debt"}:
+        import hashlib
+        from supertokens_rownd.provider_migration import _ledger_id
+        mapping = await get_user_id_mapping(rownd_client.user_id, "EXTERNAL")
+        assert isinstance(mapping, GetUserIdMappingOkResult)
+        ledger = (_ledger_id(mapping.supertokens_user_id, tenant) if change == "provider_debt" else
+                  "rownd-email-retirement-" + hashlib.sha256((mapping.supertokens_user_id + "\0" + tenant).encode()).hexdigest())
+        await metadata_api.update_user_metadata(ledger, {"plan": {
+            "state": "removing", "target": mapping.supertokens_user_id,
+            "rownd_id": rownd_client.user_id, "tenant": tenant,
+            "kind": "introduction", "provider": "google", "subject": rownd_client.user_id,
+            "recipe": None,
+        }})
+    searches = AsyncMock(wraps=repo.list_users_by_account_info)
+    monkeypatch.setattr(repo, "list_users_by_account_info", searches)
+    source = create_rownd_identity_snapshot(rownd_client.user_info, tenant)
+    optimized = await repo.read_fresh_migration_snapshot(source, {})
+    stable = change in {None, "stable_email"}
+    assert (searches.await_count == 0) is stable
+    if stable:
+        response = migrate(client)
+        assert response.status_code == 200, response.json()
+        assert searches.await_count == 0
+    from supertokens_rownd import migration_discovery
+    monkeypatch.setattr(migration_discovery, "completed_identity_user", AsyncMock(return_value=None))
+    full = await repo.read_fresh_migration_snapshot(source, {})
+    from supertokens_rownd.migration import classify_migration_snapshot
+    assert classify_migration_snapshot(optimized) == classify_migration_snapshot(full)
+    if stable:
+        forced = migrate(client)
+        assert forced.status_code == 200, forced.json()
+        assert searches.await_count > 0
+        fast_session = await sessions.get_session_without_request_response(response.headers["st-access-token"])
+        full_session = await sessions.get_session_without_request_response(forced.headers["st-access-token"])
+        assert fast_session is not None and full_session is not None
+        assert fast_session.get_recipe_user_id() == full_session.get_recipe_user_id()
+        assert fast_session.get_user_id() == full_session.get_user_id()
+        assert fast_session.get_access_token_payload()["auth_level"] == full_session.get_access_token_payload()["auth_level"]
+
+
+async def test_native_session_guard_is_recipe_and_tenant_scoped(core_url, rownd_client):
+    from supertokens_rownd.provider_migration import _ledger_id
+    client = make_client(core_url, rownd_client)
+    rownd_client.user_id = "session-guard-" + str(uuid.uuid4())
+    rownd_client.user_info = {"data": {"user_id": rownd_client.user_id, "google_id": rownd_client.user_id},
+                              "verified_data": {"google_id": True}}
+    assert migrate(client).status_code == 200
+    mapping = await get_user_id_mapping(rownd_client.user_id, "EXTERNAL")
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    user = await get_user(rownd_client.user_id)
+    recipe = user.login_methods[0].recipe_user_id
+    other = "safe-" + str(uuid.uuid4())
+    await tenants.create_or_update_tenant(other, None)
+    await tenants.associate_user_to_tenant(other, recipe)
+    existing = await sessions.create_new_session_without_request_response("public", recipe, {}, {}, True)
+    refresh_token = existing.get_all_session_tokens_dangerously()["refreshToken"]
+    assert refresh_token is not None
+    ledger = _ledger_id(mapping.supertokens_user_id, "public")
+    await metadata_api.update_user_metadata(ledger, {"test": {
+        "target": mapping.supertokens_user_id, "tenant": "public", "recipe": recipe.get_as_string(),
+        "kind": "introduction", "state": "prepared",
+    }})
+    with pytest.raises(MigrationError):
+        await sessions.create_new_session_without_request_response("public", recipe, {}, {}, True)
+    with pytest.raises(MigrationError):
+        await sessions.refresh_session_without_request_response(refresh_token, True)
+    assert await sessions.get_session_information(existing.get_handle()) is None
+    safe = await sessions.create_new_session_without_request_response(other, recipe, {}, {}, True)
+    assert safe is not None
+    await metadata_api.update_user_metadata(ledger, {"test": None})
+    await tenants.disassociate_user_from_tenant("public", recipe)
+    with pytest.raises(MigrationError):
+        await sessions.create_new_session_without_request_response("public", recipe, {}, {}, True)
+    assert await sessions.create_new_session_without_request_response(other, recipe, {}, {}, True)
+
+
 async def test_obsolete_provider_retirement_is_tenant_scoped(core_url, rownd_client):
     client = make_client(core_url, rownd_client)
     rownd_client.user_id = "scoped-" + str(uuid.uuid4())
@@ -310,6 +485,7 @@ async def test_source_change_after_link_restores_native_donor(core_url, rownd_cl
     assert len(restored.login_methods) == 1
     assert restored.login_methods[0].email == native + "@example.com"
     assert restored.login_methods[0].tenant_ids == ["public"]
+    assert await sessions.create_new_session_without_request_response("public", donor.recipe_user_id, {}, {}, True)
     target = await get_user(rownd_client.user_id)
     assert not any(subject(method) == native for method in target.login_methods)
     assert any(subject(method) == current and "public" in method.tenant_ids for method in target.login_methods)

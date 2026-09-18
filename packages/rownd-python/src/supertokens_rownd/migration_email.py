@@ -28,6 +28,24 @@ async def repair_current_email(
     from . import supertokens_repository as repo
 
     assert_source_authority(source)
+    tenant, rownd_id = source.snapshot.tenant_id, source.snapshot.rownd_user_id
+    user = await assert_source_binding(target.user_id, rownd_id, context)
+    ledger_id = "rownd-email-retirement-" + hashlib.sha256(
+        (target.user_id + "\0" + tenant).encode()).hexdigest()
+    stored = await repo.get_raw_user_metadata(ledger_id, context)
+    plan = stored.get("plan")
+    if isinstance(plan, dict) and plan.get("state") == "removing":
+        if (plan.get("target") != target.user_id or plan.get("rownd_id") != rownd_id
+            or plan.get("tenant") != tenant or not isinstance(plan.get("methods"), list)
+            or not isinstance(plan.get("previous"), str)):
+            raise _invalid()
+        # Settlement is not authority for another credential. It must precede all
+        # current-source eligibility checks, including an absent current email.
+        await repo.session_asyncio.revoke_all_sessions_for_user(target.user_id, True, tenant, context)
+        result = await repo.passwordless_asyncio.revoke_all_codes(
+            tenant_id=tenant, email=cast(str, plan["previous"]), user_context=context)
+        if not isinstance(result, RevokeAllCodesOkResult):
+            raise _invalid()
     email_identity = next((identity for identity in source.snapshot.expected_identities
                            if identity.identifier_type == "email"), None)
     if email_identity is None:
@@ -53,10 +71,6 @@ async def repair_current_email(
     if canonical_method and not canonical_method.has_same_email_as(email) and data.get("user_id") != rownd_id:
         raise _invalid()
 
-    ledger_id = "rownd-email-retirement-" + hashlib.sha256(
-        (target.user_id + "\0" + tenant).encode()).hexdigest()
-    stored = await repo.get_raw_user_metadata(ledger_id, context)
-    plan = stored.get("plan")
     if isinstance(plan, dict) and plan.get("state") == "complete" and plan.get("email") != email:
         plan = None
     if plan is None:
@@ -94,9 +108,6 @@ async def repair_current_email(
     if plan["state"] == "complete":
         if not any(method.recipe_id == "passwordless" and method.has_same_email_as(plan.get("previous")) for method in methods):
             return
-    if plan["state"] == "removing":
-        # The revocation debt survives source changes and removal response loss.
-        await repo.session_asyncio.revoke_all_sessions_for_user(target.user_id, True, tenant, context)
     if plan.get("email") != email:
         raise _invalid()
     replacement = next((method for method in methods if method.recipe_id == "passwordless"

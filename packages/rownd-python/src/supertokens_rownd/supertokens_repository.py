@@ -283,12 +283,19 @@ async def read_fresh_migration_snapshot(
         if external_lookup is not None or source_internal_lookup is not None
         else await get_user(source.rownd_user_id, inspection_context)
     )
-    identity_users = await asyncio.gather(
+    from .migration_discovery import completed_identity_user
+
+    completed_user = None
+    if (external_lookup is not None and source_internal_lookup is None
+        and external_lookup.external_user_id == source.rownd_user_id
+        and (pinned_target is None or pinned_target.user_id == external_lookup.supertokens_user_id)):
+        completed_user = await completed_identity_user(source, external_lookup.supertokens_user_id, inspection_context)
+    identity_users = ([[completed_user] for _ in source.expected_identities] if completed_user else await asyncio.gather(
         *(
             _get_migration_identity_users(identity, source.tenant_id, inspection_context)
             for identity in source.expected_identities
         )
-    )
+    ))
     owner_entries = [
         (identity, user, method)
         for identity, users in zip(source.expected_identities, identity_users)
@@ -2603,6 +2610,9 @@ async def apply_migration_repairs(
 
         if mutation.type == "ASSOCIATE_IDENTITY":
             owner = next(owner for owner in snapshot.owners if owner.recipe_user_id == mutation.recipe_user_id)
+            if mutation.identity is not None:
+                await checkpoint_introduction(fresh, target_user_id, mutation.identity, user_context,
+                                              recipe=mutation.recipe_user_id, membership=True)
 
             async def associate(recipe_user_id: RecipeUserId) -> None:
                 result = await multitenancy_asyncio.associate_user_to_tenant(

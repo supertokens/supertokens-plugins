@@ -1424,6 +1424,8 @@ def _session_function_override(config: RowndPluginConfig):
             tenant_id: str,
             user_context: UserContext,
         ):
+            from .provider_session import assert_provider_session_membership
+            await assert_provider_session_membership(user_id, recipe_user_id.get_as_string(), tenant_id, user_context)
             payload = dict(access_token_payload or {})
             payload.pop("rownd_session_authentication", None)
             app_variant_id = (
@@ -1436,7 +1438,7 @@ def _session_function_override(config: RowndPluginConfig):
                 recipe_user_id.get_as_string(), True,
             )
             payload = {**payload, **rownd_claims, **is_anonymous_claim}
-            return await original_create_new_session(
+            session = await original_create_new_session(
                 user_id,
                 recipe_user_id,
                 payload,
@@ -1445,8 +1447,33 @@ def _session_function_override(config: RowndPluginConfig):
                 tenant_id,
                 user_context,
             )
+            try:
+                await assert_provider_session_membership(user_id, recipe_user_id.get_as_string(), tenant_id, user_context)
+            except Exception:
+                await session.revoke_session(user_context)
+                raise
+            return session
 
         original.create_new_session = create_new_session_override
+        original_refresh_session = original.refresh_session
+
+        async def refresh_session_override(
+            refresh_token: str, anti_csrf_token: Optional[str], disable_anti_csrf: bool,
+            user_context: UserContext,
+        ):
+            from .provider_session import assert_provider_session_membership
+            session = await original_refresh_session(refresh_token, anti_csrf_token, disable_anti_csrf, user_context)
+            try:
+                await assert_provider_session_membership(
+                    session.get_user_id(), session.get_recipe_user_id().get_as_string(),
+                    session.get_tenant_id(), user_context,
+                )
+            except Exception:
+                await session.revoke_session(user_context)
+                raise
+            return session
+
+        original.refresh_session = refresh_session_override
         return original
 
     return override
