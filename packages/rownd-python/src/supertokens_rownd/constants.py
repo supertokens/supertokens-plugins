@@ -30,6 +30,7 @@ RESERVED_SESSION_CLAIMS = frozenset(
         *JWT_REGISTERED_CLAIMS,
         "app_user_id",
         "auth_level",
+        "rownd_session_authentication",
         "is_verified_user",
         "is_anonymous",
         "anonymous_id",
@@ -90,6 +91,8 @@ DEFAULT_ROWND_SCHEMA = {
 
 IDENTITY_USER_DATA_FIELDS = {"user_id", "email", "phone_number", "google_id", "apple_id"}
 INTERNAL_METADATA_FIELDS = {
+    "rownd_session_authentication",
+    "rownd_migration_owner_consolidation",
     "original_rownd_user",
     "rownd_email_recipe_user_id",
     "rownd_email_recipe_user_ids",

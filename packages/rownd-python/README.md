@@ -471,7 +471,17 @@ The plugin exposes Rownd-compatible user/session behavior for migrated and new S
 
 - Guest sessions use the `guest` third-party provider.
 - Instant sessions use the `instant` third-party provider and preserve `auth_level: "instant"`.
+- Guest and instant login require a matching `{"method": "anonymous", "type": "guest"}` or `{"method": "anonymous", "type": "instant"}` entry in `app_config.signInMethods`. A sub-brand's `signInMethods` replaces the base list, including an empty list that disables anonymous login.
+- Instant sessions stay anonymous and have `is_verified_user: false` after account linking. Only successful credential authentication upgrades that session; profile and metadata changes cannot attest authentication.
 - Passwordless and third-party sign-in refresh Rownd session claims after account linking while preserving the linked guest's `anonymous_id`.
+
+The anonymous-login route supports tenant-specific configuration through an async
+`resolve_config` callback. It receives `tenant_id`, `request`, and `user_context`,
+and returns a dictionary of dynamic overrides (`app_config`, `sub_brands`,
+`schema`, `client_domains`, `cross_device_confirmation_bypass`, or
+`email_change.max_session_age_seconds`). The resolved snapshot also applies to
+the session created by that request. Resolution errors reject login.
+`email_change.retirement_mode` remains a static security setting.
 - Compatibility reads combine metadata from the primary and linked recipe users. Profile and metadata writes target the primary user without relocating linked Rownd metadata.
 - Google and Apple third-party login methods are exposed as `google_id` and `apple_id` in Rownd-compatible user payloads.
 - OAuth2 Provider tokens and userinfo responses include Rownd claims plus standard `email`, `phone`, and `profile` claims when those scopes are requested.

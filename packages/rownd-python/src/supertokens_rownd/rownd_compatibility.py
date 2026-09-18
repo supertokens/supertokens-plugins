@@ -38,6 +38,8 @@ def is_internal_metadata_field(field_name: str) -> bool:
 
 
 def can_update_user_data_field(config: RowndPluginConfig, field_name: str) -> bool:
+    if field_name == "rownd_session_authentication":
+        return False
     schema_field = config.schema.get(field_name)
     if schema_field is None:
         return False
@@ -370,6 +372,7 @@ def build_rownd_session_claim_payload(
     current_payload: JsonDict,
     app_variant_id: Optional[str],
     reserved_claims: AbstractSet[str] = RESERVED_SESSION_CLAIMS,
+    authentication_origin: Optional[str] = None,
 ) -> JsonDict:
     original = as_json_dict(metadata.get("original_rownd_user"))
     verified_data = as_json_dict(original.get("verified_data"))
@@ -378,6 +381,9 @@ def build_rownd_session_claim_payload(
         original_auth_level_value if isinstance(original_auth_level_value, str) else None
     )
     auth_level = get_effective_auth_level(user, original_auth_level, verified_data, original)
+    origin = authentication_origin or current_payload.get("rownd_session_authentication")
+    if origin == "instant" or (origin is None and current_payload.get("auth_level") == "instant"):
+        auth_level = "instant"
     app_user_id = as_json_dict(original.get("data")).get("user_id")
     app_user_id = (
         app_user_id or current_payload.get("app_user_id") or (user.id if user else user_id)
@@ -389,11 +395,13 @@ def build_rownd_session_claim_payload(
         **build_configured_session_claims(config, metadata, reserved_claims),
         "app_user_id": app_user_id,
         "auth_level": auth_level,
-        "is_verified_user": auth_level != "unverified",
+        "is_verified_user": auth_level not in {"instant", "unverified"},
         ROWND_JWT_CLAIMS["app_user_id"]: app_user_id,
         ROWND_JWT_CLAIMS["auth_level"]: auth_level,
-        ROWND_JWT_CLAIMS["is_verified_user"]: auth_level != "unverified",
+        ROWND_JWT_CLAIMS["is_verified_user"]: auth_level not in {"instant", "unverified"},
     }
+    if authentication_origin:
+        claims["rownd_session_authentication"] = authentication_origin
     if is_anonymous:
         claims[ROWND_JWT_CLAIMS["is_anonymous"]] = True
     if anonymous_id:

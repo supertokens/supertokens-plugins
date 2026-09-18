@@ -2383,6 +2383,7 @@ async def test_reserved_session_claim_contract():
         "jti",
         "app_user_id",
         "auth_level",
+        "rownd_session_authentication",
         "is_verified_user",
         "is_anonymous",
         "anonymous_id",
@@ -3035,6 +3036,7 @@ async def test_passwordless_consume_records_app_variant_before_refresh(
         user_id: str,
         app_variant_id: Optional[str],
         user_context: Dict[str, Any],
+        proven_authentication: bool = False,
     ):
         assert session is returned_session
         events.append(("refresh", user_id, app_variant_id))
@@ -3125,7 +3127,7 @@ async def test_native_sign_in_preserves_success_with_malformed_variant_metadata(
             Any, SimpleNamespace(sign_in_up_post=original_api)
         ))
         result = await overridden.sign_in_up_post(
-            cast(Any, None), None, None, None, None, "public", options, {}
+            cast(Any, SimpleNamespace(id="google")), None, None, None, None, "public", options, {}
         )
 
     assert result is successful
@@ -3138,7 +3140,7 @@ async def test_native_sign_in_preserves_success_with_malformed_variant_metadata(
     update.assert_not_awaited()
     assert stored == {"original_rownd_user": original_metadata}
     refresh.assert_awaited_once_with(
-        config, returned_session, "native-user", "variant_123", original_api.await_args.args[-1]
+        config, returned_session, "native-user", "variant_123", original_api.await_args.args[-1], True
     )
 
 
@@ -3195,6 +3197,7 @@ async def test_thirdparty_sign_in_records_app_variant_before_refresh(
         user_id: str,
         app_variant_id: Optional[str],
         user_context: Dict[str, Any],
+        proven_authentication: bool = False,
     ):
         assert session is returned_session
         events.append(("refresh", user_id, app_variant_id))
@@ -3220,7 +3223,7 @@ async def test_thirdparty_sign_in_records_app_variant_before_refresh(
     overridden = plugin._thirdparty_api_override(make_config())(cast(Any, original))
 
     await overridden.sign_in_up_post(
-        cast(Any, None),
+        cast(Any, SimpleNamespace(id="google")),
         None,
         None,
         None,

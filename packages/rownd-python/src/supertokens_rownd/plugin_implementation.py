@@ -125,6 +125,7 @@ async def handle_guest_login(
     started_at = time.time()
     tenant_id = utils.resolve_tenant_id(request)
     try:
+        config = await rownd_config.resolve_plugin_config_snapshot(config, tenant_id, request, user_context)
         body = await utils.get_json_body(request)
         app_variant_id = utils.get_requested_app_variant_id_from_request(request)
         rownd_config.assert_app_variant_is_configured(config, app_variant_id)
@@ -133,20 +134,26 @@ async def handle_guest_login(
             if body.get("auth_level") == INSTANT_AUTH_METHOD_ID
             else GUEST_AUTH_METHOD_ID
         )
+        if not rownd_config.is_anonymous_sign_in_enabled(config, third_party_id, app_variant_id):
+            return utils.json_response(response, {
+                "status": "ERROR",
+                "message": "%s sign-in is not enabled" % third_party_id.capitalize(),
+            })
         third_party_user_id = "%s_%s" % (
             "anon" if third_party_id == INSTANT_AUTH_METHOD_ID else "guest",
             uuid.uuid4(),
         )
-        result = await repository.create_guest_session(
-            config,
-            request,
-            tenant_id,
-            third_party_id,
-            third_party_user_id,
-            third_party_id,
-            app_variant_id,
-            user_context,
-        )
+        with rownd_config.bind_request_config(config):
+            result = await repository.create_guest_session(
+                config,
+                request,
+                tenant_id,
+                third_party_id,
+                third_party_user_id,
+                third_party_id,
+                app_variant_id,
+                user_context,
+            )
         await telemetry.record_success(telemetry_client, started_at, tenant_id, None, result.user.id)
         return utils.json_response(
             response, {"status": "OK", "createdNewRecipeUser": result.created_new_recipe_user}

@@ -3482,7 +3482,8 @@ async def test_guest_login_creates_session_with_claims(core_url: str, rownd_clie
     client = make_client(
         core_url,
         rownd_client,
-        plugin_config={"sub_brands": {"variant_123": {"id": "app_xyz"}}},
+        plugin_config={"sub_brands": {"variant_123": {"id": "app_xyz"}},
+                       "app_config": {"signInMethods": [{"method": "anonymous", "type": "guest"}]}},
     )
 
     res = client.post(
@@ -3509,7 +3510,9 @@ async def test_guest_login_creates_session_with_claims(core_url: str, rownd_clie
 async def test_guest_login_uses_instant_provider_for_instant_auth_level(
     core_url: str, rownd_client: MockRowndClient
 ):
-    client = make_client(core_url, rownd_client)
+    client = make_client(core_url, rownd_client, plugin_config={
+        "app_config": {"signInMethods": [{"method": "anonymous", "type": "instant"}]},
+    })
 
     res = client.post(
         "/auth/plugin/rownd/guest",
@@ -5166,6 +5169,7 @@ async def test_instant_user_cannot_start_email_verification_when_required(
     client = make_client(
         core_url,
         rownd_client,
+        plugin_config={"app_config": {"signInMethods": [{"method": "email"}, {"method": "anonymous", "type": "instant"}]}},
         enable_email_verification=True,
         email_verification_mode="REQUIRED",
     )
@@ -5220,7 +5224,9 @@ async def test_required_email_verification_does_not_bypass_missing_session(
 async def test_instant_profile_email_change_is_rejected(
     memory_core_url: str, rownd_client: MockRowndClient
 ):
-    client = make_client(memory_core_url, rownd_client, enable_email_verification=True)
+    client = make_client(memory_core_url, rownd_client, enable_email_verification=True, plugin_config={
+        "app_config": {"signInMethods": [{"method": "email"}, {"method": "anonymous", "type": "instant"}]},
+    })
     guest = client.post(
         "/auth/plugin/rownd/guest",
         headers={"Content-Type": "application/json", **session_headers()},
@@ -6264,7 +6270,9 @@ async def test_linked_guest_claims_keep_exact_anonymous_id_but_clear_anonymous_f
     rownd_client: MockRowndClient,
     authenticated_recipe: str,
 ):
-    client = make_client(memory_core_url, rownd_client)
+    client = make_client(memory_core_url, rownd_client, plugin_config={
+        "app_config": {"signInMethods": [{"method": "anonymous", "type": "guest"}]},
+    })
     guest = client.post(
         "/auth/plugin/rownd/guest",
         headers={"Content-Type": "application/json", **session_headers()},
@@ -6319,6 +6327,98 @@ async def test_linked_guest_claims_keep_exact_anonymous_id_but_clear_anonymous_f
     assert refreshed_payload["is_anonymous"]["v"] is False
     assert ROWND_JWT_CLAIMS["is_anonymous"] not in refreshed_payload
     assert "aud" not in refreshed_payload
+
+
+async def test_instant_session_provenance_survives_linking_until_passwordless_success(
+    core_url: str, rownd_client: MockRowndClient,
+):
+    client = make_client(core_url, rownd_client, plugin_config={
+        "app_config": {"signInMethods": [{"method": "anonymous", "type": "instant"}]},
+    })
+    guest = client.post("/auth/plugin/rownd/guest", headers=session_headers(), json={"auth_level": "instant"})
+    st_session = await session_asyncio.get_session_without_request_response(guest.headers["st-access-token"])
+    assert st_session is not None
+    instant_recipe = st_session.get_recipe_user_id()
+    initial = st_session.get_access_token_payload()
+    assert initial["rownd_session_authentication"] == "instant"
+    assert initial["is_verified_user"] is False
+    email = "instant-provenance@example.com"
+    signed_in = await passwordless_asyncio.signinup("public", email, None, None, {})
+    primary = await accountlinking_asyncio.create_primary_user(instant_recipe, {})
+    linked = await accountlinking_asyncio.link_accounts(signed_in.recipe_user_id, cast(Any, primary).user.id, {})
+    assert getattr(linked, "status", "OK") == "OK"
+    settings = RowndPluginConfig()
+    await rownd_plugin.refresh_rownd_session_claims(settings, st_session, st_session.get_user_id(), None, {
+        "provenAuthentication": True,
+    })
+    assert st_session.get_access_token_payload()["auth_level"] == "instant"
+    await st_session.fetch_and_set_claim(rownd_plugin._rownd_is_anonymous_claim)
+    assert st_session.get_access_token_payload()["is_anonymous"]["v"] is True
+
+    forged = await session_asyncio.create_new_session_without_request_response(
+        "public", instant_recipe, {"rownd_session_authentication": "authenticated", "auth_level": "verified"}, {}, True,
+    )
+    assert forged.get_access_token_payload()["auth_level"] == "instant"
+    code = await passwordless_asyncio.create_code("public", email=email)
+    wrong_code = ("a" if code.link_code[0] != "a" else "b") + code.link_code[1:]
+    failed = client.post("/auth/signinup/code/consume", headers={
+        **auth_headers(st_session.get_access_token()), "rid": "passwordless",
+    }, json={"preAuthSessionId": code.pre_auth_session_id, "linkCode": wrong_code})
+    assert failed.status_code == 200, failed.text
+    assert failed.json()["status"] != "OK"
+    assert st_session.get_access_token_payload()["auth_level"] == "instant"
+    consumed = client.post("/auth/signinup/code/consume", headers={
+        **auth_headers(st_session.get_access_token()), "rid": "passwordless",
+    }, json={"preAuthSessionId": code.pre_auth_session_id, "linkCode": code.link_code})
+    assert consumed.status_code == 200, consumed.text
+    assert consumed.json()["status"] == "OK"
+    upgraded = await session_asyncio.get_session_without_request_response(consumed.headers["st-access-token"])
+    assert upgraded is not None
+    assert upgraded.get_user_id() == st_session.get_user_id()
+    assert upgraded.get_recipe_user_id().get_as_string() == instant_recipe.get_as_string()
+    assert upgraded.get_access_token_payload()["rownd_session_authentication"] == "authenticated"
+    assert upgraded.get_access_token_payload()["is_verified_user"] is True
+    assert upgraded.get_access_token_payload()["is_anonymous"]["v"] is False
+
+
+async def test_guard_authenticates_linked_alias_until_explicitly_retired(
+    core_url: str, rownd_client: MockRowndClient,
+):
+    client = make_client(core_url, rownd_client, plugin_config={
+        "email_change": {"retirement_mode": "guard"},
+    })
+    relay = await passwordless_asyncio.signinup(
+        "public", "auth-parity@privaterelay.appleid.com", None, None, {},
+    )
+    other = await passwordless_asyncio.signinup(
+        "public", "auth-parity-alias@example.com", None, None, {},
+    )
+    primary = await accountlinking_asyncio.create_primary_user(relay.recipe_user_id, {})
+    owner = cast(Any, primary).user.id
+    linked = await accountlinking_asyncio.link_accounts(other.recipe_user_id, owner, {})
+    assert getattr(linked, "status", "OK") == "OK"
+    metadata = {"original_rownd_user": {"data": {"email": relay.user.emails[0]}}}
+    await usermetadata_asyncio.update_user_metadata(owner, metadata)
+
+    async def consume():
+        code = await passwordless_asyncio.create_code("public", email="auth-parity-alias@example.com")
+        return client.post("/auth/signinup/code/consume", headers={
+            **session_headers(), "rid": "passwordless",
+        }, json={"preAuthSessionId": code.pre_auth_session_id, "linkCode": code.link_code})
+
+    result = await consume()
+    assert result.json()["status"] == "OK"
+    authenticated = await session_asyncio.get_session_without_request_response(result.headers["st-access-token"])
+    assert authenticated is not None
+    assert authenticated.get_user_id() == owner
+    assert authenticated.get_recipe_user_id().get_as_string() == other.recipe_user_id.get_as_string()
+    assert (await usermetadata_asyncio.get_user_metadata(owner)).metadata == metadata
+    await usermetadata_asyncio.update_user_metadata(owner, {
+        "rownd_email_recipe_user_id": relay.recipe_user_id.get_as_string(),
+    })
+    retired = await consume()
+    assert retired.json()["status"] == "RESTART_FLOW_ERROR"
+    assert "st-access-token" not in retired.headers
 
 
 async def test_email_verification_preserves_existing_passwordless_method_as_alias(

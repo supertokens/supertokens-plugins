@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from typing import List, Optional, cast
+from contextlib import contextmanager
+from copy import deepcopy
+from contextvars import ContextVar
+from dataclasses import replace
+from typing import Any, Iterator, List, Optional, cast
 
 from .constants import BUILTIN_SIGN_IN_METHOD_KEYS, DEFAULT_ROWND_SCHEMA
 from .errors import RowndPluginError
@@ -8,6 +12,48 @@ from .types import JsonDict, RowndPluginConfig
 
 
 _active_config: Optional[RowndPluginConfig] = None
+_request_config: ContextVar[Optional[RowndPluginConfig]] = ContextVar("rownd_request_config", default=None)
+
+
+def get_request_config(fallback: RowndPluginConfig) -> RowndPluginConfig:
+    return _request_config.get() or fallback
+
+
+@contextmanager
+def bind_request_config(config: RowndPluginConfig) -> Iterator[None]:
+    token = _request_config.set(config)
+    try:
+        yield
+    finally:
+        _request_config.reset(token)
+
+
+async def resolve_plugin_config_snapshot(
+    config: RowndPluginConfig, tenant_id: str, request: Any, user_context: dict[str, Any]
+) -> RowndPluginConfig:
+    if config.resolve_config is None:
+        return config
+    dynamic = await config.resolve_config(
+        {"tenant_id": tenant_id, "request": request, "user_context": user_context}
+    )
+    allowed = {
+        "app_config", "sub_brands", "schema", "client_domains",
+        "cross_device_confirmation_bypass", "email_change",
+    }
+    if not isinstance(dynamic, dict) or set(dynamic) - allowed:
+        raise RowndPluginError("Invalid Rownd dynamic configuration")
+    overrides: dict[str, Any] = {key: value for key, value in dynamic.items() if value is not None}
+    if "email_change" in overrides:
+        email_change = overrides["email_change"]
+        if not isinstance(email_change, dict) or set(email_change) - {"max_session_age_seconds"}:
+            raise RowndPluginError("Invalid Rownd dynamic email change configuration")
+        overrides["email_change"] = {**config.email_change, **email_change}
+    overrides.setdefault("email_change", dict(config.email_change))
+    resolved = replace(config, **deepcopy(overrides))
+    from .plugin import _validate_config
+
+    _validate_config(resolved)
+    return resolved
 
 
 def set_active_rownd_config(config: RowndPluginConfig) -> None:
@@ -39,6 +85,21 @@ def is_email_sign_in_enabled(
     )
     return isinstance(methods, list) and any(
         isinstance(method, dict) and method.get("method") == "email" for method in methods
+    )
+
+
+def is_anonymous_sign_in_enabled(
+    config: RowndPluginConfig, auth_level: str, app_variant_id: Optional[str] = None
+) -> bool:
+    variant = config.sub_brands.get(app_variant_id, {}) if app_variant_id else {}
+    methods = variant.get("signInMethods")
+    if methods is None:
+        methods = config.app_config.get("signInMethods")
+    return isinstance(methods, list) and any(
+        isinstance(method, dict)
+        and method.get("method") == "anonymous"
+        and ("instant" if method.get("type") == "instant" else "guest") == auth_level
+        for method in methods
     )
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Dict, List, Literal, Optional, Protocol, Union
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Protocol, Union
 from typing_extensions import NotRequired, TypedDict
 
 from .constants import DEFAULT_ROWND_SCHEMA
@@ -68,6 +68,7 @@ class RowndPluginKwargs(TypedDict, total=False):
     cross_device_confirmation_bypass: "RowndCrossDeviceConfirmationBypassConfig"
     rownd_client: Optional[RowndClientProtocol]
     email_change: "RowndEmailChangeConfig"
+    resolve_config: Optional[Callable[[Dict[str, Any]], Awaitable[JsonDict]]]
 
 
 class RowndCrossDeviceConfirmationBypassConfig(TypedDict):
@@ -174,3 +175,4 @@ class RowndPluginConfig:
         default_factory=lambda: {"max_session_age_seconds": 600, "retirement_mode": "observe"}
     )
     rownd_app_id: Optional[str] = None
+    resolve_config: Optional[Callable[[Dict[str, Any]], Awaitable[JsonDict]]] = None

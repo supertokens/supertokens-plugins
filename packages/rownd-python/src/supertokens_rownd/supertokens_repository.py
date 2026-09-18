@@ -1326,12 +1326,20 @@ async def build_rownd_session_and_anonymous_claims(
     current_payload: JsonDict,
     app_variant_id: Optional[str],
     user_context: UserContext,
+    recipe_user_id: Optional[str] = None,
+    creating: bool = False,
 ) -> Tuple[JsonDict, JsonDict]:
+    from .session_authentication import session_authentication_origin
+
     inspection = await inspect_linked_user_metadata(user_id, user_context)
     user = cast(Optional[User], inspection["user"])
     metadata = cast(JsonDict, inspection["combined_metadata"]) if user else {}
+    origin = await session_authentication_origin(
+        user, recipe_user_id, current_payload, user_context, creating
+    )
     rownd_claims = rownd_compatibility.build_rownd_session_claim_payload(
-        config, user_id, user, metadata, current_payload, app_variant_id
+        config, user_id, user, metadata, current_payload, app_variant_id,
+        authentication_origin=origin,
     )
     is_anonymous = rownd_claims.get("auth_level") in {
         GUEST_AUTH_METHOD_ID,
@@ -3814,6 +3822,51 @@ def classify_email_credential(
         )
 
     if canonical_id is None:
+        # Historical display preferences do not retire attached credentials.
+        matching_verified = [
+            method for method in methods
+            if method.verified
+            and normalize_email(cast(str, method.email)) == normalized_email
+            and not rownd_compatibility.is_supertokens_fake_email(method.email)
+            and not normalized_email.endswith("@anonymous.local")
+        ]
+        pending = metadata.get("rownd_pending_verification", [])
+        has_retirement = not isinstance(pending, list) or any(
+            isinstance(plan, dict)
+            and plan.get("tenantId", PUBLIC_TENANT_ID) == tenant_id
+            and (
+                plan.get("status") == "COMMITTING"
+                or "targetCanonicalRecipeUserId" in plan
+                or "retiredMethods" in plan
+            )
+            for plan in pending
+        )
+        candidate_emails = {
+            normalize_email(cast(str, method.email)) for method in methods
+            if not rownd_compatibility.is_supertokens_fake_email(method.email)
+        }
+        original = metadata.get("original_rownd_user")
+        original_data = original.get("data") if isinstance(original, dict) else None
+        historical_email = original_data.get("email") if isinstance(original_data, dict) else None
+        inferred = len(candidate_emails) == 1 or (
+            isinstance(historical_email, str) and normalize_email(historical_email) in candidate_emails
+        )
+        if matching_verified and inferred and not has_retirement:
+            matching_id = (
+                consumed_recipe_user_id if consumed_recipe_user_id is not None
+                else matching_verified[0].recipe_user_id.get_as_string()
+            )
+            if any(
+                method.recipe_user_id.get_as_string() == matching_id
+                for method in matching_verified
+            ):
+                return EmailCredentialAuthorization(
+                    EmailCredentialState.ALLOW, EmailCredentialReason.CANONICAL,
+                    user.id, matching_id,
+                )
+            return EmailCredentialAuthorization(
+                EmailCredentialState.MALFORMED, EmailCredentialReason.METHOD_MISMATCH, user.id,
+            )
         if not methods:
             if consumed_recipe_user_id is not None:
                 return EmailCredentialAuthorization(

@@ -117,6 +117,7 @@ from .rownd_compatibility import (
     resolve_session_claim_name,
 )
 from .rownd_repository import RowndClient
+from .session_authentication import proven_session_authentication, session_authentication_origin
 from .supertokens_repository import (
     build_rownd_oauth_payload,
     build_rownd_oauth_user_info,
@@ -279,8 +280,11 @@ async def _fetch_is_anonymous_claim(
 ) -> bool:
     from supertokens_python.asyncio import get_user
 
-    _ = recipe_user_id, tenant_id, current_payload
-    return get_effective_auth_level(await get_user(user_id, user_context)) in {
+    user = await get_user(user_id, user_context)
+    origin = await session_authentication_origin(
+        user, recipe_user_id.get_as_string(), current_payload, user_context
+    )
+    return origin == "instant" or get_effective_auth_level(user) in {
         GUEST_AUTH_METHOD_ID,
         INSTANT_AUTH_METHOD_ID,
     }
@@ -295,11 +299,21 @@ async def refresh_rownd_session_claims(
     user_id: str,
     app_variant_id: Optional[str],
     user_context: UserContext,
+    proven_authentication: bool = False,
 ) -> None:
     current_payload = session.get_access_token_payload(user_context)
-    rownd_claims, is_anonymous_claim = await build_rownd_session_and_anonymous_claims(
-        config, user_id, current_payload, app_variant_id, user_context
-    )
+
+    async def build_claims():
+        return await build_rownd_session_and_anonymous_claims(
+            config, user_id, current_payload, app_variant_id, user_context,
+            session.get_recipe_user_id(user_context).get_as_string(), proven_authentication,
+        )
+
+    if proven_authentication:
+        with proven_session_authentication():
+            rownd_claims, is_anonymous_claim = await build_claims()
+    else:
+        rownd_claims, is_anonymous_claim = await build_claims()
     refreshed_claims = {**rownd_claims, **is_anonymous_claim}
     managed_claim_names = {
         "is_anonymous",
@@ -323,9 +337,12 @@ async def _refresh_rownd_session_claims_or_revoke(
     user_id: str,
     app_variant_id: Optional[str],
     user_context: UserContext,
+    proven_authentication: bool = False,
 ) -> None:
     try:
-        await refresh_rownd_session_claims(config, session, user_id, app_variant_id, user_context)
+        await refresh_rownd_session_claims(
+            config, session, user_id, app_variant_id, user_context, proven_authentication
+        )
     except Exception:
         try:
             session_revoked = await session_asyncio.revoke_session(
@@ -1203,7 +1220,7 @@ def _passwordless_api_override(config: RowndPluginConfig):
                     )
                     if returned_session is not None:
                         await _refresh_rownd_session_claims_or_revoke(
-                            config, returned_session, user_id, app_variant_id, context
+                            config, returned_session, user_id, app_variant_id, context, True
                         )
             return result
 
@@ -1383,7 +1400,8 @@ def _thirdparty_api_override(config: RowndPluginConfig):
                     returned_session = getattr(result, "session", None)
                     if returned_session is not None:
                         await _refresh_rownd_session_claims_or_revoke(
-                            config, returned_session, user_id, app_variant_id, context
+                            config, returned_session, user_id, app_variant_id, context,
+                            provider.id not in {"instant", "guest"},
                         )
             return result
 
@@ -1406,14 +1424,16 @@ def _session_function_override(config: RowndPluginConfig):
             tenant_id: str,
             user_context: UserContext,
         ):
-            payload = access_token_payload or {}
+            payload = dict(access_token_payload or {})
+            payload.pop("rownd_session_authentication", None)
             app_variant_id = (
                 user_context.get("rowndAppVariantId")
                 if isinstance(user_context.get("rowndAppVariantId"), str)
                 else None
             )
             rownd_claims, is_anonymous_claim = await build_rownd_session_and_anonymous_claims(
-                config, user_id, payload, app_variant_id, user_context
+                rownd_config.get_request_config(config), user_id, payload, app_variant_id, user_context,
+                recipe_user_id.get_as_string(), True,
             )
             payload = {**payload, **rownd_claims, **is_anonymous_claim}
             return await original_create_new_session(
