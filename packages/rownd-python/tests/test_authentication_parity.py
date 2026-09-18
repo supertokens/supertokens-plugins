@@ -11,6 +11,7 @@ from supertokens_rownd import config, plugin, plugin_implementation
 from supertokens_rownd import supertokens_repository as repository
 from supertokens_rownd import session_authentication
 from supertokens_rownd.constants import ROWND_JWT_CLAIMS
+from supertokens_rownd.errors import RowndPluginError
 from supertokens_rownd.rownd_compatibility import (
     build_rownd_session_claim_payload,
     is_internal_metadata_field,
@@ -215,6 +216,7 @@ async def test_moved_unmarked_alias_requires_fresh_authentication(linked_user, m
         return "email" if value == "original-alias" else value
 
     monkeypatch.setattr(repository, "freshly_resolve_sdk_user_id_to_internal", immutable)
+    monkeypatch.setattr(session_authentication, "_owner_plan_reader", Mock(return_value=plan))
     monkeypatch.setattr(session_authentication, "_owner_plan_validator", None)
     with pytest.raises(Exception, match="validation is unavailable"):
         await session_authentication_origin(linked_user, "original-alias", {}, {})
@@ -243,6 +245,129 @@ async def test_moved_unmarked_alias_requires_fresh_authentication(linked_user, m
     plan["status"] = "APPLYING"
     with pytest.raises(Exception, match="incomplete"):
         await session_authentication_origin(linked_user, "original-alias", {}, {})
+
+
+@pytest.mark.parametrize(
+    "field,value,remove",
+    [
+        ("recipes", None, True),
+        ("recipes", [], False),
+        ("recipes", {}, False),
+        ("recipes", [{"id": "another", "identity": "broken"}], False),
+        ("recipes", [{"id": "instant", "identity": "broken"}], False),
+        ("recipes", [{"id": "instant", "identity": "[]"}], False),
+        ("target", None, True),
+        ("target", "missing", False),
+        ("target", [], False),
+        ("aliases", None, True),
+        ("aliases", [], False),
+        ("aliases", {}, False),
+        ("legacySessionAliasHistory", None, True),
+        ("legacySessionAliasHistory", {}, False),
+        ("legacySessionAliasHistory", {"aliases": []}, False),
+        ("legacySessionAliasHistory", {"aliases": "earlier-alias"}, False),
+        ("version", True, False),
+    ],
+)
+async def test_corrupt_checkpoint_is_read_before_alias_authentication(
+    linked_user,
+    monkeypatch,
+    field,
+    value,
+    remove,
+):
+    plan = owner_plan()
+    if remove:
+        del plan[field]
+    else:
+        plan[field] = value
+    metadata = {"rownd_migration_owner_consolidation": plan}
+    monkeypatch.setattr(repository, "get_raw_user_metadata", AsyncMock(return_value=metadata))
+    linked_user.login_methods[1] = method("thirdparty", "email", provider="google")
+
+    async def immutable(value, context):
+        return "email" if value == "original-alias" else value
+
+    monkeypatch.setattr(repository, "freshly_resolve_sdk_user_id_to_internal", immutable)
+    reader = Mock(side_effect=RowndPluginError("Invalid owner consolidation checkpoint"))
+    validator = AsyncMock(side_effect=RowndPluginError("Invalid completed checkpoint"))
+    monkeypatch.setattr(session_authentication, "_owner_plan_reader", None)
+    monkeypatch.setattr(session_authentication, "_owner_plan_validator", None)
+    session_authentication.register_owner_plan_reader(reader)
+    session_authentication.register_owner_plan_validator(validator)
+    with pytest.raises(RowndPluginError, match="Invalid owner consolidation checkpoint"):
+        await session_authentication_origin(
+            linked_user, "original-alias", {"auth_level": "verified"}, {}
+        )
+    if field == "version":
+        reader.assert_not_called()
+    else:
+        reader.assert_called_once_with(metadata)
+    validator.assert_not_awaited()
+
+
+@pytest.mark.parametrize("reader", [None, Mock(return_value=None)])
+async def test_present_checkpoint_requires_authoritative_reader(linked_user, monkeypatch, reader):
+    plan = owner_plan()
+    plan["recipes"] = []
+    monkeypatch.setattr(
+        repository,
+        "get_raw_user_metadata",
+        AsyncMock(
+            return_value={
+                "rownd_migration_owner_consolidation": plan,
+            }
+        ),
+    )
+    monkeypatch.setattr(session_authentication, "_owner_plan_reader", reader)
+    validator = AsyncMock(side_effect=RowndPluginError("Invalid completed checkpoint"))
+    monkeypatch.setattr(session_authentication, "_owner_plan_validator", validator)
+    with pytest.raises(RowndPluginError):
+        await session_authentication_origin(linked_user, "email", {"auth_level": "verified"}, {})
+    validator.assert_not_awaited()
+
+
+async def test_structurally_valid_unambiguous_binding_skips_fresh_completed_validation(
+    linked_user,
+    monkeypatch,
+):
+    plan = owner_plan()
+    metadata = {"rownd_migration_owner_consolidation": plan}
+    monkeypatch.setattr(repository, "get_raw_user_metadata", AsyncMock(return_value=metadata))
+    reader = Mock(return_value=plan)
+    validator = AsyncMock(side_effect=RowndPluginError("must not validate unrelated binding"))
+    monkeypatch.setattr(session_authentication, "_owner_plan_reader", reader)
+    monkeypatch.setattr(session_authentication, "_owner_plan_validator", validator)
+    assert await session_authentication_origin(linked_user, "email", {}, {}) == "authenticated"
+    reader.assert_called_once_with(metadata)
+    validator.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "creating,origin,expected",
+    [
+        (True, None, "authenticated"),
+        (False, "authenticated", "authenticated"),
+        (False, "instant", "instant"),
+    ],
+)
+async def test_creation_and_signed_provenance_do_not_read_checkpoints(
+    linked_user,
+    monkeypatch,
+    creating,
+    origin,
+    expected,
+):
+    metadata = AsyncMock(side_effect=AssertionError("must not read checkpoints"))
+    reader = Mock(side_effect=AssertionError("must not parse checkpoints"))
+    monkeypatch.setattr(repository, "get_raw_user_metadata", metadata)
+    monkeypatch.setattr(session_authentication, "_owner_plan_reader", reader)
+    payload = {SESSION_AUTHENTICATION_KEY: origin} if origin else {}
+    assert (
+        await session_authentication_origin(linked_user, "email", payload, {}, creating) == expected
+    )
+    metadata.assert_not_awaited()
+    reader.assert_not_called()
 
 
 def test_historical_display_preference_allows_attached_alias_but_explicit_pointer_retires_it():

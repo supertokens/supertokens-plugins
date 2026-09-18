@@ -14,6 +14,32 @@ from .types import JsonDict
 SESSION_AUTHENTICATION_KEY = "rownd_session_authentication"
 _proven_authentication: ContextVar[bool] = ContextVar("rownd_proven_authentication", default=False)
 _owner_plan_validator: Optional[Callable[[JsonDict, UserContext], Awaitable[None]]] = None
+_owner_plan_reader: Optional[Callable[[JsonDict], Optional[JsonDict]]] = None
+
+
+def register_owner_plan_reader(
+    reader: Callable[[JsonDict], Optional[JsonDict]],
+) -> None:
+    """Bind the authoritative structural reader; input is raw owner metadata."""
+    global _owner_plan_reader
+    _owner_plan_reader = reader
+
+
+def _read_owner_plan(metadata: JsonDict) -> Optional[JsonDict]:
+    key = "rownd_migration_owner_consolidation"
+    if key not in metadata:
+        return None
+    raw = metadata[key]
+    if not isinstance(raw, dict) or type(raw.get("version")) is not int:
+        raise RowndPluginError("Invalid owner consolidation checkpoint")
+    if raw["version"] not in {1, 2}:
+        raise RowndPluginError("Invalid owner consolidation checkpoint")
+    if _owner_plan_reader is None:
+        raise RowndPluginError("Owner consolidation checkpoint reader is unavailable")
+    plan = _owner_plan_reader(metadata)
+    if raw["version"] == 2 and plan is None:
+        raise RowndPluginError("Invalid owner consolidation checkpoint")
+    return plan
 
 
 def register_owner_plan_validator(
@@ -61,10 +87,8 @@ async def session_authentication_origin(
 
         target = await freshly_resolve_sdk_user_id_to_internal(user.id, context)
         metadata = await get_raw_user_metadata(target, context)
-        plan = metadata.get("rownd_migration_owner_consolidation")
-        if plan is not None and not isinstance(plan, dict):
-            raise RowndPluginError("Invalid owner consolidation checkpoint")
-        if isinstance(plan, dict) and recipe_user_id in ambiguous_owner_session_aliases(plan):
+        plan = _read_owner_plan(metadata)
+        if plan is not None and recipe_user_id in ambiguous_owner_session_aliases(plan):
             if plan.get("status") != "COMPLETE" or plan.get("reservation"):
                 raise RowndPluginError("Owner consolidation is incomplete")
             if _owner_plan_validator is None:
@@ -89,6 +113,9 @@ async def session_authentication_origin(
 
 
 def ambiguous_owner_session_aliases(plan: JsonDict) -> set[str]:
+    """Extract aliases only after the authoritative checkpoint reader has accepted the plan."""
+    if type(plan.get("version")) is not int:
+        raise RowndPluginError("Invalid owner consolidation checkpoint")
     if plan.get("version") == 1:
         return set()
     if plan.get("version") != 2:
