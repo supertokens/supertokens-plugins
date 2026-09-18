@@ -1,3 +1,4 @@
+from inspect import unwrap
 from unittest.mock import Mock
 
 import pytest
@@ -5,6 +6,7 @@ from docker.errors import APIError, NotFound
 from testcontainers.core.container import DockerContainer
 
 from conftest import start_container
+import conftest
 
 
 ROOTLESS_COLLISION = (
@@ -113,3 +115,116 @@ def test_cleanup_failure_closes_client_without_starting_another_container():
     assert raised.value is cleanup_error
     factory.assert_called_once_with()
     client.close.assert_called_once_with()
+
+
+@pytest.fixture
+def network_double(monkeypatch):
+    monkeypatch.delenv("ROWND_TEST_DOCKER_SUBNET", raising=False)
+    factory = Mock()
+    monkeypatch.setattr(conftest, "Network", factory)
+    return factory
+
+
+@pytest.mark.parametrize("subnet", [None, "10.246.231.0/24"])
+def test_network_subnet_configuration_and_cleanup_after_start_failure(monkeypatch, network_double, subnet):
+    if subnet:
+        monkeypatch.setenv("ROWND_TEST_DOCKER_SUBNET", subnet)
+    error = RuntimeError("postgres startup failed")
+    start = Mock(side_effect=error)
+    monkeypatch.setattr(conftest, "start_container", start)
+
+    with pytest.raises(RuntimeError) as raised:
+        next(unwrap(conftest.core_url)())
+
+    assert raised.value is error
+    options = network_double.call_args.kwargs["docker_network_kw"]
+    if subnet:
+        assert options["ipam"]["Config"][0]["Subnet"] == subnet
+    else:
+        assert options == {}
+    network = network_double.return_value
+    network.create.assert_called_once_with()
+    network.remove.assert_called_once_with()
+    network._docker.client.close.assert_called_once_with()
+    start.assert_called_once()
+
+
+@pytest.mark.parametrize("explanation", [
+    "all predefined address pools have been fully subnetted",
+    "invalid pool request: Pool overlaps with other one on this address space",
+    "permission denied",
+])
+def test_network_creation_error_closes_client_without_retry(monkeypatch, network_double, explanation):
+    error = APIError("network create failed", explanation=explanation)
+    network = network_double.return_value
+    network.create.side_effect = error
+    start = Mock()
+    monkeypatch.setattr(conftest, "start_container", start)
+
+    with pytest.raises(APIError) as raised:
+        next(unwrap(conftest.core_url)())
+
+    assert raised.value is error
+    network.create.assert_called_once_with()
+    network.remove.assert_not_called()
+    network._docker.client.close.assert_called_once_with()
+    start.assert_not_called()
+
+
+def test_invalid_subnet_is_rejected_before_allocating_resources(monkeypatch, network_double):
+    monkeypatch.setenv("ROWND_TEST_DOCKER_SUBNET", "not-a-subnet")
+
+    with pytest.raises(ValueError):
+        next(unwrap(conftest.core_url)())
+
+    network_double.assert_not_called()
+
+
+def test_core_startup_failure_stops_postgres_and_removes_network(monkeypatch, network_double):
+    postgres = container_double()
+    error = RuntimeError("core startup failed")
+    monkeypatch.setattr(conftest, "start_container", Mock(side_effect=[postgres, error]))
+
+    with pytest.raises(RuntimeError) as raised:
+        next(unwrap(conftest.core_url)())
+
+    assert raised.value is error
+    postgres.stop.assert_called_once_with()
+    network_double.return_value.remove.assert_called_once_with()
+    network_double.return_value._docker.client.close.assert_called_once_with()
+
+
+def test_failed_core_teardown_still_cleans_postgres_network_and_client(monkeypatch, network_double):
+    postgres, core = container_double(), container_double()
+    monkeypatch.setattr(conftest, "start_container", Mock(side_effect=[postgres, core]))
+    monkeypatch.setattr(conftest.httpx, "get", Mock(return_value=Mock(status_code=200)))
+    monkeypatch.setattr(conftest.httpx, "put", Mock())
+    error = APIError("core remove failed")
+    core.stop.side_effect = error
+    fixture = unwrap(conftest.core_url)()
+    next(fixture)
+
+    with pytest.raises(APIError) as raised:
+        fixture.close()
+
+    assert raised.value is error
+    core.stop.assert_called_once_with()
+    postgres.stop.assert_called_once_with()
+    network_double.return_value.remove.assert_called_once_with()
+    network_double.return_value._docker.client.close.assert_called_once_with()
+
+
+def test_core_readiness_timeout_cleans_all_resources_without_retry(monkeypatch, network_double):
+    postgres, core = container_double(), container_double()
+    start = Mock(side_effect=[postgres, core])
+    monkeypatch.setattr(conftest, "start_container", start)
+    monkeypatch.setattr(conftest.time, "time", Mock(side_effect=[0, 61]))
+
+    with pytest.raises(RuntimeError, match="Core container did not become ready"):
+        next(unwrap(conftest.core_url)())
+
+    assert start.call_count == 2
+    core.stop.assert_called_once_with()
+    postgres.stop.assert_called_once_with()
+    network_double.return_value.remove.assert_called_once_with()
+    network_double.return_value._docker.client.close.assert_called_once_with()

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+from contextlib import ExitStack
+from ipaddress import ip_network
 from os import environ
 from typing import Any, Callable, Dict, Literal, Optional
 from uuid import uuid4
@@ -10,6 +12,7 @@ environ["SUPERTOKENS_ENV"] = "testing"
 import httpx
 import pytest
 from docker.errors import APIError, NotFound
+from docker.types import IPAMConfig, IPAMPool
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from testcontainers.core.container import DockerContainer
@@ -154,11 +157,19 @@ def start_container(container_factory: Callable[[], DockerContainer]) -> DockerC
 
 @pytest.fixture(scope="session")
 def core_url():
-    network = Network()
-    network.create()
-    postgres = None
-    core = None
-    try:
+    # Shared daemons may exhaust Docker's default pools. Parallel runs need
+    # distinct, operator-selected subnets that do not overlap host/VPN routes.
+    subnet = environ.get("ROWND_TEST_DOCKER_SUBNET")
+    network_options = {}
+    if subnet:
+        network_options["ipam"] = IPAMConfig(pool_configs=[IPAMPool(subnet=str(ip_network(subnet)))])
+    network = Network(docker_network_kw=network_options)
+    with ExitStack() as cleanup:
+        # Network has no public close method; its context manager only removes
+        # the network, leaving the Docker client open even when create fails.
+        cleanup.callback(network._docker.client.close)
+        network.create()
+        cleanup.callback(network.remove)
         postgres = start_container(
             lambda: DockerContainer("postgres:14")
             .with_network(network)
@@ -168,6 +179,7 @@ def core_url():
             .with_env("POSTGRES_DB", "supertokens")
             .waiting_for(LogMessageWaitStrategy("database system is ready to accept connections").with_startup_timeout(60))
         )
+        cleanup.callback(postgres.stop)
 
         core = start_container(
             lambda: DockerContainer("supertokens/supertokens-postgresql:12.0.10")
@@ -178,6 +190,7 @@ def core_url():
             )
             .with_exposed_ports(3567)
         )
+        cleanup.callback(core.stop)
         url = "http://%s:%s" % (core.get_container_host_ip(), core.get_exposed_port(3567))
         deadline = time.time() + 60
         while time.time() < deadline:
@@ -194,12 +207,6 @@ def core_url():
             except Exception:
                 time.sleep(0.5)
         raise RuntimeError("SuperTokens Core container did not become ready")
-    finally:
-        if core is not None:
-            core.stop()
-        if postgres is not None:
-            postgres.stop()
-        network.remove()
 
 
 @pytest.fixture(scope="session")
