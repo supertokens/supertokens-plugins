@@ -628,7 +628,7 @@ async def test_source_epoch_change_uses_only_new_source_attribution(
         if repair_calls == 1:
             raise MigrationError(MigrationErrorReason.CORE_CAPABILITY_REQUIRED, "mapping")
 
-    async def session_method(_source: Any, target: PinnedMigrationTarget, *_args: Any):
+    async def session_method(_source: Any, target: PinnedMigrationTarget, *_args: Any, **_kwargs: Any):
         selected_session_targets.append(target.user_id)
         return SimpleNamespace(get_as_string=lambda: "source-b-recipe")
 

@@ -4832,7 +4832,7 @@ async def test_session_preparation_source_change_restarts_before_session_creatio
             target_b if is_source_b else target_a,
         )
 
-    async def session_method(_source: Any, target: PinnedMigrationTarget, *_args: Any):
+    async def session_method(_source: Any, target: PinnedMigrationTarget, *_args: Any, **_kwargs: Any):
         return RecipeUserId("%s-recipe" % target.user_id)
 
     async def record_variant(_config: Any, target_id: str, *_args: Any):

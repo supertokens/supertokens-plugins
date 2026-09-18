@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 import uuid
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import (
@@ -83,7 +83,12 @@ from .errors import (
 from .logger import log_warning
 from .identity import core_phone_number
 from .provider_migration import checkpoint_introduction, confirm_introduction, repair_provider_lifecycle
-from .migration_authority import assert_source_authority, assert_source_not_superseded
+from .migration_authority import (
+    assert_source_authority,
+    assert_source_not_superseded,
+    has_authenticated_source,
+)
+from .session_authentication import proven_session_authentication
 from . import rownd_compatibility
 from .migration import (
     CanonicalEmailPointerState,
@@ -923,7 +928,11 @@ async def migrate_rownd_user_and_create_session(
                 )
                 raise MigrationError(reason, "tenant_associate", error) from error
         recipe_user_id = await read_fresh_migration_session_method(
-            source.snapshot, completed_target, user_context
+            source.snapshot, completed_target, user_context,
+            anonymous_auth_level=(
+                GUEST_AUTH_METHOD_ID if source.rownd_user.get("auth_level") == GUEST_AUTH_METHOD_ID
+                else INSTANT_AUTH_METHOD_ID
+            ) if not source.snapshot.expected_identities else None,
         )
         supertokens_user_id = completed_target.user_id
         await record_rownd_app_variant_for_user(
@@ -941,14 +950,19 @@ async def migrate_rownd_user_and_create_session(
         raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
 
     try:
-        session = await session_asyncio.create_new_session(
-            request,
-            tenant_id,
-            recipe_user_id,
-            session_claims,
-            {},
-            create_derived_user_context(user_context, {"rowndAppVariantId": app_variant_id}),
+        authenticated = (
+            has_authenticated_source(immediately_fresh_source)
+            and bool(immediately_fresh_source.snapshot.expected_identities)
         )
+        with proven_session_authentication() if authenticated else nullcontext():
+            session = await session_asyncio.create_new_session(
+                request,
+                tenant_id,
+                recipe_user_id,
+                session_claims,
+                {},
+                create_derived_user_context(user_context, {"rowndAppVariantId": app_variant_id}),
+            )
     except MigrationError:
         scrub_migration_session_response(response, request)
         raise
@@ -2722,6 +2736,7 @@ async def read_fresh_migration_session_method(
     source: RowndIdentitySnapshot,
     target: PinnedMigrationTarget,
     user_context: UserContext,
+    anonymous_auth_level: Optional[str] = None,
 ) -> RecipeUserId:
     clear_supertokens_core_call_cache(user_context)
     user = await get_user(target.user_id, user_context)
@@ -2746,6 +2761,10 @@ async def read_fresh_migration_session_method(
     for method in sorted(user.login_methods, key=lambda method: method.recipe_user_id.get_as_string()):
         if source.tenant_id not in method.tenant_ids:
             continue
+        if anonymous_auth_level is not None and rownd_compatibility.get_third_party_info(method) != (
+            anonymous_auth_level, source.rownd_user_id,
+        ):
+            continue
         if email_identity is not None and (
             method.recipe_user_id.get_as_string() != canonical_id
             or not _migration_method_matches_identity(method, email_identity)
@@ -2764,6 +2783,11 @@ async def read_fresh_migration_session_method(
             and any(
                 candidate.recipe_user_id.get_as_string() == recipe_user_id
                 and source.tenant_id in candidate.tenant_ids
+                and (
+                    anonymous_auth_level is None
+                    or rownd_compatibility.get_third_party_info(candidate)
+                    == (anonymous_auth_level, source.rownd_user_id)
+                )
                 and (email_identity is None or _migration_method_matches_identity(candidate, email_identity))
                 and (
                     not source.expected_identities
