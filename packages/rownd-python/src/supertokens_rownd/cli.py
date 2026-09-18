@@ -16,10 +16,10 @@ from .cli_output import failure_result, format_result, success
 from .cli_profiles import (
     CliError,
     mask_profile,
+    profile_transaction,
     read_profiles,
     validate_name,
     validate_profile,
-    write_profiles,
 )
 
 
@@ -190,8 +190,11 @@ async def run(args=None, *, output=json_output, progress=stderr_output, prompt_v
             api_key = value("api_key", "SuperTokens API key (optional)", secret=True, optional=True)
             if api_key:
                 profile["supertokens"]["apiKey"] = api_key
-            profiles[name] = validate_profile(profile)
-            write_profiles(profiles)
+            validate_profile(profile)
+            with profile_transaction() as current:
+                if name in current:
+                    raise CliError("Profile already exists")
+                current[name] = profile
             output(mask_profile(profile))
         else:
             if name not in profiles:
@@ -199,8 +202,10 @@ async def run(args=None, *, output=json_output, progress=stderr_output, prompt_v
             if options.operation == "show":
                 output(mask_profile(profiles[name]))
             else:
-                del profiles[name]
-                write_profiles(profiles)
+                with profile_transaction() as current:
+                    if name not in current:
+                        raise CliError("Profile not found")
+                    del current[name]
                 output({"removed": name})
         return 0
 
@@ -271,7 +276,13 @@ async def run(args=None, *, output=json_output, progress=stderr_output, prompt_v
         return 0 if success(result) else 1
     finally:
         if failures is not None:
-            failures.close()
+            unwinding_error = sys.exc_info()[0] is not None
+            try:
+                failures.close()
+            except Exception:
+                # A repeated flush failure must not replace the original batch error.
+                if not unwinding_error:
+                    raise
 
 
 def main(args=None):

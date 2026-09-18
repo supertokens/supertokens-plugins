@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -99,6 +100,31 @@ def write_profiles(profiles, path=None):
     finally:
         if temporary is not None:
             Path(temporary).unlink(missing_ok=True)
+
+
+@contextmanager
+def profile_transaction(path=None):
+    """Serialize read-modify-replace using a stable inode separate from profiles.json."""
+    try:
+        import fcntl
+    except ImportError:
+        raise CliError("Profile updates require Unix file locking") from None
+    path = Path(path) if path is not None else profiles_path()
+    fd = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.parent.chmod(0o700)
+        fd = os.open(path.with_name("profiles.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        profiles = read_profiles(path)
+        yield profiles
+        write_profiles(profiles, path)
+    except OSError:
+        raise CliError("Unable to update profiles; check directory permissions") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def mask_profile(profile):

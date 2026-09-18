@@ -28,6 +28,10 @@ for `profiles`; a positional profile name is also accepted.
 
 Profiles are stored in `~/.config/rownd-python/profiles.json`, with an owner-only
 directory (`0700`), owner-only file (`0600`), and atomic replacement on updates.
+Profile updates require Unix file locking. A separate owner-only (`0600`)
+`profiles.lock` file serializes concurrent additions and removals; credential
+prompts occur before locking, and the latest profiles are revalidated under the
+lock before saving. The lock file remains in place between commands.
 Profile output masks credentials and removes URI query strings and fragments.
 Dry-run profile reads do not change local permissions.
 
@@ -71,7 +75,8 @@ user_456,second@example.com
 
 The entire file is validated before SDK initialization or repairs. CSV quoting,
 escaped quotes, commas and newlines inside quoted fields, UTF-8 BOM, and CRLF
-are supported. Blank lines are ignored; ID edges are trimmed. Missing or
+are supported. Blank physical lines are ignored; explicit quoted empty or
+whitespace-only IDs are rejected. ID edges are trimmed. Missing or
 repeated ID headers, missing IDs, whitespace/control characters inside IDs,
 inconsistent columns and malformed quotes reject the file. Duplicate IDs are
 processed once in first-seen order.
@@ -93,8 +98,11 @@ processing finished; consult the summary and exit status for success.
 `rownd_user_id,status,error_code,error_message`. It records original input IDs
 for unsuccessful results, including previews with `canReconcile: false`.
 Blocker and execution-proof codes are joined with semicolons; messages are
-sanitized. Existing files are never overwritten. If writing fails, dispatch
-stops and in-flight users finish before the command exits nonzero. Dry run
+sanitized. Existing files are never overwritten. If writing the retry CSV,
+stdout results, or stderr progress fails, dispatch stops and in-flight users
+finish before the command exits nonzero. Result output and retry-file writes
+are attempted independently, so a broken output pipe does not discard in-flight
+failed IDs from a writable retry CSV. The first output error is preserved. Dry run
 still writes this explicitly requested local report. Retry it using a new
 output filename:
 

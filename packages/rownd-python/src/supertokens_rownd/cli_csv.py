@@ -13,10 +13,13 @@ from .cli_profiles import CliError
 def parse_csv(text, id_column="rownd_user_id"):
     # csv.reader(strict=True) still accepts quotes inside unquoted fields.
     rows, row, field, state = [], [], "", "unquoted"
+    record_present = False
     text = text.removeprefix("\ufeff")
     i = 0
     while i < len(text):
         char = text[i]
+        if not char.isspace():
+            record_present = True
         if state == "quoted":
             if char == '"':
                 if i + 1 < len(text) and text[i + 1] == '"':
@@ -30,8 +33,10 @@ def parse_csv(text, id_column="rownd_user_id"):
             row.append(field)
             field, state = "", "unquoted"
             if char != ",":
-                rows.append(row)
+                if record_present:
+                    rows.append(row)
                 row = []
+                record_present = False
                 if char == "\r" and i + 1 < len(text) and text[i + 1] == "\n":
                     i += 1
         elif char == '"' and state == "unquoted" and not field:
@@ -43,9 +48,8 @@ def parse_csv(text, id_column="rownd_user_id"):
         i += 1
     if state == "quoted":
         raise CliError("CSV has an unterminated quoted field")
-    if row or field or state == "closed":
+    if record_present:
         rows.append([*row, field])
-    rows = [row for row in rows if not (len(row) == 1 and not row[0].strip())]
     if not rows:
         raise CliError("CSV is empty; a header and at least one Rownd ID are required")
     header = [value.strip() for value in rows[0]]
@@ -131,12 +135,56 @@ class FailedFile:
 
 
 async def reconcile_csv(
-    ids, duplicates, profile, dry_run, concurrency, reconcile, output, progress, failures=None
+    ids,
+    duplicates,
+    profile,
+    dry_run,
+    concurrency,
+    reconcile,
+    output,
+    progress,
+    failures=None,
+    *,
+    wait_for_tick=asyncio.sleep,
 ):
     next_index = completed = succeeded = active = 0
     stopped = False
+    first_error = None
+    parent_cancellation = None
     statuses = {}
     started = time.monotonic()
+
+    def stop(error):
+        nonlocal stopped, first_error
+        stopped = True
+        if first_error is None:
+            first_error = error
+
+    def attempt(callback, *args):
+        try:
+            callback(*args)
+        except Exception as error:
+            stop(error)
+
+    async def drain(tasks):
+        nonlocal parent_cancellation
+        settled = asyncio.gather(*tasks, return_exceptions=True)
+        interrupted = False
+        while not settled.done():
+            try:
+                # Child cancellation must not cancel siblings. Parent cancellation
+                # cancels them once, then shields their cleanup from repeated requests.
+                await asyncio.shield(settled)
+            except asyncio.CancelledError as error:
+                stop(error)
+                if parent_cancellation is None:
+                    parent_cancellation = error
+                if not interrupted:
+                    interrupted = True
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+        return settled.result()
 
     def report(state):
         elapsed = max(time.monotonic() - started, 0.000001)
@@ -150,12 +198,15 @@ async def reconcile_csv(
         )
 
     async def ticker():
-        while True:
-            await asyncio.sleep(1)
-            report("running")
+        try:
+            while not stopped:
+                await wait_for_tick(1)
+                attempt(report, "running")
+        except Exception as error:
+            stop(error)
 
     async def worker():
-        nonlocal next_index, completed, succeeded, active, stopped
+        nonlocal next_index, completed, succeeded, active
         try:
             while not stopped and next_index < len(ids):
                 index = next_index
@@ -185,38 +236,45 @@ async def reconcile_csv(
                     },
                     profile,
                 )
-                output({"type": "result", "index": index + 1, "result": result})
+                # Each sink gets the result even if the other fails. In-flight retry IDs
+                # must survive stdout/stderr failures before we drain and raise.
+                attempt(output, {"type": "result", "index": index + 1, "result": result})
                 if not ok and failures is not None:
-                    failures.append(user_id, result)
-        except Exception:
-            stopped = True
+                    attempt(failures.append, user_id, result)
+        except asyncio.CancelledError as error:
+            stop(error)
             raise
+        except Exception as error:
+            stop(error)
 
     report("running")
     timer = asyncio.create_task(ticker())
+    workers = [asyncio.create_task(worker()) for _ in range(min(concurrency, len(ids)))]
     finished = False
+    failed = 0
     try:
-        outcomes = await asyncio.gather(
-            *(worker() for _ in range(min(concurrency, len(ids)))), return_exceptions=True
-        )
-        for outcome in outcomes:
-            if isinstance(outcome, BaseException):
-                raise outcome
-        failed = len(ids) - succeeded
-        output(
-            {
-                "type": "summary",
-                "dryRun": dry_run,
-                "total": len(ids),
-                "duplicatesSkipped": duplicates,
-                "succeeded": succeeded,
-                "failed": failed,
-                "statuses": statuses,
-            }
-        )
-        finished = True
-        return int(failed > 0)
+        await drain(workers)
+        if first_error is None:
+            failed = len(ids) - succeeded
+            attempt(
+                output,
+                {
+                    "type": "summary",
+                    "dryRun": dry_run,
+                    "total": len(ids),
+                    "duplicatesSkipped": duplicates,
+                    "succeeded": succeeded,
+                    "failed": failed,
+                    "statuses": statuses,
+                },
+            )
+        finished = first_error is None
     finally:
         timer.cancel()
-        await asyncio.gather(timer, return_exceptions=True)
-        report("complete" if finished else "stopped")
+        await drain([timer])
+        attempt(report, "complete" if finished and not stopped else "stopped")
+    if parent_cancellation is not None:
+        raise parent_cancellation
+    if first_error is not None:
+        raise first_error
+    return int(failed > 0)
