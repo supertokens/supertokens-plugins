@@ -366,10 +366,103 @@ def plan_owner_operations(plan: JsonDict, profile: JsonDict, *, node_compatible:
     return actions
 
 
+def _require_owner_plan(condition: object) -> None:
+    if not condition:
+        raise AdministrativePolicyError("Invalid duplicate owner consolidation plan")
+
+
+def _validate_owner_completion(plan: JsonDict, final: JsonDict) -> None:
+    require = _require_owner_plan
+    memberships = plan.get("tenantMemberships", [])
+    require(isinstance(memberships, list))
+    membership_ids = set()
+    if memberships:
+        from .admin_lineage import single_owner_lineage
+
+        require(single_owner_lineage(plan) and plan["status"] == "COMPLETE")
+        for membership in memberships:
+            require(isinstance(membership, dict) and valid_lookup_id(membership.get("id")))
+            require(membership["id"] not in membership_ids)
+            membership_ids.add(membership["id"])
+            require(valid_lookup_id(membership.get("methodPlanId")))
+            tenants = membership.get("tenantIds")
+            if not isinstance(tenants, list):
+                raise AdministrativePolicyError("Invalid duplicate owner consolidation plan")
+            require("public" in tenants)
+            require(all(isinstance(t, str) and t for t in tenants))
+            require(tenants == sorted(set(tenants)))
+    if plan["status"] != "COMPLETE":
+        return
+    completion = plan.get("completion", {"recipes": plan["recipes"], "state": final})
+    require(isinstance(completion, dict) and isinstance(completion["recipes"], list) and completion["recipes"])
+    completed_ids = [r["id"] for r in completion["recipes"]]
+    require(len(set(completed_ids)) == len(completed_ids) and plan["target"] in completed_ids)
+    for recipe in completion["recipes"]:
+        identity = json.loads(recipe["identity"])
+        require(isinstance(identity, list) and len(identity) == 7)
+        require(valid_lookup_id(recipe["id"]) and identity[1] == recipe.get("email"))
+        require(identity[0] in {"passwordless", "thirdparty", "emailpassword", "webauthn"})
+        require(identity[1] is None or isinstance(identity[1], str) and bool(identity[1]))
+        require(identity[2] is None or isinstance(identity[2], str) and bool(identity[2]))
+        if identity[0] == "thirdparty":
+            require(isinstance(identity[3], dict) and valid_lookup_id(identity[3].get("id")) and valid_lookup_id(identity[3].get("userId")))
+        else:
+            require(identity[3] is None)
+        original = next((r for r in plan["recipes"] if r["id"] == recipe["id"]), None)
+        if original is not None:
+            initial_identity = json.loads(original["identity"])
+            require(all(type(identity[i]) is type(initial_identity[i]) and identity[i] == initial_identity[i]
+                        for i in (0, 2, 3, 5, 6)))
+            if initial_identity[0] != "passwordless":
+                require(identity[1] == initial_identity[1])
+        membership = next((m for m in memberships if m["id"] == recipe["id"]), None)
+        require(identity[4] == (membership["tenantIds"] if membership else ["public"]))
+        require(type(identity[5]) in (int, float) and math.isfinite(identity[5]) and identity[5] >= 0)
+        require(type(recipe["verified"]) is bool)
+    state = completion["state"]
+    require(set(g["id"] for g in state["graph"]) == set(completed_ids))
+    require(len(state["graph"]) == len(completed_ids))
+    require(all(g["owner"] == plan["target"] and g["primary"] is True for g in state["graph"]))
+    require(set(m["id"] for m in state["mappings"]) == set(completed_ids))
+    require(len(state["mappings"]) == len(completed_ids))
+    require(all(type(c["verified"]) is bool for c in state["verifications"]))
+    require(membership_ids.issubset(completed_ids))
+
+
+def _validate_owner_lineage_receipts(plan: JsonDict, ids: set[str]) -> None:
+    require = _require_owner_plan
+    method_retirements = plan.get("methodAliasRetirements", [])
+    require(isinstance(method_retirements, list))
+    if method_retirements:
+        from .admin_lineage import retirement_alias_receipt
+
+        require(plan["status"] == "COMPLETE" and "completion" in plan)
+        retired_method_ids = set()
+        for receipt in method_retirements:
+            rid = receipt["recipe"]["id"]
+            require(rid not in retired_method_ids)
+            retired_method_ids.add(rid)
+            expected = retirement_alias_receipt(plan, {
+                "kind": "retire", "id": rid, "identity": receipt["recipe"]["identity"]})
+            require(expected is not None and expected == receipt)
+            require(rid not in {r["id"] for r in plan["completion"]["recipes"]})
+            marker = next(m["values"] for m in plan["completion"]["state"]["markers"]
+                          if m["id"] == receipt["mapping"]["alias"])
+            require(marker.get("rownd_migration_superseded") == {
+                "rowndUserId": plan["sourceId"], "targetUserId": plan["target"]})
+    history = plan.get("legacySessionAliasHistory")
+    if history is not None:
+        anchor = next(r for r in plan["recipes"] if r["id"] == plan["target"])
+        identity = json.loads(anchor["identity"])
+        require(identity[0] == "thirdparty" and isinstance(identity[3], dict) and identity[3].get("id") == "instant")
+        require(history["instantRecipeId"] == plan["target"] and history["instantRecipeIdentity"] == anchor["identity"])
+        require(isinstance(history["aliases"], list) and history["aliases"])
+        require(all(valid_lookup_id(a) and a not in ids for a in history["aliases"]))
+        require(len(set(history["aliases"])) == len(history["aliases"]))
+
+
 def read_owner_plan(metadata: JsonDict) -> Optional[JsonDict]:
-    def require(condition: Any) -> None:
-        if not condition:
-            raise AdministrativePolicyError("Invalid duplicate owner consolidation plan")
+    require = _require_owner_plan
 
     plan = metadata.get(OWNER_PLAN_KEY)
     if OWNER_PLAN_KEY not in metadata:
@@ -487,48 +580,8 @@ def read_owner_plan(metadata: JsonDict) -> Optional[JsonDict]:
             require(marker.get("rownd_migration_superseded") == {"rowndUserId": plan["sourceId"], "targetUserId": plan["target"]})
         if plan["status"] == "READY":
             require(plan["cursor"] == 0)
-        if plan["status"] == "COMPLETE":
-            completion = plan.get("completion", {"recipes": plan["recipes"], "state": final})
-            require(isinstance(completion, dict) and isinstance(completion["recipes"], list) and completion["recipes"])
-            completed_ids = [r["id"] for r in completion["recipes"]]
-            require(len(set(completed_ids)) == len(completed_ids) and plan["target"] in completed_ids)
-            for recipe in completion["recipes"]:
-                identity = json.loads(recipe["identity"])
-                require(isinstance(identity, list) and len(identity) == 7)
-                require(valid_lookup_id(recipe["id"]) and identity[1] == recipe.get("email"))
-                require(identity[0] in {"passwordless", "thirdparty", "emailpassword", "webauthn"})
-                require(identity[1] is None or isinstance(identity[1], str) and bool(identity[1]))
-                require(identity[2] is None or isinstance(identity[2], str) and bool(identity[2]))
-                if identity[0] == "thirdparty":
-                    require(isinstance(identity[3], dict) and valid_lookup_id(identity[3].get("id")) and valid_lookup_id(identity[3].get("userId")))
-                else:
-                    require(identity[3] is None)
-                original = next((r for r in plan["recipes"] if r["id"] == recipe["id"]), None)
-                if original is not None:
-                    initial_identity = json.loads(original["identity"])
-                    require(all(type(identity[i]) is type(initial_identity[i]) and identity[i] == initial_identity[i]
-                                for i in (0, 2, 3, 4, 5, 6)))
-                    if initial_identity[0] != "passwordless":
-                        require(identity[1] == initial_identity[1])
-                require(isinstance(identity, list) and len(identity) == 7 and identity[4] == ["public"])
-                require(type(identity[5]) in (int, float) and math.isfinite(identity[5]) and identity[5] >= 0)
-                require(type(recipe["verified"]) is bool)
-            state = completion["state"]
-            require(set(g["id"] for g in state["graph"]) == set(completed_ids))
-            require(len(state["graph"]) == len(completed_ids))
-            require(all(g["owner"] == plan["target"] and g["primary"] is True for g in state["graph"]))
-            require(set(m["id"] for m in state["mappings"]) == set(completed_ids))
-            require(len(state["mappings"]) == len(completed_ids))
-            require(all(type(c["verified"]) is bool for c in state["verifications"]))
-        history = plan.get("legacySessionAliasHistory")
-        if history is not None:
-            anchor = next(r for r in plan["recipes"] if r["id"] == plan["target"])
-            identity = json.loads(anchor["identity"])
-            require(identity[0] == "thirdparty" and isinstance(identity[3], dict) and identity[3].get("id") == "instant")
-            require(history["instantRecipeId"] == plan["target"] and history["instantRecipeIdentity"] == anchor["identity"])
-            require(isinstance(history["aliases"], list) and history["aliases"])
-            require(all(valid_lookup_id(a) and a not in ids for a in history["aliases"]))
-            require(len(set(history["aliases"])) == len(history["aliases"]))
+        _validate_owner_completion(plan, final)
+        _validate_owner_lineage_receipts(plan, ids)
     except (KeyError, TypeError, ValueError, IndexError, AttributeError, OverflowError, AssertionError, StopIteration, AdministrativePolicyError):
         raise AdministrativePolicyError("Invalid duplicate owner consolidation plan") from None
     return copy.deepcopy(plan)

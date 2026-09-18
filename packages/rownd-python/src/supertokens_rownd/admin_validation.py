@@ -43,7 +43,11 @@ async def resolve_consolidated_token_owner(
     if plan is None:
         return None
     if tenant_id != "public":
-        raise AdministrativePolicyError("Consolidated aliases require public tenant membership")
+        from .admin_lineage import require_single_owner_tenant_transition
+
+        require_single_owner_tenant_transition(plan)
+        if not any(tenant_id in m["tenantIds"] for m in plan.get("tenantMemberships", [])):
+            raise AdministrativePolicyError("Owner tenant membership is not receipted")
     await validate_completed_owner_plan(plan, user_context)
     alias = next((a for a in plan["aliases"] if a["id"] == rownd_user_id), None)
     mapping = await store.mapping(rownd_user_id)
@@ -126,7 +130,11 @@ async def assert_session_membership(user_id: str, recipe_user_id: str, tenant_id
         if plan is None:
             continue
         if tenant_id != "public":
-            raise AdministrativePolicyError("Owner consolidation requires public tenant membership")
+            from .admin_lineage import require_single_owner_tenant_transition
+
+            require_single_owner_tenant_transition(plan)
+            if not any(tenant_id in m["tenantIds"] for m in plan.get("tenantMemberships", [])):
+                raise AdministrativePolicyError("Owner tenant membership is not receipted")
         await validate_completed_owner_plan(plan, user_context)
         if user_id != plan["sourceId"]:
             raise AdministrativePolicyError("Owner consolidation session owner changed")
@@ -161,12 +169,20 @@ async def validate_completed_owner_plan(plan: dict[str, Any], user_context: dict
     state = completion.get("state")
     if not isinstance(state, dict) or not isinstance(state.get("markers"), list):
         raise AdministrativePolicyError("Invalid completed owner state")
-    observed = await store.inspect_graph([validated["target"]], [m["id"] for m in state["markers"]], completion["recipes"])
+    observed = await store.inspect_graph([validated["target"]], [m["id"] for m in state["markers"]], completion["recipes"],
+                                         allow_tenant_membership=bool(validated.get("tenantMemberships")))
     if not same_json(observed["state"], state) or not same_json(observed["recipes"], completion["recipes"]):
         raise AdministrativePolicyError("Completed owner graph changed")
     if any(g["owner"] != validated["target"] or g["primary"] is not True for g in state["graph"]):
         raise AdministrativePolicyError("Completed owner graph has foreign recipes")
     for alias in validated["aliases"]:
+        retirement = next((r for r in validated.get("methodAliasRetirements", [])
+                           if r["mapping"]["alias"] == alias["id"]), None)
+        if retirement is not None:
+            from .admin_lineage import validate_retired_alias
+
+            await validate_retired_alias(store, validated, retirement)
+            continue
         mapping = await store.mapping(alias["id"])
         if mapping is None or mapping["id"] != alias["to"]:
             raise AdministrativePolicyError("Completed owner mapping changed")

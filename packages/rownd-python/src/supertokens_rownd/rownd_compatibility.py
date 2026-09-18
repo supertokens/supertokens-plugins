@@ -213,13 +213,13 @@ def project_rownd_compat_user(
     verified_data = {
         key: value
         for key, value in as_json_dict(original.get("verified_data")).items()
-        if key not in {"email", "google_id", "apple_id"}
+        if key not in {"email", "google_id", "apple_id"} and not is_internal_metadata_field(key)
     }
     data: JsonDict = {"user_id": user_id}
     data_field_keys = set()
 
     for key, value in original_data.items():
-        if not is_identity_field(key):
+        if not is_identity_field(key) and not is_internal_metadata_field(key):
             data[key] = value
             data_field_keys.add(key)
 
@@ -299,7 +299,7 @@ def project_rownd_compat_user(
         data.setdefault("anonymous_id", anonymous_id)
 
     for key, schema_field in schema.items():
-        if data.get(key) is None and schema_field.get("type") == "string":
+        if not is_internal_metadata_field(key) and data.get(key) is None and schema_field.get("type") == "string":
             data[key] = ""
 
     sorted_by_joined = sorted(tenant_login_methods, key=lambda method: method.time_joined)

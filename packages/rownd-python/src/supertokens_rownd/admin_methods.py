@@ -18,6 +18,7 @@ from supertokens_python.types import RecipeUserId, LoginMethod
 from .admin_core import AdministrativeCore, method_identity, same_json
 from .admin_planning import OWNER_PLAN_KEY, POLICY_MARKERS, AdministrativePolicyError, provider_subject, read_owner_plan
 from .admin_source import source_evidence
+from .admin_lineage import prepare_alias_retirement, successful_profiles, validate_recovery_mappings, retirement_alias_receipt, validate_retired_alias, require_single_owner_tenant_transition
 from .supertokens_repository import import_method_account_infos, import_user, login_method_matches_import
 
 METHOD_KEY = "rownd_migration_admin_methods"
@@ -127,8 +128,26 @@ async def validate_method_recovery(store: AdministrativeCore, plan: dict[str, An
         if not any(same_json(json.loads(method_identity(method)), identity) for identity in expected[rid]):
             raise AdministrativePolicyError("Method recovery recipe identity changed")
     for mapping in owner_state_at(plan)["mappings"]:
-        if not same_json(await store.mapping(mapping["id"], "SUPERTOKENS") or {"id": mapping["id"]}, mapping):
-            raise AdministrativePolicyError("Method recovery mappings changed")
+        current = await store.mapping(mapping["id"], "SUPERTOKENS")
+        if current is not None and "alias" in current and not same_json(await store.mapping(current["alias"]), current):
+            raise AdministrativePolicyError("Method recovery reverse mapping changed")
+    try:
+        await validate_recovery_mappings(store, plan, checkpoint)
+    except AdministrativePolicyError:
+        for mapping in owner_state_at(plan)["mappings"]:
+            if same_json(await store.mapping(mapping["id"], "SUPERTOKENS") or {"id": mapping["id"]}, mapping):
+                continue
+            eligible = [(i, s) for i, s in enumerate(checkpoint["operations"]) if i <= checkpoint["cursor"]
+                        and s.get("kind") == "retire" and s.get("id") == mapping["id"] and s.get("aliasRetirement")]
+            if len(eligible) != 1:
+                raise AdministrativePolicyError("Unreceipted method mapping changed")
+            index, step = eligible[0]
+            if await store.user(mapping["id"]) is None:
+                await validate_retired_alias(store, plan, step["aliasRetirement"])
+            elif index == checkpoint["cursor"]:
+                await validate_retirement_mapping_gap(store, plan, step)
+            else:
+                raise AdministrativePolicyError("Committed retirement recipe still exists")
     if raw.get("rownd_pending_verification") not in (None, []):
         raise AdministrativePolicyError("CANONICAL_EMAIL_POLICY")
 
@@ -152,6 +171,15 @@ async def plan_methods(store: AdministrativeCore, target: str, source: dict[str,
     desired = source["loginMethods"]
     contact = profile["data"].get("email", "").lower()
     target_metadata = await store.raw(target)
+    histories.extend(successful_profiles(target_metadata, store.tenant_id, source["externalUserId"]))
+    previous = target_metadata.get(METHOD_KEY)
+    finalization = target_metadata.get("rownd_migration_admin_finalization")
+    if (isinstance(previous, dict) and previous.get("status") == "COMPLETE"
+            and previous.get("tenantId") == store.tenant_id and previous.get("sourceId") == source["externalUserId"]
+            and isinstance(finalization, dict) and finalization.get("status") == "COMPLETE"
+            and finalization.get("tenantId") == store.tenant_id and finalization.get("sourceId") == source["externalUserId"]
+            and same_json(finalization.get("source"), source_evidence(previous["profile"]))):
+        histories.append(previous["profile"])
     pointers = target_metadata.get("rownd_email_recipe_user_ids")
     if pointers is not None and (not isinstance(pointers, dict) or any(not isinstance(p, str) or not p for p in pointers.values())):
         raise AdministrativePolicyError("CANONICAL_EMAIL_POLICY")
@@ -276,22 +304,197 @@ async def validate_intent(operation: Any, checkpoint: dict[str, Any], source: di
 
         users = [SimpleNamespace(login_methods=[LoginMethod.from_json(m) for m in baseline["methods"]])]
         derived = await plan_methods(BaselineStore(), checkpoint["target"], source, checkpoint["profile"], users)  # type: ignore[arg-type]
-        recorded = [{k: v for k, v in step.items() if k not in {"nonce", "receipt"}} for step in checkpoint["operations"]]
+        recorded = [{k: v for k, v in step.items() if k not in {"nonce", "receipt", "aliasRetirement"}} for step in checkpoint["operations"]]
         if not same_json(derived, recorded):
             raise ValueError()
     except (KeyError, TypeError, ValueError, AttributeError):
         raise AdministrativePolicyError("Method intent does not match its source and baseline") from None
 
 
+async def validate_retirement_mapping_gap(store: AdministrativeCore, plan: dict[str, Any], step: dict[str, Any]) -> None:
+    receipt = retirement_alias_receipt(plan, step)
+    if receipt is None or not same_json(receipt, step.get("aliasRetirement")):
+        raise AdministrativePolicyError("Invalid alias retirement gap receipt")
+    mapping = receipt["mapping"]
+    user = await store.user(step["id"])
+    methods = [] if user is None else [m for m in user.login_methods if await store.immutable(m.recipe_user_id.get_as_string()) == step["id"]]
+    if (user is None or await store.immutable(user.id) != plan["target"] or len(methods) != 1
+            or not same_json(json.loads(method_identity(methods[0])), json.loads(step["identity"]))
+            or await store.mapping(mapping["alias"]) is not None or await store.mapping(mapping["id"], "SUPERTOKENS") is not None
+            or not same_json((await store.raw(mapping["alias"])).get("rownd_migration_superseded"),
+                             {"rowndUserId": plan["sourceId"], "targetUserId": plan["target"]})):
+        raise AdministrativePolicyError("Alias retirement mapping gap changed")
+
+
+async def validate_admin_completed_plan(operation: Any, plan: dict[str, Any]) -> None:
+    from .admin_validation import validate_completed_owner_plan
+    from .admin_planning import administrative_source
+
+    try:
+        await validate_completed_owner_plan(plan, operation.context)
+        return
+    except AdministrativePolicyError as original_error:
+        require_single_owner_tenant_transition(plan)
+        checkpoint = (await operation.store.raw(plan["target"])).get(METHOD_KEY)
+        if (not isinstance(checkpoint, dict) or checkpoint.get("target") != plan["target"]
+                or checkpoint.get("sourceId") != plan["sourceId"] or not isinstance(checkpoint.get("tenantId"), str)
+                or checkpoint.get("status") not in {"APPLYING", "COMPLETE"}
+                or not isinstance(checkpoint.get("operations"), list) or not checkpoint["operations"]
+                or any(s.get("kind") != "associate" for s in checkpoint["operations"])):
+            raise original_error
+        profile = await operation.fetch(plan["sourceId"])
+        if profile is None:
+            raise original_error
+        tenant = checkpoint["tenantId"]
+        proof_operation = SimpleNamespace(tenant_id=tenant, context=operation.context,
+            store=AdministrativeCore(operation.context, tenant), profiles={plan["sourceId"]: profile})
+        await validate_intent(proof_operation, checkpoint, administrative_source(profile, tenant))
+        await validate_method_cursor(proof_operation, checkpoint)
+        completion = plan.get("completion")
+        if not isinstance(completion, dict):
+            raise original_error
+        expected = copy.deepcopy(completion["recipes"])
+        for step in checkpoint["operations"]:
+            recipe = next((r for r in expected if r["id"] == step["id"]), None)
+            if recipe is None or not same_json(json.loads(recipe["identity"]), json.loads(step["identity"])):
+                raise original_error
+        observed = await operation.store.inspect_graph([plan["target"]], [m["id"] for m in completion["state"]["markers"]], allow_tenant_membership=True)
+        states = [copy.deepcopy(completion["state"])]
+        finalization = (await operation.store.raw(plan["target"])).get("rownd_migration_admin_finalization")
+        if not same_json(observed["state"], completion["state"]):
+            if (checkpoint["status"] != "COMPLETE" or checkpoint["cursor"] != len(checkpoint["operations"])
+                    or not isinstance(finalization, dict) or type(finalization.get("version")) is not int or finalization["version"] != 1
+                    or finalization.get("sourceId") != plan["sourceId"] or finalization.get("target") != plan["target"]
+                    or finalization.get("tenantId") != tenant or not same_json(finalization.get("source"), source_evidence(profile))
+                    or finalization.get("status") not in {"APPLYING", "COMPLETE"}
+                    or type(finalization.get("cursor")) is not int or not isinstance(finalization.get("operations"), list)
+                    or not 0 <= finalization["cursor"] <= len(finalization["operations"])
+                    or finalization["status"] == "COMPLETE" and finalization["cursor"] != len(finalization["operations"])):
+                raise original_error
+            state = copy.deepcopy(completion["state"])
+            states = []
+            allowed_counts = {finalization["cursor"], min(finalization["cursor"] + 1, len(finalization["operations"]))}
+            if 0 in allowed_counts:
+                states.append(copy.deepcopy(state))
+            email = profile["data"].get("email")
+            for index, step in enumerate(finalization["operations"]):
+                if step.get("kind") == "metadata" and step.get("id") == plan["target"]:
+                    marker = next(m["values"] for m in state["markers"] if m["id"] == plan["target"])
+                    before, values = step.get("before"), step.get("values")
+                    if not isinstance(before, dict) or not isinstance(values, dict):
+                        raise original_error
+                    pointers = copy.deepcopy(marker.get("rownd_email_recipe_user_ids", {}))
+                    candidates = [r for r in expected if json.loads(r["identity"])[0] == "passwordless" and r.get("email", "").lower() == str(email).lower()]
+                    if len(candidates) == 1:
+                        mapping = next(m for m in state["mappings"] if m["id"] == candidates[0]["id"])
+                        pointers[tenant] = mapping.get("alias", mapping["id"])
+                    allowed = {"rownd_migration_complete": True, "rownd_email_recipe_user_ids": pointers}
+                    for key, value in values.items():
+                        if key not in POLICY_MARKERS:
+                            continue
+                        if key not in allowed or not same_json(value, allowed[key]) or not same_json(before.get(key), marker.get(key)):
+                            raise original_error
+                        marker[key] = value
+                elif step.get("kind") == "verify_email":
+                    from .rownd_compatibility import is_rownd_email_verified
+
+                    if (not isinstance(email, str) or step.get("email", "").lower() != email.lower()
+                            or not is_rownd_email_verified(profile.get("verified_data", {}).get("email"), email)
+                            or type(step.get("before")) is not bool):
+                        raise original_error
+                    cell = next((c for c in state["verifications"] if c["id"] == step.get("id") and c["email"] == step["email"]), None)
+                    if cell is None or cell["verified"] is not step["before"]:
+                        raise original_error
+                    cell["verified"] = True
+                else:
+                    raise original_error
+                if index + 1 in allowed_counts:
+                    states.append(copy.deepcopy(state))
+            if not any(same_json(observed["state"], candidate) for candidate in states):
+                raise original_error
+        possibilities = []
+        for count in {checkpoint["cursor"], min(checkpoint["cursor"] + 1, len(checkpoint["operations"]))}:
+            recipes = copy.deepcopy(expected)
+            for step in checkpoint["operations"][:count]:
+                recipe = next(r for r in recipes if r["id"] == step["id"])
+                identity = json.loads(recipe["identity"])
+                identity[4] = sorted(set(identity[4]) | {tenant})
+                recipe["identity"] = json.dumps(identity, separators=(",", ":"))
+            possibilities.append(recipes)
+        if not any(same_json(observed["recipes"], expected_recipes) for expected_recipes in possibilities):
+            raise original_error
+        operation.tenant_transition_recovery = True
+
+
+async def validate_creation_receipt(operation: Any, checkpoint: dict[str, Any], step: dict[str, Any]):
+    store = operation.store
+    receipt = step.get("receipt")
+    if not isinstance(receipt, dict) or not isinstance(receipt.get("id"), str) or type(receipt.get("verified")) is not bool:
+        raise AdministrativePolicyError("Invalid method creation receipt")
+    user = await store.user(receipt["id"])
+    methods = [] if user is None else [m for m in user.login_methods if await store.immutable(m.recipe_user_id.get_as_string()) == receipt["id"]]
+    if (user is None or len(methods) != 1 or not login_method_matches_import(methods[0], step["method"])
+            or operation.tenant_id not in methods[0].tenant_ids
+            or not same_json(json.loads(method_identity(methods[0])), json.loads(receipt["identity"]))
+            or methods[0].verified is not receipt["verified"]):
+        raise AdministrativePolicyError("Creation receipt is not the authorized source method")
+    marker = (await store.raw(receipt["id"])).get(RECEIPT_KEY)
+    python_proven = (isinstance(step.get("nonce"), str) and bool(step["nonce"]) and same_json(marker, {
+        "plan": checkpoint["id"], "nonce": step["nonce"], "target": checkpoint["target"], "sourceId": checkpoint["sourceId"]}))
+    plan = read_owner_plan(await store.raw(checkpoint["target"]))
+    node_proven = plan is not None and plan["sourceId"] == checkpoint["sourceId"] and any(
+        r["id"] == receipt["id"] and same_json(json.loads(r["identity"]), json.loads(receipt["identity"]))
+        and r["verified"] is receipt["verified"] for r in plan.get("createdRecipes", []))
+    if not python_proven and not node_proven:
+        raise AdministrativePolicyError("Creation receipt lacks independent provenance")
+    owner = await store.immutable(user.id)
+    if owner != checkpoint["target"]:
+        if owner != receipt["id"] or user.is_primary_user or len(user.login_methods) != 1 or await store.mapping(receipt["id"], "SUPERTOKENS") is not None:
+            raise AdministrativePolicyError("Creation receipt ownership changed")
+    return user, methods[0]
+
+
+async def validate_method_cursor(operation: Any, checkpoint: dict[str, Any]) -> None:
+    store = operation.store
+    for step in checkpoint["operations"][:checkpoint["cursor"]]:
+        if step["kind"] == "create":
+            user, _ = await validate_creation_receipt(operation, checkpoint, step)
+            if await store.immutable(user.id) != checkpoint["target"]:
+                raise AdministrativePolicyError("Method cursor passed an unlinked creation")
+            continue
+        user = await store.user(step["id"])
+        methods = [] if user is None else [m for m in user.login_methods if await store.immutable(m.recipe_user_id.get_as_string()) == step["id"]]
+        if step["kind"] == "retire":
+            if methods:
+                raise AdministrativePolicyError("Method cursor passed an existing retired credential")
+            continue
+        after = json.loads(step["identity"])
+        if step["kind"] == "update_email":
+            after[1] = step["email"]
+        elif step["kind"] == "associate":
+            after[4] = sorted(set(after[4]) | {operation.tenant_id})
+        elif step["kind"] == "remove_tenant":
+            after[4] = sorted(set(after[4]) - {operation.tenant_id})
+        else:
+            raise AdministrativePolicyError("Unknown committed method operation")
+        if (user is None or await store.immutable(user.id) != checkpoint["target"] or len(methods) != 1
+                or not same_json(json.loads(method_identity(methods[0])), after)):
+            raise AdministrativePolicyError("Committed method postcondition changed")
+
+
 async def execute_methods(operation: Any, target: str, source: dict[str, Any], actions: list[dict[str, Any]]) -> None:
     store: AdministrativeCore = operation.store
     source_id = source["externalUserId"]
     prior = (await store.raw(target)).get(METHOD_KEY)
+    pinned = getattr(operation, "pinned_method_checkpoint", prior)
+    if not same_json(prior, pinned):
+        raise AdministrativePolicyError("Method checkpoint changed during handoff")
     if prior is not None and not isinstance(prior, dict):
         raise AdministrativePolicyError("Invalid method reconciliation checkpoint")
     if prior and prior.get("status") == "COMPLETE" and "baseline" in prior:
         if same_json(source_evidence(prior["profile"]), source_evidence(operation.profiles[source_id])):
             await validate_intent(operation, prior, source)
+            await validate_method_cursor(operation, prior)
             return
     if prior is None or prior.get("status") == "COMPLETE":
         checkpoint = {"version": 1, "id": str(uuid.uuid4()), "sourceId": source_id,
@@ -307,6 +510,7 @@ async def execute_methods(operation: Any, target: str, source: dict[str, Any], a
                 or not same_json(source_evidence(checkpoint["profile"]), source_evidence(operation.profiles[source_id]))):
             raise AdministrativePolicyError("Invalid method reconciliation checkpoint")
         await validate_intent(operation, checkpoint, source)
+        await validate_method_cursor(operation, checkpoint)
 
     expected_saved = copy.deepcopy(prior)
 
@@ -380,7 +584,7 @@ async def execute_methods(operation: Any, target: str, source: dict[str, Any], a
                 receipt = {"id": rid, "identity": method_identity(method), "verified": method.verified}
                 step["receipt"] = receipt
                 await save()
-            user = await store.user(receipt["id"])
+            user, _ = await validate_creation_receipt(operation, checkpoint, step)
             if user is None:
                 raise AdministrativePolicyError("Created recipe disappeared")
             owned = None
@@ -394,6 +598,8 @@ async def execute_methods(operation: Any, target: str, source: dict[str, Any], a
                 if owner != receipt["id"] or user.is_primary_user or len(user.login_methods) != 1:
                     raise AdministrativePolicyError("Created recipe belongs to another owner")
                 await operation.source_guard()
+                await unchanged()
+                await validate_creation_receipt(operation, checkpoint, step)
                 await store.operation({"kind": "link", "id": receipt["id"]}, target)
             linked_user = await store.user(receipt["id"])
             if linked_user is None:
@@ -456,12 +662,31 @@ async def execute_methods(operation: Any, target: str, source: dict[str, Any], a
                 if kind == "retire":
                     if rid == target:
                         raise AdministrativePolicyError("Cannot retire immutable primary recipe")
+                    owner_plan = read_owner_plan(await store.raw(target))
+                    if owner_plan:
+                        operation.mutation_started = True
+                        if step.get("aliasRetirement") and await store.mapping(rid, "SUPERTOKENS") is None:
+                            await validate_retirement_mapping_gap(store, owner_plan, step)
+                            receipt = step["aliasRetirement"]
+                        else:
+                            receipt = await prepare_alias_retirement(store, owner_plan, step)
+                        if receipt is not None:
+                            if step.get("aliasRetirement") is not None and not same_json(step["aliasRetirement"], receipt):
+                                raise AdministrativePolicyError("Alias retirement receipt changed")
+                            step["aliasRetirement"] = receipt
+                            await save()
+                            alias_mapping = receipt["mapping"]
+                            if await store.mapping(alias_mapping["alias"]):
+                                for address in sorted({r["email"] for r in owner_plan["recipes"] if r.get("email")}):
+                                    await store.operation({"kind": "revoke_verification_tokens", "id": alias_mapping["alias"], "email": address}, target)
+                                await store.operation({"kind": "delete_mapping", "id": rid, "alias": alias_mapping["alias"]}, target)
+                            await validate_retirement_mapping_gap(store, owner_plan, step)
                     email_change = current.recipe_id == "passwordless" and bool(current.email)
                     if email_change:
                         await passwordless.revoke_all_codes(operation.tenant_id, email=current.email, user_context=store.context)
-                    await sessions.revoke_all_sessions_for_user(target if email_change else current.recipe_user_id.get_as_string(),
+                    await sessions.revoke_all_sessions_for_user(target if email_change else rid if step.get("aliasRetirement") else current.recipe_user_id.get_as_string(),
                         revoke_sessions_for_linked_accounts=email_change, tenant_id=operation.tenant_id, user_context=store.context)
-                    await core.delete_user(current.recipe_user_id.get_as_string(), False, store.context)
+                    await core.delete_user(rid if step.get("aliasRetirement") else current.recipe_user_id.get_as_string(), False, store.context)
                 elif same_json(identity, before):
                     if not step["verified"] and await verification.is_email_verified(current.recipe_user_id, step["email"], store.context):
                         raise AdministrativePolicyError("Canonical email verification changed")
@@ -478,5 +703,6 @@ async def execute_methods(operation: Any, target: str, source: dict[str, Any], a
         store.actions.append(kind)
         checkpoint["cursor"] += 1
         await save()
+    await validate_method_cursor(operation, checkpoint)
     checkpoint["status"] = "COMPLETE"
     await save()

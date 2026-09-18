@@ -56,6 +56,7 @@ from supertokens_rownd.rownd_repository import (
     RowndTokenValidationReason,
 )
 from supertokens_rownd import create_magic_link_with_confirmation_bypass
+from supertokens_rownd import plugin_implementation
 from supertokens_rownd.errors import (
     MigrationError,
     MigrationErrorReason,
@@ -179,6 +180,9 @@ async def test_blocked_migration_aliases_return_422_without_session(
     monkeypatch.setattr(session_asyncio, "create_new_session", create_session)
     monkeypatch.setattr(impl, "read_fresh_migration_snapshot", AsyncMock())
     monkeypatch.setattr(impl, "get_raw_user_metadata", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        plugin_implementation, "resolve_consolidated_token_owner", AsyncMock(return_value=None)
+    )
     monkeypatch.setattr(
         impl,
         "classify_migration_snapshot",

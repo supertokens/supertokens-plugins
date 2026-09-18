@@ -16,12 +16,12 @@ from supertokens_python.types.base import AccountInfoInput
 
 from .admin_core import AdministrativeCore, same_json
 from .admin_orphan import ORPHAN_KEY, inspect_orphan, retire_orphan
-from .admin_methods import METHOD_KEY, execute_methods, method_intent, validate_method_recovery
+from .admin_methods import METHOD_KEY, execute_methods, method_intent, validate_method_recovery, validate_admin_completed_plan
 from .admin_evidence import checkpoint_phone_proof, instant_primary_proof
-from .admin_validation import validate_completed_owner_plan
 from .admin_publication import PUBLICATION_KEY, publish_mapping, single_owner_snapshot
 from .admin_metadata import inspect_occupied_metadata
 from .admin_source import source_evidence
+from .admin_lineage import record_successful_profile, require_single_owner_tenant_transition, completed_tenant_memberships
 from .admin_finalization import FINAL_KEY, finish
 from .admin_planning import (
     OWNER_PLAN_KEY,
@@ -99,7 +99,7 @@ class Reconciliation:
                 raw = await self.store.raw(literal)
                 checkpoint = read_owner_plan(raw)
                 if checkpoint and checkpoint["status"] == "COMPLETE":
-                    await validate_completed_owner_plan(checkpoint, self.context)
+                    await validate_admin_completed_plan(self, checkpoint)
                 if checkpoint and checkpoint["status"] != "COMPLETE":
                     for candidate in checkpoint["candidates"]:
                         candidates[candidate["rownd_user_id"]] = candidate
@@ -318,6 +318,10 @@ class Reconciliation:
                     raise AdministrativePolicyError("Fresh alias would inherit unrelated email verification")
             return source, None, None
         if self.tenant_id != "public" or (len(owners) == 1 and any(m.tenant_ids != ["public"] for u in owners.values() for m in u.login_methods)):
+            for completed_plan in checkpoints:
+                if completed_plan:
+                    require_single_owner_tenant_transition(completed_plan)
+                    self.tenant_owner_plan = copy.deepcopy(completed_plan)
             mapping = await self.store.mapping(winner)
             if checkpoint or len(owners) != 1 or len(candidates) != 1 or (mapping and mapping["id"] != target):
                 raise AdministrativePolicyError("Whole-owner consolidation requires public-only recipes")
@@ -480,6 +484,22 @@ class Reconciliation:
 
     async def run(self, source_id: Optional[str], selected_id: Optional[str], email: Optional[str], dry_run: bool) -> JsonDict:
         await self.progress("discovery")
+        from .admin_lifecycle import recover_lifecycle
+
+        lifecycle_source = source_id
+        if lifecycle_source is None and selected_id:
+            selected_mapping = await self.store.mapping(selected_id, "ANY")
+            lifecycle_source = selected_mapping["alias"] if selected_mapping else None
+        lifecycle_actions = []
+        if lifecycle_source:
+            binding = await self.store.mapping(lifecycle_source)
+            if binding and await self.store.user(binding["id"]) is not None:
+                lifecycle_actions = await recover_lifecycle(self, lifecycle_source, binding["id"], dry_run)
+                if dry_run and lifecycle_actions:
+                    return {**self.result, "status": "PREVIEW", "dryRun": True, "snapshotOnly": True,
+                            "rownd_user_id": lifecycle_source, "requested_rownd_user_id": lifecycle_source,
+                            "supertokens_user_id": binding["id"], "canReconcile": True, "matchesSource": False,
+                            "proposedActions": lifecycle_actions, "blockers": [], "requiresExecutionProof": []}
         source, plan, target = await self.prepare(source_id, selected_id, email)
         winner = source["externalUserId"]
         user = await self.store.user(target) if target else None
@@ -498,6 +518,8 @@ class Reconciliation:
                 if owner:
                     method_users.append(owner)
         intent = await method_intent(self, target, source, method_users) if target else None
+        if target and getattr(self, "tenant_transition_recovery", False):
+            intent = (await self.store.raw(target))[METHOD_KEY]
         method_actions = intent["operations"] if intent else []
         occupied = await inspect_occupied_metadata(self.store, target, (winner,)) if target else {}
         if plan:
@@ -536,6 +558,8 @@ class Reconciliation:
                 actions.append({"action": "restore_mapping"})
         if plan and plan["status"] in {"APPLYING", "RECONCILING"}:
             actions.append({"action": "update_migration_metadata"})
+        if getattr(self, "tenant_transition_recovery", False):
+            actions.append({"action": "update_migration_metadata"})
         pointer = occupied.get("rownd_email_recipe_user_ids", {}).get(self.tenant_id, occupied.get("rownd_email_recipe_user_id"))
         if target and not pointer and any(self.tenant_id in m.tenant_ids and m.recipe_id == "passwordless" and m.email for m in current_methods):
             actions.append({"action": "set_canonical_email"})
@@ -553,7 +577,7 @@ class Reconciliation:
             mapping = await self.store.mapping(winner)
             if mapping is None or mapping["id"] != target:
                 raise AdministrativePolicyError("Canonical mapping changed")
-            return {**self.result, "status": "OK", "changed": False, "actions": [],
+            return {**self.result, "status": "OK", "changed": self.mutation_started, "actions": [a["action"] for a in lifecycle_actions],
                     "recipe_user_ids": [m.recipe_user_id.get_as_string() for m in user.login_methods]}
         if self.orphan:
             await self.source_guard()
@@ -563,7 +587,12 @@ class Reconciliation:
             previous_intent = (await self.store.raw(target)).get(METHOD_KEY)
             if previous_intent is None or previous_intent.get("status") == "COMPLETE":
                 self.mutation_started = True
+                if previous_intent and previous_intent.get("tenantId") == self.tenant_id:
+                    final_receipt = (await self.store.raw(target)).get(FINAL_KEY)
+                    if isinstance(final_receipt, dict) and final_receipt.get("status") == "COMPLETE":
+                        await record_successful_profile(self.store, previous_intent)
                 await metadata.update_user_metadata(target, {METHOD_KEY: intent}, self.context)
+            self.pinned_method_checkpoint = copy.deepcopy(intent)
         if plan:
             await self.execute_owner(plan)
         elif self.single_owner_baseline and target:
@@ -612,6 +641,10 @@ class Reconciliation:
         self.mutation_started = True
         final_actions.append({"kind": "metadata", "id": target, "values": patch})
         await finish(self, target, final_actions)
+        successful = (await self.store.raw(target)).get(METHOD_KEY)
+        if isinstance(successful, dict) and successful.get("status") == "COMPLETE" and successful.get("tenantId") == self.tenant_id:
+            self.mutation_started = True
+            await record_successful_profile(self.store, successful)
         mapping = await self.store.mapping(winner)
         if mapping is None or mapping["id"] != target:
             raise AdministrativePolicyError("Canonical mapping changed")
@@ -625,9 +658,20 @@ class Reconciliation:
                 raise AdministrativePolicyError("Owner checkpoint changed before completion")
             plan["status"] = "COMPLETE"
             plan["completion"] = {"recipes": completed["recipes"], "state": completed["state"]}
+            if isinstance(successful, dict):
+                plan["methodAliasRetirements"] = [s["aliasRetirement"] for s in successful["operations"] if s.get("aliasRetirement")]
             await metadata.update_user_metadata(target, {OWNER_PLAN_KEY: plan}, self.context)
             if not same_json((await self.store.raw(target)).get(OWNER_PLAN_KEY), plan):
                 raise AdministrativePolicyError("Owner checkpoint completion changed")
+        tenant_plan = getattr(self, "tenant_owner_plan", None)
+        if tenant_plan is not None and isinstance(successful, dict):
+            memberships = completed_tenant_memberships(tenant_plan, successful)
+            if not same_json((await self.store.raw(target)).get(OWNER_PLAN_KEY), tenant_plan):
+                raise AdministrativePolicyError("Owner lineage changed during tenant transition")
+            tenant_plan["tenantMemberships"] = memberships
+            observed = await self.store.inspect_graph([target], [m["id"] for m in tenant_plan["completion"]["state"]["markers"]], allow_tenant_membership=True)
+            tenant_plan["completion"] = {"recipes": observed["recipes"], "state": observed["state"]}
+            await metadata.update_user_metadata(target, {OWNER_PLAN_KEY: tenant_plan}, self.context)
         if self.orphan:
             self.orphan["phase"] = "COMPLETE"
             await metadata.update_user_metadata(self.orphan["sourceId"], {ORPHAN_KEY: self.orphan}, self.context)

@@ -77,7 +77,8 @@ class AdministrativeCore:
         return result
 
     async def inspect_graph(self, owner_ids: list[str], extra_literals: list[str],
-                            expected_recipes: Optional[list[JsonDict]] = None) -> JsonDict:
+                             expected_recipes: Optional[list[JsonDict]] = None, *,
+                             allow_tenant_membership: bool = False) -> JsonDict:
         self.fresh()
         recipes: dict[str, JsonDict] = {}
         graph: dict[str, JsonDict] = {}
@@ -89,7 +90,7 @@ class AdministrativeCore:
                 raise AdministrativePolicyError("A checkpoint owner disappeared")
             owner = await self.immutable(user.id)
             for method in user.login_methods:
-                if method.tenant_ids != ["public"]:
+                if method.tenant_ids != ["public"] and not allow_tenant_membership:
                     raise AdministrativePolicyError("Owner consolidation requires public-only recipes")
                 recipe_id = await self.immutable(method.recipe_user_id.get_as_string())
                 member = await self.user(recipe_id)
