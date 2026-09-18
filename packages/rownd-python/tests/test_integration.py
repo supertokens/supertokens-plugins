@@ -1070,7 +1070,9 @@ async def test_migrate_email_eligibility_and_verification_converge_independently
     user = await get_user(user_id)
     assert user is not None
     email_method = next(method for method in user.login_methods if method.email == email)
-    assert email_method.verified is (evidence == "matching")
+    # The validated Rownd JWT authorizes its current profile email independently
+    # of the historical verified_data marker.
+    assert email_method.verified is True
     if "repair" in mode:
         assert next(method for method in user.login_methods if method.email == old_email).verified
     if mode == "mixed":
@@ -1088,16 +1090,16 @@ async def test_migrate_email_eligibility_and_verification_converge_independently
     session = await session_asyncio.get_session_without_request_response(response.headers["st-access-token"])
     assert session is not None and session.get_user_id() == user_id
     assert session.get_recipe_user_id().get_as_string() == email_method.recipe_user_id.get_as_string()
-    assert session.get_access_token_payload()["st-ev"]["v"] is (evidence == "matching")
-    if mode in {"standalone", "mixed"} and evidence != "matching":
-        assert session.get_access_token_payload()["auth_level"] == "unverified"
-        assert session.get_access_token_payload()["is_verified_user"] is False
+    assert session.get_access_token_payload()["st-ev"]["v"] is True
+    if mode in {"standalone", "mixed"}:
+        assert session.get_access_token_payload()["auth_level"] == "verified"
+        assert session.get_access_token_payload()["is_verified_user"] is True
     projected = client.get("/auth/plugin/rownd/user", headers=auth_headers(response.headers["st-access-token"]))
     assert projected.status_code == 200, projected.text
     assert projected.json()["data"]["email"] == email
-    assert projected.json()["verified_data"].get("email") == (email if evidence == "matching" else None)
+    assert projected.json()["verified_data"].get("email") == email
     claims = impl.rownd_compatibility.build_standard_oauth_claims(user, ["email"], metadata, "public")
-    assert claims["email_verified"] is (evidence == "matching")
+    assert claims["email_verified"] is True
     if evidence != "matching":
         verify.assert_not_awaited()
     assert migrate_rownd_user(client, rownd_client, user_id, profile).status_code == 200
@@ -1338,10 +1340,10 @@ async def test_migrate_google_user_successfully(core_url: str, rownd_client: Moc
     assert thirdparty_method.verified is False
     email_method = next(method for method in user.login_methods if method.recipe_id == "passwordless")
     assert email_method.email == "google-user@example.com"
-    assert email_method.verified is False
+    assert email_method.verified is True
 
 
-async def test_migrate_blocks_unverified_rownd_email_collision_without_duplicate(
+async def test_jwt_current_email_links_existing_owner_without_duplicate(
     core_url: str, rownd_client: MockRowndClient
 ):
     client = make_client(core_url, rownd_client)
@@ -1362,21 +1364,22 @@ async def test_migrate_blocks_unverified_rownd_email_collision_without_duplicate
         },
     )
 
-    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 422, False, "state_inspect")
-    assert res.headers.get("st-access-token") is None
+    assert res.status_code == 200, res.text
+    assert res.headers.get("st-access-token")
     mapping = await get_user_id_mapping("migration-unverified-collision", "EXTERNAL", {})
-    assert isinstance(mapping, UnknownMappingError)
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    assert mapping.supertokens_user_id == owner.user.id
     migrated_user = await get_user("migration-unverified-collision")
-    assert migrated_user is None
+    assert migrated_user is not None
     unchanged = await get_user(owner.user.id)
-    assert unchanged is not None and len(unchanged.login_methods) == 1
+    assert unchanged is not None and len(unchanged.login_methods) == 2
     google_owners = await supertokens_list_users_by_account_info(
         "public",
         AccountInfoInput(third_party=ThirdPartyInfo("migration-unverified-google", "google")),
         False,
         {},
     )
-    assert google_owners == []
+    assert len(google_owners) == 1 and google_owners[0].id == migrated_user.id
 
 
 async def test_migrate_reconciles_cross_recipe_primary_email_owner(
@@ -1677,7 +1680,7 @@ async def test_migrate_does_not_link_verified_email_owner_mapped_to_another_rown
     assert getattr(existing_mapping, "supertokens_user_id", None) == passwordless.user.id
 
 
-async def test_migrate_does_not_link_provider_to_mismatched_verified_email(
+async def test_jwt_current_email_overrides_stale_rownd_verification_marker(
     core_url: str, rownd_client: MockRowndClient
 ):
     client = make_client(core_url, rownd_client)
@@ -1712,16 +1715,13 @@ async def test_migrate_does_not_link_provider_to_mismatched_verified_email(
         },
     )
 
-    assert_migration_error(res, "IDENTITY_OWNED_BY_ANOTHER_USER", 422, False, "state_inspect")
-    unchanged_provider = await get_user(provider.user.id)
-    unchanged_passwordless = await get_user(passwordless.user.id)
-    assert unchanged_provider is not None
-    assert unchanged_passwordless is not None
-    assert len(unchanged_provider.login_methods) == 1
-    assert len(unchanged_passwordless.login_methods) == 1
-    assert (await get_user_id_mapping(rownd_user_id, "EXTERNAL", {})).__class__.__name__ == (
-        "UnknownMappingError"
-    )
+    assert res.status_code == 200, res.text
+    current_provider = await get_user(provider.user.id)
+    current_passwordless = await get_user(passwordless.user.id)
+    assert current_provider is not None and current_passwordless is not None
+    assert current_provider.id == current_passwordless.id
+    assert len(current_provider.login_methods) == 2
+    assert isinstance(await get_user_id_mapping(rownd_user_id, "EXTERNAL", {}), GetUserIdMappingOkResult)
 
 
 async def test_migration_finalization_failure_keeps_linked_email_owner_and_mapping(
@@ -1794,7 +1794,8 @@ async def test_migration_preflights_later_collision_before_creating_phone_method
         user_context={},
     )
     provider = cast(Any, provider)
-    await passwordless_asyncio.signinup("public", collision_email, None, None, {})
+    collision = await passwordless_asyncio.signinup("public", collision_email, None, None, {})
+    await create_user_id_mapping(collision.user.id, "another-rownd-source", force=False)
 
     res = migrate_rownd_user(
         client,

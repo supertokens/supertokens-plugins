@@ -7,6 +7,7 @@ import time
 import uuid
 from types import SimpleNamespace
 from typing import Any, Optional, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from supertokens_python import SupertokensConfig
@@ -41,6 +42,13 @@ from supertokens_rownd.rownd_repository import (
 )
 from supertokens_rownd.types import JsonDict, RowndPluginConfig, RowndTelemetryConfig
 from supertokens_rownd.utils import parse_migration_authorization_header
+
+
+@pytest.fixture(autouse=True)
+def isolate_lifecycle_in_contract_tests(monkeypatch):
+    # Contract tests replace Core inspection; exercise lifecycle against Core separately.
+    monkeypatch.setattr(implementation.repository, "repair_provider_lifecycle", AsyncMock())
+    monkeypatch.setattr(implementation.repository, "assert_source_not_superseded", AsyncMock())
 
 
 ERROR_CONTRACT = {

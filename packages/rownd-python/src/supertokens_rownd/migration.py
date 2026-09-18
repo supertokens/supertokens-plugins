@@ -6,6 +6,7 @@ from types import MappingProxyType
 from typing import Mapping, Optional, Tuple, TypeVar
 
 from .errors import MigrationError, MigrationErrorReason
+from .identity import normalize_optional_identities, provider_subject, validate_identity_cells
 from .types import JsonDict, RowndSchema
 
 
@@ -38,6 +39,8 @@ class IdentityOwner:
     verified: bool
     tenant_ids: Tuple[str, ...]
     is_primary_user: bool
+    internal_recipe_user_id: Optional[str] = None
+    time_joined: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,7 @@ class ValidatedMigrationMetadata:
     legacy_complete: Optional[bool] = None
     canonical_email_recipe_user_id: Optional[str] = None
     original_rownd_user_id: Optional[str] = None
+    source_identities: Optional[Tuple[ExpectedIdentity, ...]] = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,7 @@ class MigrationMutationType(str, Enum):
     MAKE_PRIMARY = "MAKE_PRIMARY"
     CREATE_IDENTITY = "CREATE_IDENTITY"
     LINK_IDENTITY = "LINK_IDENTITY"
+    ASSOCIATE_IDENTITY = "ASSOCIATE_IDENTITY"
     VERIFY_IDENTITY = "VERIFY_IDENTITY"
     WRITE_METADATA = "WRITE_METADATA"
 
@@ -208,6 +213,8 @@ def create_rownd_identity_snapshot(
     app_variant_id: Optional[str] = None,
     schema: Optional[RowndSchema] = None,
 ) -> RowndIdentitySnapshot:
+    rownd_user = normalize_optional_identities(rownd_user)
+    validate_identity_cells(rownd_user)
     data = rownd_user.get("data")
     verified_data = rownd_user.get("verified_data", {})
     if not isinstance(data, dict) or not isinstance(verified_data, dict):
@@ -231,21 +238,18 @@ def create_rownd_identity_snapshot(
     identities = []
     for provider_id, field in (("apple", "apple_id"), ("google", "google_id")):
         verification = verified_data.get(field, _MISSING)
-        if field not in data:
-            if verification is True or isinstance(verification, str):
+        provider_user_id = provider_subject(rownd_user, provider_id)
+        if provider_user_id is None:
+            if verification is True:
                 raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "source_normalize")
             if verification is not _MISSING and verification is not False:
                 raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "source_normalize")
             continue
-        provider_user_id = data[field]
         if not isinstance(provider_user_id, str) or not provider_user_id.strip():
             raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "source_normalize")
         if verification is not _MISSING and not isinstance(verification, (bool, str)):
             raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "source_normalize")
         normalized_provider_user_id = provider_user_id.strip()
-        normalized_verification = verification.strip() if isinstance(verification, str) else None
-        if isinstance(verification, str) and normalized_verification != normalized_provider_user_id:
-            raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "source_normalize")
         identities.append(
             ExpectedIdentity(
                 key="thirdparty:%s:%s" % (provider_id, normalized_provider_user_id),
@@ -314,6 +318,7 @@ def validate_migration_metadata(
     )
     original = metadata.get("original_rownd_user", _MISSING)
     original_id = None
+    original_identities = None
     if original is not _MISSING:
         if not isinstance(original, dict):
             return MigrationMetadataState(False)
@@ -326,12 +331,17 @@ def validate_migration_metadata(
             original_id = original_data.get("user_id") if isinstance(original_data, dict) else None
             if not isinstance(original_id, str) or not original_id.strip():
                 return MigrationMetadataState(False)
+            try:
+                original_identities = create_rownd_identity_snapshot(original, tenant_id).expected_identities
+            except MigrationError:
+                return MigrationMetadataState(False)
     return MigrationMetadataState(
         True,
         ValidatedMigrationMetadata(
             legacy_complete=legacy if isinstance(legacy, bool) else None,
             canonical_email_recipe_user_id=canonical if isinstance(canonical, str) else None,
             original_rownd_user_id=original_id if isinstance(original_id, str) else None,
+            source_identities=original_identities,
         ),
     )
 
@@ -679,6 +689,7 @@ def classify_migration_snapshot(
         prefix_mutations.append(MigrationMutation("MAKE_PRIMARY", target_user_id=target.user_id))
     create_mutations = []
     link_mutations = []
+    associate_mutations = []
     verify_mutations = []
     for identity in source.expected_identities:
         owners = owners_by_identity[identity.key]
@@ -696,6 +707,11 @@ def classify_migration_snapshot(
             create_mutations.append(MigrationMutation("CREATE_IDENTITY", identity=identity))
             continue
         owner = target_owner or link_owner
+        if target_owner and source.tenant_id not in target_owner.tenant_ids:
+            associate_mutations.append(MigrationMutation(
+                "ASSOCIATE_IDENTITY", target_user_id=target.user_id,
+                recipe_user_id=target_owner.recipe_user_id, identity=identity,
+            ))
         if (
             owner
             and owner.recipe_id == "passwordless"
@@ -725,12 +741,18 @@ def classify_migration_snapshot(
         *prefix_mutations,
         *create_mutations,
         *link_mutations,
+        *associate_mutations,
         *verify_mutations,
     ]
 
     metadata_matches = (
         metadata.value.legacy_complete is True
         and metadata.value.original_rownd_user_id == source.rownd_user_id
+        and (metadata.value.source_identities is None or
+             tuple((identity.key, identity.verified if identity.identifier_type != "email" else False)
+                   for identity in metadata.value.source_identities)
+             == tuple((identity.key, identity.verified if identity.identifier_type != "email" else False)
+                      for identity in source.expected_identities))
     )
     email = next(
         (

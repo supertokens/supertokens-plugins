@@ -47,6 +47,16 @@ from supertokens_rownd.types import JsonDict, RowndSchema
 PHONE_SCHEMA: RowndSchema = {"phone_number": {"type": "string"}}
 
 
+@pytest.fixture(autouse=True)
+def isolate_lifecycle_in_snapshot_unit_tests(monkeypatch):
+    # These tests supply synthetic Core snapshots; lifecycle SDK effects are covered
+    # with real Core in test_identity_lifecycle.py.
+    monkeypatch.setattr(repository, "repair_provider_lifecycle", AsyncMock())
+    monkeypatch.setattr(repository, "checkpoint_introduction", AsyncMock(return_value={}))
+    monkeypatch.setattr(repository, "confirm_introduction", AsyncMock())
+    monkeypatch.setattr(repository, "assert_source_not_superseded", AsyncMock())
+
+
 @pytest.mark.parametrize(
     "field,value",
     [("google_id", "google-123"), ("apple_id", "apple-123"), ("phone_number", "+1234567890")],
@@ -220,6 +230,7 @@ def login_method(
 ) -> Any:
     return SimpleNamespace(
         recipe_id=recipe_id,
+        time_joined=1,
         recipe_user_id=SimpleNamespace(get_as_string=lambda: recipe_user_id),
         third_party=(
             SimpleNamespace(id=provider_id, user_id=provider_user_id) if provider_id else None
@@ -239,6 +250,29 @@ def login_method(
 
 def sdk_user(user_id: str, methods: list[Any], *, primary: bool = True) -> Any:
     return SimpleNamespace(id=user_id, is_primary_user=primary, login_methods=methods)
+
+
+@pytest.mark.parametrize("changed", ["internal_id", "join_time"])
+async def test_email_alias_cannot_verify_a_different_immutable_credential(monkeypatch, changed):
+    identity = create_rownd_identity_snapshot({
+        "data": {"user_id": "r", "email": "current@example.com"},
+        "verified_data": {"email": True},
+    }, "tenant-a").expected_identities[0]
+    method = login_method("alias", "passwordless", email="current@example.com", verified=False)
+    owner = IdentityOwner(identity.key, "alias", "target", "passwordless", "current@example.com",
+                          False, ("tenant-a",), True, "immutable-old", 1)
+    if changed == "join_time":
+        method.time_joined = 2
+    monkeypatch.setattr(repository, "get_user", AsyncMock(return_value=sdk_user("target", [method])))
+    monkeypatch.setattr(repository, "resolve_supertokens_user_id", AsyncMock(return_value=(
+        "immutable-new" if changed == "internal_id" else "immutable-old"
+    )))
+    verify = AsyncMock()
+    with pytest.raises(MigrationError):
+        await repository._apply_to_fresh_migration_method(
+            "alias", "target", {}, verify, expected_identity=identity, expected_owner=owner,
+        )
+    verify.assert_not_awaited()
 
 
 @pytest.fixture
@@ -601,7 +635,7 @@ def test_unverified_email_created_for_same_rownd_user_can_resume_linking() -> No
 
 
 @pytest.mark.parametrize("field", ["email", "phone_number", "google_id", "apple_id"])
-@pytest.mark.parametrize("value", [None, True, 1, [], {}, "", " "])
+@pytest.mark.parametrize("value", [True, 1, [], {}, " "])
 def test_invalid_identifier_shapes_do_not_become_eligible(field, value) -> None:
     with pytest.raises(MigrationError) as error:
         create_rownd_identity_snapshot({"data": {"user_id": "rownd-1", field: value}}, "public")
@@ -910,13 +944,18 @@ def test_evidence_without_source_value_distinguishes_contacts_from_provider_conf
     if field == "email":
         assert create_rownd_identity_snapshot(profile, "public").expected_identities == ()
         return
+    if field in {"google_id", "apple_id"} and isinstance(verification, str):
+        identities = create_rownd_identity_snapshot(profile, "public").expected_identities
+        assert identities[0].provider_user_id == verification
+        assert identities[0].verified
+        return
     with pytest.raises(MigrationError) as error:
         create_rownd_identity_snapshot(profile, "public")
     assert error.value.reason is MigrationErrorReason.SOURCE_IDENTITY_INVALID
     assert error.value.stage == "source_normalize"
 
 
-@pytest.mark.parametrize("verification", [None, 1, {}, []])
+@pytest.mark.parametrize("verification", [1, {}, []])
 def test_malformed_provider_verification_evidence_fails_closed(
     verification: Any,
 ) -> None:
@@ -937,11 +976,7 @@ def test_malformed_provider_verification_evidence_fails_closed(
         {},
         {"data": {"user_id": "rownd-1"}, "verified_data": None},
         {"data": {"user_id": 1}, "verified_data": {}},
-        {"data": {"user_id": "rownd-1", "google_id": ""}, "verified_data": {}},
-        {
-            "data": {"user_id": "rownd-1", "google_id": "google-1"},
-            "verified_data": {"google_id": "google-2"},
-        },
+        {"data": {"user_id": "rownd-1", "google_id": " "}, "verified_data": {}},
         {"data": {"user_id": "rownd-1", "email": 1}, "verified_data": {}},
         {
             "data": {"user_id": "rownd-1", "email": "a@example.com"},
@@ -1616,7 +1651,7 @@ def test_target_missing_tenant_membership_is_repairable() -> None:
     )
     assert result.status is MigrationDispositionStatus.REPAIRABLE
     assert result.target == PinnedMigrationTarget("provider", MigrationTargetSource.THIRD_PARTY)
-    assert [mutation.type for mutation in result.mutations] == ["CREATE_MAPPING", "WRITE_METADATA"]
+    assert [mutation.type for mutation in result.mutations] == ["CREATE_MAPPING", "ASSOCIATE_IDENTITY", "WRITE_METADATA"]
 
 
 def test_foreign_owner_without_tenant_membership_is_never_linked() -> None:
@@ -1645,7 +1680,7 @@ def test_foreign_owner_without_tenant_membership_is_never_linked() -> None:
 
 
 @pytest.mark.parametrize("tenant_id", ["public", "tenant-a"])
-def test_complete_mapped_target_does_not_require_tenant_membership(tenant_id: str) -> None:
+def test_complete_mapped_target_requires_tenant_membership(tenant_id: str) -> None:
     identity_source = replace(source(google_id="g"), tenant_id=tenant_id)
     result = classify_migration_snapshot(
         snapshot(
@@ -1655,8 +1690,8 @@ def test_complete_mapped_target_does_not_require_tenant_membership(tenant_id: st
             metadata={"mapped": valid_metadata(identity_source)},
         )
     )
-    assert result.status is MigrationDispositionStatus.COMPLETE
-    assert result.mutations == ()
+    assert result.status is MigrationDispositionStatus.REPAIRABLE
+    assert [mutation.type for mutation in result.mutations] == ["ASSOCIATE_IDENTITY", "WRITE_METADATA"]
 
 
 @pytest.mark.asyncio
@@ -1704,10 +1739,12 @@ async def test_completion_associates_before_fresh_session_resolution(
 
     async def read_snapshot(*_args: Any):
         events.append("snapshot")
+        # Membership can disappear after the completion snapshot; session preparation
+        # must independently inspect/repair the SDK state below.
         return snapshot(
             identity_source=fresh.snapshot,
             external_target="mapped",
-            owners=(owner("thirdparty:google:g", "mapped", tenant_ids=()),),
+            owners=(owner("thirdparty:google:g", "mapped", tenant_ids=(tenant_id,)),),
             metadata={"mapped": valid_metadata(fresh.snapshot)},
         )
 
@@ -1801,11 +1838,11 @@ async def test_completion_associates_before_fresh_session_resolution(
     elif failure in {"association_status", "association_timeout"}:
         assert associations == ["associate:google-recipe"]
     else:
-        assert associations == ["associate:google-recipe", "associate:extra-recipe"]
+        assert associations == ["associate:google-recipe"]
         first_get = events.index("get:mapped")
         assert events[first_get - 1] == "snapshot"
-        assert events[first_get:first_get + 4] == [
-            "get:mapped", "associate:google-recipe", "associate:extra-recipe", "get:mapped"
+        assert events[first_get:first_get + 3] == [
+            "get:mapped", "associate:google-recipe", "get:mapped"
         ]
 
 
@@ -2128,7 +2165,7 @@ async def test_repository_allows_repair_of_out_of_tenant_target(
     disposition = classify_migration_snapshot(result)
     assert disposition.status is MigrationDispositionStatus.REPAIRABLE
     assert [mutation.type for mutation in disposition.mutations] == [
-        "CREATE_IDENTITY", "WRITE_METADATA"
+        "CREATE_IDENTITY", "ASSOCIATE_IDENTITY", "WRITE_METADATA"
     ]
 
 

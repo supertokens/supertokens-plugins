@@ -19,6 +19,7 @@ from .constants import (
     ROWND_JWT_CLAIMS,
 )
 from .errors import RowndPluginError
+from .identity import core_phone_number, normalize_optional_identities, provider_subject
 from .types import JsonDict, RowndPluginConfig
 
 
@@ -97,16 +98,12 @@ def is_verified_provider_method(method: LoginMethod, original: Optional[JsonDict
         return False
     if method.email and not is_supertokens_fake_email(method.email):
         return True
-    data = as_json_dict((original or {}).get("data"))
     field = "%s_id" % provider
-    if field in data:
-        evidence = as_json_dict((original or {}).get("verified_data")).get(field)
-        return (
-            isinstance(data.get(field), str) and cast(str, data[field]).strip() == subject
-            and (evidence is True or (isinstance(evidence, str) and evidence.strip() == subject))
-        )
-    # A preserved synthetic method is not a provider assertion, even if its email EV changes.
-    return False
+    evidence = as_json_dict((original or {}).get("verified_data")).get(field)
+    # A synthetic method needs Rownd's subject-specific evidence, not Core email EV.
+    return provider_subject(original or {}, provider or "") == subject and (
+        evidence is True or (isinstance(evidence, str) and evidence.strip() == subject)
+    )
 
 
 def has_verified_real_login_method(user: Optional[User], original: Optional[JsonDict] = None) -> bool:
@@ -617,13 +614,14 @@ def map_rownd_user_to_supertokens(
     tenant_id: Optional[str] = None,
     migration_complete: bool = False,
 ) -> JsonDict:
+    rownd_user = normalize_optional_identities(rownd_user)
     login_methods = []
     data = as_json_dict(rownd_user.get("data"))
     verified_data = as_json_dict(rownd_user.get("verified_data"))
     if not data.get("user_id"):
         raise RowndPluginError("Rownd user has no user_id")
 
-    google_id = data.get("google_id")
+    google_id = provider_subject(rownd_user, "google")
     if isinstance(google_id, str) and google_id:
         login_methods.append(
             {
@@ -635,7 +633,7 @@ def map_rownd_user_to_supertokens(
                 **({"tenantIds": [tenant_id]} if tenant_id else {}),
             }
         )
-    apple_id = data.get("apple_id")
+    apple_id = provider_subject(rownd_user, "apple")
     if isinstance(apple_id, str) and apple_id:
         login_methods.append(
             {
@@ -651,8 +649,12 @@ def map_rownd_user_to_supertokens(
         login_methods.append(
             {
                 "recipeId": "passwordless",
-                "phoneNumber": data["phone_number"],
-                "isVerified": bool(verified_data.get("phone_number")),
+                "phoneNumber": core_phone_number(cast(str, data["phone_number"])),
+                "isVerified": verified_data.get("phone_number") is True or (
+                    isinstance(verified_data.get("phone_number"), str)
+                    and cast(str, verified_data["phone_number"]).strip()
+                    == cast(str, data["phone_number"]).strip()
+                ),
                 **({"tenantIds": [tenant_id]} if tenant_id else {}),
             }
         )

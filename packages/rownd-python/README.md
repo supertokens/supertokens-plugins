@@ -479,25 +479,40 @@ missing-identity additions remain nonprimary (`isPrimary` is omitted) so they ca
 linked to the existing target. `MAKE_PRIMARY` recovery for existing nonprimary targets
 is unchanged.
 
-Online migration accepts eligible `data.email`, `data.google_id`, and `data.apple_id`
-without historical `verified_data` markers. Eligibility is separate from email
-verification (EV): `verified_data.email` must be `true` or match the current `data.email`
-after trimming and case normalization to establish source verification. Missing or stale
-email evidence does not verify the current email. Generated provider/guest placeholder
-emails remain unverified; a Google/Apple identity does not prove email ownership.
+Online migration accepts eligible contact and provider identifiers without historical
+`verified_data` markers. A validated Rownd JWT authorizes its current real profile email;
+this proof is privately bound to the source object, tenant, and identities. A fetched
+profile alone needs `verified_data.email: true` or a matching normalized email to establish
+verification. Generated provider/guest placeholder emails remain unverified; a Google/Apple
+identifier alone does not prove email ownership. Native canonical emails and pending email
+changes restrict reconciliation, and cleanup retires only snapshot-proven email methods.
 Existing Core verification for the exact email is preserved and takes precedence over
 historical metadata in compatibility email-verification claims.
 
 Eligibility does not authorize adopting or linking an unrelated email or provider owner.
 Provider-owner adoption/linking requires matching source verification or positive same-Rownd
 owner provenance; a mapping to a different target is not authority over that owner.
+JWT migration rejects a raw `rownd_migration_superseded` tombstone even after its alias
+mapping is removed; administrative recovery references cannot reauthorize that source.
 Google/Apple matching requires the exact provider namespace
 and case-sensitive subject after trimming. Tenant, mapping, collision, and primary-account
 guards remain in place. The plugin's `schema` is local profile configuration, not an
 upstream Rownd authentication configuration; it does not select migration lookup fields.
+Google/Apple subjects prefer nonempty strings in `verified_data`, falling back to `data`;
+boolean verification evidence is preserved. Optional absent, null, and exact-empty identity
+cells are ignored, while malformed and whitespace-only source values are rejected.
+Provider replacement links the current credential before removing obsolete tenant membership.
+Durable introduction, retirement, and revocation records support interrupted work. Confirmed
+creation receipts bind recipe IDs, subjects, join times, and tenant membership. An uncertain
+creation is treated as an existing donor, never as permission to delete an unknown account.
+Obsolete recipes are deleted only after their last tenant membership is removed and a
+replacement remains linked; recipe-only deletion retains the primary user and mapping.
+Uncommitted sole anchors remain quarantined rather than deleting the primary account.
 
 Phone migration remains verified-only: missing verification preserves the phone in original
 profile metadata, not as a Core login method; contradictory phone evidence blocks migration.
+Mexico's retired `+521` mobile prefix is normalized to `+52` at the Core boundary only;
+the current and verified Rownd phone values must still agree before this normalization.
 Preserving a provider identifier does not itself create verified provider claims. Source
 authentication level remains separate from contact and provider verification evidence.
 When an eligible source email exists, migration sessions use its owned, tenant-scoped

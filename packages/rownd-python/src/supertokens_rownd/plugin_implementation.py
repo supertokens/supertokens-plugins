@@ -22,6 +22,7 @@ from .constants import GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID
 from .errors import MigrationError, MigrationErrorReason, RowndEmailChangeError, RowndPluginError
 from .logger import log_debug, log_warning
 from .migration import create_rownd_identity_snapshot
+from .migration_authority import _bind_authenticated_source
 from .rownd_repository import (
     RowndAPIError,
     RowndAPIErrorReason,
@@ -219,10 +220,10 @@ async def handle_migrate(
         snapshot = create_rownd_identity_snapshot(rownd_user, tenant_id, app_variant_id, config.schema)
         if snapshot.rownd_user_id != rownd_user_id:
             raise MigrationError(MigrationErrorReason.ROWND_USER_ID_MISMATCH, stage)
-        source = repository.FreshMigrationSource(
+        source = _bind_authenticated_source(repository.FreshMigrationSource(
             rownd_user,
             snapshot,
-        )
+        ))
 
         async def read_fresh_source() -> Optional[repository.FreshMigrationSource]:
             try:
@@ -244,10 +245,10 @@ async def handle_migrate(
                 raise MigrationError(
                     MigrationErrorReason.ROWND_USER_ID_MISMATCH, "source_normalize"
                 )
-            return repository.FreshMigrationSource(
+            return _bind_authenticated_source(repository.FreshMigrationSource(
                 fresh_user,
                 fresh_snapshot,
-            )
+            ))
 
         stage = "state_inspect"
         await repository.migrate_rownd_user_and_create_session(

@@ -100,7 +100,6 @@ INTERNAL_METADATA_FIELDS = {
     "rownd_migration_target",
     "rownd_migration_canonical_target",
     "rownd_migration_superseded",
-    "rownd_migration_owner_consolidation",
     "rownd_migration_mapping_publication",
     "rownd_migration_orphan_mapping_repair",
     "rownd_migration_email_retirements",
