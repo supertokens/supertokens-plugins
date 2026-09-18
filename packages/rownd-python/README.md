@@ -2,6 +2,61 @@
 
 Rownd migration plugin for `supertokens_python`.
 
+Requires Python **3.9+** and SuperTokens Python SDK **0.31.3+**. CLI profile
+add/remove operations additionally require Unix `fcntl` file locking.
+
+## Administrative reconciliation
+
+After initializing SuperTokens with this plugin, backend code can inspect or
+repair an account without a Rownd JWT or user session:
+
+```python
+from supertokens_rownd import reconcile_user
+
+preview = await reconcile_user(rownd_user_id="rownd-user-id", dry_run=True)
+result = await reconcile_user(rownd_user_id="rownd-user-id")
+# Alternative selectors:
+# await reconcile_user(email="user@example.com")
+# await reconcile_user(supertokens_user_id="internal-external-or-recipe-id")
+```
+
+Provide exactly one selector. Optional arguments are `tenant_id` (default
+`"public"`), `user_context`, `dry_run`, and `on_progress`. The function uses the
+initialized plugin credentials and Core connection; it does not read CLI profiles
+or create a session. Keep this administrative function behind your application's
+own operator authorization if exposing it through an API.
+
+Results use Node-compatible field names:
+
+- `OK`: `rownd_user_id`, immutable `supertokens_user_id`, `recipe_user_ids`,
+  `changed`, and `actions`.
+- `PREVIEW`: `dryRun`, `snapshotOnly`, `canReconcile`, `matchesSource`,
+  `proposedActions`, `missingMethods`, `blockers`, and `requiresExecutionProof`.
+- `NOT_FOUND`, `AMBIGUOUS`, `BLOCKED`, or `ERROR`: reconciliation could not
+  establish completion. `partialProgress` indicates mutations may have occurred;
+  `changed: null` means the final change state is unknown.
+
+`requested_rownd_user_id` preserves an explicit Rownd selector even if another
+source wins election. `requested_supertokens_user_id` preserves a SuperTokens
+selector; reconciliation cannot silently switch its target. `on_progress` accepts
+a callback receiving a dictionary with `stage` and any stage-specific details;
+an async callback is also supported.
+
+The winning Rownd profile and surviving SuperTokens primary are separate choices.
+Eligible profiles compete using valid `meta.last_sign_in` / `meta.last_active`
+timestamps; a tie requires established canonical provenance. Activity alone does
+not authorize merging unrelated accounts. Whole-owner consolidation is limited to
+public-only recipe graphs and preserves immutable recipe IDs. Checkpoints record
+multi-step repairs so retries can validate committed state before continuing.
+These Core operations are not an atomic transaction.
+
+Administrative current-email ownership and email verification are distinct:
+verification requires `verified_data.email` to be `true` or match the current
+email. A native pending email change blocks conflicting reconciliation. Mapping
+changes must preserve verification for the same immutable credential, rather
+than inherit unrelated verification stored under an alias. Retired Rownd aliases
+cannot reclaim account ownership through later migration.
+
 ## Administrative CLI
 
 Installing this package provides `rownd-python`; `python -m supertokens_rownd`
@@ -49,7 +104,11 @@ services' credentials. Results are structured JSON on stdout; stage progress
 goes to stderr. Credentials are redacted and transport diagnostics are replaced
 with sanitized explanations. Execution exits zero for `OK`; a dry-run `PREVIEW`
 exits zero only when `canReconcile` is true. Other results and command errors
-exit nonzero.
+exit with code `1`; Ctrl-C exits with code `130`. Argument, configuration, or
+output failures may produce only sanitized stderr, without a JSON result or final
+batch summary. An unexpected execution exception reports `changed: null` and
+`partialProgress: true`: an unknown result does not imply rollback. The dry-run
+equivalent reports `changed: false`, `canReconcile: false`, and `OBSERVATION_FAILED`.
 
 `--dry-run` inspects live state without applying authentication changes.
 `proposedActions`, `blockers`, `requiresExecutionProof`, and `canReconcile`
@@ -114,9 +173,11 @@ rownd-python reconcile-csv --profile production --file failures.csv \
 The batch exits zero only if every unique ID succeeds (`OK`, or `PREVIEW` with
 `canReconcile: true`). Batch repairs are not atomic; completed changes remain
 if another user fails or the command is interrupted.
+The failure CSV is an input for manual retries, not a promise that each failure is
+transient. Resolve identity and policy blockers before retrying those rows.
 
 > [!IMPORTANT]
-> Verified Core user-ID mapping rejections for existing Session or UserMetadata references return `CORE_CAPABILITY_REQUIRED` (HTTP 503, `retryable: false`, `stage: "mapping"`). The plugin does not automatically repair these references, force mappings, or revoke existing sessions to unblock mapping. No optional narrow mapping capability is wired.
+> JWT migration mapping rejections for existing Session or UserMetadata references return `CORE_CAPABILITY_REQUIRED` (HTTP 503, `retryable: false`, `stage: "mapping"`). JWT migration does not automatically repair these references, force mappings, or revoke existing sessions to unblock mapping. Administrative reconciliation has separate checkpointed mapping-publication authority; this does not relax the JWT migration boundary.
 
 This rejection classification is compatibility-tested with Python SDK **0.31.3** and Core **12.0.10**: the SDK-wrapped HTTP 400 from `POST /recipe/userid/map` with message `UserId is already in use in Session recipe` or `UserId is already in use in UserMetadata recipe`. Other recipes and error formats are not assumed recognized; other errors retain existing handling. Exact bidirectional mapping postconditions still recover races, including when the mapping call reports an error.
 
@@ -251,6 +312,13 @@ The plugin registers these routes below `api_base_path`:
 The message is unchanged; valid or omitted variants retain their HTTP 200 behavior.
 
 Migration and guest routes accept an optional `tenantId` query parameter and default to `public`. Compatibility user views, sessions, and pending email verification are scoped to that tenant; user metadata remains shared across tenant memberships.
+
+The guest route selects instant login for `{"auth_level":"instant"}`; other or
+omitted values select guest login. Success returns HTTP 200 with
+`{"status":"OK","createdNewRecipeUser":true}` for a newly created recipe user.
+Disabled sign-in methods and configuration-resolution failures return HTTP 200
+with `{"status":"ERROR","message":"..."}` without creating a session. Guest
+clients must check the response body's `status`, unlike migration clients below.
 
 Both migration routes return HTTP 200 with `{"status":"OK"}` on success. Failures use a
 non-2xx status and a stable body containing `reason`, `retryable`, `stage`, and
@@ -471,22 +539,42 @@ The plugin exposes Rownd-compatible user/session behavior for migrated and new S
 
 - Guest sessions use the `guest` third-party provider.
 - Instant sessions use the `instant` third-party provider and preserve `auth_level: "instant"`.
-- Guest and instant login require a matching `{"method": "anonymous", "type": "guest"}` or `{"method": "anonymous", "type": "instant"}` entry in `app_config.signInMethods`. A sub-brand's `signInMethods` replaces the base list, including an empty list that disables anonymous login.
+- Guest and instant login require a matching `{"method": "anonymous", "type": "guest"}` or `{"method": "anonymous", "type": "instant"}` entry in `app_config.signInMethods`. Omitted anonymous type defaults to guest. A sub-brand's `signInMethods` replaces the base list, including an empty list that disables anonymous login.
 - Instant sessions stay anonymous and have `is_verified_user: false` after account linking. Only successful credential authentication upgrades that session; profile and metadata changes cannot attest authentication.
 - Passwordless and third-party sign-in refresh Rownd session claims after account linking while preserving the linked guest's `anonymous_id`.
 
-The anonymous-login route supports tenant-specific configuration through an async
-`resolve_config` callback. It receives `tenant_id`, `request`, and `user_context`,
-and returns a dictionary of dynamic overrides (`app_config`, `sub_brands`,
-`schema`, `client_domains`, `cross_device_confirmation_bypass`, or
-`email_change.max_session_age_seconds`). The resolved snapshot also applies to
-the session created by that request. Resolution errors reject login.
-`email_change.retirement_mode` remains a static security setting.
 - Compatibility reads combine metadata from the primary and linked recipe users. Profile and metadata writes target the primary user without relocating linked Rownd metadata.
 - Google and Apple third-party login methods are exposed as `google_id` and `apple_id` in Rownd-compatible user payloads.
 - OAuth2 Provider tokens and userinfo responses include Rownd claims plus standard `email`, `phone`, and `profile` claims when those scopes are requested.
 - OAuth2 `resource=app:*` requests are translated to SuperTokens `audience=app:*` for Rownd-compatible OAuth clients.
 - Rownd compatibility user routes ignore the global email verification claim validator for profile access; secure email changes apply their own checks.
+
+`resolve_config` is currently invoked by the anonymous-login route and administrative
+`reconcile_user` calls. It receives
+one dictionary containing `tenant_id`, `request`, and `user_context`:
+
+```python
+async def resolve_config(operation):
+    tenant = await load_tenant_configuration(operation["tenant_id"])
+    return {"app_config": tenant["app_config"]}
+```
+
+Pass the callback as `RowndPluginConfig(resolve_config=resolve_config, ...)`.
+Supported overrides are `app_config`, `sub_brands`, `schema`, `client_domains`,
+`cross_device_confirmation_bypass`, and `email_change.max_session_age_seconds`.
+Top-level values replace static values rather than being deep-merged; `None` is
+ignored. The permitted email-change setting is merged with static email-change
+settings; `retirement_mode` remains startup-static. Resolution errors reject login.
+The snapshot applies to that operation and any anonymous session creation, not globally.
+App-config, migration, profile/email-change routes and subsequent session requests
+do not independently invoke this resolver.
+
+After upgrading, instant sessions report `is_verified_user: false`. Older unmarked
+sessions whose aliases moved during reconciliation require a freshly validated
+completed checkpoint; ambiguous sessions remain instant until fresh credential
+authentication. Incomplete or invalid provenance fails closed.
+`rownd_session_authentication` is internal state, not a configurable claim or a
+user-context flag for upgrading authentication.
 
 ### Email Changes
 
@@ -568,8 +656,11 @@ Existing metadata using `rownd_email_recipe_user_id` remains
 supported; new updates also maintain the tenant-scoped `rownd_email_recipe_user_ids`
 map. Guard mode permits the verified canonical Passwordless email, or an unverified
 canonical email with valid migration-completion metadata and a matching tenant canonical
-pointer. This permits a Passwordless challenge, not an EV bypass. Every retained
-noncanonical alias remains blocked during create, resend, and consume. Synchronous migration
+pointer. This permits a Passwordless challenge, not an EV bypass. Explicit canonical
+pointers and retirement metadata block excluded aliases during create, resend, and
+consume. A historical profile email preference alone does not retire another
+attached, verified, nonsynthetic Passwordless email: eligible aliases remain usable
+subject to tenant, credential-match, and unambiguous topology checks. Synchronous migration
 retains old methods and publishes completion and the tenant canonical pointer after identity
 reconciliation; completion alone does not mark an eligible email verified.
 

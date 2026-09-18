@@ -37,6 +37,20 @@
 
 ## Unreleased
 
+### Rownd reconciliation parity
+
+- Port authentication and reconciliation behavior from `rownd-plugin` at `d34639e`.
+  Guest and instant login require the matching anonymous sign-in configuration;
+  optional `resolve_config` overrides currently apply to anonymous login and its
+  session creation. Instant-origin sessions retain their authentication level after
+  account linking until credential authentication and report `is_verified_user: false`.
+- Distinguish explicit canonical email restrictions from historical profile preferences
+  when authorizing linked Passwordless email credentials.
+- Add administrative user reconciliation and dry-run inspection, with source election,
+  checkpointed ownership repairs, and structured partial-progress results.
+- Add Python CLI profiles, single-user reconciliation, and bounded CSV reconciliation
+  with failure reports for targeted retries.
+
 ### Patch Changes
 
 - Stop email-change completion from synthesizing a Rownd `data.user_id` from the SuperTokens
