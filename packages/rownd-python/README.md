@@ -2,6 +2,111 @@
 
 Rownd migration plugin for `supertokens_python`.
 
+## Administrative CLI
+
+Installing this package provides `rownd-python`; `python -m supertokens_rownd`
+is equivalent. From this package directory, prefix commands with `uv run`.
+The CLI initializes the SuperTokens recipes and Rownd plugin from a local
+profile without starting a web server.
+
+### Profiles
+
+```sh
+rownd-python profiles add --profile production
+rownd-python profiles list
+rownd-python profiles show --profile production
+rownd-python profiles remove --profile production
+```
+
+Interactive addition requests Rownd app ID, app key, app secret, SuperTokens
+connection URI, optional Core API key, and tenant ID (default `public`). Keys,
+secrets and connection URIs use masked terminal entry. Ctrl-C cancels without
+saving. For noninteractive use, supply `--app-id`, `--app-key`, `--app-secret`
+and `--connection-uri`, optionally `--api-key` and `--tenant-id`. Connection URIs
+must use HTTP(S), with no embedded username or password. `profile` is an alias
+for `profiles`; a positional profile name is also accepted.
+
+Profiles are stored in `~/.config/rownd-python/profiles.json`, with an owner-only
+directory (`0700`), owner-only file (`0600`), and atomic replacement on updates.
+Profile output masks credentials and removes URI query strings and fragments.
+Dry-run profile reads do not change local permissions.
+
+### Reconcile one user
+
+```sh
+rownd-python reconcile-user --profile production --rownd-user-id ROWND_ID --dry-run
+rownd-python reconcile-user --profile production --rownd-user-id ROWND_ID
+rownd-python reconcile-user --profile production --email user@example.com
+rownd-python reconcile-user --profile production --supertokens-user-id SUPERTOKENS_ID
+```
+
+Supply exactly one selector. The configured profile supplies the tenant and both
+services' credentials. Results are structured JSON on stdout; stage progress
+goes to stderr. Credentials are redacted and transport diagnostics are replaced
+with sanitized explanations. Execution exits zero for `OK`; a dry-run `PREVIEW`
+exits zero only when `canReconcile` is true. Other results and command errors
+exit nonzero.
+
+`--dry-run` inspects live state without applying authentication changes.
+`proposedActions`, `blockers`, `requiresExecutionProof`, and `canReconcile`
+describe that snapshot. A preview is not authorization for later execution:
+run again without `--dry-run` to revalidate live state and apply repairs.
+
+### Reconcile a CSV
+
+```sh
+rownd-python reconcile-csv --profile production --file users.csv \
+  --concurrency 5 --failed-file failures.csv --dry-run > results.jsonl
+```
+
+The default selector column is `rownd_user_id`; use `--id-column "Rownd ID"`
+for another header. Other columns do not provide identity or verification
+evidence. For example:
+
+```csv
+rownd_user_id,email
+user_123,first@example.com
+user_456,second@example.com
+```
+
+The entire file is validated before SDK initialization or repairs. CSV quoting,
+escaped quotes, commas and newlines inside quoted fields, UTF-8 BOM, and CRLF
+are supported. Blank lines are ignored; ID edges are trimmed. Missing or
+repeated ID headers, missing IDs, whitespace/control characters inside IDs,
+inconsistent columns and malformed quotes reject the file. Duplicate IDs are
+processed once in first-seen order.
+
+`--concurrency` bounds simultaneous users (default `1`). Individual failures
+do not stop other users. Stdout contains JSON Lines: each `type: "result"`
+record has a one-based unique-input `index` and sanitized `result`; the final
+`type: "summary"` includes `total`, `duplicatesSkipped`, `succeeded`, `failed`,
+`statuses`, and `dryRun`. Results appear in completion order. The result's
+`requested_rownd_user_id` retains the CSV ID if canonical source election
+changes `rownd_user_id`.
+
+Progress goes to stderr at startup, every second, and at completion. It includes
+completed/total users, active calls, success/failure counts, average users/second,
+elapsed time and estimated time remaining. A `complete` progress line means
+processing finished; consult the summary and exit status for success.
+
+`--failed-file` creates a **new** owner-only (`0600`) CSV with columns
+`rownd_user_id,status,error_code,error_message`. It records original input IDs
+for unsuccessful results, including previews with `canReconcile: false`.
+Blocker and execution-proof codes are joined with semicolons; messages are
+sanitized. Existing files are never overwritten. If writing fails, dispatch
+stops and in-flight users finish before the command exits nonzero. Dry run
+still writes this explicitly requested local report. Retry it using a new
+output filename:
+
+```sh
+rownd-python reconcile-csv --profile production --file failures.csv \
+  --concurrency 5 --failed-file failures-retry.csv
+```
+
+The batch exits zero only if every unique ID succeeds (`OK`, or `PREVIEW` with
+`canReconcile: true`). Batch repairs are not atomic; completed changes remain
+if another user fails or the command is interrupted.
+
 > [!IMPORTANT]
 > Verified Core user-ID mapping rejections for existing Session or UserMetadata references return `CORE_CAPABILITY_REQUIRED` (HTTP 503, `retryable: false`, `stage: "mapping"`). The plugin does not automatically repair these references, force mappings, or revoke existing sessions to unblock mapping. No optional narrow mapping capability is wired.
 

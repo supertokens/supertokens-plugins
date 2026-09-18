@@ -18,6 +18,9 @@ dependencies = [
   "typing_extensions>=4.1.1,<5.0.0"
 ]
 
+[project.scripts]
+rownd-python = "supertokens_rownd.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/supertokens/supertokens-plugins"
 Repository = "https://github.com/supertokens/supertokens-plugins"
