@@ -50,9 +50,23 @@ The winning Rownd profile and surviving SuperTokens primary are separate choices
 Eligible profiles compete using valid `meta.last_sign_in` / `meta.last_active`
 timestamps; a tie requires established canonical provenance. Activity alone does
 not authorize merging unrelated accounts. Whole-owner consolidation is limited to
-public-only recipe graphs and preserves immutable recipe IDs. Checkpoints record
+public-only recipe graphs and preserves immutable recipe IDs. Single-owner repairs
+can run in the requested tenant, preserving other tenant memberships; this does not
+authorize cross-tenant whole-owner consolidation. Checkpoints record
 multi-step repairs so retries can validate committed state before continuing.
 These Core operations are not an atomic transaction.
+
+Checkpoint compatibility targets `rownd-plugin` at `d34639e`: owner consolidation
+uses version 2 plans, while Python administrative method, publication, finalization,
+and lifecycle journals use version 1. These are separate record formats, not
+interchangeable versions of one schema. Supported Node lifecycle receipts are
+validated against fresh source, mapping, and recipe state before cleanup. Durable
+lineage and revocation debt survive interrupted cleanup; retries may repeat revocation
+or other recoverable operations, so this is not an exactly-once guarantee.
+
+Metadata backfill fills only absent, non-identity fields. Existing values, including
+nulls and opaque objects on linked identities or aliases, remain occupied; existing
+`original_rownd_user` provenance is preserved rather than overwritten by the winner.
 
 Administrative current-email ownership and email verification are distinct:
 verification requires `verified_data.email` to be `true` or match the current
@@ -187,6 +201,10 @@ transient. Resolve identity and policy blockers before retrying those rows.
 
 This rejection classification is compatibility-tested with Python SDK **0.31.3** and Core **12.0.10**: the SDK-wrapped HTTP 400 from `POST /recipe/userid/map` with message `UserId is already in use in Session recipe` or `UserId is already in use in UserMetadata recipe`. Other recipes and error formats are not assumed recognized; other errors retain existing handling. Exact bidirectional mapping postconditions still recover races, including when the mapping call reports an error.
 
+Administrative force operations are limited to validated mapping plans and their exact
+alias/recipe cells, with ownership and verification checks. There is no general-purpose
+`force` argument on `reconcile_user` or the CLI.
+
 This package is managed by Turborepo through `package.json`, but published as a Python package named `supertokens-rownd`.
 
 ## Installation
@@ -213,6 +231,16 @@ uv sync --dev
 uv run python -m build
 uv run pytest
 ```
+
+Integration tests require Docker. If its default address pools are exhausted, choose
+an available subnet that does not overlap host, VPN, or other Docker networks:
+
+```bash
+ROWND_TEST_DOCKER_SUBNET="$AVAILABLE_TEST_SUBNET" uv run pytest
+```
+
+Set `AVAILABLE_TEST_SUBNET` to your chosen CIDR first; parallel runs need distinct
+subnets. Omit `ROWND_TEST_DOCKER_SUBNET` to use Docker's default network allocation.
 
 From the repository root, Turborepo can run the Python package tasks because this directory has a `package.json` workspace adapter:
 
@@ -519,8 +547,10 @@ Uncommitted sole anchors remain quarantined rather than deleting the primary acc
 JWT lifecycle repair does not merge a separate primary owner. An obsolete recipe that
 originally anchored the current primary may nevertheless be retired using recipe-only
 deletion after a replacement is linked; the primary user ID and mapping remain intact.
-Repeated completed migrations use ID-only discovery when the bidirectional mapping,
-source identities, tenant membership, canonical email, and checkpoint state are stable.
+Repeated completed provider-only migrations may use ID-only discovery when the
+bidirectional mapping, source identities, tenant membership, and checkpoint state are
+stable. Any expected email or phone identity requires full account discovery, including
+cross-recipe contact ownership checks, even when the migration was already completed.
 Unknown operational markers or repair/debt conditions fall back to account discovery.
 Fresh source, mapping, method, and final session checks still run; no completion result
 is cached across requests or writes.
@@ -549,11 +579,15 @@ synthetic-email EV as provider authentication.
 App-variant membership stays at `original_rownd_user.attributes["rownd:app_variants"]`.
 Recording a variant preserves genuine Rownd metadata without synthesizing `data.user_id`
 or `verified_data`. An attributes-only wrapper is valid operational metadata, not identity
-provenance; malformed or conflicting identity metadata still blocks migration.
+provenance. Historical profiles with a valid Rownd user ID remain opaque provenance
+when old identity cells cannot be parsed: they do not attest current identities, and
+fresh-source repair is required. Invalid provenance structure or conflicting ownership
+still blocks migration; unsupported historical cells alone do not block benign writes.
 
 Email-change completion no longer synthesizes a Rownd `data.user_id` from the SuperTokens
 user ID. Native attributes-only wrappers remain non-provenance, while genuine linked
-profiles retain their Rownd identity. Malformed or conflicting metadata returns the SDK
+profiles retain their Rownd identity. Invalid provenance structure or conflicting
+metadata returns the SDK
 `GENERAL_ERROR` response before credential additions or session revocation.
 
 After all Rownd users have migrated, retain the compatibility routes without Rownd credentials by configuring `disable_rownd_user_migration=True`. This removes both migration routes; when no app key is configured, it uses an internal app key for passwordless and verification-link rewriting.
@@ -608,9 +642,12 @@ App-config, migration, profile/email-change routes and subsequent session reques
 do not independently invoke this resolver.
 
 After upgrading, instant sessions report `is_verified_user: false`. Older unmarked
-sessions whose aliases moved during reconciliation require a freshly validated
-completed checkpoint; ambiguous sessions remain instant until fresh credential
-authentication. Incomplete or invalid provenance fails closed.
+sessions with owner-consolidation metadata require structural and fresh completed-plan
+validation; ambiguous moved aliases remain instant until fresh credential authentication.
+Incomplete or invalid checkpoints fail closed on that legacy inference path. Successful
+native credential authentication and explicitly authenticated sessions do not depend on
+an old completed administrative checkpoint, even if it is malformed. In-flight mapping
+publication and orphan recovery still block unsafe native session issuance.
 `rownd_session_authentication` is internal state, not a configurable claim or a
 user-context flag for upgrading authentication.
 

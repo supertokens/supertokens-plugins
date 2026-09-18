@@ -49,6 +49,14 @@
   when authorizing linked Passwordless email credentials.
 - Add administrative user reconciliation and dry-run inspection, with source election,
   checkpointed ownership repairs, and structured partial-progress results.
+- Support tenant-local single-owner repairs while restricting whole-owner consolidation
+  to public-only graphs. Preserve occupied metadata and original Rownd provenance.
+- Validate version 2 Node owner plans and supported lifecycle receipts from `d34639e`;
+  use separate version 1 Python repair journals for interrupted operations. Preserve
+  lineage and revocation debt through cleanup without promising exactly-once execution.
+- Keep native credential authentication independent of malformed old completed owner
+  checkpoints; retain strict completed-plan validation for unmarked legacy session
+  inference and block unsafe in-flight mapping publication.
 - Add Python CLI profiles, single-user reconciliation, and bounded CSV reconciliation
   with failure reports for targeted retries.
 
@@ -85,6 +93,13 @@
   obsolete anchor recipe while preserving the primary ID and mapping when a replacement
   remains linked. Durable lifecycle records track interrupted work and revocation debt;
   they are recovery mechanisms, not an atomicity or complete recovery-validation guarantee.
+- Limit completed-migration ID-only discovery to provider-only identities. Email and phone
+  identities still require full cross-recipe ownership discovery on every migration.
+- Preserve historical profiles with valid Rownd IDs as opaque provenance when old identity
+  cells cannot be parsed; use fresh-source repair rather than treating them as current proof
+  or blocking benign profile writes.
+- Allow `ROWND_TEST_DOCKER_SUBNET` to select a test network when Docker's default address
+  pools are exhausted; retain Docker's default allocation when the variable is omitted.
 - Return HTTP 400 with `reason: "UNKNOWN_APP_VARIANT"` for unknown app-config variants,
   preserving the existing message. Valid and omitted variants are unchanged.
 - Document existing unreleased behavior: missing Rownd users return `ROWND_USER_NOT_FOUND`
