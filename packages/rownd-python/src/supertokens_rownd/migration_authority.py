@@ -70,6 +70,17 @@ async def assert_source_not_superseded(rownd_user_id: str, context: UserContext)
     repo.clear_supertokens_core_call_cache(context)
     # The literal alias tombstone survives removal of its user-ID mapping. Linked
     # metadata or an administrative recovery reference must not authorize replay.
-    raw = await repo.get_raw_user_metadata(rownd_user_id, context)
+    try:
+        raw = await repo.get_raw_user_metadata(rownd_user_id, context)
+    except MigrationError:
+        raise
+    except Exception as error:
+        raise MigrationError(
+            MigrationErrorReason.CORE_UNAVAILABLE
+            if repo._is_recognizable_core_outage(error)
+            else MigrationErrorReason.MIGRATION_INCOMPLETE,
+            "state_inspect",
+            error,
+        ) from error
     if "rownd_migration_superseded" in raw:
         raise MigrationError(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "state_inspect")
