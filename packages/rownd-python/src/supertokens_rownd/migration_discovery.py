@@ -16,6 +16,10 @@ async def completed_identity_user(
 ) -> Optional[User]:
     from . import supertokens_repository as repo
 
+    # Core uniqueness is recipe-scoped for contacts. ID-only reads cannot exclude
+    # a foreign emailpassword/thirdparty reservation for a passwordless contact.
+    if any(identity.identifier_type in {"email", "phone"} for identity in source.expected_identities):
+        return None
     reverse = repo._mapping_lookup(await repo.get_user_id_mapping(target, "SUPERTOKENS", context))
     if reverse is None or reverse.external_user_id != source.rownd_user_id or reverse.supertokens_user_id != target:
         return None

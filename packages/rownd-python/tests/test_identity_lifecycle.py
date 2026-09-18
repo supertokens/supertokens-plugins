@@ -216,34 +216,60 @@ async def test_online_current_email_uses_jwt_authority_and_retires_snapshot_emai
     assert not any(method.email == profile["data"]["email"] for method in user.login_methods)
 
 
-async def test_email_revocation_debt_survives_source_drift(core_url, rownd_client, monkeypatch):
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_email_revocation_debt_survives_source_drift(core_url, rownd_client, monkeypatch, legacy):
+    import hashlib
     client = make_client(core_url, rownd_client)
     rownd_client.user_id = "email-debt-" + str(uuid.uuid4())
     old = rownd_client.user_id + "@old.example"
     rownd_client.user_info = {"data": {"user_id": rownd_client.user_id, "google_id": rownd_client.user_id, "email": old},
                               "verified_data": {"google_id": True}}
     assert migrate(client).status_code == 200
+    mapping = await get_user_id_mapping(rownd_client.user_id, "EXTERNAL")
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    ledger = "rownd-email-retirement-" + hashlib.sha256((mapping.supertokens_user_id + "\0public").encode()).hexdigest()
     native_remove = tenants.disassociate_user_from_tenant
     issued = []
 
     async def remove(tenant, recipe, *args, **kwargs):
         result = await native_remove(tenant, recipe, *args, **kwargs)
         if not issued:
+            if legacy:
+                stored = await repo.get_raw_user_metadata(ledger)
+                plan = cast(dict, stored["plan"])
+                await metadata_api.update_user_metadata(ledger, {"plan": {key: value for key, value in plan.items() if key != "replacement"}})
             # Model issuance already past its membership check when removal commits.
             from supertokens_rownd import provider_session
             with monkeypatch.context() as inflight:
                 inflight.setattr(provider_session, "assert_provider_session_membership", AsyncMock())
                 issued.append(await sessions.create_new_session_without_request_response(tenant, recipe, {}, {}, True))
+            await repo.passwordless_asyncio.create_code(tenant, email=old)
+            await repo.passwordless_asyncio.create_code(tenant, email=rownd_client.user_id + "@new.example")
             rownd_client.user_info["data"]["email"] = rownd_client.user_id + "@third.example"
             raise TimeoutError("committed email removal followed by source drift")
         return result
 
     monkeypatch.setattr(tenants, "disassociate_user_from_tenant", remove)
     rownd_client.user_info["data"]["email"] = rownd_client.user_id + "@new.example"
-    migrate(client)
-    migrate(client)
+    response = migrate(client)
+    for _ in range(3):
+        if response.status_code == 200:
+            break
+        response = migrate(client)
+    assert response.status_code == 200, response.json()
     assert issued
     assert await sessions.get_session_information(issued[0].get_handle()) is None
+    user = await get_user(rownd_client.user_id)
+    assert {method.email for method in user.login_methods if method.recipe_id == "passwordless"} == {
+        rownd_client.user_id + "@third.example"
+    }
+    assert await repo.passwordless_asyncio.list_codes_by_email("public", old) == []
+    assert await repo.passwordless_asyncio.list_codes_by_email("public", rownd_client.user_id + "@new.example") == []
+    completed = cast(dict, (await repo.get_raw_user_metadata(ledger))["plan"])
+    assert completed["state"] == "complete"
+    assert completed["email"] == rownd_client.user_id + "@third.example"
+    assert completed["history"][0]["previous"] == old
+    assert completed["history"][0]["email"] == rownd_client.user_id + "@new.example"
 
 
 @pytest.mark.parametrize("operation", ["import", "membership"])
@@ -333,11 +359,11 @@ async def test_completed_discovery_avoids_searches_only_for_stable_state(core_ur
     source = create_rownd_identity_snapshot(rownd_client.user_info, tenant)
     optimized = await repo.read_fresh_migration_snapshot(source, {})
     stable = change in {None, "stable_email"}
-    assert (searches.await_count == 0) is stable
+    assert (searches.await_count == 0) is (change is None)
     if stable:
         response = migrate(client)
         assert response.status_code == 200, response.json()
-        assert searches.await_count == 0
+        assert (searches.await_count == 0) is (change is None)
     from supertokens_rownd import migration_discovery
     monkeypatch.setattr(migration_discovery, "completed_identity_user", AsyncMock(return_value=None))
     full = await repo.read_fresh_migration_snapshot(source, {})
@@ -353,6 +379,28 @@ async def test_completed_discovery_avoids_searches_only_for_stable_state(core_ur
         assert fast_session.get_recipe_user_id() == full_session.get_recipe_user_id()
         assert fast_session.get_user_id() == full_session.get_user_id()
         assert fast_session.get_access_token_payload()["auth_level"] == full_session.get_access_token_payload()["auth_level"]
+
+
+@pytest.mark.parametrize("reservation", ["emailpassword", "thirdparty"])
+async def test_completed_email_reservations_match_full_discovery(core_url, rownd_client, monkeypatch, reservation):
+    from supertokens_rownd import migration_discovery
+    from supertokens_python.recipe.emailpassword import asyncio as emailpassword
+    client = make_client(core_url, rownd_client, enable_email_password=True)
+    rownd_client.user_id = "reservation-" + str(uuid.uuid4())
+    email = rownd_client.user_id + "@example.com"
+    rownd_client.user_info = {"data": {"user_id": rownd_client.user_id, "email": email}, "verified_data": {}}
+    assert migrate(client).status_code == 200
+    if reservation == "emailpassword":
+        foreign = await emailpassword.sign_up("public", email, "Password123!")
+    else:
+        foreign = await providers.manually_create_or_update_user("public", "google", rownd_client.user_id, email, False)
+    assert getattr(foreign, "user").id != (await get_user(rownd_client.user_id)).id
+    optimized = migrate(client)
+    monkeypatch.setattr(migration_discovery, "completed_identity_user", AsyncMock(return_value=None))
+    full = migrate(client)
+    assert optimized.status_code == full.status_code == 422
+    assert optimized.json()["reason"] == full.json()["reason"] == "IDENTITY_OWNED_BY_ANOTHER_USER"
+    assert "st-access-token" not in optimized.headers and "st-access-token" not in full.headers
 
 
 async def test_native_session_guard_is_recipe_and_tenant_scoped(core_url, rownd_client):
