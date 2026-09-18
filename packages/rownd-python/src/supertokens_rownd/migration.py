@@ -334,7 +334,9 @@ def validate_migration_metadata(
             try:
                 original_identities = create_rownd_identity_snapshot(original, tenant_id).expected_identities
             except MigrationError:
-                return MigrationMetadataState(False)
+                # Historical profiles are opaque provenance, not fresh identity authority.
+                # Unknown identity evidence requires repair, without blocking benign writes.
+                original_identities = ()
     return MigrationMetadataState(
         True,
         ValidatedMigrationMetadata(

@@ -4301,6 +4301,26 @@ async def test_oauth_claims_share_one_metadata_inspection(monkeypatch: pytest.Mo
     assert calls == 1
 
 
+@pytest.mark.parametrize("verified_data", [None, [False], {"google_id": True}])
+async def test_historical_metadata_is_not_fresh_identity_authority(verified_data: Any):
+    original = {
+        "data": {"user_id": "rownd-user", "email": "user@example.com"},
+        "verified_data": verified_data,
+    }
+    before = deepcopy(original)
+
+    state = migration.validate_migration_metadata({"original_rownd_user": original})
+
+    assert state.valid
+    assert state.value is not None
+    assert state.value.original_rownd_user_id == "rownd-user"
+    assert state.value.source_identities == ()
+    assert original == before
+    with pytest.raises(migration.MigrationError) as error:
+        migration.create_rownd_identity_snapshot(original, "public")
+    assert error.value.reason is migration.MigrationErrorReason.SOURCE_IDENTITY_INVALID
+
+
 @pytest.mark.parametrize("verified_data", [{"email": "user@example.com"}, None, [False]])
 async def test_app_variant_uses_fresh_raw_metadata_before_write(
     monkeypatch: pytest.MonkeyPatch, verified_data: Any,
@@ -4360,6 +4380,28 @@ async def test_app_variant_uses_fresh_raw_metadata_before_write(
         (
             {
                 "original_rownd_user": {"data": {"user_id": "rownd-user"}},
+                "rownd_migration_complete": True,
+            },
+            "REPAIRABLE",
+            None,
+        ),
+        (
+            {
+                "original_rownd_user": {
+                    "data": {"user_id": "rownd-user", "google_id": "google-user"},
+                    "verified_data": None,
+                },
+                "rownd_migration_complete": True,
+            },
+            "REPAIRABLE",
+            None,
+        ),
+        (
+            {
+                "original_rownd_user": {
+                    "data": {"user_id": "rownd-user", "google_id": "google-user"},
+                    "verified_data": {"google_id": True},
+                },
                 "rownd_migration_complete": True,
             },
             "COMPLETE",

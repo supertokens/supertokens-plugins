@@ -178,6 +178,7 @@ async def test_blocked_migration_aliases_return_422_without_session(
     create_session = AsyncMock()
     monkeypatch.setattr(session_asyncio, "create_new_session", create_session)
     monkeypatch.setattr(impl, "read_fresh_migration_snapshot", AsyncMock())
+    monkeypatch.setattr(impl, "get_raw_user_metadata", AsyncMock(return_value={}))
     monkeypatch.setattr(
         impl,
         "classify_migration_snapshot",
