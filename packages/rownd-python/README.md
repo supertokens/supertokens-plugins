@@ -36,6 +36,10 @@ Results use Node-compatible field names:
   establish completion. `partialProgress` indicates mutations may have occurred;
   `changed: null` means the final change state is unknown.
 
+An unsuccessful dry run may return one of these failure statuses rather than
+`PREVIEW`. These administrative results are not migration HTTP `reason`/`retryable`
+envelopes. CSV records still use `type: "result"`; the outcome is in `result.status`.
+
 `requested_rownd_user_id` preserves an explicit Rownd selector even if another
 source wins election. `requested_supertokens_user_id` preserves a SuperTokens
 selector; reconciliation cannot silently switch its target. `on_progress` accepts
@@ -106,9 +110,11 @@ with sanitized explanations. Execution exits zero for `OK`; a dry-run `PREVIEW`
 exits zero only when `canReconcile` is true. Other results and command errors
 exit with code `1`; Ctrl-C exits with code `130`. Argument, configuration, or
 output failures may produce only sanitized stderr, without a JSON result or final
-batch summary. An unexpected execution exception reports `changed: null` and
-`partialProgress: true`: an unknown result does not imply rollback. The dry-run
-equivalent reports `changed: false`, `canReconcile: false`, and `OBSERVATION_FAILED`.
+batch summary. If an exception escapes reconciliation, the CLI emits an `ERROR`
+fallback with `changed: null` and `partialProgress: true` for execution; an unknown
+result does not imply rollback. Its dry-run fallback reports `changed: false`,
+`canReconcile: false`, and an `OBSERVATION_FAILED` blocker. Normally returned API
+failures retain their reported change and partial-progress state.
 
 `--dry-run` inspects live state without applying authentication changes.
 `proposedActions`, `blockers`, `requiresExecutionProof`, and `canReconcile`
@@ -177,7 +183,7 @@ The failure CSV is an input for manual retries, not a promise that each failure 
 transient. Resolve identity and policy blockers before retrying those rows.
 
 > [!IMPORTANT]
-> JWT migration mapping rejections for existing Session or UserMetadata references return `CORE_CAPABILITY_REQUIRED` (HTTP 503, `retryable: false`, `stage: "mapping"`). JWT migration does not automatically repair these references, force mappings, or revoke existing sessions to unblock mapping. Administrative reconciliation has separate checkpointed mapping-publication authority; this does not relax the JWT migration boundary.
+> JWT migration mapping rejections for existing Session or UserMetadata references return `CORE_CAPABILITY_REQUIRED` (HTTP 503, `retryable: false`, `stage: "mapping"`). JWT migration does not automatically repair these references, force mappings, or revoke existing sessions to unblock mapping. Administrative reconciliation separately uses checkpointed, guarded mapping deletion and publication with Core force semantics; this does not relax the JWT migration boundary.
 
 This rejection classification is compatibility-tested with Python SDK **0.31.3** and Core **12.0.10**: the SDK-wrapped HTTP 400 from `POST /recipe/userid/map` with message `UserId is already in use in Session recipe` or `UserId is already in use in UserMetadata recipe`. Other recipes and error formats are not assumed recognized; other errors retain existing handling. Exact bidirectional mapping postconditions still recover races, including when the mapping call reports an error.
 
@@ -331,8 +337,10 @@ repository has no structured Rownd error code proving another category. HTTP 408
 requests reject redirects; network and body-read operations use a total request deadline, and
 response bodies are streamed under a 1 MiB limit. JSON parsing is synchronous and cannot be
 preempted by the event-loop deadline, but its work is bounded by that response limit. The plugin
-does not classify disabled Rownd profiles because the current profile response contract in
-this repository does not establish an authoritative disabled-state field and value.
+rejects a present source `state` other than `"enabled"`; an omitted state defaults to
+enabled. JWT source-authority validation reports `SOURCE_IDENTITY_INVALID`, while
+administrative validation reports a blocked policy outcome. These checks do not use
+the separate `ROWND_USER_DISABLED` reason.
 
 A missing Rownd user returns `ROWND_USER_NOT_FOUND` (HTTP 401, `retryable: false`),
 not a successful no-op, on both migration routes.
@@ -479,7 +487,7 @@ missing-identity additions remain nonprimary (`isPrimary` is omitted) so they ca
 linked to the existing target. `MAKE_PRIMARY` recovery for existing nonprimary targets
 is unchanged.
 
-Online migration accepts eligible contact and provider identifiers without historical
+Online migration accepts eligible emails and Google/Apple identifiers without historical
 `verified_data` markers. A validated Rownd JWT authorizes its current real profile email;
 this proof is privately bound to the source object, tenant, and identities. A fetched
 profile alone needs `verified_data.email: true` or a matching normalized email to establish
@@ -508,6 +516,9 @@ creation is treated as an existing donor, never as permission to delete an unkno
 Obsolete recipes are deleted only after their last tenant membership is removed and a
 replacement remains linked; recipe-only deletion retains the primary user and mapping.
 Uncommitted sole anchors remain quarantined rather than deleting the primary account.
+JWT lifecycle repair does not merge a separate primary owner. An obsolete recipe that
+originally anchored the current primary may nevertheless be retired using recipe-only
+deletion after a replacement is linked; the primary user ID and mapping remain intact.
 
 Phone migration remains verified-only: missing verification preserves the phone in original
 profile metadata, not as a Core login method; contradictory phone evidence blocks migration.
@@ -566,7 +577,8 @@ The plugin exposes Rownd-compatible user/session behavior for migrated and new S
 
 `resolve_config` is currently invoked by the anonymous-login route and administrative
 `reconcile_user` calls. It receives
-one dictionary containing `tenant_id`, `request`, and `user_context`:
+one dictionary containing `tenant_id`, `request`, and `user_context`. Administrative
+calls supply `request: None`:
 
 ```python
 async def resolve_config(operation):
@@ -579,7 +591,9 @@ Supported overrides are `app_config`, `sub_brands`, `schema`, `client_domains`,
 `cross_device_confirmation_bypass`, and `email_change.max_session_age_seconds`.
 Top-level values replace static values rather than being deep-merged; `None` is
 ignored. The permitted email-change setting is merged with static email-change
-settings; `retirement_mode` remains startup-static. Resolution errors reject login.
+settings; `retirement_mode` remains startup-static. Resolution errors prevent the
+operation: anonymous login returns its error response, while administrative
+reconciliation returns an unsuccessful result.
 The snapshot applies to that operation and any anonymous session creation, not globally.
 App-config, migration, profile/email-change routes and subsequent session requests
 do not independently invoke this resolver.
@@ -675,9 +689,14 @@ pointer. This permits a Passwordless challenge, not an EV bypass. Explicit canon
 pointers and retirement metadata block excluded aliases during create, resend, and
 consume. A historical profile email preference alone does not retire another
 attached, verified, nonsynthetic Passwordless email: eligible aliases remain usable
-subject to tenant, credential-match, and unambiguous topology checks. Synchronous migration
-retains old methods and publishes completion and the tenant canonical pointer after identity
-reconciliation; completion alone does not mark an eligible email verified.
+subject to tenant, credential-match, and unambiguous topology checks. Migration publishes
+the tenant canonical email pointer and can retire snapshot-proven obsolete Passwordless
+email methods when source, provider-continuity, ownership, and replacement-verification
+checks pass. Retirement revokes old email codes and tenant account sessions, removes
+obsolete tenant membership, and deletes the recipe only when no tenant memberships
+remain and the replacement is still linked. This differs from native profile email
+changes in observe mode, which retain previous aliases. Completion metadata alone is
+not verification proof.
 
 Successful profile or field updates that start verification return
 `email_verification_pending: true`. Until verification completes, the returned profile

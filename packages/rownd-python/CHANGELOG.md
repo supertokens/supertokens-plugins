@@ -42,7 +42,8 @@
 - Port authentication and reconciliation behavior from `rownd-plugin` at `d34639e`.
   Guest and instant login require the matching anonymous sign-in configuration;
   optional `resolve_config` overrides currently apply to anonymous login and its
-  session creation. Instant-origin sessions retain their authentication level after
+  session creation, and to administrative `reconcile_user` calls (with `request: None`).
+  Instant-origin sessions retain their authentication level after
   account linking until credential authentication and report `is_verified_user: false`.
 - Distinguish explicit canonical email restrictions from historical profile preferences
   when authorizing linked Passwordless email credentials.
@@ -63,16 +64,27 @@
 - Preserve app-variant membership in its existing metadata location without fabricating
   Rownd identity or verification fields; accept attributes-only wrappers as non-provenance.
 - Migrate eligible emails and Google/Apple identifiers without historical `verified_data`.
-  Keep eligibility separate from EV: stale email evidence is not trusted and generated
-  placeholder emails remain unverified. Interrupted unverified-email repairs require trusted
-  same-Rownd provenance; otherwise Passwordless linking requires source and owner verification.
+  Validated JWT migration privately attests the current real source email; fetched
+  administrative profiles still require matching `verified_data` for source email
+  verification. Generated placeholder emails remain unverified, and eligibility alone
+  does not authorize unrelated credential owners. Interrupted unverified-email repairs
+  require trusted same-Rownd provenance; otherwise Passwordless linking requires source
+  and owner verification.
   Retain namespace, tenant, collision, mapping, and primary-account guards. Completed migration
   can publish an unverified canonical email for Passwordless challenges, not bypass EV.
-- Classify verified Session/UserMetadata user-ID mapping rejections as `CORE_CAPABILITY_REQUIRED`
+- In JWT migration, classify verified Session/UserMetadata user-ID mapping rejections as `CORE_CAPABILITY_REQUIRED`
   (HTTP 503, `retryable: false`, `stage: "mapping"`), compatibility-tested with Python SDK
   0.31.3 and Core 12.0.10. No automatic reference repair, forced mapping, or session revocation
   is attempted to unblock mapping. Other errors retain existing handling; exact bidirectional
   mapping races still recover. Recognition is limited to the verified rejection formats.
+  Administrative reconciliation separately uses checkpointed, guarded mapping deletion
+  and publication with Core force semantics; this authority is unavailable to JWT migration.
+- Add source-authority checks rejecting a present Rownd `state` other than `"enabled"`,
+  snapshot-proven current-email retirement, and provider credential replacement. Retirement
+  can revoke old email codes and tenant sessions; provider replacement can remove an
+  obsolete anchor recipe while preserving the primary ID and mapping when a replacement
+  remains linked. Durable lifecycle records track interrupted work and revocation debt;
+  they are recovery mechanisms, not an atomicity or complete recovery-validation guarantee.
 - Return HTTP 400 with `reason: "UNKNOWN_APP_VARIANT"` for unknown app-config variants,
   preserving the existing message. Valid and omitted variants are unchanged.
 - Document existing unreleased behavior: missing Rownd users return `ROWND_USER_NOT_FOUND`
