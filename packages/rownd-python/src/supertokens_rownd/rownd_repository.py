@@ -9,7 +9,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 import jwt
@@ -413,12 +413,14 @@ class RowndClient:
         return data
 
     async def fetch_optional_user_info(self, user_id: str) -> Optional[JsonDict]:
+        if not valid_lookup_id(user_id):
+            raise RowndAPIError(RowndAPIErrorReason.PROFILE_INVALID)
         app_id = await self._fetch_app_id()
 
         try:
             data = await self._request(
                 "GET",
-                "/applications/%s/users/%s/data" % (app_id, user_id),
+                "/applications/%s/users/%s/data" % (quote(app_id, safe=""), quote(user_id, safe="")),
             )
         except RowndAPIError as err:
             if err.reason is RowndAPIErrorReason.USER_NOT_FOUND:
@@ -438,6 +440,49 @@ class RowndClient:
         ):
             raise RowndAPIError(RowndAPIErrorReason.PROFILE_INVALID)
         return data
+
+    async def fetch_fresh_user_info(self, user_id: str) -> Optional[JsonDict]:
+        return await self.fetch_optional_user_info(user_id)
+
+    async def find_user_ids_by_email(self, email: str) -> list[str]:
+        if not valid_lookup_id(email) or any(char.isspace() or char == "," for char in email):
+            raise RowndPluginError("Invalid Rownd email lookup value")
+        app_id = await self._fetch_app_id()
+        ids: set[str] = set()
+        cursors: set[str] = set()
+        total: Optional[int] = None
+        after: Optional[str] = None
+        for _ in range(1000):
+            params = {"lookup_filter": email, "include_duplicates": "true",
+                      "page_size": "100", "sort": "asc"}
+            if after is not None:
+                params["after"] = after
+            body = await self._request("GET", "/applications/%s/users/data?%s" % (
+                quote(app_id, safe=""), urlencode(params)))
+            count, entries = body.get("total_results"), body.get("results")
+            if (type(count) is not int or count < 0 or count > 9007199254740991
+                    or not isinstance(entries, list) or len(entries) > 100):
+                raise RowndPluginError("ROWND_EMAIL_SEARCH_INVALID_RESPONSE")
+            if total is not None and count != total:
+                raise RowndPluginError("ROWND_EMAIL_SEARCH_CHANGED")
+            total = count
+            before = len(ids)
+            last = None
+            for entry in entries:
+                data = entry.get("data") if isinstance(entry, dict) else None
+                last = data.get("user_id") if isinstance(data, dict) else None
+                if not isinstance(last, str) or not valid_lookup_id(last):
+                    raise RowndPluginError("ROWND_EMAIL_SEARCH_INVALID_RESPONSE")
+                ids.add(last)
+            if len(ids) > total:
+                raise RowndPluginError("ROWND_EMAIL_SEARCH_INVALID_RESPONSE")
+            if len(ids) == total:
+                return sorted(ids)
+            if len(ids) == before or not isinstance(last, str) or last in cursors:
+                raise RowndPluginError("ROWND_EMAIL_SEARCH_INCOMPLETE")
+            cursors.add(last)
+            after = last
+        raise RowndPluginError("ROWND_EMAIL_SEARCH_INCOMPLETE")
 
     async def _fetch_app_id(self) -> str:
         if self.config.rownd_app_id is not None:
@@ -557,3 +602,9 @@ class RowndClient:
         if not isinstance(data, dict):
             raise RowndPluginError("Invalid Rownd response")
         return data
+
+
+def valid_lookup_id(value: Any) -> bool:
+    return (isinstance(value, str) and bool(value) and value.strip() == value
+            and value not in {".", ".."}
+            and all(ord(char) >= 32 and ord(char) != 127 for char in value))

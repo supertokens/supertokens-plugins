@@ -63,6 +63,7 @@ from supertokens_python.interfaces import (
 from .constants import (
     GUEST_AUTH_METHOD_ID,
     INSTANT_AUTH_METHOD_ID,
+    INTERNAL_METADATA_FIELDS,
     PUBLIC_TENANT_ID,
     RESERVED_OAUTH_CLAIMS,
 )
@@ -122,12 +123,7 @@ from .utils import (
 )
 
 
-_LINKED_OPERATIONAL_METADATA_FIELDS = {
-    "rownd_email_recipe_user_id",
-    "rownd_email_recipe_user_ids",
-    "rownd_migration_complete",
-    "rownd_pending_verification",
-}
+_LINKED_OPERATIONAL_METADATA_FIELDS = INTERNAL_METADATA_FIELDS - {"original_rownd_user"}
 
 
 class _BulkImportError(RuntimeError):
@@ -1167,6 +1163,16 @@ async def inspect_linked_user_metadata(
     user_override: Optional[User] = None,
 ) -> Dict[str, Any]:
     user = user_override if user_override is not None else await get_user(user_id, user_context)
+    reference_id = user_id
+    visited = {user_id}
+    while user is None:
+        reference = await get_raw_user_metadata(reference_id, user_context)
+        target = reference.get("rownd_migration_canonical_target", reference.get("rownd_migration_target"))
+        if not isinstance(target, str) or not target or target in visited:
+            break
+        visited.add(target)
+        reference_id = target
+        user = await get_user(target, user_context)
     if user is None:
         metadata = await get_raw_user_metadata(user_id, user_context)
         return {**combine_linked_metadata(user_id, metadata, []), "user": None}
@@ -1179,6 +1185,7 @@ async def inspect_linked_user_metadata(
             for method in user.login_methods
             if method.recipe_user_id.get_as_string() != primary_user_id
         }
+        | (visited - {primary_user_id})
     )
     metadata_results = await asyncio.gather(
         get_raw_user_metadata(primary_user_id, user_context),
