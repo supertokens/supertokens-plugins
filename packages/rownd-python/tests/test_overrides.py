@@ -3465,6 +3465,7 @@ async def test_create_new_session_builds_rownd_and_boolean_claims_in_initial_pay
     monkeypatch.setattr(plugin, "build_rownd_session_and_anonymous_claims", build_claims)
     from supertokens_rownd import provider_session
     monkeypatch.setattr(provider_session, "assert_provider_session_membership", AsyncMock())
+    monkeypatch.setattr(plugin, "_assert_native_session_publication", AsyncMock())
     original = SimpleNamespace(create_new_session=create_new_session, refresh_session=AsyncMock())
     overridden = plugin._session_function_override(make_config())(cast(Any, original))
 

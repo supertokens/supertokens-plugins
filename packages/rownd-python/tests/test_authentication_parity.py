@@ -67,9 +67,13 @@ def linked_user(monkeypatch):
     return user
 
 
-async def test_instant_creation_ignores_forged_context_and_payload_proofs(linked_user):
+async def test_instant_creation_ignores_forged_context_and_payload_proofs(linked_user, monkeypatch):
+    from supertokens_rownd import provider_session
+
+    monkeypatch.setattr(plugin, "_assert_native_session_publication", AsyncMock())
+    monkeypatch.setattr(provider_session, "assert_provider_session_membership", AsyncMock())
     create = AsyncMock()
-    original = SimpleNamespace(create_new_session=create)
+    original = SimpleNamespace(create_new_session=create, refresh_session=AsyncMock())
     overridden = plugin._session_function_override(RowndPluginConfig())(cast(Any, original))
     await overridden.create_new_session(
         "owner",
@@ -327,7 +331,7 @@ async def test_present_checkpoint_requires_authoritative_reader(linked_user, mon
     validator.assert_not_awaited()
 
 
-async def test_structurally_valid_unambiguous_binding_skips_fresh_completed_validation(
+async def test_structurally_valid_unambiguous_binding_requires_fresh_completed_validation(
     linked_user,
     monkeypatch,
 ):
@@ -335,12 +339,13 @@ async def test_structurally_valid_unambiguous_binding_skips_fresh_completed_vali
     metadata = {"rownd_migration_owner_consolidation": plan}
     monkeypatch.setattr(repository, "get_raw_user_metadata", AsyncMock(return_value=metadata))
     reader = Mock(return_value=plan)
-    validator = AsyncMock(side_effect=RowndPluginError("must not validate unrelated binding"))
+    validator = AsyncMock(side_effect=RowndPluginError("Completed owner graph changed"))
     monkeypatch.setattr(session_authentication, "_owner_plan_reader", reader)
     monkeypatch.setattr(session_authentication, "_owner_plan_validator", validator)
-    assert await session_authentication_origin(linked_user, "email", {}, {}) == "authenticated"
+    with pytest.raises(RowndPluginError, match="Completed owner graph changed"):
+        await session_authentication_origin(linked_user, "email", {}, {})
     reader.assert_called_once_with(metadata)
-    validator.assert_not_awaited()
+    validator.assert_awaited_once_with(plan, {})
 
 
 @pytest.mark.parametrize(

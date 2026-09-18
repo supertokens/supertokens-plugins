@@ -227,6 +227,9 @@ async def invoke_migration(
     use_real_repository: bool = False,
     enable_debug_logs: bool = False,
 ) -> tuple[FakeResponse, CapturingTelemetry]:
+    monkeypatch.setattr(implementation, "assert_source_not_superseded", AsyncMock())
+    monkeypatch.setattr(implementation, "resolve_consolidated_token_owner", AsyncMock(return_value=None))
+
     async def migrate(*args: Any, **kwargs: Any) -> str:
         if migration_state is not None:
             cast(JsonDict, args[9]).update(migration_state)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from contextlib import suppress
 import warnings
 from collections.abc import Callable
 from typing import Any, Generic, Literal, NamedTuple, Optional, TypeVar, cast
@@ -1411,6 +1412,28 @@ def _thirdparty_api_override(config: RowndPluginConfig):
     return override
 
 
+async def _assert_native_session_publication(
+    user_id: str, recipe_user_id: str, user_context: UserContext,
+) -> None:
+    from .admin_core import AdministrativeCore
+    from .admin_orphan import ORPHAN_KEY
+    from .admin_planning import AdministrativePolicyError
+    from .admin_publication import PUBLICATION_KEY, read_publication
+
+    # Node native credentials do not depend on completed administrative checkpoints.
+    # Only in-flight ID publication can make their otherwise valid binding unsafe.
+    store = AdministrativeCore(user_context)
+    store.fresh()
+    ids = {user_id, recipe_user_id, await store.immutable(user_id), await store.immutable(recipe_user_id)}
+    for identifier in ids:
+        raw = await store.raw(identifier)
+        if read_publication(raw.get(PUBLICATION_KEY)) is not None:
+            raise AdministrativePolicyError("Fresh mapping publication is incomplete")
+        orphan = raw.get(ORPHAN_KEY)
+        if orphan is not None and (not isinstance(orphan, dict) or orphan.get("phase") != "COMPLETE"):
+            raise AdministrativePolicyError("Orphan mapping recovery is incomplete")
+
+
 def _session_function_override(config: RowndPluginConfig):
     def override(original: SessionRecipeInterface) -> SessionRecipeInterface:
         original_create_new_session = original.create_new_session
@@ -1425,6 +1448,7 @@ def _session_function_override(config: RowndPluginConfig):
             user_context: UserContext,
         ):
             from .provider_session import assert_provider_session_membership
+            await _assert_native_session_publication(user_id, recipe_user_id.get_as_string(), user_context)
             await assert_provider_session_membership(user_id, recipe_user_id.get_as_string(), tenant_id, user_context)
             payload = dict(access_token_payload or {})
             payload.pop("rownd_session_authentication", None)
@@ -1448,9 +1472,11 @@ def _session_function_override(config: RowndPluginConfig):
                 user_context,
             )
             try:
+                await _assert_native_session_publication(user_id, recipe_user_id.get_as_string(), user_context)
                 await assert_provider_session_membership(user_id, recipe_user_id.get_as_string(), tenant_id, user_context)
             except Exception:
-                await session.revoke_session(user_context)
+                with suppress(Exception):
+                    await session.revoke_session(user_context)
                 raise
             return session
 
@@ -1464,12 +1490,17 @@ def _session_function_override(config: RowndPluginConfig):
             from .provider_session import assert_provider_session_membership
             session = await original_refresh_session(refresh_token, anti_csrf_token, disable_anti_csrf, user_context)
             try:
+                await _assert_native_session_publication(
+                    session.get_user_id(), session.get_recipe_user_id().get_as_string(),
+                    user_context,
+                )
                 await assert_provider_session_membership(
                     session.get_user_id(), session.get_recipe_user_id().get_as_string(),
                     session.get_tenant_id(), user_context,
                 )
             except Exception:
-                await session.revoke_session(user_context)
+                with suppress(Exception):
+                    await session.revoke_session(user_context)
                 raise
             return session
 

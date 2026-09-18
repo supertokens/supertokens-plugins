@@ -88,14 +88,15 @@ async def session_authentication_origin(
         target = await freshly_resolve_sdk_user_id_to_internal(user.id, context)
         metadata = await get_raw_user_metadata(target, context)
         plan = _read_owner_plan(metadata)
-        if plan is not None and recipe_user_id in ambiguous_owner_session_aliases(plan):
+        if plan is not None:
             if plan.get("status") != "COMPLETE" or plan.get("reservation"):
                 raise RowndPluginError("Owner consolidation is incomplete")
             if _owner_plan_validator is None:
                 raise RowndPluginError("Completed owner plan validation is unavailable")
             await _owner_plan_validator(plan, context)
-            # Unmarked sessions on moved aliases cannot prove their original credential.
-            return "instant"
+            if recipe_user_id in ambiguous_owner_session_aliases(plan):
+                # Unmarked sessions on moved aliases cannot prove their original credential.
+                return "instant"
 
     recipe = await freshly_resolve_sdk_user_id_to_internal(recipe_user_id, context)
     for method in user.login_methods:

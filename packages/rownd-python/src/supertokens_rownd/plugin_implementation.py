@@ -4,12 +4,14 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Optional, cast, get_args
+from contextlib import suppress
+from typing import Any, Awaitable, Callable, Optional, cast, get_args
 
 from supertokens_python import SupertokensConfig, is_recipe_initialized
 from supertokens_python.framework.request import BaseRequest
 from supertokens_python.framework.response import BaseResponse
 from supertokens_python.recipe.session import SessionContainer
+from supertokens_python.recipe.session import asyncio as session_asyncio
 from supertokens_python.types.base import UserContext
 
 import supertokens_rownd.telemetry.create_telemetry_client as telemetry
@@ -18,17 +20,25 @@ from . import config as rownd_config
 from . import rownd_compatibility as compatibility
 from . import supertokens_repository as repository
 from . import utils
+from .admin_planning import AdministrativePolicyError
+from .admin_validation import resolve_consolidated_token_owner
 from .constants import GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID
 from .errors import MigrationError, MigrationErrorReason, RowndEmailChangeError, RowndPluginError
 from .logger import log_debug, log_warning
 from .migration import create_rownd_identity_snapshot
-from .migration_authority import _bind_authenticated_source
+from .migration_authority import (
+    _bind_authenticated_source,
+    assert_source_authority,
+    assert_source_not_superseded,
+    has_authenticated_source,
+)
 from .rownd_repository import (
     RowndAPIError,
     RowndAPIErrorReason,
     RowndTokenValidationError,
     RowndTokenValidationReason,
 )
+from .session_authentication import proven_session_authentication
 from .types import JsonDict, MigrationStage, RowndClientProtocol, RowndPluginConfig, RowndTelemetryClient
 
 
@@ -165,6 +175,90 @@ async def handle_guest_login(
         return utils.json_response(response, {"status": "ERROR", "message": "Guest login failed"})
 
 
+async def _resolve_consolidated_owner(
+    rownd_user_id: str,
+    tenant_id: str,
+    user_context: UserContext,
+    fetch_fresh_profile: Callable[[str], Awaitable[Optional[JsonDict]]],
+) -> Optional[dict[str, Any]]:
+    try:
+        return await resolve_consolidated_token_owner(
+            rownd_user_id, tenant_id, user_context, fetch_fresh_profile,
+        )
+    except (MigrationError, AdministrativePolicyError):
+        raise
+    except Exception as error:
+        reason = (MigrationErrorReason.CORE_UNAVAILABLE
+                  if repository._is_recognizable_core_outage(error)
+                  else MigrationErrorReason.INTERNAL_ERROR)
+        raise MigrationError(reason, "state_inspect", error) from error
+
+
+async def _create_consolidated_alias_session(
+    config: RowndPluginConfig,
+    source: repository.FreshMigrationSource,
+    owner: dict[str, Any],
+    request: BaseRequest,
+    response: BaseResponse,
+    tenant_id: str,
+    app_variant_id: Optional[str],
+    user_context: UserContext,
+    migration_state: JsonDict,
+    read_fresh_source: Callable[[], Awaitable[Optional[repository.FreshMigrationSource]]],
+    fetch_fresh_profile: Callable[[str], Awaitable[Optional[JsonDict]]],
+) -> None:
+    async def validated_profile(rownd_id: str) -> Optional[JsonDict]:
+        if rownd_id != source.snapshot.rownd_user_id:
+            return await fetch_fresh_profile(rownd_id)
+        fresh = await read_fresh_source()
+        if fresh is None or not has_authenticated_source(fresh):
+            raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "state_inspect")
+        assert_source_authority(fresh)
+        if fresh.snapshot != source.snapshot:
+            raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "state_inspect")
+        return fresh.rownd_user
+
+    async def validate_binding() -> None:
+        await validated_profile(source.snapshot.rownd_user_id)
+        resolved = await _resolve_consolidated_owner(
+            source.snapshot.rownd_user_id, tenant_id, user_context, validated_profile,
+        )
+        if resolved is None or any(resolved[key] != owner[key] for key in ("target", "canonical_rownd_id")):
+            raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "state_inspect")
+        if resolved["recipe_user_id"].get_as_string() != owner["recipe_user_id"].get_as_string():
+            raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "state_inspect")
+
+    if not has_authenticated_source(source):
+        raise MigrationError(MigrationErrorReason.SOURCE_IDENTITY_INVALID, "state_inspect")
+    assert_source_authority(source)
+    canonical_id = owner["canonical_rownd_id"]
+    await repository.record_rownd_app_variant_for_user(config, canonical_id, app_variant_id, user_context)
+    claims = await repository.build_rownd_session_claims(config, canonical_id, {}, app_variant_id, user_context)
+    await validate_binding()
+    session = None
+    try:
+        # The credential proof remains bound to the JWT subject, never the canonical profile.
+        with proven_session_authentication():
+            session = await session_asyncio.create_new_session(
+                request, tenant_id, owner["recipe_user_id"], claims, {},
+                utils.create_derived_user_context(user_context, {"rowndAppVariantId": app_variant_id}),
+            )
+        await validate_binding()
+        if (session.get_user_id(user_context) != canonical_id
+                or session.get_recipe_user_id(user_context).get_as_string() != owner["recipe_user_id"].get_as_string()
+                or session.get_tenant_id(user_context) != tenant_id):
+            raise MigrationError(MigrationErrorReason.SESSION_CREATION_FAILED, "session_create")
+    except Exception as error:
+        if session is not None:
+            with suppress(Exception):
+                await session.revoke_session(user_context)
+        repository.scrub_migration_session_response(response, request)
+        if isinstance(error, (MigrationError, AdministrativePolicyError)):
+            raise
+        raise MigrationError(MigrationErrorReason.SESSION_CREATION_FAILED, "session_create", error) from error
+    migration_state.update(path="consolidated_alias", supertokens_user_id=canonical_id)
+
+
 async def handle_migrate(
     config: RowndPluginConfig,
     client: RowndClientProtocol,
@@ -204,14 +298,20 @@ async def handle_migrate(
         if not isinstance(rownd_user_id, str) or not rownd_user_id.strip():
             raise MigrationError(MigrationErrorReason.TOKEN_CLAIMS_INVALID, stage)
         stage = "rownd_profile_fetch"
-        try:
-            rownd_user = await client.fetch_optional_user_info(rownd_user_id)
-        except RowndAPIError as err:
-            raise _rownd_api_migration_error(err, stage) from err
-        except MigrationError:
-            raise
-        except Exception as err:
-            raise MigrationError(MigrationErrorReason.ROWND_UNAVAILABLE, stage, err) from err
+
+        async def fetch_fresh_profile(profile_id: str) -> Optional[JsonDict]:
+            try:
+                return await client.fetch_optional_user_info(profile_id)
+            except RowndAPIError as err:
+                raise _rownd_api_migration_error(err, "rownd_profile_fetch") from err
+            except MigrationError:
+                raise
+            except Exception as err:
+                raise MigrationError(
+                    MigrationErrorReason.ROWND_UNAVAILABLE, "rownd_profile_fetch", err
+                ) from err
+
+        rownd_user = await fetch_fresh_profile(rownd_user_id)
         if rownd_user is None:
             raise MigrationError(
                 MigrationErrorReason.ROWND_USER_NOT_FOUND, "rownd_profile_fetch"
@@ -226,16 +326,7 @@ async def handle_migrate(
         ))
 
         async def read_fresh_source() -> Optional[repository.FreshMigrationSource]:
-            try:
-                fresh_user = await client.fetch_optional_user_info(cast(str, rownd_user_id))
-            except RowndAPIError as err:
-                raise _rownd_api_migration_error(err, "rownd_profile_fetch") from err
-            except MigrationError:
-                raise
-            except Exception as err:
-                raise MigrationError(
-                    MigrationErrorReason.ROWND_UNAVAILABLE, "rownd_profile_fetch", err
-                ) from err
+            fresh_user = await fetch_fresh_profile(cast(str, rownd_user_id))
             if fresh_user is None:
                 return None
             fresh_snapshot = create_rownd_identity_snapshot(
@@ -251,19 +342,29 @@ async def handle_migrate(
             ))
 
         stage = "state_inspect"
-        await repository.migrate_rownd_user_and_create_session(
-            config,
-            rownd_user_id,
-            source,
-            supertokens_config,
-            request,
-            response,
-            tenant_id,
-            app_variant_id,
-            user_context,
-            migration_state,
-            read_fresh_source,
+        await assert_source_not_superseded(rownd_user_id, user_context)
+        owner = await _resolve_consolidated_owner(
+            rownd_user_id, tenant_id, user_context, fetch_fresh_profile,
         )
+        if owner is not None:
+            await _create_consolidated_alias_session(
+                config, source, owner, request, response, tenant_id, app_variant_id,
+                user_context, migration_state, read_fresh_source, fetch_fresh_profile,
+            )
+        else:
+            await repository.migrate_rownd_user_and_create_session(
+                config,
+                rownd_user_id,
+                source,
+                supertokens_config,
+                request,
+                response,
+                tenant_id,
+                app_variant_id,
+                user_context,
+                migration_state,
+                read_fresh_source,
+            )
         stage = "session_create"
         result = utils.json_response(response, {"status": "OK"})
         terminal_outcome = "success"
@@ -281,7 +382,11 @@ async def handle_migrate(
         migration_error = (
             err
             if isinstance(err, MigrationError)
-            else MigrationError(MigrationErrorReason.INTERNAL_ERROR, stage, err)
+            else MigrationError(
+                MigrationErrorReason.MIGRATION_STATE_INVALID
+                if isinstance(err, AdministrativePolicyError) else MigrationErrorReason.INTERNAL_ERROR,
+                stage, err,
+            )
         )
         terminal_http_status = migration_error.http_status
         terminal_retryable = migration_error.retryable
