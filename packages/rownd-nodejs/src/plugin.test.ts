@@ -908,6 +908,41 @@ describe("rownd-nodejs plugin", () => {
       },
     );
 
+    it.each(["thirdparty", "emailpassword"])(
+      "does not count an unverified %s-only email as an existing authentication account",
+      async (recipeId) => {
+        const email = `unverified-${recipeId}@example.com`;
+        vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([
+          {
+            id: "unverified-user",
+            loginMethods: [
+              {
+                recipeId,
+                recipeUserId: { getAsString: () => "unverified-user" },
+                email,
+                verified: false,
+                tenantIds: ["public"],
+                ...(recipeId === "thirdparty"
+                  ? { thirdParty: { id: "google", userId: "unverified-google" } }
+                  : {}),
+              },
+            ],
+          } as any,
+        ]);
+        vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({
+          status: "UNKNOWN_MAPPING_ERROR",
+        });
+        vi.spyOn(UserMetadata, "getUserMetadata").mockResolvedValue({
+          status: "OK",
+          metadata: {},
+        });
+
+        await expect(
+          doesRowndAccountInfoExist({ tenantId: "public", email }),
+        ).resolves.toBe(false);
+      },
+    );
+
     it("uses the Rownd profile email instead of a stale Apple email without a canonical marker", async () => {
       const appleRecipeUserId = {
         getAsString: () => "stale-apple-recipe-user",
@@ -9834,6 +9869,90 @@ describe("rownd-nodejs plugin", () => {
           expect.objectContaining({ recipeId: "passwordless", email }),
         );
       });
+
+      it.each(["empty", "Rownd snapshot"])(
+        "allows explicit sign-in to an imported unverified passwordless user with %s metadata",
+        async (metadataKind) => {
+          const passwordlessLinks: string[] = [];
+          const { server: s, port } = await setup(
+            importCoreConnectionURI,
+            {
+              appConfig: {
+                auth: { useExplicitSignUpFlow: true },
+                signInMethods: [{ method: "email" }],
+              },
+            },
+            { passwordlessLinks },
+          );
+          server = s;
+          testPORT = port;
+          const email = `unverified-import-${randomUUID()}@example.com`;
+          const imported = await importUser(
+            {
+              userMetadata:
+                metadataKind === "empty"
+                  ? {}
+                  : {
+                      original_rownd_user: {
+                        data: { user_id: randomUUID(), email },
+                        verified_data: {},
+                      },
+                    },
+              loginMethods: [
+                {
+                  recipeId: "passwordless",
+                  email,
+                  isVerified: false,
+                  tenantIds: ["public"],
+                },
+              ],
+            },
+            { connectionURI: importCoreConnectionURI },
+          );
+          const expectUnverifiedMethod = async () => {
+            const user = await SuperTokens.getUser(imported.id);
+            expect(user?.loginMethods).toEqual([
+              expect.objectContaining({
+                recipeId: "passwordless",
+                email,
+                verified: false,
+              }),
+            ]);
+          };
+          await expectUnverifiedMethod();
+
+          const createCode = await requestPasswordlessCode(email, "sign_in");
+          await expect(createCode.json()).resolves.toMatchObject({
+            status: "OK",
+          });
+          expect(passwordlessLinks).toHaveLength(1);
+          await expectUnverifiedMethod();
+
+          const consume = await consumePasswordlessLink(
+            passwordlessLinks[0],
+            "sign_in",
+          );
+          await expect(consume.json()).resolves.toMatchObject({
+            status: "OK",
+            createdNewRecipeUser: false,
+            user: { id: imported.id },
+          });
+          const session = await Session.getSessionWithoutRequestResponse(
+            consume.headers.get("st-access-token")!,
+          );
+          expect(session?.getUserId()).toBe(imported.id);
+          const users = await SuperTokens.listUsersByAccountInfo(
+            "public",
+            { email },
+            false,
+          );
+          expect(users).toHaveLength(1);
+          expect(users[0].loginMethods).toHaveLength(1);
+          expect(users[0].loginMethods[0].recipeUserId.getAsString()).toBe(
+            imported.loginMethods[0].recipeUserId,
+          );
+        },
+      );
 
       it("allows first explicit email sign-in to a verified Google-only primary account", async () => {
         const passwordlessLinks: string[] = [];

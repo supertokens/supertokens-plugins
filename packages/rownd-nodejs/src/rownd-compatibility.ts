@@ -1023,16 +1023,31 @@ export async function doesRowndAccountInfoExist(input: {
   if (!input.email) {
     return users.length > 0;
   }
+  if (isSyntheticEmail(input.email)) return false;
 
+  const email = input.email.trim().toLowerCase();
   const matches = await Promise.all(
-    users.map((user) =>
-      hasAuthenticationEmailForTenant(
+    users.map(async (user) => {
+      const metadata = (
+        await inspectLinkedUserMetadata(user.id, input.userContext, user)
+      ).combinedMetadata;
+      const resolutionInput = {
         user,
-        input.email!,
-        input.tenantId,
-        input.userContext,
-      ),
-    ),
+        metadata,
+        tenantId: input.tenantId,
+        email,
+      };
+      const canonical = resolveEmailForAuthentication(resolutionInput);
+      if (canonical.status === "SELECTED" && canonical.email === email) {
+        return true;
+      }
+      // Imported passwordless methods can receive a sign-in code before verification.
+      const passwordless = resolveEmailForAuthentication({
+        ...resolutionInput,
+        passwordlessOnly: true,
+      });
+      return passwordless.status === "SELECTED" && passwordless.email === email;
+    }),
   );
   return matches.some(Boolean);
 }
