@@ -152,7 +152,7 @@ async def test_unknown_raw_record_is_not_empty_evidence(core_url, monkeypatch, l
 
 
 @pytest.mark.parametrize("debt", ["unknown", "pending", "foreign_source", "provider_history"])
-async def test_post_session_fresh_phase_rejects_new_literal_evidence(core_url, monkeypatch, debt):
+async def test_post_session_migration_only_evidence_is_deferred(core_url, monkeypatch, debt):
     client, rownd = migrated(core_url)
     original = repo.session_asyncio.create_new_session
     sessions = []
@@ -177,10 +177,10 @@ async def test_post_session_fresh_phase_rejects_new_literal_evidence(core_url, m
 
     monkeypatch.setattr(repo.session_asyncio, "create_new_session", create)
     response = client.post("/auth/plugin/rownd/migrate", headers=auth_headers("synthetic"))
-    assert response.status_code == 503, response.text
-    assert not response.headers.get("st-access-token")
+    assert response.status_code == 200, response.text
     assert len(sessions) == 1
-    assert await repo.session_asyncio.get_session_information(sessions[0].get_handle()) is None
+    assert await repo.session_asyncio.get_session_information(sessions[0].get_handle()) is not None
+    assert await migration_plan.read_completed_migration(RowndPluginConfig(), source_for(rownd), {}) is None
 
 
 async def test_write_between_prephase_and_native_entry_expires_evidence(core_url, monkeypatch):

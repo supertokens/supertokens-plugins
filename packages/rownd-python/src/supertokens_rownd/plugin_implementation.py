@@ -354,7 +354,7 @@ async def handle_migrate(
                 rownd_user_id, tenant_id, user_context, fetch_fresh_profile,
             )
         if plan is not None:
-            result = await create_completed_session(config, source, plan, request, response, user_context, read_fresh_source)
+            result = await create_completed_session(config, source, plan, request, response, user_context)
             migration_state.update(path="already_complete", target_source="mapping", supertokens_user_id=result)
         elif owner is not None:
             await _create_consolidated_alias_session(

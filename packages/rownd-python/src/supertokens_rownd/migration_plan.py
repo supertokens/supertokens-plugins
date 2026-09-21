@@ -275,10 +275,9 @@ class _SessionEvidence:
         self.phase = "claims"
         self.task = asyncio.current_task()
         self.native_entered = False
-        self.bind_state(state, context)
+        self.bind_cache(context)
 
-    def bind_state(self, state: _OrdinarySnapshot, context: UserContext) -> None:
-        self.state = state
+    def bind_cache(self, context: UserContext) -> None:
         # Identity witnesses only: the SDK remains the sole response cache. A
         # write or cache clear removes these entries, expiring nested read authority.
         cache = context.get("_default", {}).get("core_call_cache", {})
@@ -290,6 +289,92 @@ class _SessionEvidence:
 
 
 _EVIDENCE_KEY = "_rownd_completed_session_evidence"
+
+
+async def _validate_session_binding(source: FreshMigrationSource, state: _OrdinarySnapshot,
+                                    context: UserContext) -> None:
+    from . import supertokens_repository as repo
+    from .admin_orphan import ORPHAN_KEY
+    from .admin_publication import PUBLICATION_KEY
+    from .provider_migration import _ledger_id
+
+    assert_source_authority(source)
+    repo.clear_supertokens_core_call_cache(context)
+
+    def invalid() -> MigrationError:
+        return MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "session_create")
+
+    # Only the authenticated credential remains authoritative after handoff.
+    # Other methods, contact reservations and completion markers belong to the
+    # next migration attempt, not to publication of this session.
+    ids = {state.source_id, state.target, state.recipe}
+    expected = (state.target, state.source_id)
+    for identifier in sorted(ids):
+        for role in ("EXTERNAL", "SUPERTOKENS"):
+            mapping = repo._mapping_lookup(await repo.get_user_id_mapping(identifier, role, context))
+            pair = (mapping.supertokens_user_id, mapping.external_user_id) if mapping else None
+            required = expected if (identifier, role) in {
+                (state.source_id, "EXTERNAL"), (state.target, "SUPERTOKENS"),
+            } else None
+            if pair != required:
+                raise invalid()
+        raw = await _read_literal_metadata(identifier, context)
+        if raw is None:
+            raise invalid()
+        if "rownd_migration_superseded" in raw:
+            raise MigrationError(MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER, "session_create")
+        orphan = raw.get(ORPHAN_KEY)
+        if (raw.get(PUBLICATION_KEY) is not None or
+                (orphan is not None and (not isinstance(orphan, dict) or orphan.get("phase") != "COMPLETE"))):
+            raise invalid()
+        introduction = raw.get("rownd_migration_provider_introduction")
+        if identifier == state.recipe and introduction is not None and (
+            not isinstance(introduction, dict) or not isinstance(introduction.get("tenant"), str)
+            or introduction.get("tenant") == state.tenant
+        ):
+            raise invalid()
+
+    user = await repo.get_user(state.recipe, context)
+    if user is None or not user.is_primary_user or user.id not in {state.target, state.source_id}:
+        raise invalid()
+    previous = next(method for method in state.user().login_methods
+                    if method.recipe_user_id.get_as_string() == state.recipe)
+    method = next((method for method in user.login_methods
+                   if method.recipe_user_id.get_as_string() == state.recipe), None)
+    identity = next(identity for identity in source.snapshot.expected_identities
+                    if repo._migration_method_matches_identity(previous, identity))
+    if (method is None or state.tenant not in method.tenant_ids or method.time_joined != previous.time_joined
+            or not repo._migration_method_matches_identity(method, identity)
+            or (identity.verified and identity.recipe_id == "passwordless" and not method.verified)):
+        raise invalid()
+    if method.recipe_id == "thirdparty":
+        ledger = await _read_literal_metadata(_ledger_id(state.target, state.tenant), context)
+        if ledger is None:
+            raise invalid()
+        for entry in ledger.values():
+            if not isinstance(entry, dict):
+                raise invalid()
+            applies = state.recipe in (entry.get("recipe"), entry.get("internal_recipe"))
+            pending_introduction = (entry.get("kind") == "introduction" and entry.get("recipe") is None
+                and repo.rownd_compatibility.get_third_party_info(method) == (entry.get("provider"), entry.get("subject")))
+            if pending_introduction or (applies and (
+                entry.get("state") != "complete" or entry.get("tenant") != state.tenant
+                or entry.get("target") != state.target or entry.get("joined") != method.time_joined
+                or entry.get("recipe") != state.recipe or entry.get("internal_recipe") != state.recipe
+                or repo.rownd_compatibility.get_third_party_info(method) != (entry.get("provider"), entry.get("subject"))
+            )):
+                raise invalid()
+    elif identity.identifier_type == "email":
+        ledger = await _read_literal_metadata(_debt_ids(state.target, state.tenant)[0], context)
+        if ledger is None:
+            raise invalid()
+        retirement = ledger.get("plan")
+        if isinstance(retirement, dict) and retirement.get("state") == "removing":
+            methods = retirement.get("methods")
+            if not isinstance(methods, list) or any(
+                not isinstance(record, dict) or record.get("recipe") == state.recipe for record in methods
+            ):
+                raise invalid()
 
 
 def current_session_evidence(config: RowndPluginConfig, user_id: str, context: UserContext,
@@ -304,8 +389,7 @@ def current_session_evidence(config: RowndPluginConfig, user_id: str, context: U
         return None
     if recipe is not None and evidence.phase != "issuance":
         return None
-    if not _validate_ordinary_snapshot(evidence.source, state):
-        raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
+    assert_source_authority(evidence.source)
     return state
 
 
@@ -325,9 +409,9 @@ def finish_coordinated_session(config: RowndPluginConfig, state: _OrdinarySnapsh
     # transfer publication back to the coordinator's mandatory post-hook read.
     if (not isinstance(evidence, _SessionEvidence) or not evidence.active or evidence.config is not config
             or evidence.task is not asyncio.current_task() or evidence.state is not state
-            or evidence.phase != "issuance" or not evidence.native_entered
-            or not _validate_ordinary_snapshot(evidence.source, state)):
+            or evidence.phase != "issuance" or not evidence.native_entered):
         raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "session_create")
+    assert_source_authority(evidence.source)
     evidence.phase = "awaiting_post"
 
 
@@ -338,7 +422,6 @@ async def create_completed_session(
     request: BaseRequest,
     response: BaseResponse,
     context: UserContext,
-    read_fresh_source: Callable[[], Awaitable[Optional[FreshMigrationSource]]],
 ) -> str:
     from . import supertokens_repository as repo
 
@@ -346,18 +429,15 @@ async def create_completed_session(
     context = repo.create_derived_user_context(context, {_EVIDENCE_KEY: evidence})
 
     async def validate() -> None:
-        assert_source_authority(source)
-        fresh = await read_fresh_source()
-        if fresh is None:
-            raise MigrationError(MigrationErrorReason.ROWND_USER_NOT_FOUND, "rownd_profile_fetch")
-        assert_source_authority(fresh)
-        if (not has_authenticated_source(fresh) or fresh.snapshot != source.snapshot
-                or fresh.rownd_user != source.rownd_user):
-            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
-        state = await _read_fresh_ordinary_snapshot(config, fresh, context)
-        if state is None or state.target != plan.target.user_id or state.recipe != plan.recipe_user_id.get_as_string():
-            raise MigrationError(MigrationErrorReason.MIGRATION_INCOMPLETE, "state_inspect")
-        evidence.bind_state(state, context)
+        try:
+            await _validate_session_binding(source, plan.ordinary, context)
+        except MigrationError:
+            raise
+        except Exception as error:
+            reason = (MigrationErrorReason.CORE_UNAVAILABLE if repo._is_recognizable_core_outage(error)
+                      else MigrationErrorReason.MIGRATION_INCOMPLETE)
+            raise MigrationError(reason, "session_create", error) from error
+        evidence.bind_cache(context)
 
     session = None
     try:

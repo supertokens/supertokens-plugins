@@ -42,6 +42,100 @@ async def test_unchanged_migration_skips_repair(core_url, monkeypatch, kind):
     repair.assert_not_awaited()
 
 
+@pytest.mark.parametrize("kind", ["email", "provider"])
+async def test_native_sessions_and_refresh_do_not_require_rownd(core_url, monkeypatch, kind):
+    _, rownd = migrated(core_url, kind)
+    fetch = AsyncMock(side_effect=RuntimeError("Rownd unavailable"))
+    monkeypatch.setattr(rownd, "fetch_optional_user_info", fetch)
+    user = await repo.get_user(rownd.user_id)
+    assert user is not None
+    session = await repo.session_asyncio.create_new_session_without_request_response(
+        "public", user.login_methods[0].recipe_user_id,
+    )
+    token = session.get_all_session_tokens_dangerously()["refreshToken"]
+    assert token is not None
+    refreshed = await repo.session_asyncio.refresh_session_without_request_response(token, disable_anti_csrf=True)
+    assert refreshed.get_user_id() == rownd.user_id
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("kind", ["email", "provider"])
+@pytest.mark.parametrize("path", ["/auth/plugin/rownd/migrate", "/auth/plugin/migrate-session"])
+async def test_handoff_uses_one_profile_fetch_despite_rownd_outage(core_url, monkeypatch, kind, path):
+    client, rownd = migrated(core_url, kind)
+    fetch = rownd.fetch_optional_user_info
+    calls = []
+
+    async def once(user_id):
+        calls.append(user_id)
+        if len(calls) > 1:
+            raise RuntimeError("Rownd unavailable after authentication")
+        return await fetch(user_id)
+
+    monkeypatch.setattr(rownd, "fetch_optional_user_info", once)
+    response = client.post(path, headers=auth_headers("synthetic"))
+    assert response.status_code == 200, response.text
+    assert calls == [rownd.user_id]
+
+
+@pytest.mark.parametrize("when", ["claims", "session"])
+@pytest.mark.parametrize("change", ["removed", "tenant", "retired", "email_retired", "mapping", "publication", "verification"])
+async def test_selected_authentication_changes_prevent_publication(core_url, monkeypatch, when, change):
+    kind = "email" if change in {"verification", "email_retired"} else "provider"
+    client, rownd = migrated(core_url, kind)
+    mapping = await get_user_id_mapping(rownd.user_id, "EXTERNAL")
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    user = await repo.get_user(rownd.user_id)
+    assert user is not None
+    recipe = user.login_methods[0].recipe_user_id
+    target = mapping.supertokens_user_id
+    original = repo.build_rownd_session_claims if when == "claims" else repo.session_asyncio.create_new_session
+    sessions = []
+    changed = False
+    get_mapping = repo.get_user_id_mapping
+
+    async def maps(identifier, role=None, context=None):
+        if changed and change == "mapping" and (identifier, role) == (rownd.user_id, "EXTERNAL"):
+            return GetUserIdMappingOkResult("another-owner", rownd.user_id)
+        return await get_mapping(identifier, role, context)
+
+    async def hook(*args, **kwargs):
+        nonlocal changed
+        result = await original(*args, **kwargs)
+        if when == "session":
+            sessions.append(result)
+        if change == "removed":
+            await repo.delete_user(recipe.get_as_string(), remove_all_linked_accounts=False)
+        elif change == "tenant":
+            await repo.multitenancy_asyncio.disassociate_user_from_tenant("public", recipe)
+        elif change == "retired":
+            await metadata.update_user_metadata(_ledger_id(target, "public"), {"retirement": {
+                "target": target, "tenant": "public", "recipe": recipe.get_as_string(),
+                "internal_recipe": recipe.get_as_string(), "state": "removing",
+            }})
+        elif change == "email_retired":
+            ledger = "rownd-email-retirement-" + hashlib.sha256((target + "\0public").encode()).hexdigest()
+            await metadata.update_user_metadata(ledger, {"plan": {
+                "state": "removing", "methods": [{"recipe": recipe.get_as_string()}],
+            }})
+        elif change == "publication":
+            await metadata.update_user_metadata(target, {"rownd_migration_mapping_publication": {"version": 1}})
+        elif change == "verification":
+            await repo.emailverification_asyncio.unverify_email(recipe, user.login_methods[0].email)
+        changed = True
+        return result
+
+    monkeypatch.setattr(repo, "get_user_id_mapping", maps)
+    monkeypatch.setattr(repo if when == "claims" else repo.session_asyncio,
+                        "build_rownd_session_claims" if when == "claims" else "create_new_session", hook)
+    response = client.post("/auth/plugin/rownd/migrate", headers=auth_headers("synthetic"))
+    assert response.status_code == 503, response.text
+    assert not response.headers.get("st-access-token")
+    assert len(sessions) == (1 if when == "session" else 0)
+    for session in sessions:
+        assert await repo.session_asyncio.get_session_information(session.get_handle()) is None
+
+
 @pytest.mark.parametrize("change", [
     "provider", "email", "profile", "marker", "malformed_marker", "provider_debt",
     "email_debt", "completion", "canonical",
@@ -84,7 +178,7 @@ async def test_changed_or_indebted_migration_does_not_take_noop(core_url, monkey
 
 
 @pytest.mark.parametrize("when", ["before", "after"])
-async def test_noop_source_race_does_not_publish_session(core_url, monkeypatch, when):
+async def test_source_changes_after_handoff_do_not_reauthenticate(core_url, monkeypatch, when):
     client, rownd = migrated(core_url)
     original_create = repo.session_asyncio.create_new_session
     original_claims = repo.build_rownd_session_claims
@@ -110,18 +204,14 @@ async def test_noop_source_race_does_not_publish_session(core_url, monkeypatch, 
     monkeypatch.setattr(repo.session_asyncio, "create_new_session", create)
     monkeypatch.setattr(repo, "build_rownd_session_claims", claims)
     response = client.post("/auth/plugin/rownd/migrate", headers=auth_headers("synthetic"))
-    assert response.status_code == 503, response.text
-    assert response.json()["reason"] == "MIGRATION_INCOMPLETE"
-    assert not response.headers.get("st-access-token")
-    assert not response.headers.get("front-token")
-    assert len(sessions) == (1 if when == "after" else 0)
-    if sessions:
-        assert await repo.session_asyncio.get_session_information(sessions[0].get_handle()) is None
+    assert response.status_code == 200, response.text
+    assert len(sessions) == 1
+    assert await repo.session_asyncio.get_session_information(sessions[0].get_handle()) is not None
 
 
 @pytest.mark.parametrize("debt", ["provider", "metadata", "completion", "tombstone"])
 @pytest.mark.parametrize("when", ["claims", "session"])
-async def test_noop_rechecks_debt_after_hooks(core_url, monkeypatch, debt, when):
+async def test_handoff_defers_migration_debt_but_rejects_tombstones(core_url, monkeypatch, debt, when):
     client, rownd = migrated(core_url)
     mapping = await get_user_id_mapping(rownd.user_id, "EXTERNAL")
     assert isinstance(mapping, GetUserIdMappingOkResult)
@@ -150,8 +240,15 @@ async def test_noop_rechecks_debt_after_hooks(core_url, monkeypatch, debt, when)
     monkeypatch.setattr(repo if when == "claims" else repo.session_asyncio,
                         "build_rownd_session_claims" if when == "claims" else "create_new_session", claims)
     response = client.post("/auth/plugin/rownd/migrate", headers=auth_headers("synthetic"))
-    assert response.status_code == (422 if debt == "tombstone" else 503), response.text
-    assert response.json()["reason"] == ("IDENTITY_OWNED_BY_ANOTHER_USER" if debt == "tombstone" else "MIGRATION_INCOMPLETE")
+    if debt != "tombstone":
+        assert response.status_code == 200, response.text
+        noop = AsyncMock(side_effect=AssertionError("debt must be reconsidered next request"))
+        monkeypatch.setattr(migration_plan, "create_completed_session", noop)
+        client.post("/auth/plugin/rownd/migrate", headers=auth_headers("synthetic"))
+        noop.assert_not_awaited()
+        return
+    assert response.status_code == 422, response.text
+    assert response.json()["reason"] == "IDENTITY_OWNED_BY_ANOTHER_USER"
     assert not response.headers.get("st-access-token")
     assert len(sessions) == (1 if when == "session" else 0)
     if sessions:
@@ -159,7 +256,7 @@ async def test_noop_rechecks_debt_after_hooks(core_url, monkeypatch, debt, when)
 
 
 @pytest.mark.parametrize("change", ["nonselected", "contact"])
-async def test_noop_rechecks_other_identities_after_session_hook(core_url, monkeypatch, change):
+async def test_handoff_does_not_reinspect_nonselected_identities(core_url, monkeypatch, change):
     from supertokens_python.recipe.thirdparty import asyncio as thirdparty
 
     client, rownd = migrated(core_url, "mixed")
@@ -184,10 +281,9 @@ async def test_noop_rechecks_other_identities_after_session_hook(core_url, monke
 
     monkeypatch.setattr(repo.session_asyncio, "create_new_session", create)
     response = client.post("/auth/plugin/rownd/migrate", headers=auth_headers("synthetic"))
-    assert response.status_code == (422 if change == "contact" else 503), response.text
-    assert not response.headers.get("st-access-token")
+    assert response.status_code == 200, response.text
     assert len(sessions) == 1
-    assert await repo.session_asyncio.get_session_information(sessions[0].get_handle()) is None
+    assert await repo.session_asyncio.get_session_information(sessions[0].get_handle()) is not None
 
 
 async def test_noop_rechecks_tenant_after_session_hook(core_url, monkeypatch):
@@ -263,11 +359,14 @@ async def test_noop_postissuance_cancellation(core_url, monkeypatch, cleanup):
         monkeypatch.setattr(session, "revoke_session", revoke)
         return session
 
-    async def fresh():
+    validate_binding = migration_plan._validate_session_binding
+
+    async def validate(*args):
         if sessions:
             raise cancellation
-        return source
+        return await validate_binding(*args)
 
+    monkeypatch.setattr(migration_plan, "_validate_session_binding", validate)
     monkeypatch.setattr(repo.session_asyncio, "create_new_session", create)
     if cleanup == "timeout":
         monkeypatch.setattr(migration_plan, "_CANCELLATION_CLEANUP_TIMEOUT", 0.02)
@@ -276,7 +375,7 @@ async def test_noop_postissuance_cancellation(core_url, monkeypatch, cleanup):
     async def invoke():
         try:
             return await migration_plan.create_completed_session(
-                config, source, plan, request, response, context, fresh,
+                config, source, plan, request, response, context,
             )
         except asyncio.CancelledError as error:
             propagated.append(error)

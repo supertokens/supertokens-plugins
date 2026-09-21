@@ -58,6 +58,7 @@ def read_phases(core_url, monkeypatch):
     requests = []
     phases = []
     read = migration_plan.read_ordinary_snapshot
+    binding = migration_plan._validate_session_binding
     send = httpx.AsyncClient.send
 
     async def observe_read(*args, **kwargs):
@@ -74,12 +75,22 @@ def read_phases(core_url, monkeypatch):
             requests.append((phase.get(), request.method, request.url.path, tuple(request.url.params.multi_items())))
         return await send(self, request, *args, **kwargs)
 
+    async def observe_binding(*args, **kwargs):
+        label = "binding-" + str(len(phases))
+        phases.append(label)
+        token = phase.set(label)
+        try:
+            return await binding(*args, **kwargs)
+        finally:
+            phase.reset(token)
+
     monkeypatch.setattr(migration_plan, "read_ordinary_snapshot", observe_read)
+    monkeypatch.setattr(migration_plan, "_validate_session_binding", observe_binding)
     monkeypatch.setattr(httpx.AsyncClient, "send", observe_send)
     return phases, requests
 
 
-@pytest.mark.parametrize("kind,first_budget,stable_budget", [("email", 138, 32), ("provider", 148, 29)])
+@pytest.mark.parametrize("kind,first_budget,stable_budget", [("email", 138, 28), ("provider", 148, 27)])
 def test_migration_request_budget(core_url, core_requests, read_phases, monkeypatch, kind, first_budget, stable_budget):
     rownd = MockRowndClient()
     rownd.user_id = "request-count-" + uuid4().hex
@@ -99,8 +110,8 @@ def test_migration_request_budget(core_url, core_requests, read_phases, monkeypa
     client = make_client(core_url, rownd, enable_email_verification=True)
     for label, path, budget, source_count in [
         ("first", "/auth/plugin/rownd/migrate", first_budget, 9),
-        ("stable", "/auth/plugin/rownd/migrate", stable_budget, 3),
-        ("stable-session", "/auth/plugin/migrate-session", stable_budget, 3),
+        ("stable", "/auth/plugin/rownd/migrate", stable_budget, 1),
+        ("stable-session", "/auth/plugin/migrate-session", stable_budget, 1),
     ]:
         core_requests.clear()
         fetches.clear()
@@ -119,7 +130,8 @@ def test_migration_request_budget(core_url, core_requests, read_phases, monkeypa
         if label != "first":
             assert snapshots.await_count == 0
             assert len(phases) == 3
-            plugin_gets = Counter(entry for entry in phase_requests if entry[0].startswith("plugin-") and entry[1] == "GET")
+            assert sum(label.startswith("plugin-") for label in phases) == 1
+            plugin_gets = Counter(entry for entry in phase_requests if entry[0] != "sdk_or_fallback" and entry[1] == "GET")
             assert max(plugin_gets.values()) == 1
             print(json.dumps({"label": kind + "-" + label, "read_phases": dict(Counter(entry[0] for entry in phase_requests))}))
         assert response.status_code == 200, response.text

@@ -46,34 +46,35 @@ consolidated-owner probing**. Both route aliases require zero calls to
 `read_fresh_migration_snapshot`, lifecycle repair, or migration repair on unchanged
 fixtures.
 
-Measured against baseline `1e8a279`, with SDK 0.31.3, Python 3.9, and Core 12.0.10:
+Measured handoff change against baseline `3fab681`, with SDK 0.31.3, Python 3.9,
+and Core 12.0.10:
 
 | Operation | Core before → after | Mapping before → after | Rownd profile reads before → after | SDK EV reads before → after |
 | --- | ---: | ---: | ---: | ---: |
-| Stable email, either route | 67 → 32 | 22 → 12 | 4 → 3 | 1 → 1 |
-| Stable provider, either route | 70 → 29 | 25 → 12 | 4 → 3 | 1 → 1 |
+| Stable email, either route | 32 → 28 | 12 → 12 | 3 → 1 | 1 → 1 |
+| Stable provider, either route | 29 → 27 | 12 → 12 | 3 → 1 | 1 → 1 |
 | First email | 138 → 138 | 50 → 50 | 9 → 9 | 1 → 1 |
 | First provider | 148 → 148 | 58 → 58 | 9 → 9 | 1 → 1 |
 | Provider replacement | 237 → 237 | 98 → 98 | 12 → 12 | 1 → 1 |
 | Retained historical alias, four recipes | 391 → 391 | 97 → 97 | 9 → 9 | 162 → 162 |
 
-Stable email metadata reads fall from 30 to 12, user reads from 10 to 3.
-Stable provider metadata reads fall from 32 to 12, user reads from 11 to 3.
-Email reservation queries remain three per request. Both revisions were rerun
-against disposable Core instances with the same benchmark fixtures.
+Stable metadata reads fall from 12 to 10 for both credential types; user reads
+remain three. Email reservation queries fall from three to one per request.
+Counts are actual HTTP requests below the SDK cache, measured against disposable Core.
 
 First migrations, replacement, and historical aliases retain their budgets.
 The entry probe checks source metadata and user existence before requesting map
 roles, then shares these reads with fallback discovery. Historical validation
 remains on the full administrative path.
 
-Each successful ordinary phase costs ten plugin GETs for email, nine for provider:
+Initial migration inspection costs ten plugin GETs for email, nine for provider:
 four mapping roles, four literal metadata/ledger records, one user read, and an
-email reservation query where applicable. Initial, pre-issuance, and post-hook
-phases each read every identical GET key at most once. The SDK reuses the
+email reservation query where applicable. Each subsequent credential-binding
+phase costs eight GETs: four mapping roles, two literal account records, the
+selected credential's retirement ledger, and one user read. The SDK reuses the
 pre-issuance user read; its additional calls are one literal email-verification
-GET and one session POST. Thus email totals `10 + 10 + 2 + 10 = 32`, provider
-`9 + 9 + 2 + 9 = 29`.
+GET and one session POST. Email totals `10 + 8 + 2 + 8 = 28`, provider
+`9 + 8 + 2 + 8 = 27`. Every identical GET key is read at most once per phase.
 
 ### Call graph and fresh boundaries
 
@@ -81,19 +82,21 @@ GET and one session POST. Thus email totals `10 + 10 + 2 + 10 = 32`, provider
    source authority. `read_completed_migration` opens a fresh SDK GET phase and
    reads a bounded `_OrdinarySnapshot` in `migration_plan.py`.
 2. `build_rownd_session_claims` uses defensively reconstructed snapshot inputs.
-   It remains an awaited hook boundary. After it returns, the coordinator fetches
-   the source again, clears SDK GETs, and reads/validates the entire ordinary
-   snapshot again before issuance.
+   It remains an awaited hook boundary. After it returns, the coordinator clears
+   SDK GETs and checks only current authentication validity: exact mapping roles,
+   primary owner, selected method identity/incarnation, tenant membership,
+   required verification, tombstones, publication/orphan markers, and selected
+   credential introduction/retirement. It does not fetch Rownd again.
 3. Native creation claims a single-use private evidence object, bound to config,
    authenticated source, target, recipe, tenant, task, and issuance phase. Its
-   pure validator and claims preparation reuse the same snapshot. Identity
+   claims preparation reuses the established snapshot. Identity
    witnesses into the SDK GET cache expire this authority after cache invalidation
    or writes; there is no independent HTTP-response cache. Without current private
    evidence, native creation uses its existing fresh standalone guards.
 4. Native return transfers publication back to the coordinator. After the SDK
-   session call **and outer session hooks** return, the coordinator fetches the
-   source again and starts a separate fresh SDK phase. It validates all ordinary
-   evidence, then checks the returned session's owner, recipe, and tenant.
+   session call **and outer session hooks** return, the coordinator starts a
+   separate fresh SDK phase checking the same selected credential binding, then
+   checks the returned session's owner, recipe, and tenant.
    Failure revokes the session and scrubs response credentials. Evidence expires
    in `finally`; retaining or copying a context cannot authorize another request.
 
@@ -101,9 +104,19 @@ The snapshot stores immutable strings/tuples, including explicit mapping roles,
 literal metadata records, contact-query results, and the selected method. Its
 validators perform no HTTP. Raw metadata names and SDK email-verification names
 remain literal; alias mapping never merges their cache keys. Cross-recipe email
-and phone reservation queries remain mandatory. Provider identity matching stays
-exact, and both hashed ledgers are read even when a provider is absent from the
-current profile.
+and phone reservation queries and both hashed ledgers are required during initial
+migration inspection. After handoff, only the selected credential's ledger is
+read, and unrelated entries do not invalidate its authentication. Provider
+identity matching stays exact.
+
+Migration completion is deliberately distinct from session validity. New
+completion debt, nonselected method/contact changes, or Rownd profile changes
+during hooks are handled on the next migration attempt. They do not invalidate
+the account and credential already authenticated for this request. Claims use
+the established, privately authenticated inputs, not hook-supplied provenance.
+Native create/refresh remain Core-only and work during Rownd outages. First
+migration, repair, and administrative alias paths retain their conservative
+source refreshes and authority checks.
 
 Eligibility requires a bidirectionally mapped, primary, complete target; an exact
 authenticated source profile; all expected methods, tenant memberships,
