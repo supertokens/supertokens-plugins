@@ -20,6 +20,7 @@ import {
 } from "./rownd-compatibility";
 import { clearSuperTokensCoreCallCache, type JsonRecord } from "./utils";
 import type { SuperTokensUserImport } from "./types";
+import { invalidateReconciliationReads } from "./reconciliation-reads";
 
 type MetadataBackfillInput = {
   source: SuperTokensUserImport;
@@ -131,4 +132,46 @@ export async function backfillAdministrativeMetadata(
   );
   await assertAdministrativeMetadataBackfilled(input);
   return true;
+}
+
+export async function inspectPublicMetadataPublication(input: MetadataBackfillInput): Promise<JsonRecord> {
+  const { source, tenantId, internalUserId, userContext } = input;
+  if (!isAdministrativeMigration(source, tenantId) || source.externalUserId === internalUserId) return {};
+  const profile = await assertAuthenticatedMigrationSource(source, tenantId);
+  if (!profile) throw new RowndMigrationPolicyError("Metadata backfill requires a privately authenticated source");
+  const inspection = await inspectLinkedUserMetadata(internalUserId, userContext);
+  if (!inspection.user || inspection.primaryUserId !== internalUserId) {
+    throw new RowndMigrationPolicyError("Metadata backfill target is not the immutable owner");
+  }
+  // Core reads metadata by literal ID even though user APIs return external IDs.
+  // Publish application fields there; migration checkpoints retain one owner.
+  const available = {
+    ...buildRowndUserMetadata(profile),
+    ...inspection.combinedMetadata,
+    ...inspection.primaryMetadata,
+  };
+  const published = await getRawUserMetadata(source.externalUserId!, userContext);
+  return Object.fromEntries(Object.entries(available).filter(([field, value]) =>
+    !isInternalMetadataField(field) && value !== undefined && value !== null &&
+    !Object.prototype.hasOwnProperty.call(published, field)));
+}
+
+export async function assertPublicMetadataPublished(input: MetadataBackfillInput): Promise<void> {
+  if (Object.keys(await inspectPublicMetadataPublication(input)).length) {
+    throw new RowndMigrationPolicyError("Public user metadata publication is incomplete");
+  }
+}
+
+export async function publishPublicMetadata(input: MetadataBackfillInput): Promise<void> {
+  invalidateReconciliationReads("metadata", input.internalUserId);
+  invalidateReconciliationReads("metadata", input.source.externalUserId!);
+  if (!Object.keys(await inspectPublicMetadataPublication(input)).length) return;
+  await assertMigrationMapping(input.internalUserId, input.source.externalUserId!, input.userContext);
+  invalidateReconciliationReads("metadata", input.source.externalUserId!);
+  const patch = await inspectPublicMetadataPublication(input);
+  if (!Object.keys(patch).length) return;
+  await assertMigrationMapping(input.internalUserId, input.source.externalUserId!, input.userContext);
+  await UserMetadata.updateUserMetadata(input.source.externalUserId!, patch, input.userContext);
+  await assertMigrationMapping(input.internalUserId, input.source.externalUserId!, input.userContext);
+  await assertPublicMetadataPublished(input);
 }

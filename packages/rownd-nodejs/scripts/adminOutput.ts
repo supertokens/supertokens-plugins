@@ -2,6 +2,8 @@ import type { ReconcileUserResult } from "../src/reconcile-user";
 import type { Profile } from "./profiles";
 
 const safeDiagnostics = new Set([
+  "Placeholder provenance override evidence changed",
+  "Placeholder provenance override requires a live administrative source",
   "Duplicate owner consolidation blocked: a donor is not an eligible standalone owner",
   "Duplicate owner consolidation blocked: an owner has conflicting migration markers",
   "Duplicate owner consolidation blocked: an alias mapping changed",
@@ -48,6 +50,7 @@ const safeDiagnostics = new Set([
   "Invalid Rownd administrative lookup scope",
   "Invalid Rownd email lookup value",
   "Administrative metadata backfill is incomplete",
+  "Public user metadata publication is incomplete",
   "Rownd source is not the requested enabled user",
   "Rownd source identity changed before migration completion",
   "Rownd verified email proof changed before reconciliation completion",

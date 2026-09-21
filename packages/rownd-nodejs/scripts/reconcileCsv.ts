@@ -72,7 +72,7 @@ export async function readRowndCsv(file: string, idColumn?: string) {
 }
 
 export async function reconcileCsv(
-  input: { userIds: string[]; duplicates: number; profile: Profile; dryRun: boolean; concurrency?: number;
+  input: { userIds: string[]; duplicates: number; profile: Profile; dryRun: boolean; concurrency?: number; overridePlaceholderProvenance?: boolean;
     recordFailure?: (id: string, failure: ReconcileFailure) => Promise<void>; onProgress?: (progress: ReconcileProgress) => void },
   output: (value: string) => void,
   reconcile: (input: ReconcileUserInput) => Promise<ReconcileUserResult> = reconcileUser,
@@ -97,7 +97,8 @@ export async function reconcileCsv(
     let result: ReconcileUserResult;
     active++;
     try {
-      result = await reconcile({ rownd_user_id: id, tenantId: input.profile.supertokens.tenantId, dryRun: input.dryRun });
+      result = await reconcile({ rownd_user_id: id, tenantId: input.profile.supertokens.tenantId, dryRun: input.dryRun,
+        ...(input.overridePlaceholderProvenance !== undefined ? { overridePlaceholderProvenance: input.overridePlaceholderProvenance } : {}) });
     } catch {
       result = { status: "ERROR", changed: input.dryRun ? false : null, actions: [],
         ...(input.dryRun ? { dryRun: true, canReconcile: false, matchesSource: false, proposedActions: [],

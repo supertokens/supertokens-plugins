@@ -220,6 +220,98 @@ describe("Apple relay migration and explicit administrative reconciliation", { t
     }
   }
 
+  async function seedPlaceholderOwner(shape = "email") {
+    const rowndId = `rownd-${randomUUID()}`;
+    const profile: RowndUser = { data: { user_id: rowndId, email: `${randomUUID()}@example.com`,
+      ...(shape.includes("google") ? { google_id: randomUUID() } : {}),
+      ...(shape === "apple" ? { apple_id: randomUUID() } : {}),
+    }, verified_data: { email: true } };
+    const mapped = mapRowndUserToSuperTokens(profile, "public");
+    const imported = await importUser({ ...mapped, externalUserId: undefined, userMetadata: {},
+      loginMethods: ["google", "apple"].includes(shape) ? mapped.loginMethods.filter((method) => method.recipeId === "thirdparty") : mapped.loginMethods,
+    }, { connectionURI: `http://${core.getHost()}:${core.getMappedPort(3567)}` });
+    const placeholder: RowndUser = { data: { user_id: imported.id }, verified_data: {} };
+    await UserMetadata.updateUserMetadata(imported.id, { original_rownd_user: placeholder, preference: "preserved" });
+    rownd.fetchUserInfo.mockImplementation(async ({ user_id }) => user_id === rowndId ? profile : undefined);
+    return { rowndId, internalId: imported.id, profile, placeholder };
+  }
+
+  it.each(["google", "apple", "email", "google+email"])("admin explicitly overrides placeholder provenance for %s and preserves an audit snapshot", async (shape) => {
+    const fixture = await seedPlaceholderOwner(shape);
+    expect(await readOnlyPreview({ rownd_user_id: fixture.rowndId })).toMatchObject({ status: "BLOCKED",
+      message: "Missing mapping cannot be restored without matching live identity and migration provenance" });
+    const input = { rownd_user_id: fixture.rowndId, overridePlaceholderProvenance: true };
+    const preview = await readOnlyPreview(input);
+    expect(preview, JSON.stringify(preview)).toMatchObject({ status: "PREVIEW", canReconcile: true,
+      proposedActions: expect.arrayContaining([{ action: "override_placeholder_provenance", supertokens_user_id: fixture.internalId, rownd_user_id: fixture.rowndId }]) });
+    expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata.original_rownd_user).toEqual(fixture.placeholder);
+    const result = await reconcileUser(input);
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "OK", supertokens_user_id: fixture.internalId });
+    const metadata = (await UserMetadata.getUserMetadata(fixture.internalId)).metadata;
+    expect(metadata).toMatchObject({ original_rownd_user: fixture.profile, preference: "preserved",
+      rownd_migration_placeholder_provenance_override: { sourceId: fixture.rowndId, target: fixture.internalId,
+        tenantId: "public", original_rownd_user: fixture.placeholder, recordedAt: expect.any(String) } });
+    const publicUser = (await SuperTokens.getUser(fixture.internalId))!;
+    expect((await UserMetadata.getUserMetadata(publicUser.id)).metadata).toEqual({ preference: "preserved" });
+    const retry = await reconcileUser(input);
+    expect(retry, JSON.stringify(retry)).toMatchObject({ status: "OK", changed: false });
+    expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata).toEqual(metadata);
+  });
+
+  it.each(["wrong UUID", "real identity", "guest", "live historical user", "superseded", "target conflict", "alias conflict", "no live match", "wrong tenant", "audit conflict"])("placeholder override retains the %s safeguard", async (failure) => {
+    const fixture = await seedPlaceholderOwner();
+    if (failure === "wrong UUID") await UserMetadata.updateUserMetadata(fixture.internalId, { original_rownd_user: { data: { user_id: randomUUID() } } });
+    if (failure === "real identity") await UserMetadata.updateUserMetadata(fixture.internalId, { original_rownd_user: { data: { user_id: fixture.internalId, email: `${randomUUID()}@example.com` } } });
+    if (failure === "guest") await UserMetadata.updateUserMetadata(fixture.internalId, { original_rownd_user: { ...fixture.placeholder, auth_level: "guest" } });
+    if (failure === "live historical user") rownd.fetchUserInfo.mockImplementation(async ({ user_id }) => user_id === fixture.rowndId ? fixture.profile :
+      user_id === fixture.internalId ? fixture.placeholder : undefined);
+    if (failure === "superseded") await UserMetadata.updateUserMetadata(fixture.internalId, { rownd_migration_superseded: { rowndUserId: "other", targetUserId: "other" } });
+    if (failure === "target conflict") await UserMetadata.updateUserMetadata(fixture.internalId, { rownd_migration_target: randomUUID() });
+    if (failure === "alias conflict") await UserMetadata.updateUserMetadata(fixture.rowndId, { original_rownd_user: fixture.profile });
+    if (failure === "no live match") {
+      fixture.profile.data.email = `${randomUUID()}@example.com`;
+      await UserMetadata.updateUserMetadata(fixture.rowndId, { rownd_migration_target: fixture.internalId });
+    }
+    if (failure === "wrong tenant") {
+      const tenant = `other-${randomUUID()}`;
+      await Multitenancy.createOrUpdateTenant(tenant, { firstFactors: ["link-email"] });
+      await Multitenancy.associateUserToTenant(tenant, SuperTokens.convertToRecipeUserId(fixture.internalId));
+      await Multitenancy.disassociateUserFromTenant("public", SuperTokens.convertToRecipeUserId(fixture.internalId));
+      await UserMetadata.updateUserMetadata(fixture.rowndId, { rownd_migration_target: fixture.internalId });
+    }
+    if (failure === "audit conflict") await UserMetadata.updateUserMetadata(fixture.internalId, {
+      rownd_migration_placeholder_provenance_override: { sourceId: "other" },
+    });
+    const writes = await spyOnReconciliationWrites();
+    const input = { rownd_user_id: fixture.rowndId, overridePlaceholderProvenance: true };
+    expect(await readOnlyPreview(input)).toMatchObject({ canReconcile: false });
+    const result = await reconcileUser(input);
+    expect(["BLOCKED", "AMBIGUOUS"], JSON.stringify(result)).toContain(result.status);
+    expect(result.changed).toBe(false);
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each(["before", "after"])("placeholder override resumes %s interrupted mapping publication without losing its audit", async (stage) => {
+    const fixture = await seedPlaceholderOwner();
+    const create = SuperTokens.createUserIdMapping.bind(SuperTokens);
+    vi.spyOn(SuperTokens, "createUserIdMapping").mockImplementationOnce(async (input) => {
+      if (stage === "after") await create(input);
+      throw new Error("publication interrupted");
+    });
+    const input = { rownd_user_id: fixture.rowndId, overridePlaceholderProvenance: true };
+    expect(await reconcileUser(input)).toMatchObject({ status: "ERROR", message: "publication interrupted" });
+    const audit = (await UserMetadata.getUserMetadata(fixture.internalId)).metadata.rownd_migration_placeholder_provenance_override;
+    expect(audit).toMatchObject({ original_rownd_user: fixture.placeholder });
+    const preview = await readOnlyPreview(input);
+    expect(preview, JSON.stringify(preview)).toMatchObject({ status: "PREVIEW", canReconcile: true,
+      proposedActions: expect.arrayContaining([expect.objectContaining({ action: "override_placeholder_provenance" })]) });
+    const retry = await reconcileUser(input);
+    expect(retry, JSON.stringify(retry)).toMatchObject({ status: "OK" });
+    expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata).toMatchObject({
+      original_rownd_user: fixture.profile, rownd_migration_placeholder_provenance_override: audit,
+    });
+  });
+
   async function seedInvalidPublicCanonical() {
     const fixture = await seed(true);
     const contact = fixture.separate!;

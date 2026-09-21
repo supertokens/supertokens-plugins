@@ -26,10 +26,12 @@ export async function runAdmin(args: string[], output: (value: unknown) => void 
         "tenant-id": { type: "string" }, "dry-run": { type: "boolean" }, help: { type: "boolean" },
         file: { type: "string" }, "id-column": { type: "string" },
         concurrency: { type: "string" }, "failed-file": { type: "string" },
+        "override-placeholder-provenance": { type: "boolean" },
       } });
     } catch { throw new CliValidationError("Invalid command arguments; run with --help"); }
   })();
   if (values.help) {
+    output("Reconciliation option: --override-placeholder-provenance accepts an internal-UUID instant placeholder only when a live login identity matches; dry run previews the override.");
     output("profiles add --profile NAME (interactive; credential entry is masked)\nprofiles list\nprofiles show|remove --profile NAME\nNoninteractive add: --app-id ID --app-key KEY --app-secret SECRET --connection-uri URI [--api-key KEY] [--tenant-id public]\nreconcile-user --profile NAME (--rownd-user-id ID | --email EMAIL | --supertokens-user-id ID) [--dry-run]\nDry run returns a read-only PREVIEW; exit 0 only when canReconcile is true. Execution must revalidate the snapshot.");
     output("reconcile-csv --profile NAME --file users.csv [--id-column rownd_user_id] [--concurrency 1] [--failed-file failed.csv] [--dry-run]\nCSV requires a header. IDs are deduplicated; JSON lines contain results in completion order and a summary. Progress and average users/s are logged to stderr every second. The optional failure CSV must be a new file. Any unsuccessful result exits nonzero.");
     return 0;
@@ -39,6 +41,7 @@ export async function runAdmin(args: string[], output: (value: unknown) => void 
     throw new CliValidationError("--concurrency and --failed-file are only supported by reconcile-csv");
   }
   if (command === "profile" || command === "profiles") {
+    if (values["override-placeholder-provenance"] !== undefined) throw new CliValidationError("--override-placeholder-provenance is only supported by reconciliation commands");
     if (values["dry-run"]) throw new CliValidationError("--dry-run is only supported by reconciliation commands");
     if (values.file !== undefined || values["id-column"] !== undefined) throw new CliValidationError("--file and --id-column are only supported by reconcile-csv");
     if (values.profile && positionalName && values.profile !== positionalName) throw new CliValidationError("Conflicting profile names");
@@ -102,9 +105,11 @@ export async function runAdmin(args: string[], output: (value: unknown) => void 
       experimental: { plugins: [init({ rowndAppKey: profile.rownd.appKey, rowndAppSecret: profile.rownd.appSecret, rowndAppId: profile.rownd.appId })] },
     });
     if (csv) return await reconcileCsv({ ...csv, profile, dryRun: values["dry-run"] ?? false, concurrency,
+      overridePlaceholderProvenance: values["override-placeholder-provenance"],
       recordFailure: failures ? (id, failure) => failures.append(id, failure) : undefined,
       onProgress: (progress) => console.error(formatReconcileProgress(progress)) }, output);
     const result = await reconcileUser({ ...input, tenantId: profile.supertokens.tenantId, dryRun: values["dry-run"] ?? false,
+      overridePlaceholderProvenance: values["override-placeholder-provenance"],
       onProgress: ({ stage, action }) => console.error(`[reconcile] ${stage}${action ? ` ${action}` : ""}`) } as ReconcileUserInput);
     output(formatReconcileResult(result, profile));
     return result.status === "OK" || (result.status === "PREVIEW" && result.canReconcile === true) ? 0 : 1;

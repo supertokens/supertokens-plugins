@@ -70,6 +70,15 @@ it.each([true, false])("propagates dry run and uses canReconcile for preview exi
   expect(JSON.parse(lines[0]!).result).toMatchObject({ dryRun: true, changed: false, actions: [], canReconcile });
 });
 
+it.each([true, false])("propagates the explicit placeholder override through CSV reconciliation (%s)", async (dryRun) => {
+  const calls: ReconcileUserInput[] = [];
+  await reconcileCsv({ userIds: ["user_a", "user_b"], duplicates: 0, profile, dryRun, overridePlaceholderProvenance: true }, () => {}, async (input) => {
+    calls.push(input);
+    return { status: "BLOCKED", changed: false, actions: [] };
+  });
+  expect(calls).toEqual(["user_a", "user_b"].map((rownd_user_id) => ({ rownd_user_id, tenantId: "public", dryRun, overridePlaceholderProvenance: true })));
+});
+
 it("preserves the dry-run contract after an unexpected rejected call", async () => {
   const lines: string[] = [];
   expect(await reconcileCsv({ userIds: ["user_a"], duplicates: 0, profile, dryRun: true }, (line) => lines.push(line), async () => {

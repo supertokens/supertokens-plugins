@@ -1,5 +1,5 @@
 import { reconciliationSuperTokens as SuperTokens, reconciliationEmailVerification as EmailVerification } from "./reconciliation-sdk";
-import { inspectAdministrativeMetadataBackfill } from "./migration-admin-metadata";
+import { inspectAdministrativeMetadataBackfill, inspectPublicMetadataPublication } from "./migration-admin-metadata";
 import { inspectAdministrativeProviderIntroductions } from "./migration-admin-provider";
 import { assertAuthenticatedMigrationSource, getAuthenticatedMigrationEmail, isCurrentRowndEmailReconciliationPlan, prepareCurrentRowndEmailReconciliation } from "./migration-email";
 import { assertMigrationOwnerGraph } from "./migration-postconditions";
@@ -18,7 +18,7 @@ type Method = SuperTokensUserImport["loginMethods"][number];
 
 export type ReconcilePreviewAction = {
   action: "import_user" | "restore_mapping" | "create_mapping" | "remove_mapping" | "create_primary" | "create_method" |
-    "link_method" | "unlink_method" | "verify_email" | "set_canonical_email" | "update_migration_metadata" | "review_provider_retirement" | "review_email_retirement";
+    "link_method" | "unlink_method" | "verify_email" | "set_canonical_email" | "update_migration_metadata" | "review_provider_retirement" | "review_email_retirement" | "override_placeholder_provenance" | "publish_public_metadata";
   method?: Method;
   recipeUserId?: string;
   supertokens_user_id?: string;
@@ -172,6 +172,9 @@ export async function previewReconciliation(input: {
     if (metadata.rownd_migration_complete !== true || Object.keys(await inspectAdministrativeMetadataBackfill({
       source, tenantId, internalUserId: id, userContext,
     })).length > 0) result.proposedActions.push({ action: "update_migration_metadata", supertokens_user_id: id });
+    if (Object.keys(await inspectPublicMetadataPublication({ source, tenantId, internalUserId: id, userContext })).length) {
+      result.proposedActions.push({ action: "publish_public_metadata", supertokens_user_id: id, rownd_user_id: source.externalUserId });
+    }
     await inspectAdministrativeProviderIntroductions(source, tenantId, id, userContext);
     if (await inspectProviderMigrationCheckpoints(id, source.externalUserId!, tenantId, userContext)) {
       result.requiresExecutionProof.push({ code: "MIGRATION_CHECKPOINT_REVIEW_REQUIRED" });

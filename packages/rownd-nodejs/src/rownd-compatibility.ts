@@ -83,6 +83,7 @@ const IDENTITY_USER_DATA_FIELDS = new Set([
 ]);
 
 const INTERNAL_METADATA_FIELDS = new Set([
+  "rownd_migration_placeholder_provenance_override",
   "original_rownd_user",
   "rownd_email_recipe_user_id",
   "rownd_email_recipe_user_ids",
@@ -103,6 +104,7 @@ const INTERNAL_METADATA_FIELDS = new Set([
 ]);
 
 const LINKED_OPERATIONAL_METADATA_FIELDS = new Set([
+  "rownd_migration_placeholder_provenance_override",
   "rownd_migration_owner_consolidation",
   "rownd_migration_owner_recovery",
   "rownd_migration_admin_donor_sessions",

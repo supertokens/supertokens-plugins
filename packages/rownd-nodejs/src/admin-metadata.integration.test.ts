@@ -22,7 +22,7 @@ import { GenericContainer, Network, Wait, type StartedNetwork, type StartedTestC
 import { init } from "./plugin";
 import { reconcileUser } from "./reconcile-user";
 import { fetchAdministrativeMigrationSource } from "./migration-email";
-import { backfillAdministrativeMetadata, inspectAdministrativeMetadataBackfill } from "./migration-admin-metadata";
+import { backfillAdministrativeMetadata, inspectAdministrativeMetadataBackfill, publishPublicMetadata } from "./migration-admin-metadata";
 import { buildRowndUserMetadata, getRawUserMetadata, mapRowndUserToSuperTokens } from "./rownd-compatibility";
 import { importUser, reconcileRowndUserWithExistingLoginMethods } from "./supertokens-repository";
 import type { RowndUser, SuperTokensUserImport } from "./types";
@@ -119,17 +119,80 @@ describe("administrative custom metadata backfill", { timeout: 60000, sequential
     const auth = authWrites();
     const writes = vi.spyOn(UserMetadata, "updateUserMetadata");
     expect(await reconcileUser({ rownd_user_id: fixture.alias, dryRun: true })).toMatchObject({ status: "PREVIEW", matchesSource: false, canReconcile: true,
-      proposedActions: [{ action: "update_migration_metadata", supertokens_user_id: fixture.internalId }] });
+      proposedActions: [{ action: "update_migration_metadata", supertokens_user_id: fixture.internalId },
+        { action: "publish_public_metadata", supertokens_user_id: fixture.internalId, rownd_user_id: fixture.alias }] });
     expect(writes).not.toHaveBeenCalled();
     auth.forEach((spy) => expect(spy).not.toHaveBeenCalled());
     expect(await fixture.run()).toMatchObject({ status: "OK", changed: true });
-    expect(writes).toHaveBeenCalledTimes(1);
+    expect(writes).toHaveBeenCalledTimes(2);
     expect(writes).toHaveBeenCalledWith(fixture.internalId, { missingMeta: "from meta", precedence: "data", missingData: 0 }, expect.anything());
     expect((await getRawUserMetadata(fixture.internalId)).existing).toBe("preserved");
     writes.mockClear();
     expect(await fixture.run()).toMatchObject({ status: "OK", changed: false });
     expect(writes).not.toHaveBeenCalled();
     auth.forEach((spy) => expect(spy).not.toHaveBeenCalled());
+  });
+
+  it("repairs metadata visibility for an already-reconciled mapped user through the ordinary SDK", async () => {
+    const fixture = await seed({ first_name: "Existing", last_active: "2026-09-18", sandboxx_app_variants: ["variant"] });
+    const writes = vi.spyOn(UserMetadata, "updateUserMetadata");
+    const auth = authWrites();
+    const user = (await SuperTokens.getUser(fixture.internalId))!;
+    expect(user.id).toBe(fixture.alias);
+    expect((await UserMetadata.getUserMetadata(user.id)).metadata).toEqual({});
+    expect(await reconcileUser({ rownd_user_id: fixture.alias, dryRun: true })).toMatchObject({ status: "PREVIEW", canReconcile: true, matchesSource: false,
+      proposedActions: [{ action: "publish_public_metadata", supertokens_user_id: fixture.internalId, rownd_user_id: fixture.alias }] });
+    expect(writes).not.toHaveBeenCalled();
+    expect(await fixture.run()).toMatchObject({ status: "OK", changed: true, actions: ["public_metadata_published"] });
+    expect((await UserMetadata.getUserMetadata(user.id)).metadata).toEqual({ first_name: "Existing", last_active: "2026-09-18", sandboxx_app_variants: ["variant"] });
+    expect(writes).toHaveBeenCalledTimes(1);
+    auth.forEach((spy) => expect(spy).not.toHaveBeenCalled());
+    writes.mockClear();
+    expect(await fixture.run()).toMatchObject({ status: "OK", changed: false, actions: [] });
+    expect(writes).not.toHaveBeenCalled();
+  });
+
+  it("preserves public edits and opaque values while excluding internal migration state", async () => {
+    const fixture = await seed({ first_name: "Internal", flag: true, count: 8, object: { internal: true }, nil: null, missing: "publish" });
+    const publicValues = { first_name: "Public edit", flag: false, count: 0, object: { public: true }, empty: "", array: [] };
+    await UserMetadata.updateUserMetadata(fixture.alias, publicValues);
+    expect(await fixture.run()).toMatchObject({ status: "OK" });
+    expect((await UserMetadata.getUserMetadata(fixture.alias)).metadata).toEqual({ ...publicValues, missing: "publish" });
+    expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata).toMatchObject({ first_name: "Internal", original_rownd_user: fixture.profile });
+  });
+
+  it.each(["throw", "lost write"])("retries incomplete public metadata publication (%s)", async (failure) => {
+    const fixture = await seed({ first_name: "Preserved" });
+    const update = UserMetadata.updateUserMetadata.bind(UserMetadata);
+    const writes = vi.spyOn(UserMetadata, "updateUserMetadata").mockImplementation(async (...args) => {
+      if (args[0] === fixture.alias) {
+        if (failure === "throw") throw new Error("publication interrupted");
+        return { status: "OK", metadata: {} };
+      }
+      return update(...args);
+    });
+    expect(await fixture.run()).toMatchObject({ status: failure === "throw" ? "ERROR" : "BLOCKED" });
+    expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata.first_name).toBe("Preserved");
+    writes.mockRestore();
+    expect(await fixture.run()).toMatchObject({ status: "OK", changed: true });
+    expect((await UserMetadata.getUserMetadata(fixture.alias)).metadata.first_name).toBe("Preserved");
+  });
+
+  it("rechecks the mapping immediately before publishing public metadata", async () => {
+    const fixture = await seed({ first_name: "Preserved" });
+    const source = (await fetchAdministrativeMigrationSource(fixture.alias, "public", {}))!;
+    const read = UserMetadata.getUserMetadata.bind(UserMetadata);
+    let aliasReads = 0;
+    vi.spyOn(UserMetadata, "getUserMetadata").mockImplementation(async (...args) => {
+      const result = await read(...args);
+      if (args[0] === fixture.alias && ++aliasReads === 2) {
+        await SuperTokens.deleteUserIdMapping({ userId: fixture.alias, userIdType: "EXTERNAL", force: true });
+      }
+      return result;
+    });
+    const writes = vi.spyOn(UserMetadata, "updateUserMetadata");
+    await expect(publishPublicMetadata({ source, tenantId: "public", internalUserId: fixture.internalId, userContext: {} })).rejects.toThrow();
+    expect(writes).not.toHaveBeenCalled();
   });
 
   it("preserves existing false, zero, empty, null, arrays and opaque objects", async () => {
@@ -149,11 +212,12 @@ describe("administrative custom metadata backfill", { timeout: 60000, sequential
     const writes = vi.spyOn(UserMetadata, "updateUserMetadata");
     const preview = await reconcileUser({ rownd_user_id: fixture.alias, dryRun: true });
     expect(preview, JSON.stringify(preview)).toMatchObject({ status: "PREVIEW", matchesSource: false, canReconcile: true,
-      proposedActions: [{ action: "update_migration_metadata", supertokens_user_id: fixture.internalId }] });
+      proposedActions: [{ action: "update_migration_metadata", supertokens_user_id: fixture.internalId },
+        { action: "publish_public_metadata", supertokens_user_id: fixture.internalId, rownd_user_id: fixture.alias }] });
     expect(writes).not.toHaveBeenCalled();
     expect(await fixture.run()).toMatchObject({ status: "OK", changed: true });
     expect(await getRawUserMetadata(fixture.internalId)).toMatchObject({ original_rownd_user: fixture.profile, existing: false });
-    expect(writes).toHaveBeenCalledTimes(1);
+    expect(writes).toHaveBeenCalledTimes(2);
     writes.mockClear();
     expect(await fixture.run()).toMatchObject({ status: "OK", changed: false });
     expect(writes).not.toHaveBeenCalled();

@@ -633,6 +633,47 @@ Successful inspection returns `PREVIEW`; known failures retain `BLOCKED`,
 a guarantee of later execution. Run again without `dryRun` to apply repairs;
 execution revalidates live state.
 
+### Publish metadata under the mapped user ID
+
+Successful reconciliation also publishes missing application metadata under the
+mapped Rownd ID, so `UserMetadata.getUserMetadata(user.id)` can read it through the
+ordinary SDK and dashboard. Existing fields under that ID take precedence, including
+false, zero, and opaque objects. Migration snapshots, checkpoints, and override audits
+are retained on their internal owner rather than copied as application fields.
+Already-reconciled users with missing public metadata can be repaired by running
+reconciliation again; dry run reports `publish_public_metadata`, and execution
+reports `public_metadata_published`. This is a missing-field backfill, not ongoing
+synchronization between the two metadata records.
+
+### Override an internal-ID placeholder snapshot
+
+Some accounts have an `original_rownd_user` snapshot whose `data.user_id` is the
+SuperTokens internal UUID and whose only derived login method is the fallback
+`instant` identity. This can block mapping restoration even when an existing
+Google, Apple, or passwordless login matches the live Rownd profile.
+
+Opt in with `overridePlaceholderProvenance: true` in `reconcileUser`, or
+`--override-placeholder-provenance` on either reconciliation CLI command:
+
+```sh
+rownd-nodejs reconcile-user --profile sandboxx --rownd-user-id ROWND_USER_ID \
+  --override-placeholder-provenance --dry-run
+```
+
+The override accepts only that internal-UUID placeholder, and still requires a
+matching live login method in the requested tenant. Genuine historical identities,
+existing live historical users, contradictory snapshots, superseded accounts,
+mapping conflicts, and ownership checks retain their normal restrictions.
+Use a Rownd ID to identify the live source; the placeholder itself cannot discover it.
+
+Dry run includes `override_placeholder_provenance` in `proposedActions` and writes
+nothing. Remove `--dry-run` to execute. Before publishing the mapping, execution
+preserves the original snapshot and source/target IDs in the internal metadata field
+`rownd_migration_placeholder_provenance_override`, with `recordedAt`. After method
+reconciliation passes its postconditions, it replaces `original_rownd_user` with
+the validated live profile and records `completedAt` in the audit. Retry interrupted
+repairs with the same override option; the original audit snapshot is retained.
+
 ### Reconcile a CSV
 
 Use `reconcile-csv` to reconcile every unique Rownd ID in a CSV using one profile:

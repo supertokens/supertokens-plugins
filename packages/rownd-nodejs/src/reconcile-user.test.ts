@@ -12,12 +12,13 @@ afterEach(() => setRowndClient(undefined));
 describe("admin source authorization", () => {
   it("Rownd app fields cannot publish internal consolidation or canonical ownership markers", () => {
     const injected = { rownd_migration_owner_consolidation: { status: "COMPLETE" }, rownd_migration_canonical_target: "foreign-owner",
-      original_rownd_user: { data: { user_id: "foreign-source" } }, rownd_migration_complete: false };
+      original_rownd_user: { data: { user_id: "foreign-source" } }, rownd_migration_complete: false,
+      rownd_migration_placeholder_provenance_override: { sourceId: "foreign-source" } };
     const profile: RowndUser = { data: { user_id: "rownd", email: "test@example.com", preference: "blue", ...injected }, meta: injected };
     const source = mapRowndUserToSuperTokens(profile, "public");
     expect(source.userMetadata).toEqual({ original_rownd_user: profile, rownd_migration_complete: true, preference: "blue" });
   });
-  it.each([{}, { email: "" }, { email: "a", rownd_user_id: "b" }, { email: "a", supertokens_user_id: undefined }, { rownd_user_id: "a", dryRun: "true" }, null])("rejects invalid selector %j", (value) => {
+  it.each([{}, { email: "" }, { email: "a", rownd_user_id: "b" }, { email: "a", supertokens_user_id: undefined }, { rownd_user_id: "a", dryRun: "true" }, { rownd_user_id: "a", overridePlaceholderProvenance: "true" }, null])("rejects invalid selector %j", (value) => {
     expect(() => validateReconcileSelector(value)).toThrow("exactly one");
   });
   it("accepts each selector with common options", () => {

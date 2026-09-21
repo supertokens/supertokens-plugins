@@ -18,17 +18,18 @@ import { AmbiguousAdministrativeElection, bindAdministrativeElection, inspectAdm
 import { assertCompletedPlan, prepareOwnerConsolidation, readConsolidationCheckpoint, readOwnerRecoveryCheckpoint, UnresolvedConsolidationOwners } from "./migration-consolidation";
 import { readOwnerPlanCheckpoint } from "./migration-owner-plan";
 import { assertFreshAliasVerification, completeMappingPublication, inspectMappingPublication, publishFreshMapping } from "./migration-publication";
-import { assertAdministrativeMetadataBackfilled } from "./migration-admin-metadata";
+import { assertAdministrativeMetadataBackfilled, assertPublicMetadataPublished, publishPublicMetadata } from "./migration-admin-metadata";
 import { recoverProviderRevocations } from "./migration-provider";
 import type { MethodPlan } from "./migration-method-plan";
 import { resolveRowndProviderSubject } from "./provider-identity";
 import { recoverOrphanMapping } from "./migration-orphan-mapping";
+import { archivePlaceholderProvenance, completePlaceholderProvenanceOverride, inspectPlaceholderProvenanceOverride, isInternalIdPlaceholder } from "./migration-placeholder-provenance";
 
 export type ReconcileUserInput = (
   | { rownd_user_id: string; email?: never; supertokens_user_id?: never }
   | { email: string; rownd_user_id?: never; supertokens_user_id?: never }
   | { supertokens_user_id: string; rownd_user_id?: never; email?: never }
-) & { tenantId?: string; userContext?: JsonRecord; dryRun?: boolean; onProgress?: (event: ReconciliationProgress) => void };
+) & { tenantId?: string; userContext?: JsonRecord; dryRun?: boolean; overridePlaceholderProvenance?: boolean; onProgress?: (event: ReconciliationProgress) => void };
 
 export type ReconcileCandidate = { rownd_user_id: string; supertokens_user_id: string };
 export type ReconcileUserResult = {
@@ -54,6 +55,7 @@ export function validateReconcileSelector(input: unknown): asserts input is Reco
       !selectors.some((key) => typeof input[key] === "string" && (input[key] as string).trim()) ||
       (input.tenantId !== undefined && (typeof input.tenantId !== "string" || !input.tenantId.trim())) ||
       (input.dryRun !== undefined && typeof input.dryRun !== "boolean") ||
+      (input.overridePlaceholderProvenance !== undefined && typeof input.overridePlaceholderProvenance !== "boolean") ||
       (input.userContext !== undefined && !isRecord(input.userContext))) {
     throw new Error("Provide exactly one non-empty rownd_user_id, email, or supertokens_user_id selector");
   }
@@ -208,7 +210,7 @@ async function survivorCanonicalId(user: User | undefined, userContext: JsonReco
   return mapping.status === "OK" ? mapping.externalUserId : undefined;
 }
 
-async function inspectSourceElection(source: Source, selected: User | undefined, tenantId: string, userContext: JsonRecord, initialCandidates: ActivityCandidate[] = [], contactEmail?: string) {
+async function inspectSourceElection(source: Source, selected: User | undefined, tenantId: string, userContext: JsonRecord, initialCandidates: ActivityCandidate[] = [], contactEmail?: string, overridePlaceholderProvenance = false) {
   const users = selected ? [selected] : [];
   const checkpoint = readOwnerPlanCheckpoint(await getRawUserMetadata(source.externalUserId!, userContext)) ??
     (selected ? readOwnerPlanCheckpoint(await getRawUserMetadata(await internalOwner(selected, userContext), userContext)) : undefined);
@@ -235,7 +237,7 @@ async function inspectSourceElection(source: Source, selected: User | undefined,
     if (id !== source.externalUserId && mapping.status !== "OK" &&
       (await getRawUserMetadata(id, userContext)).original_rownd_user?.data.user_id === source.externalUserId &&
       !readOwnerPlanCheckpoint(await getRawUserMetadata(id, userContext))) {
-      await assertPinnedMappingProvenance(id, source, tenantId, userContext);
+      await assertPinnedMappingProvenance(id, source, tenantId, userContext, overridePlaceholderProvenance);
       provenRecovery = { rownd_user_id: source.externalUserId!, supertokens_user_id: id };
     }
   }
@@ -374,7 +376,7 @@ async function findRecoveryOwner(source: Source, tenantId: string, userContext: 
   return candidates[0]?.user;
 }
 
-async function assertPinnedMappingProvenance(id: string, source: Source, tenantId: string, userContext: JsonRecord) {
+async function assertPinnedMappingProvenance(id: string, source: Source, tenantId: string, userContext: JsonRecord, overridePlaceholderProvenance = false) {
   await assertAuthenticatedMigrationSource(source, tenantId);
   clearSuperTokensCoreCallCache(userContext);
   await assertSelectorNamespace(source.externalUserId!, userContext);
@@ -399,7 +401,9 @@ async function assertPinnedMappingProvenance(id: string, source: Source, tenantI
       (getMigrationTarget(stored) !== undefined && getMigrationTarget(stored) !== id) ||
       !user.loginMethods.some((method) => method.tenantIds.includes(tenantId) &&
         source.loginMethods.some((expected) => matchesImportLoginMethod(method, expected)) &&
-        (stored.original_rownd_user === undefined || mapRowndUserToSuperTokens(stored.original_rownd_user, tenantId).loginMethods.some((expected) => matchesImportLoginMethod(method, expected))))) {
+        (stored.original_rownd_user === undefined ||
+          (overridePlaceholderProvenance && isInternalIdPlaceholder(stored.original_rownd_user, id, tenantId)) ||
+          mapRowndUserToSuperTokens(stored.original_rownd_user, tenantId).loginMethods.some((expected) => matchesImportLoginMethod(method, expected))))) {
     throw new RowndMigrationPolicyError("Missing mapping cannot be restored without matching live identity and migration provenance");
   }
   if (metadata.original_rownd_user && stored.original_rownd_user && !isDeepStrictEqual(
@@ -407,17 +411,22 @@ async function assertPinnedMappingProvenance(id: string, source: Source, tenantI
     mapRowndUserToSuperTokens(stored.original_rownd_user!, tenantId).loginMethods,
   )) throw new RowndMigrationPolicyError("Contradictory historical snapshots cannot authorize mapping restoration");
   await assertMigrationOwnerGraph(user, tenantId, userContext);
+  if (overridePlaceholderProvenance) await inspectPlaceholderProvenanceOverride(id, source, tenantId, userContext);
   return user;
 }
 
-async function inspectPinnedMappingPublication(id: string, source: Source, tenantId: string, userContext: JsonRecord) {
-  const user = await assertPinnedMappingProvenance(id, source, tenantId, userContext);
+async function inspectPinnedMappingPublication(id: string, source: Source, tenantId: string, userContext: JsonRecord, overridePlaceholderProvenance = false) {
+  const user = await assertPinnedMappingProvenance(id, source, tenantId, userContext, overridePlaceholderProvenance);
   await assertUnambiguousSource(user, source.externalUserId!, userContext, { rownd_user_id: source.externalUserId!, supertokens_user_id: id }, source);
-  return assertPinnedMappingProvenance(id, source, tenantId, userContext);
+  return assertPinnedMappingProvenance(id, source, tenantId, userContext, overridePlaceholderProvenance);
 }
 
-async function publishPinnedMapping(id: string, source: Source, tenantId: string, userContext: JsonRecord) {
-  await inspectPinnedMappingPublication(id, source, tenantId, userContext);
+async function publishPinnedMapping(id: string, source: Source, tenantId: string, userContext: JsonRecord, overridePlaceholderProvenance = false) {
+  await inspectPinnedMappingPublication(id, source, tenantId, userContext, overridePlaceholderProvenance);
+  if (overridePlaceholderProvenance) {
+    await archivePlaceholderProvenance(id, source, tenantId, userContext);
+    await inspectPinnedMappingPublication(id, source, tenantId, userContext, overridePlaceholderProvenance);
+  }
   if (id !== source.externalUserId) await publishFreshMapping(id, source, tenantId, userContext);
   clearSuperTokensCoreCallCache(userContext);
   await assertMigrationMapping(id, source.externalUserId!, userContext);
@@ -465,7 +474,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
       const recovered = await recoverOrphanMapping({ sourceId: input.rownd_user_id, tenantId, userContext, dryRun: input.dryRun,
         onMutation: () => { mutationStarted = true; result.changed = null; },
         reconcile: (sourceId, target, assertReady, pinnedWinner) => withFreshRowndReads(() => reconcileUserWithFreshSources(
-          { rownd_user_id: sourceId, tenantId, userContext, dryRun: input.dryRun }, { target, assertReady, pinnedWinner })),
+          { rownd_user_id: sourceId, tenantId, userContext, dryRun: input.dryRun, overridePlaceholderProvenance: input.overridePlaceholderProvenance }, { target, assertReady, pinnedWinner })),
       });
       if (recovered) return recovered;
     }
@@ -543,7 +552,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
     sourceOwner ??= await findRecoveryOwner(source, tenantId, userContext, true);
     const initialSourceOwner = sourceOwner ? await internalOwner(sourceOwner, userContext) : undefined;
     const initialSourceMapping = await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL", userContext });
-    const inspection = await inspectSourceElection(source, sourceOwner, tenantId, userContext, resolvedElection?.candidates, discoveredEmail);
+    const inspection = await inspectSourceElection(source, sourceOwner, tenantId, userContext, resolvedElection?.candidates, discoveredEmail, input.overridePlaceholderProvenance);
     clearSuperTokensCoreCallCache(userContext);
     if (!isDeepStrictEqual(initialSourceMapping, await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL", userContext }))) {
       result.supertokens_user_id = initialSourceOwner;
@@ -622,6 +631,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
     const snapshot = async (id: string | undefined) => id ? {
       user: JSON.parse(JSON.stringify(await SuperTokens.getUser(id, userContext) ?? null)) as unknown,
       metadata: await getUserMetadata(id, userContext),
+      publicMetadata: await getRawUserMetadata(rowndId, userContext),
       mapping: await SuperTokens.getUserIdMapping({ userId: id, userIdType: "ANY", userContext }),
     } : undefined;
     const before = await snapshot(beforeId);
@@ -640,18 +650,25 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
     if (input.dryRun) {
       await assertAuthenticatedMigrationSource(source, tenantId);
       clearSuperTokensCoreCallCache(userContext);
-      if (restoreMapping) selected = await inspectPinnedMappingPublication(beforeId!, source, tenantId, userContext);
+      if (restoreMapping) selected = await inspectPinnedMappingPublication(beforeId!, source, tenantId, userContext, input.overridePlaceholderProvenance);
       else if (beforeId && !consolidation?.managesMapping) await assertMigrationMapping(beforeId, rowndId, userContext);
       // The preview only enters read-only inspection; reconciliation and cleanup are never invoked.
       const preview = await previewReconciliation({ source, selected, internalId: beforeId, restoreMapping, tenantId, userContext,
         plannedOwnerIds: consolidation?.plannedOwnerIds, mappingPlanned: consolidation?.managesMapping });
+      if (beforeId && input.overridePlaceholderProvenance) {
+        const override = await inspectPlaceholderProvenanceOverride(beforeId, source, tenantId, userContext);
+        if ((restoreMapping && override.placeholder) || (override.audit && override.audit.completedAt === undefined)) {
+          preview.proposedActions.push({ action: "override_placeholder_provenance", supertokens_user_id: beforeId, rownd_user_id: rowndId });
+          preview.matchesSource = false;
+        }
+      }
       if (consolidation?.proposedActions.length) {
         preview.proposedActions = [...consolidation.proposedActions, ...preview.proposedActions.filter((action) => !consolidation!.proposedActions.some((existing) =>
           existing.action === action.action && existing.recipeUserId === action.recipeUserId && existing.supertokens_user_id === action.supertokens_user_id && existing.rownd_user_id === action.rownd_user_id))];
         preview.matchesSource = false;
       }
       clearSuperTokensCoreCallCache(userContext);
-      if (restoreMapping) await inspectPinnedMappingPublication(beforeId!, source, tenantId, userContext);
+      if (restoreMapping) await inspectPinnedMappingPublication(beforeId!, source, tenantId, userContext, input.overridePlaceholderProvenance);
       else if (beforeId && !consolidation?.managesMapping) await assertMigrationMapping(beforeId, rowndId, userContext);
       if (consolidation) await consolidation.assertOwners();
       return { ...result, ...preview };
@@ -664,7 +681,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
       await orphanHandoff?.assertReady();
       mutationStarted = true;
       if (restoreMapping) {
-        await publishPinnedMapping(beforeId!, source, tenantId, userContext);
+        await publishPinnedMapping(beforeId!, source, tenantId, userContext, input.overridePlaceholderProvenance);
       }
       if (consolidation) {
         await consolidation.execute();
@@ -697,14 +714,14 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
           clearSuperTokensCoreCallCache(userContext);
           const mapping = await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL", userContext });
           if (mapping.status === "OK") pinOwner(mapping.superTokensUserId);
-          await publishPinnedMapping(imported.id, source, tenantId, userContext);
+          await publishPinnedMapping(imported.id, source, tenantId, userContext, input.overridePlaceholderProvenance);
         } catch (error) {
           if (!isBulkImportDuplicateIdentityError(error)) throw error;
           const recovered = await findRecoveryOwner(source, tenantId, userContext);
           if (recovered) {
             const recoveredId = await internalOwner(recovered, userContext);
             pinOwner(recoveredId);
-            await publishPinnedMapping(recoveredId, source, tenantId, userContext);
+            await publishPinnedMapping(recoveredId, source, tenantId, userContext, input.overridePlaceholderProvenance);
           }
           if (!await reconcileRowndUserWithExistingLoginMethods(source, tenantId, userContext,
             { repairUser: recovered, expectedInternalUserId, onTargetSelected: pinOwner })) throw error;
@@ -731,7 +748,9 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
         tenantId, userContext, authenticatedEmail: getAuthenticatedMigrationEmail(source, tenantId), matchesMethod: matchesImportLoginMethod });
       await assertAdministrativeMetadataBackfilled({ source, tenantId, internalUserId: id, userContext });
       if (consolidation) await consolidation.complete();
+      if (input.overridePlaceholderProvenance) await completePlaceholderProvenanceOverride(id, source, tenantId, userContext);
       await completeMappingPublication(id, source, tenantId, userContext);
+      await publishPublicMetadata({ source, tenantId, internalUserId: id, userContext });
       result.status = "OK";
     } catch (error) {
       operationFailed = true;
@@ -753,6 +772,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
       if (result.status === "OK" && expectedInternalUserId) {
         await assertMigrationMapping(expectedInternalUserId, rowndId, userContext);
         await assertAdministrativeMetadataBackfilled({ source, tenantId, internalUserId: expectedInternalUserId, userContext });
+        await assertPublicMetadataPublished({ source, tenantId, internalUserId: expectedInternalUserId, userContext });
         if (consolidation) {
           await assertAuthenticatedMigrationSource(source, tenantId);
           await consolidation.assertOwners(true);
@@ -765,6 +785,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
         if (!isDeepStrictEqual(before?.user, after?.user)) result.actions.push(before ? "login_methods_reconciled" : "user_imported_or_linked");
         if (!isDeepStrictEqual(before?.mapping, after?.mapping)) result.actions.push("external_mapping_updated");
         if (!isDeepStrictEqual(before?.metadata, after?.metadata)) result.actions.push("migration_metadata_updated");
+        if (!isDeepStrictEqual(before?.publicMetadata, after?.publicMetadata)) result.actions.push("public_metadata_published");
       }
     } catch (error) {
       result.changed = revocationProgress ? true : null;

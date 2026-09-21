@@ -90,6 +90,8 @@ Module._load = function(id, ...args) {
     expect(JSON.parse(bunResult.stdout)).toMatchObject({ status: "ERROR", dryRun: true, changed: false });
     expect(bunResult.stdout + bunResult.stderr).not.toContain("pass%22word");
     expect(bunResult.stdout + bunResult.stderr).not.toContain("secret");
+    const override = await cli(["reconcile-user", "--profile", "local", "--rownd-user-id", "missing", "--dry-run", "--override-placeholder-provenance"], preload);
+    expect(JSON.parse(override.stdout)).toMatchObject({ status: "ERROR", dryRun: true, changed: false });
     const csv = join(home, "users.csv");
     await writeFile(csv, 'note,Rownd ID\r\n"quoted, note",user_a\r\nsecond,user_b\r\nduplicate,user_a\r\n');
     const profilePath = join(home, ".config", "rownd-nodejs", "profiles.json");
@@ -98,7 +100,7 @@ Module._load = function(id, ...args) {
     methods.length = 0;
     const failedFile = join(home, "failed.csv");
     const batch = await cli(["reconcile-csv", "--profile", "local", "--file", csv, "--id-column", "Rownd ID",
-      "--concurrency", "2", "--failed-file", failedFile, "--dry-run"], preload);
+      "--concurrency", "2", "--failed-file", failedFile, "--dry-run", "--override-placeholder-provenance"], preload);
     expect(batch.code).toBe(1);
     const lines = batch.stdout.trim().split("\n").map((line) => JSON.parse(line));
     expect(lines).toHaveLength(3);
