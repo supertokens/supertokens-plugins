@@ -770,30 +770,6 @@ async def migrate_rownd_user_and_create_session(
             continue
         disposition = classify_migration_snapshot(durable, pinned_target)
         record_disposition(disposition)
-        if attempt_count == 1 and not recovered_after_error:
-            from .migration_plan import completed_migration, create_completed_session
-
-            try:
-                plan = await completed_migration(config, source, disposition, user_context)
-            except Exception as error:
-                last_error = error
-                recovered_after_error = True
-                clear_supertokens_core_call_cache(user_context)
-                continue
-            if plan is not None:
-                try:
-                    result = await create_completed_session(
-                        config, source, plan, request, response, user_context, read_fresh_source,
-                    )
-                except MigrationError:
-                    raise
-                except Exception as error:
-                    reason = (MigrationErrorReason.CORE_UNAVAILABLE
-                              if _is_recognizable_core_outage(error)
-                              else MigrationErrorReason.MIGRATION_INCOMPLETE)
-                    raise MigrationError(reason, "state_inspect", error) from error
-                migration_state.update(path="already_complete", supertokens_user_id=result)
-                return result
         if disposition.target is not None and disposition.status is not MigrationDispositionStatus.BLOCKED:
             if disposition.target.source.value in {"mapping", "raw_id"}:
                 try:
@@ -1403,6 +1379,13 @@ async def build_rownd_session_claims(
     app_variant_id: Optional[str],
     user_context: Optional[UserContext] = None,
 ) -> JsonDict:
+    from .migration_plan import current_session_evidence
+
+    evidence = current_session_evidence(config, user_id, user_context or {})
+    if evidence is not None and app_variant_id is None:
+        return rownd_compatibility.build_rownd_session_claim_payload(
+            config, user_id, evidence.user(), json.loads(evidence.metadata_json), current_payload, None,
+        )
     inspection = await inspect_linked_user_metadata(user_id, user_context)
     user = cast(Optional[User], inspection["user"])
     metadata = cast(JsonDict, inspection["combined_metadata"]) if user else {}
@@ -1421,10 +1404,16 @@ async def build_rownd_session_and_anonymous_claims(
     creating: bool = False,
 ) -> Tuple[JsonDict, JsonDict]:
     from .session_authentication import session_authentication_origin
+    from .migration_plan import current_session_evidence
 
-    inspection = await inspect_linked_user_metadata(user_id, user_context)
-    user = cast(Optional[User], inspection["user"])
-    metadata = cast(JsonDict, inspection["combined_metadata"]) if user else {}
+    evidence = current_session_evidence(config, user_id, user_context, recipe_user_id) if creating and app_variant_id is None else None
+    if evidence is not None:
+        user = evidence.user()
+        metadata = json.loads(evidence.metadata_json)
+    else:
+        inspection = await inspect_linked_user_metadata(user_id, user_context)
+        user = cast(Optional[User], inspection["user"])
+        metadata = cast(JsonDict, inspection["combined_metadata"]) if user else {}
     origin = await session_authentication_origin(
         user, recipe_user_id, current_payload, user_context, creating
     )

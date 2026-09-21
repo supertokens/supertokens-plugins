@@ -165,7 +165,10 @@ async def test_alias_resolution_errors_keep_transport_classification_and_cleanup
     )
     create = AsyncMock(return_value=session)
     scrub = Mock()
-    monkeypatch.setattr(plugin_implementation, "assert_source_not_superseded", AsyncMock())
+    from supertokens_rownd import migration_plan
+
+    monkeypatch.setattr(migration_plan, "read_completed_migration", AsyncMock(return_value=None))
+    monkeypatch.setattr(plugin_implementation, "assert_source_not_superseded_in_phase", AsyncMock())
     monkeypatch.setattr(repository, "record_rownd_app_variant_for_user", AsyncMock())
     monkeypatch.setattr(repository, "build_rownd_session_claims", AsyncMock(return_value={}))
     monkeypatch.setattr(repository, "scrub_migration_session_response", scrub)

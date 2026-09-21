@@ -216,7 +216,7 @@ async def test_noop_postissuance_cancellation(core_url, monkeypatch, cleanup):
     from starlette.responses import Response
     from supertokens_python.framework.fastapi.fastapi_request import FastApiRequest
     from supertokens_python.framework.fastapi.fastapi_response import FastApiResponse
-    from supertokens_rownd.migration import create_rownd_identity_snapshot, classify_migration_snapshot
+    from supertokens_rownd.migration import create_rownd_identity_snapshot
     from supertokens_rownd.migration_authority import _bind_authenticated_source
     from supertokens_rownd.types import RowndPluginConfig
 
@@ -227,8 +227,7 @@ async def test_noop_postissuance_cancellation(core_url, monkeypatch, cleanup):
     ))
     config = RowndPluginConfig(rownd_app_key="test-key", rownd_app_secret="test-secret")
     context = {}
-    disposition = classify_migration_snapshot(await repo.read_fresh_migration_snapshot(source.snapshot, context))
-    plan = await migration_plan.completed_migration(config, source, disposition, context)
+    plan = await migration_plan.read_completed_migration(config, source, context)
     assert plan is not None
     request = FastApiRequest(Request({
         "type": "http", "method": "POST", "path": "/auth/plugin/rownd/migrate",

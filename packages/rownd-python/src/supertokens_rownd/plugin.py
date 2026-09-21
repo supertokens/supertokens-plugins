@@ -1448,8 +1448,13 @@ def _session_function_override(config: RowndPluginConfig):
             user_context: UserContext,
         ):
             from .provider_session import assert_provider_session_membership
-            await _assert_native_session_publication(user_id, recipe_user_id.get_as_string(), user_context)
-            await assert_provider_session_membership(user_id, recipe_user_id.get_as_string(), tenant_id, user_context)
+            from .migration_plan import claim_session_evidence, finish_coordinated_session
+
+            evidence = claim_session_evidence(rownd_config.get_request_config(config), user_id, user_context,
+                                                recipe_user_id.get_as_string(), tenant_id)
+            if evidence is None:
+                await _assert_native_session_publication(user_id, recipe_user_id.get_as_string(), user_context)
+                await assert_provider_session_membership(user_id, recipe_user_id.get_as_string(), tenant_id, user_context)
             payload = dict(access_token_payload or {})
             payload.pop("rownd_session_authentication", None)
             app_variant_id = (
@@ -1472,8 +1477,13 @@ def _session_function_override(config: RowndPluginConfig):
                 user_context,
             )
             try:
-                await _assert_native_session_publication(user_id, recipe_user_id.get_as_string(), user_context)
-                await assert_provider_session_membership(user_id, recipe_user_id.get_as_string(), tenant_id, user_context)
+                if evidence is None:
+                    await _assert_native_session_publication(user_id, recipe_user_id.get_as_string(), user_context)
+                    await assert_provider_session_membership(user_id, recipe_user_id.get_as_string(), tenant_id, user_context)
+                else:
+                    # The private coordinator owns the fresh post-hook phase, after
+                    # this SDK call and any outer session hooks have returned.
+                    finish_coordinated_session(rownd_config.get_request_config(config), evidence, user_context)
             except Exception:
                 with suppress(Exception):
                     await session.revoke_session(user_context)

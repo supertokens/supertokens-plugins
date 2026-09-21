@@ -68,6 +68,12 @@ async def assert_source_not_superseded(rownd_user_id: str, context: UserContext)
     from . import supertokens_repository as repo
 
     repo.clear_supertokens_core_call_cache(context)
+    await assert_source_not_superseded_in_phase(rownd_user_id, context)
+
+
+async def assert_source_not_superseded_in_phase(rownd_user_id: str, context: UserContext) -> None:
+    from . import supertokens_repository as repo
+
     # The literal alias tombstone survives removal of its user-ID mapping. Linked
     # metadata or an administrative recovery reference must not authorize replay.
     try:

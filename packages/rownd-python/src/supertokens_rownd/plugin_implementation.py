@@ -29,7 +29,7 @@ from .migration import create_rownd_identity_snapshot
 from .migration_authority import (
     _bind_authenticated_source,
     assert_source_authority,
-    assert_source_not_superseded,
+    assert_source_not_superseded_in_phase,
     has_authenticated_source,
 )
 from .rownd_repository import (
@@ -342,11 +342,21 @@ async def handle_migrate(
             ))
 
         stage = "state_inspect"
-        await assert_source_not_superseded(rownd_user_id, user_context)
-        owner = await _resolve_consolidated_owner(
-            rownd_user_id, tenant_id, user_context, fetch_fresh_profile,
-        )
-        if owner is not None:
+        from .migration_plan import read_completed_migration, create_completed_session
+
+        plan = await read_completed_migration(config, source, user_context)
+        owner = None
+        if plan is None:
+            # The entry reader already opened this fresh, read-only SDK phase.
+            # Keep its literal reads through conservative fallback discovery.
+            await assert_source_not_superseded_in_phase(rownd_user_id, user_context)
+            owner = await _resolve_consolidated_owner(
+                rownd_user_id, tenant_id, user_context, fetch_fresh_profile,
+            )
+        if plan is not None:
+            result = await create_completed_session(config, source, plan, request, response, user_context, read_fresh_source)
+            migration_state.update(path="already_complete", target_source="mapping", supertokens_user_id=result)
+        elif owner is not None:
             await _create_consolidated_alias_session(
                 config, source, owner, request, response, tenant_id, app_variant_id,
                 user_context, migration_state, read_fresh_source, fetch_fresh_profile,

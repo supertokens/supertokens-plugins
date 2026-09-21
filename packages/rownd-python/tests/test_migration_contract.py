@@ -227,7 +227,10 @@ async def invoke_migration(
     use_real_repository: bool = False,
     enable_debug_logs: bool = False,
 ) -> tuple[FakeResponse, CapturingTelemetry]:
-    monkeypatch.setattr(implementation, "assert_source_not_superseded", AsyncMock())
+    from supertokens_rownd import migration_plan
+
+    monkeypatch.setattr(migration_plan, "read_completed_migration", AsyncMock(return_value=None))
+    monkeypatch.setattr(implementation, "assert_source_not_superseded_in_phase", AsyncMock())
     monkeypatch.setattr(implementation, "resolve_consolidated_token_owner", AsyncMock(return_value=None))
 
     async def migrate(*args: Any, **kwargs: Any) -> str:

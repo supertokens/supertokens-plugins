@@ -42,6 +42,7 @@ from supertokens_python.types import RecipeUserId
 from supertokens_python.types.base import AccountInfoInput
 
 import supertokens_rownd.supertokens_repository as impl
+import supertokens_rownd.migration_plan as migration_plan
 import supertokens_rownd.telemetry.create_telemetry_client as telemetry
 import supertokens_rownd.plugin as rownd_plugin
 from supertokens_rownd.constants import ROWND_JWT_CLAIMS
@@ -178,6 +179,7 @@ async def test_blocked_migration_aliases_return_422_without_session(
     )
     create_session = AsyncMock()
     monkeypatch.setattr(session_asyncio, "create_new_session", create_session)
+    monkeypatch.setattr(migration_plan, "read_completed_migration", AsyncMock(return_value=None))
     monkeypatch.setattr(impl, "read_fresh_migration_snapshot", AsyncMock())
     monkeypatch.setattr(impl, "get_raw_user_metadata", AsyncMock(return_value={}))
     monkeypatch.setattr(
@@ -207,6 +209,45 @@ async def test_blocked_migration_aliases_return_422_without_session(
     assert event["httpStatus"] == 422
     assert event["retryable"] is False
     assert event["reason"] == reason.value
+
+
+@pytest.mark.parametrize("path", ["/auth/plugin/rownd/migrate", "/auth/plugin/migrate-session"])
+async def test_early_migration_probe_core_outage_returns_503_without_session(
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    telemetry_client = CapturingTelemetryClient()
+    client = make_client(
+        "http://localhost:3567", rownd_client,
+        plugin_config={"telemetry": {"provider": "custom", "factory": lambda: telemetry_client}},
+    )
+    metadata = AsyncMock(side_effect=httpx.ConnectError("Core unavailable"))
+    create_session = AsyncMock()
+    fallback = AsyncMock()
+    monkeypatch.setattr(usermetadata_asyncio, "get_user_metadata", metadata)
+    monkeypatch.setattr(session_asyncio, "create_new_session", create_session)
+    monkeypatch.setattr(impl, "migrate_rownd_user_and_create_session", fallback)
+
+    response = client.post(
+        path, headers={"Authorization": "Bearer rownd-token", **session_headers()}
+    )
+
+    assert_migration_error(response, "CORE_UNAVAILABLE", 503, True, "state_inspect")
+    metadata.assert_awaited_once()
+    fallback.assert_not_called()
+    create_session.assert_not_called()
+    for header in ("st-access-token", "st-refresh-token", "front-token", "set-cookie"):
+        assert header not in response.headers
+    assert len(telemetry_client.events) == 1
+    event = telemetry_client.events[0]
+    assert event["operationId"] == response.json()["operationId"]
+    assert event["operation"] == "migration"
+    assert event["outcome"] == "error"
+    assert event["stage"] == "state_inspect"
+    assert event["httpStatus"] == 503
+    assert event["retryable"] is True
+    assert event["reason"] == "CORE_UNAVAILABLE"
 
 
 @pytest.mark.parametrize("path", ["/auth/plugin/rownd/migrate", "/auth/plugin/migrate-session"])
