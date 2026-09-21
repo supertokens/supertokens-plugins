@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.7.11
+
+### Patch Changes
+
+- Allow explicit sign in for unverified accounts
+
 ## 0.7.10
 
 ### Patch Changes
