@@ -272,6 +272,90 @@ async def test_email_revocation_debt_survives_source_drift(core_url, rownd_clien
     assert completed["history"][0]["email"] == rownd_client.user_id + "@new.example"
 
 
+@pytest.mark.parametrize("has_email", [False, True], ids=["source-without-email", "source-with-email"])
+async def test_email_settlement_refreshes_binding_after_completion_write(
+    core_url, rownd_client, monkeypatch, has_email,
+):
+    import hashlib
+    import httpx
+    import supertokens_python.querier as sdk_querier
+    from supertokens_rownd.errors import MigrationErrorReason
+    from supertokens_rownd.migration import MigrationTargetSource, PinnedMigrationTarget
+    from supertokens_rownd.migration_email import repair_current_email
+    from supertokens_rownd.provider_migration import assert_source_binding
+
+    client = make_client(core_url, rownd_client)
+    rownd_id = rownd_client.user_id = "settlement-binding-" + str(uuid.uuid4())
+    old, new = rownd_id + "@old.example", rownd_id + "@new.example"
+    rownd_client.user_info = {
+        "data": {"user_id": rownd_id, "google_id": rownd_id, "email": old},
+        "verified_data": {"google_id": True},
+    }
+    assert migrate(client).status_code == 200
+    mapping = await get_user_id_mapping(rownd_id, "EXTERNAL")
+    assert isinstance(mapping, GetUserIdMappingOkResult)
+    target = mapping.supertokens_user_id
+    ledger = "rownd-email-retirement-" + hashlib.sha256((target + "\0public").encode()).hexdigest()
+    update = metadata_api.update_user_metadata
+    read = repo.get_raw_user_metadata
+    checkpointed = []
+
+    async def interrupt_removal(user_id, values, context):
+        result = await update(user_id, values, context)
+        if user_id == ledger and values.get("plan", {}).get("state") == "removing":
+            checkpointed.append(True)
+            raise TimeoutError("committed retirement checkpoint")
+        return result
+
+    async def unavailable_checkpoint(user_id, context=None):
+        if user_id == ledger and checkpointed:
+            raise TimeoutError("checkpoint unavailable until next request")
+        return await read(user_id, context)
+
+    rownd_client.user_info["data"]["email"] = new
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(metadata_api, "update_user_metadata", interrupt_removal)
+        interrupted.setattr(repo, "get_raw_user_metadata", unavailable_checkpoint)
+        assert migrate(client).status_code != 200
+    removing = (await repo.get_raw_user_metadata(ledger))["plan"]
+    assert isinstance(removing, dict) and removing["state"] == "removing"
+    profile = deepcopy(rownd_client.user_info)
+    if not has_email:
+        del profile["data"]["email"]
+    source = repo.FreshMigrationSource(profile, create_rownd_identity_snapshot(profile, "public"))
+    source_reader = AsyncMock(return_value=source)
+    injected = []
+
+    async def complete_then_supersede(user_id, values, context):
+        result = await update(user_id, values, context)
+        if user_id == ledger and values.get("plan", {}).get("state") == "complete":
+            # Warm after the SDK write's tag change, before an independent worker's write.
+            await assert_source_binding(target, rownd_id, context)
+            cache_tag = getattr(sdk_querier.Querier, "_Querier__global_cache_tag")
+            async with httpx.AsyncClient() as transport:
+                response = await transport.put(core_url + "/recipe/user/metadata", json={
+                    "userId": rownd_id, "metadataUpdate": {"rownd_migration_superseded": {}},
+                })
+            response.raise_for_status()
+            assert response.json()["status"] == "OK"
+            assert getattr(sdk_querier.Querier, "_Querier__global_cache_tag") == cache_tag
+            injected.append(True)
+        return result
+
+    monkeypatch.setattr(metadata_api, "update_user_metadata", complete_then_supersede)
+    with pytest.raises(MigrationError) as caught:
+        await repair_current_email(
+            source, PinnedMigrationTarget(target, MigrationTargetSource.MAPPING), {}, source_reader,
+        )
+    assert caught.value.reason == MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER
+    assert injected == [True]
+    source_reader.assert_not_awaited()
+    completed = (await repo.get_raw_user_metadata(ledger))["plan"]
+    assert isinstance(completed, dict) and completed["state"] == "complete"
+    user = await get_user(target)
+    assert {method.email for method in user.login_methods if method.recipe_id == "passwordless"} == {new}
+
+
 @pytest.mark.parametrize("operation", ["import", "membership"])
 async def test_provider_introduction_source_drift_recovers_exact_scope(core_url, rownd_client, monkeypatch, operation):
     client = make_client(core_url, rownd_client)

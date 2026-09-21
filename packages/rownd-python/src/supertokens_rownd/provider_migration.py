@@ -31,7 +31,8 @@ async def assert_source_binding(target: str, rownd_id: str, context: UserContext
     from . import supertokens_repository as repo
 
     await repo.assert_source_not_superseded(rownd_id, context)
-    clear_supertokens_core_call_cache(context)
+    # The tombstone check starts this read phase. Keep its SDK cache through
+    # both mapping directions and owner resolution; no mutation intervenes.
     external = repo._mapping_lookup(await repo.get_user_id_mapping(rownd_id, "EXTERNAL", context))
     internal = repo._mapping_lookup(await repo.get_user_id_mapping(target, "SUPERTOKENS", context))
     if (target != rownd_id or external is not None or internal is not None) and (
@@ -40,7 +41,9 @@ async def assert_source_binding(target: str, rownd_id: str, context: UserContext
     ):
         raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "account_link")
     user = await repo.get_user(target, context)
-    if user is None or not await repo.sdk_user_id_matches_internal_target(user.id, target, context):
+    if user is None or (
+        user.id != target and await repo.resolve_supertokens_user_id(user.id, context) != target
+    ):
         raise MigrationError(MigrationErrorReason.MAPPING_CONFLICT, "account_link")
     return user
 

@@ -770,6 +770,30 @@ async def migrate_rownd_user_and_create_session(
             continue
         disposition = classify_migration_snapshot(durable, pinned_target)
         record_disposition(disposition)
+        if attempt_count == 1 and not recovered_after_error:
+            from .migration_plan import completed_migration, create_completed_session
+
+            try:
+                plan = await completed_migration(config, source, disposition, user_context)
+            except Exception as error:
+                last_error = error
+                recovered_after_error = True
+                clear_supertokens_core_call_cache(user_context)
+                continue
+            if plan is not None:
+                try:
+                    result = await create_completed_session(
+                        config, source, plan, request, response, user_context, read_fresh_source,
+                    )
+                except MigrationError:
+                    raise
+                except Exception as error:
+                    reason = (MigrationErrorReason.CORE_UNAVAILABLE
+                              if _is_recognizable_core_outage(error)
+                              else MigrationErrorReason.MIGRATION_INCOMPLETE)
+                    raise MigrationError(reason, "state_inspect", error) from error
+                migration_state.update(path="already_complete", supertokens_user_id=result)
+                return result
         if disposition.target is not None and disposition.status is not MigrationDispositionStatus.BLOCKED:
             if disposition.target.source.value in {"mapping", "raw_id"}:
                 try:

@@ -23,6 +23,67 @@ SESSION_REFERENCE = "UserId is already in use in Session recipe\n"
 METADATA_REFERENCE = "UserId is already in use in UserMetadata recipe\n"
 
 
+@pytest.mark.parametrize("derived", [False, True], ids=["parent", "derived"])
+@pytest.mark.parametrize("mutation", ["tombstone", "remove_mapping", "reassign_mapping"])
+async def test_source_binding_refreshes_warm_and_derived_contexts(
+    core_url, native_target, monkeypatch, derived, mutation,
+):
+    from supertokens_rownd import supertokens_repository as repo
+    from supertokens_rownd.errors import MigrationError, MigrationErrorReason
+    from supertokens_rownd.provider_migration import assert_source_binding
+    from supertokens_rownd.utils import create_derived_user_context
+
+    _, provider, rownd_id = native_target
+    target = provider.user.id
+    replacement = await thirdparty_asyncio.manually_create_or_update_user(
+        "public", "google", "replacement-" + rownd_id, rownd_id + "@replacement.example", True,
+    )
+    assert isinstance(replacement, ManuallyCreateOrUpdateUserOkResult)
+    assert target != rownd_id
+
+    async with httpx.AsyncClient(base_url=core_url) as transport:
+        async def write(method, path, body):
+            response = await transport.request(method, path, json=body)
+            response.raise_for_status()
+            assert response.json()["status"] == "OK", response.text
+
+        await write("POST", MAPPING_PATH, {
+            "superTokensUserId": target, "externalUserId": rownd_id,
+        })
+        parent = {}
+        context = create_derived_user_context(parent, {}) if derived else parent
+        bound = await assert_source_binding(target, rownd_id, context)
+        assert bound.id == rownd_id  # Exercise external-ID resolution back to target.
+        cache_tag = getattr(sdk_querier.Querier, "_Querier__global_cache_tag")
+
+        # Bypass the SDK: another worker's writes cannot invalidate this process's tag.
+        if mutation == "tombstone":
+            await write("PUT", "/recipe/user/metadata", {
+                "userId": rownd_id, "metadataUpdate": {"rownd_migration_superseded": {}},
+            })
+        else:
+            await write("POST", MAPPING_PATH + "/remove", {
+                "userId": rownd_id, "userIdType": "EXTERNAL", "force": True,
+            })
+            if mutation == "reassign_mapping":
+                await write("POST", MAPPING_PATH, {
+                    "superTokensUserId": replacement.user.id, "externalUserId": rownd_id,
+                })
+        assert getattr(sdk_querier.Querier, "_Querier__global_cache_tag") == cache_tag
+
+        # Negative control: removing only the entry barrier leaves cached authority usable.
+        with monkeypatch.context() as without_barrier:
+            without_barrier.setattr(repo, "clear_supertokens_core_call_cache", lambda context: None)
+            stale = await assert_source_binding(target, rownd_id, context)
+            assert stale.id == rownd_id
+
+        with pytest.raises(MigrationError) as caught:
+            await assert_source_binding(target, rownd_id, context)
+        expected = (MigrationErrorReason.IDENTITY_OWNED_BY_ANOTHER_USER if mutation == "tombstone"
+                    else MigrationErrorReason.MAPPING_CONFLICT)
+        assert caught.value.reason == expected
+
+
 @pytest.fixture
 def intercept_sdk_transport(monkeypatch: pytest.MonkeyPatch):
     def install(handler: Callable[[httpx.Request], Awaitable[httpx.Response | None]]) -> None:

@@ -119,13 +119,13 @@ async def repair_current_email(
             raise _invalid()
         plan = {**plan, "state": "complete"}
         await repo.usermetadata_asyncio.update_user_metadata(ledger_id, {"plan": plan}, context)
+        user = await assert_source_binding(target.user_id, rownd_id, context)
     email_identity = next((identity for identity in source.snapshot.expected_identities
                            if identity.identifier_type == "email"), None)
     if email_identity is None:
         return
     tenant, rownd_id = source.snapshot.tenant_id, source.snapshot.rownd_user_id
     email = email_identity.identifier
-    user = await assert_source_binding(target.user_id, rownd_id, context)
     metadata = await repo.get_user_metadata(target.user_id, context)
     original = repo.as_json_dict(metadata.get("original_rownd_user"))
     data = repo.as_json_dict(original.get("data"))
