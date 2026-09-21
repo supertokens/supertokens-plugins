@@ -5,7 +5,7 @@ import UserMetadata from "supertokens-node/recipe/usermetadata";
 import Passwordless from "supertokens-node/recipe/passwordless";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
 import Multitenancy from "supertokens-node/recipe/multitenancy";
-import { hasReconciliationReads, invalidateReconciliationReads, reconciliationRead, reconciliationProgress } from "./reconciliation-reads";
+import { assertReconciliationWritesAllowed, hasReconciliationReads, invalidateReconciliationReads, reconciliationRead, reconciliationProgress } from "./reconciliation-reads";
 
 function invalidateGraphs() {
   invalidateReconciliationReads("user");
@@ -43,6 +43,7 @@ function facade<T extends object>(sdk: T, recipe: string): T {
           (recipe === "thirdparty" && ["signInUp", "manuallyCreateOrUpdateUser"].includes(property)) ||
           (recipe === "tenant" && ["associateUserToTenant", "disassociateUserFromTenant"].includes(property));
         if (!mappingWrite && !metadataWrite && !verificationWrite && !graphWrite) return call();
+        assertReconciliationWritesAllowed();
         const invalidate = () => {
           if (metadataWrite) invalidateReconciliationReads("metadata", String(args[0]));
           if (mappingWrite) invalidateReconciliationReads("mapping");

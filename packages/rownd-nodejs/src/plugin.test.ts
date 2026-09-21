@@ -4575,6 +4575,56 @@ describe("rownd-nodejs plugin", () => {
     });
 
     describe("POST /migrate", () => {
+      it("publishes the canonical target once and rejects a conflicting target on retry", async () => {
+        const { server: s, port } = await setup(importCoreConnectionURI);
+        server = s;
+        const rowndUserId = `canonical-publication-${randomUUID()}`;
+        mockRowndClient.validateToken.mockResolvedValue({ user_id: rowndUserId });
+        mockRowndClient.fetchUserInfo.mockResolvedValue({
+          data: { user_id: rowndUserId, email: `${rowndUserId}@example.com` },
+          verified_data: { email: true },
+        });
+        const writes = vi.spyOn(UserMetadata, "updateUserMetadata");
+        const createSession = vi.spyOn(Session, "createNewSession");
+        const migrate = () => fetch(`http://localhost:${port}/auth/plugin/rownd/migrate`, {
+          method: "POST", headers: { Authorization: "Bearer canonical-token", "st-auth-mode": "header" },
+        });
+        const canonicalWrites = () => writes.mock.calls.filter(([id, update]) =>
+          id === rowndUserId && update.rownd_migration_canonical_target !== undefined);
+
+        expect((await UserMetadata.getUserMetadata(rowndUserId)).metadata.rownd_migration_canonical_target).toBeUndefined();
+        const initial = await migrate();
+        expect(initial.status).toBe(200);
+        expect(await initial.json()).toEqual({ status: "OK" });
+        const target = (await UserMetadata.getUserMetadata(rowndUserId)).metadata.rownd_migration_canonical_target;
+        expect(target).toEqual(expect.any(String));
+        expect(canonicalWrites()).toHaveLength(1);
+        expect(canonicalWrites()[0]![1]).toEqual({ rownd_migration_canonical_target: target });
+
+        writes.mockClear();
+        createSession.mockClear();
+        const repeated = await migrate();
+        expect(repeated.status).toBe(200);
+        expect(await repeated.json()).toEqual({ status: "OK" });
+        expect(repeated.headers.has("st-access-token")).toBe(true);
+        expect(createSession).toHaveBeenCalledTimes(1);
+        expect(canonicalWrites()).toHaveLength(0);
+        expect((await UserMetadata.getUserMetadata(rowndUserId)).metadata.rownd_migration_canonical_target).toBe(target);
+
+        await UserMetadata.updateUserMetadata(rowndUserId, { rownd_migration_canonical_target: "conflicting-target" });
+        writes.mockClear();
+        createSession.mockClear();
+        const conflicted = await migrate();
+        expect(conflicted.status).toBe(400);
+        expect(await conflicted.json()).toMatchObject({ status: "ERROR" });
+        expect(createSession).not.toHaveBeenCalled();
+        expect(canonicalWrites()).toHaveLength(0);
+        expect((await UserMetadata.getUserMetadata(rowndUserId)).metadata.rownd_migration_canonical_target).toBe("conflicting-target");
+        for (const header of ["set-cookie", "st-access-token", "st-refresh-token", "front-token"]) {
+          expect(conflicted.headers.has(header)).toBe(false);
+        }
+      });
+
       describe.each(["/auth/plugin/rownd/migrate", "/auth/plugin/migrate-session"])("missing legacy user: %s", (path) => {
         it.each([
           "missing", "invalid token", "undefined profile", "existing user", "cached absence",

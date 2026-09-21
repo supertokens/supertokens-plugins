@@ -5,7 +5,7 @@ import EmailVerification from "supertokens-node/recipe/emailverification";
 import Session from "supertokens-node/recipe/session";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import { User } from "supertokens-node/lib/build/user";
-import { assertConsolidationSessionMembership, prepareOwnerConsolidation } from "./migration-consolidation";
+import { assertCompletedPlan, assertConsolidationSessionMembership, prepareOwnerConsolidation } from "./migration-consolidation";
 import { bindAdministrativeElection, inspectAdministrativeElection } from "./migration-election";
 import { fetchAdministrativeMigrationSource } from "./migration-email";
 import { applyOwnerOperation, OWNER_PLAN_KEY, readOwnerPlanCheckpoint } from "./migration-owner-plan";
@@ -13,8 +13,8 @@ import { setRowndClient } from "./rownd-repository";
 import { recordAdministrativeMethodCreation } from "./migration-method-receipts";
 import { assertMigrationSourceActive } from "./migration-mapping";
 import { inspectInstantPrimaryProof } from "./migration-instant-election";
-import { withReconciliationReads } from "./reconciliation-reads";
-import { reconciliationUserMetadata } from "./reconciliation-sdk";
+import { invalidateReconciliationReads, withReconciliationReads } from "./reconciliation-reads";
+import { reconciliationAccountLinking, reconciliationSuperTokens, reconciliationUserMetadata } from "./reconciliation-sdk";
 import type { RowndUser } from "./types";
 import type { JsonRecord } from "./utils";
 
@@ -168,6 +168,88 @@ async function prepare(bind = true, sourceId = "newer", ownerIds = ["T", "D"]) {
 }
 
 describe("durable owner transitions", () => {
+  it.each(["mapping", "owner", "literal metadata"])("standalone completed observations deduplicate exact selectors but refresh after external %s changes", async (change) => {
+    const consolidation = await prepare();
+    await consolidation.execute();
+    await consolidation.beginMethodReconciliation();
+    await consolidation.complete();
+    const checkpoint = readOwnerPlanCheckpoint(metadata.get("T")!)!;
+    const users = vi.mocked(SuperTokens.getUser);
+    const mappingReads = vi.mocked(SuperTokens.getUserIdMapping);
+    const metadataReads = vi.mocked(UserMetadata.getUserMetadata);
+    users.mockClear();
+    mappingReads.mockClear();
+    metadataReads.mockClear();
+    const observation = await assertCompletedPlan(checkpoint, {});
+    expect(observation.state.graph).toEqual(checkpoint.completion!.state.graph);
+    const userIds = users.mock.calls.map(([id]) => id);
+    const mappingIds = mappingReads.mock.calls.map(([input]) => `${input.userIdType}:${input.userId}`);
+    const metadataIds = metadataReads.mock.calls.map(([id]) => id);
+    expect(userIds.length).toBe(new Set(userIds).size);
+    expect(mappingIds.length).toBe(new Set(mappingIds).size);
+    expect(metadataIds.length).toBe(new Set(metadataIds).size);
+    expect(metadataIds).toEqual(expect.arrayContaining(["T", "newer", "older"]));
+    expect(mappingIds).toEqual(expect.arrayContaining(["EXTERNAL:newer", "SUPERTOKENS:T"]));
+    if (change === "mapping") mappings.delete("T");
+    else if (change === "owner") recipes.get("D")!.owner = "D";
+    else metadata.set("older", { ...metadata.get("older"), rownd_migration_canonical_target: "outside" });
+    await expect(assertCompletedPlan(checkpoint, {})).rejects.toThrow();
+  });
+
+  it("completed observations preserve outer graph reads across metadata-only writes and refresh on explicit invalidation", async () => {
+    const consolidation = await prepare();
+    await consolidation.execute();
+    await consolidation.beginMethodReconciliation();
+    await consolidation.complete();
+    const checkpoint = readOwnerPlanCheckpoint(metadata.get("T")!)!;
+    await withReconciliationReads(async () => {
+      await assertCompletedPlan(checkpoint, {});
+      vi.mocked(SuperTokens.getUser).mockClear();
+      vi.mocked(SuperTokens.getUserIdMapping).mockClear();
+      vi.mocked(UserMetadata.getUserMetadata).mockClear();
+      vi.mocked(EmailVerification.isEmailVerified).mockClear();
+      await assertCompletedPlan(checkpoint, {});
+      expect(UserMetadata.getUserMetadata).not.toHaveBeenCalled();
+      await reconciliationUserMetadata.updateUserMetadata("D", { preference: "kept" });
+      await assertCompletedPlan(checkpoint, {});
+      expect(UserMetadata.getUserMetadata).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(UserMetadata.getUserMetadata).mock.calls[0]![0]).toBe("D");
+      expect(SuperTokens.getUser).not.toHaveBeenCalled();
+      expect(SuperTokens.getUserIdMapping).not.toHaveBeenCalled();
+      expect(EmailVerification.isEmailVerified).not.toHaveBeenCalled();
+      invalidateReconciliationReads();
+      await assertCompletedPlan(checkpoint, {});
+      expect(SuperTokens.getUser).toHaveBeenCalledTimes(5);
+      expect(SuperTokens.getUserIdMapping).toHaveBeenCalledTimes(10);
+      expect(UserMetadata.getUserMetadata).toHaveBeenCalledTimes(6);
+      expect(EmailVerification.isEmailVerified).toHaveBeenCalledTimes(10);
+      mappings.delete("T");
+      invalidateReconciliationReads();
+      await expect(assertCompletedPlan(checkpoint, {})).rejects.toThrow();
+    });
+  });
+
+  it.each(["mapping", "graph"])("completed observations respect SDK %s mutation invalidation in the outer scope", async (change) => {
+    const consolidation = await prepare();
+    await consolidation.execute();
+    await consolidation.beginMethodReconciliation();
+    await consolidation.complete();
+    const checkpoint = readOwnerPlanCheckpoint(metadata.get("T")!)!;
+    await withReconciliationReads(async () => {
+      await assertCompletedPlan(checkpoint, {});
+      if (change === "mapping") {
+        await reconciliationSuperTokens.deleteUserIdMapping({ userId: "newer", userIdType: "EXTERNAL" });
+      } else {
+        vi.mocked(AccountLinking.unlinkAccount).mockImplementationOnce(async () => {
+          recipes.get("D")!.owner = "D";
+          return { status: "OK", wasLinked: true, wasRecipeUserDeleted: false };
+        });
+        await reconciliationAccountLinking.unlinkAccount(SuperTokens.convertToRecipeUserId(external("D")));
+      }
+      await expect(assertCompletedPlan(checkpoint, {})).rejects.toThrow();
+    });
+  });
+
   it("ordinary consolidation reuses discovery profiles across completion boundaries", async () => {
     const fetchUserInfo = vi.fn(async ({ user_id }: { user_id: string }) => structuredClone(profiles.get(user_id)));
     setRowndClient({ validateToken: async () => ({ user_id: "newer" }), fetchUserInfo });

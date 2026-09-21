@@ -62,7 +62,7 @@ import {
 } from "./utils";
 import type { RowndUser, SuperTokensUserImport } from "./types";
 import type { ReconcilePreviewAction } from "./reconcile-preview";
-import { invalidateReconciliationReads, reconciliationReadRevision } from "./reconciliation-reads";
+import { hasReconciliationReads, invalidateReconciliationReads, reconciliationReadRevision, withReadOnlyReconciliationReads } from "./reconciliation-reads";
 
 type User = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
 type Method = User["loginMethods"][number];
@@ -398,8 +398,18 @@ function sharedProfile(left: RowndUser, right: RowndUser) {
   );
 }
 
+// Administrative reconciliation owns its invalidation boundaries. Standalone
+// token validations instead discard all observation evidence when they return.
+function withConsolidationReads<T>(action: () => Promise<T>) {
+  return hasReconciliationReads() ? action() : withReadOnlyReconciliationReads(action);
+}
+
 async function observe(plan: OwnerPlanCheckpoint, context: JsonRecord) {
   clearSuperTokensCoreCallCache(context);
+  return withConsolidationReads(() => observeInPhase(plan, context));
+}
+
+async function observeInPhase(plan: OwnerPlanCheckpoint, context: JsonRecord) {
   const state: OwnerState = {
     graph: [],
     mappings: [],
@@ -548,15 +558,24 @@ export async function assertCompletedPlan(
   plan: OwnerPlanCheckpoint,
   context: JsonRecord,
 ) {
+  clearSuperTokensCoreCallCache(context);
+  return withConsolidationReads(() => assertCompletedPlanInPhase(plan, context));
+}
+
+async function assertCompletedPlanInPhase(
+  plan: OwnerPlanCheckpoint,
+  context: JsonRecord,
+) {
   if (plan.status !== "COMPLETE" || plan.reservation)
     throw new RowndMigrationPolicyError("Owner consolidation is incomplete");
   const completed = plan.completion;
-  const { state } = await observe(
+  const observed = await observeInPhase(
     completed
       ? { ...plan, recipes: completed.recipes, initial: completed.state }
       : plan,
     context,
   );
+  const { state } = observed;
   const final = completed?.state ?? ownerStateAt(plan, plan.operations.length);
   if (
     state.graph.length < plan.recipes.length ||
@@ -617,6 +636,7 @@ export async function assertCompletedPlan(
     throw new RowndMigrationPolicyError(
       "Consolidation canonical metadata changed",
     );
+  return observed;
 }
 
 export async function assertConsolidationSessionMembership(
@@ -1364,8 +1384,7 @@ export async function prepareOwnerConsolidation(input: {
           fail("an unplanned exact-email owner appeared");
       }
     if (plan.status === "COMPLETE") {
-      await assertCompletedPlan(plan, context);
-      return observe(plan, context);
+      return assertCompletedPlan(plan, context);
     }
     for (const receipt of plan.createdRecipes ?? []) {
       const user = await SuperTokens.getUser(receipt.id, context);

@@ -2,11 +2,21 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 type ReadKind = "rownd" | "user" | "mapping" | "metadata" | "search" | "verification";
 export type ReconciliationProgress = { stage: "discovery" | "execution" | "verification"; action?: string };
-type Context = { reads: Map<ReadKind, Map<string, Promise<unknown>>>; revision: object; onProgress?: (event: ReconciliationProgress) => void };
+type Context = { reads: Map<ReadKind, Map<string, Promise<unknown>>>; revision: object; readOnly?: boolean; onProgress?: (event: ReconciliationProgress) => void };
 const contexts = new AsyncLocalStorage<Context>();
 
 export function withReconciliationReads<T>(action: () => Promise<T>, onProgress?: Context["onProgress"]) {
   return contexts.run({ reads: new Map(), revision: {}, onProgress }, action);
+}
+
+// Explicit validation phases never inherit or publish cached evidence from/to the
+// surrounding reconciliation. The caller must also clear the SDK's Core cache.
+export function withReadOnlyReconciliationReads<T>(action: () => Promise<T>) {
+  return contexts.run({ reads: new Map(), revision: {}, readOnly: true, onProgress: contexts.getStore()?.onProgress }, action);
+}
+
+export function assertReconciliationWritesAllowed() {
+  if (contexts.getStore()?.readOnly) throw new Error("Cannot mutate a read-only reconciliation phase");
 }
 
 export function hasReconciliationReads() {

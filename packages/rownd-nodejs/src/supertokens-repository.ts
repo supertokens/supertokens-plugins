@@ -275,21 +275,33 @@ function ownsImportAccountInfo(
   return loginMethod.hasSameEmailAs(importMethod.email);
 }
 
+type ImportAccountInfoReader = (tenantId: string, accountInfo: Parameters<typeof SuperTokens.listUsersByAccountInfo>[1]) => ReturnType<typeof SuperTokens.listUsersByAccountInfo>;
+
+function createImportAccountInfoReader(userContext: JsonRecord): ImportAccountInfoReader {
+  // Each discovery owns its promises; later passes must observe intervening mutations.
+  const searches = new Map<string, ReturnType<ImportAccountInfoReader>>();
+  return (tenantId, accountInfo) => {
+    const key = JSON.stringify([tenantId, accountInfo]);
+    let result = searches.get(key);
+    if (!result) {
+      result = SuperTokens.listUsersByAccountInfo(tenantId, accountInfo, false, userContext);
+      searches.set(key, result);
+    }
+    return result;
+  };
+}
+
 async function inspectImportMethod(
   importMethod: ImportLoginMethod,
   tenantId: string,
   userContext: JsonRecord,
+  readAccountInfo: ImportAccountInfoReader = (tenant, accountInfo) => SuperTokens.listUsersByAccountInfo(tenant, accountInfo, false, userContext),
 ) {
   const users = new Map(
     (
       await Promise.all(
         getImportMethodAccountInfos(importMethod).map((accountInfo) =>
-          SuperTokens.listUsersByAccountInfo(
-            tenantId,
-            accountInfo,
-            false,
-            userContext,
-          ),
+          readAccountInfo(tenantId, accountInfo),
         ),
       )
     )
@@ -316,7 +328,8 @@ async function inspectImportMethod(
 }
 
 export async function findExistingImportMethodUsers(source: SuperTokensUserImport, tenantId: string, userContext: JsonRecord) {
-  const inspections = await Promise.all(source.loginMethods.map((method) => inspectImportMethod(method, tenantId, userContext)));
+  const readAccountInfo = createImportAccountInfoReader(userContext);
+  const inspections = await Promise.all(source.loginMethods.map((method) => inspectImportMethod(method, tenantId, userContext, readAccountInfo)));
   return [...new Map(inspections.flatMap(({ importMethod, owners }) => owners
     .filter(({ loginMethod }) => matchesImportLoginMethod(loginMethod, importMethod))
     .map(({ user }) => [user.id, user] as const))).values()];
@@ -324,8 +337,9 @@ export async function findExistingImportMethodUsers(source: SuperTokensUserImpor
 
 export async function inspectMigrationMethods(source: SuperTokensUserImport, methods: ImportLoginMethod[], tenantId: string, userContext: JsonRecord) {
   const authenticatedEmail = getMigrationContactEmail(source, tenantId);
+  const readAccountInfo = createImportAccountInfoReader(userContext);
   return Promise.all(methods.map(async (method) => {
-    const inspection = await inspectImportMethod(method, tenantId, userContext);
+    const inspection = await inspectImportMethod(method, tenantId, userContext, readAccountInfo);
     if (method.recipeId !== "passwordless" || authenticatedEmail === undefined ||
         method.email?.toLowerCase() !== authenticatedEmail) return { ...inspection, incidentalEmailOwners: [] };
     // Contact proof does not authorize incidental same-email provider accounts.
@@ -1066,12 +1080,13 @@ async function reconcileRowndUserOnce(
       await assertUserIsNotMappedToAnotherRowndUser(id, stUser.externalUserId, userContext);
       clearSuperTokensCoreCallCache(userContext);
       const beforeLink = await SuperTokens.getUser(id, userContext);
-      if (!beforeLink || (!await sdkUserIdMatchesInternalTarget(beforeLink.id, primaryUserId, userContext) &&
+      const alreadyLinked = beforeLink ? await sdkUserIdMatchesInternalTarget(beforeLink.id, primaryUserId, userContext) : false;
+      if (!beforeLink || (!alreadyLinked &&
           (beforeLink.isPrimaryUser || !beforeLink.loginMethods.some((method) =>
             method.recipeUserId.getAsString() === id && method.tenantIds.includes(tenantId) && matchesImportLoginMethod(method, action.method))))) {
         throw new RowndMigrationPolicyError("Migrated login method ownership changed before linking");
       }
-      if (await sdkUserIdMatchesInternalTarget(beforeLink.id, primaryUserId, userContext)) continue;
+      if (alreadyLinked) continue;
       if (action.recipe.kind === "existing" && action.expectedOwner !== await resolveUserId(beforeLink.id)) throw new RowndMigrationPolicyError("Planned donor owner changed");
       if (action.recipe.kind === "existing" && action.method.recipeId === "thirdparty") {
         await checkpointProviderIntroduction({ source: stUser, internalUserId: primaryUserId, recipeUserId: id, tenantId,

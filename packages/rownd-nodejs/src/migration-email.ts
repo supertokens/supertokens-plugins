@@ -347,8 +347,8 @@ export async function finishCurrentRowndEmailReconciliation(input: {
 }) {
   const { internalUserId, plan, tenantId, userContext } = input;
   const { user, retiredMethods } = await validateCurrentRowndEmailReconciliation(input);
-  for (const retired of retiredMethods) {
-    await validateCurrentRowndEmailReconciliation(input);
+  for (const [index, retired] of retiredMethods.entries()) {
+    if (index > 0) await validateCurrentRowndEmailReconciliation(input);
     const result = await Passwordless.revokeAllCodes({ email: retired.email, tenantId, userContext });
     if (result.status !== "OK") throw new Error("Failed to revoke retired Rownd email codes");
     await input.removeMethod(retired.recipeUserId, tenantId, user.id);

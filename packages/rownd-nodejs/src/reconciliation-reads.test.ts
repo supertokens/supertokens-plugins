@@ -2,11 +2,33 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import SuperTokens from "supertokens-node";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import { reconciliationSuperTokens as core, reconciliationUserMetadata as metadata } from "./reconciliation-sdk";
-import { invalidateReconciliationReads, reconciliationRead, withReconciliationReads } from "./reconciliation-reads";
+import { invalidateReconciliationReads, reconciliationRead, withReconciliationReads, withReadOnlyReconciliationReads } from "./reconciliation-reads";
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("invocation reconciliation reads", () => {
+  it("isolates read-only phase evidence from the outer cache and rejects mutations", async () => {
+    let revision = 0;
+    const load = vi.fn(async () => revision);
+    const write = vi.spyOn(UserMetadata, "updateUserMetadata").mockResolvedValue({ status: "OK", metadata: {} });
+    await withReconciliationReads(async () => {
+      expect(await reconciliationRead("metadata", "owner", load)).toBe(0);
+      revision = 1;
+      await withReadOnlyReconciliationReads(async () => {
+        expect(await reconciliationRead("metadata", "owner", load)).toBe(1);
+        expect(await reconciliationRead("metadata", "owner", load)).toBe(1);
+        expect(() => metadata.updateUserMetadata("owner", {})).toThrow("read-only");
+      });
+      expect(await reconciliationRead("metadata", "owner", load)).toBe(0);
+      revision = 2;
+      await withReadOnlyReconciliationReads(async () => {
+        expect(await reconciliationRead("metadata", "owner", load)).toBe(2);
+      });
+    });
+    expect(write).not.toHaveBeenCalled();
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
   it("deduplicates concurrent latency-injected reads and starts each retry fresh", async () => {
     const load = vi.fn(async () => {
       await new Promise((resolve) => setTimeout(resolve, 2));

@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import { withProvenSessionAuthentication } from "./session-authentication";
 import { MigrationTelemetry } from "./telemetry/migrationTelemetry";
-import { assertMigrationMapping } from "./migration-mapping";
+import { assertMigrationMapping, resolveMigrationMapping } from "./migration-mapping";
 import { resolveConsolidatedTokenOwner } from "./migration-consolidation";
 import { discoverMigrationById, planMigration } from "./migration-plan";
 import { authenticateRowndMigration, assertAuthenticatedMigrationSource } from "./migration-email";
@@ -470,15 +470,12 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       if (consolidatedAlias && (await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext))?.canonicalRowndId !== consolidatedAlias.canonicalRowndId) {
         throw new Error("Consolidated Rownd alias ownership changed before session creation");
       }
-      clearSuperTokensCoreCallCache(resolved.userContext);
-      const finalMapping = await SuperTokens.getUserIdMapping({
-        userId: rowndUserId, userIdType: "EXTERNAL", userContext: resolved.userContext,
-      });
-      const internalUserId = finalMapping.status === "OK" ? finalMapping.superTokensUserId : rowndUserId;
-      await assertMigrationMapping(internalUserId, rowndUserId, resolved.userContext);
-      await UserMetadata.updateUserMetadata(rowndUserId, {
-        rownd_migration_canonical_target: internalUserId,
-      }, resolved.userContext);
+      const { internalUserId, metadata: sourceMetadata } = await resolveMigrationMapping(rowndUserId, resolved.userContext);
+      if (sourceMetadata.rownd_migration_canonical_target !== internalUserId) {
+        await UserMetadata.updateUserMetadata(rowndUserId, {
+          rownd_migration_canonical_target: internalUserId,
+        }, resolved.userContext);
+      }
       await assertMigrationMapping(internalUserId, rowndUserId, resolved.userContext);
       // Keep newly issued credentials off the response until the actual session
       // binding has been checked. Existing browser credentials are never cleared.

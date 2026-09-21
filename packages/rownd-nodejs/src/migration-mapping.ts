@@ -140,6 +140,31 @@ export async function assertMigrationMapping(
   userContext: JsonRecord,
 ) {
   const metadata = await assertMigrationSourceActive(rowndUserId, userContext);
+  await assertMigrationMappingWithMetadata(internalUserId, rowndUserId, metadata, userContext);
+}
+
+export async function resolveMigrationMapping(
+  rowndUserId: string,
+  userContext: JsonRecord,
+) {
+  const metadata = await assertMigrationSourceActive(rowndUserId, userContext);
+  const external = await SuperTokens.getUserIdMapping({
+    userId: rowndUserId,
+    userIdType: "EXTERNAL",
+    userContext,
+  });
+  const internalUserId = external.status === "OK" ? external.superTokensUserId : rowndUserId;
+  await assertMigrationMappingWithMetadata(internalUserId, rowndUserId, metadata, userContext, external);
+  return { internalUserId, metadata };
+}
+
+async function assertMigrationMappingWithMetadata(
+  internalUserId: string,
+  rowndUserId: string,
+  metadata: JsonRecord,
+  userContext: JsonRecord,
+  externalMapping?: Awaited<ReturnType<typeof SuperTokens.getUserIdMapping>>,
+) {
   if (
     metadata.rownd_migration_canonical_target !== undefined &&
     metadata.rownd_migration_canonical_target !== internalUserId
@@ -147,7 +172,7 @@ export async function assertMigrationMapping(
     throw new RowndMigrationPolicyError("The canonical reconciliation target changed");
   }
   const [external, internal] = await Promise.all([
-    SuperTokens.getUserIdMapping({
+    externalMapping ?? SuperTokens.getUserIdMapping({
       userId: rowndUserId,
       userIdType: "EXTERNAL",
       userContext,
