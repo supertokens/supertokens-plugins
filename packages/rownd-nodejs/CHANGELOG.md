@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 0.7.12
+
+### Patch Changes
+
+- Reduce the number of requests during the migration call
+
 ## 0.7.11
 
 ### Patch Changes
