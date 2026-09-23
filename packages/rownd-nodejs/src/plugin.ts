@@ -93,6 +93,7 @@ import {
 } from "./pluginImplementation";
 
 import { withProvenSessionAuthentication } from "./session-authentication";
+import { withAppleJwksRetry } from "./apple-jwks-retry";
 
 const DISABLED_MIGRATION_ROWND_APP_KEY = "migration-disabled";
 const PENDING_EMAIL_VERIFICATION_SESSION_ERROR =
@@ -1091,6 +1092,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 );
                 const response = await originalImplementation.signInUpPOST({
                   ...input,
+                  // Retry verification only: an OAuth authorization code may already be consumed.
+                  provider: withAppleJwksRetry(input.provider),
                   userContext: operationContext,
                 });
 
