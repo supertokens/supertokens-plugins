@@ -9,6 +9,7 @@ import type {
 } from "supertokens-node/recipe/oauth2provider/types";
 import type { APIInterface as PasswordlessAPIInterface } from "supertokens-node/recipe/passwordless";
 import Session from "supertokens-node/recipe/session";
+import type AccountLinking from "supertokens-node/recipe/accountlinking";
 import type { APIInterface as ThirdPartyAPIInterface } from "supertokens-node/recipe/thirdparty";
 import type {
   SessionContainerInterface,
@@ -40,13 +41,18 @@ import {
   setSuperTokensConfig,
   validateDynamicConfig,
 } from "./config";
-import { RowndEmailChangeError } from "./errors";
+import { RowndEmailChangeError, RowndPasswordlessCleanupError } from "./errors";
 import {
   applyRowndOAuthResourceParams,
   buildRowndOAuthPayload,
   buildRowndOAuthUserInfo,
   normalizeRowndOAuthScopes,
   doesRowndAccountInfoExist,
+  findHistoricalEmailOwner,
+  passwordlessHistoryOwner,
+  linkHistoricalPasswordlessUser,
+  type HistoricalPasswordlessScope,
+  type PasswordlessAuthSnapshot,
   shouldLinkRowndAccounts,
 } from "./rownd-compatibility";
 import { setRowndClient } from "./rownd-repository";
@@ -178,6 +184,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           : undefined;
       const telemetryClient = createClient(pluginConfig.telemetry);
       let hubBootstrapParams: Record<string, string> | undefined;
+      let accountLinkingDecision: NonNullable<NonNullable<Parameters<typeof AccountLinking.init>[0]>["shouldDoAutomaticAccountLinking"]> =
+        async () => ({ shouldAutomaticallyLink: false });
 
       const addHubBootstrapParams = <T extends Record<string, any>>(
         input: T,
@@ -624,6 +632,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const usesExplicitAuthIntent =
                   (intent === "sign_in" || intent === "sign_up") &&
                   explicitFlowEnabled;
+                let authSnapshot: PasswordlessAuthSnapshot | undefined;
                 if ("email" in input) {
                   let preparation: Awaited<
                     ReturnType<typeof prepareEmailForPasswordlessAuth>
@@ -635,6 +644,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       reconcileTarget: usesExplicitAuthIntent,
                       userContext: resolved.userContext,
                     });
+                    authSnapshot = "snapshot" in preparation ? preparation.snapshot : undefined;
                   } catch (error) {
                     logDebugMessage(
                       `Explicit passwordless email preparation failed. Error: ${error instanceof Error ? error.message : String(error)}`,
@@ -655,6 +665,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 if (usesExplicitAuthIntent && intent === "sign_in") {
                   if (
                     !(await doesRowndAccountInfoExist({
+                      snapshot: authSnapshot,
                       tenantId: input.tenantId,
                       ...("email" in input
                         ? { email: input.email }
@@ -868,6 +879,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     ? requestedIntent
                     : undefined;
                 let consumedEmail: string | undefined;
+                let authSnapshot: PasswordlessAuthSnapshot | undefined;
                 try {
                   const device =
                     await input.options.recipeImplementation.listCodesByPreAuthSessionId(
@@ -885,6 +897,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       reconcileTarget: false,
                       userContext: resolved.userContext,
                     });
+                    authSnapshot = "snapshot" in preparation ? preparation.snapshot : undefined;
                     if (preparation.status === "REJECT_CLEANUP_METHOD") {
                       return {
                         status: "SIGN_IN_UP_NOT_ALLOWED" as const,
@@ -905,11 +918,85 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   resolved.userContext,
                   { rowndAppVariantId: appVariantId },
                 );
+                const historicalOwner = consumedEmail && !input.session
+                  ? await findHistoricalEmailOwner({
+                    snapshot: authSnapshot,
+                    requireNewPasswordless: true,
+                    email: consumedEmail,
+                    tenantId: input.tenantId,
+                    userContext: operationContext,
+                  })
+                  : undefined;
+                const historicalScope: HistoricalPasswordlessScope | undefined = historicalOwner && consumedEmail ? {
+                  userId: historicalOwner.id,
+                  email: consumedEmail.trim().toLowerCase(),
+                  tenantId: input.tenantId,
+                  ownerRecipeUserIds: historicalOwner.loginMethods.map((method) => method.recipeUserId.getAsString()),
+                } : undefined;
+                const consumeContext = createDerivedUserContext(operationContext, {
+                  [passwordlessHistoryOwner]: historicalScope,
+                });
                 const response = await originalImplementation.consumeCodePOST({
                   ...input,
-                  userContext: operationContext,
+                  userContext: consumeContext,
+                  options: historicalScope ? {
+                    ...input.options,
+                    recipeImplementation: {
+                      ...input.options.recipeImplementation,
+                      consumeCode: async (consumeInput) => {
+                        if (consumeInput.tenantId !== historicalScope.tenantId || consumeInput.session ||
+                          consumeInput.preAuthSessionId !== input.preAuthSessionId || historicalScope.recipeUserId ||
+                          historicalScope.denied) {
+                          historicalScope.denied = true;
+                          return { status: "RESTART_FLOW_ERROR" as const };
+                        }
+                        const result = await input.options.recipeImplementation.consumeCode({
+                          ...consumeInput, userContext: consumeContext,
+                        });
+                        if (result.status !== "OK") return result;
+                        historicalScope.recipeUserId = result.recipeUserId.getAsString();
+                        const cleanup = async () => {
+                          if (result.createdNewRecipeUser) {
+                            await deleteRejectedConsumedPasswordlessUser({
+                              userId: result.recipeUserId.getAsString(),
+                              recipeUserId: result.recipeUserId.getAsString(),
+                              email: historicalScope.email,
+                              tenantId: historicalScope.tenantId,
+                              onlyIfStillStandalone: true,
+                              userContext: consumeContext,
+                            });
+                          }
+                        };
+                        let user;
+                        try {
+                          user = await linkHistoricalPasswordlessUser(
+                            historicalScope, accountLinkingDecision, consumeContext,
+                          );
+                        } catch (error) {
+                          historicalScope.denied = true;
+                          try {
+                            await cleanup();
+                          } catch (cleanupError) {
+                            throw new RowndPasswordlessCleanupError(error, cleanupError);
+                          }
+                          throw error;
+                        }
+                        if (!user) {
+                          await cleanup();
+                          return { status: "RESTART_FLOW_ERROR" as const };
+                        }
+                        return { ...result, user };
+                      },
+                    },
+                  } : input.options,
                 });
 
+                if (historicalScope && (historicalScope.denied || (response.status === "OK" &&
+                  response.session.getUserId(consumeContext) !== historicalScope.userId))) {
+                  historicalScope.denied = true;
+                  if (response.status === "OK") await response.session.revokeSession(consumeContext);
+                  return { status: "SIGN_IN_UP_NOT_ALLOWED" as const, reason: INACTIVE_PASSWORDLESS_EMAIL_REASON };
+                }
                 if (response.status === "OK") {
                   if (consumedEmail) {
                     try {
@@ -920,7 +1007,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                           tenantId: input.tenantId,
                           intent: explicitIntent,
                           createdNewRecipeUser: response.createdNewRecipeUser,
-                          userContext: operationContext,
+                          recipeUserId: response.session.getRecipeUserId(consumeContext).getAsString(),
+                          userContext: consumeContext,
                         });
                       if (disposition.status !== "ALLOW") {
                         await response.session.revokeSession(operationContext);
@@ -1034,7 +1122,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
 
               return {
                 ...config,
-                shouldDoAutomaticAccountLinking: async (...input) => {
+                shouldDoAutomaticAccountLinking: accountLinkingDecision = async (...input) => {
                   if (input[4]?.rowndDisableAutomaticAccountLinking === true) {
                     return {
                       shouldAutomaticallyLink: false,
@@ -1044,6 +1132,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   const rowndLinkingDecision =
                     await shouldLinkRowndAccounts(input);
                   if (rowndLinkingDecision) {
+                    if ("historicalEmail" in rowndLinkingDecision && originalShouldDoAutomaticAccountLinking) {
+                      const originalDecision = await originalShouldDoAutomaticAccountLinking(...input);
+                      if (!originalDecision.shouldAutomaticallyLink) return originalDecision;
+                    }
                     return rowndLinkingDecision;
                   }
 

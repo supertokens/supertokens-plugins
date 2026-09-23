@@ -190,6 +190,25 @@ Canonical email metadata is considered during account lookup and automatic
 linking, so a stale email retained by Apple or another provider cannot restore a
 replaced Passwordless email.
 
+Imported unverified accounts can also use email sign-in when linked-account
+metadata contains a nonempty string `first_sign_in` or `last_sign_in`, at the
+top level or under `original_rownd_user.meta`. This compatibility policy still
+requires a unique matching owner, the same real email and tenant, and valid
+canonical-email state. Code issuance does not mark the imported method verified.
+
+Adjacent read-only authorization steps reuse the same account and metadata
+snapshot. Historical linking reloads state across application callbacks, account
+promotion, linking, and session creation; snapshots are never cached globally or
+carried across those boundaries. Existing passwordless and verified accounts skip
+the historical-consume metadata lookup.
+
+Historical-account linking rechecks ownership before and after linking and
+before accepting the session. These checks and the Core link operation are not
+atomic. A conflict detected after linking denies authentication or revokes the
+session, but cannot reverse a completed link. The plugin does not attempt an
+unsafe rollback; failure cleanup deletes only a newly created passwordless user
+that is still the exact standalone email/tenant identity when re-fetched.
+
 Successful update responses that start verification include
 `email_verification_pending: true`. The returned profile continues to contain
 the current canonical email until verification completes.

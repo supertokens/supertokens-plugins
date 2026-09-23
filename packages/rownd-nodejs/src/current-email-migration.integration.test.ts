@@ -2033,7 +2033,7 @@ Module._load = function(id, ...args) {
     await expectCanonical(fixture, 1);
     expect((await UserMetadata.getUserMetadata(fixture.internalId)).metadata.rownd_pending_verification).toEqual([nativePending]);
     expect(await Session.getSessionInformation(session.getHandle())).toBeUndefined();
-    await expect(prepareEmailForPasswordlessAuth({ email: fixture.email, tenantId: "public", reconcileTarget: true, userContext: {} })).resolves.toEqual({ status: "ALLOW" });
+    await expect(prepareEmailForPasswordlessAuth({ email: fixture.email, tenantId: "public", reconcileTarget: true, userContext: {} })).resolves.toMatchObject({ status: "ALLOW" });
   });
 
   it.each([

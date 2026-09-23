@@ -1,6 +1,7 @@
 import { reconciliationSuperTokens as SuperTokens, reconciliationAccountLinking as AccountLinking, reconciliationEmailVerification as EmailVerification, reconciliationUserMetadata as UserMetadata, reconciliationPasswordless as Passwordless, reconciliationThirdParty as ThirdParty, reconciliationMultitenancy as MultiTenancy } from "./reconciliation-sdk";
 import { classifyMethodOwner, resolveMethodInspection, selectMigrationMethods, planMethods, methodPlanAllows, type MethodRecipe, type MethodSnapshot, type MethodPlan } from "./migration-method-plan";
 import { recordAdministrativeMethodCreation } from "./migration-method-receipts";
+import { invalidateReconciliationReads } from "./reconciliation-reads";
 import { migrationPhoneAccountInfos, sameCorePhoneNumber } from "./migration-phone-identity";
 import { backfillAdministrativeMetadata } from "./migration-admin-metadata";
 import { getAdministrativeRepairMetadata, prepareAdministrativeCanonicalEmail } from "./migration-admin-email";
@@ -75,6 +76,10 @@ import {
   getRawUserMetadata,
   mergeMissingValues,
   inspectLinkedUserMetadata,
+  hasHistoricalEmailEligibility,
+  type PasswordlessAuthSnapshot,
+  getHistoricalPasswordlessScope,
+  validateHistoricalPasswordlessOwner,
   updatePrimaryUserMetadata,
 } from "./rownd-compatibility";
 import {
@@ -3282,6 +3287,7 @@ export async function prepareEmailForPasswordlessAuth(input: {
       }
     | { userId: string; disposition: "CLEANUP" }
   > = [];
+  const snapshot: PasswordlessAuthSnapshot = { users, inspections: new Map() };
 
   for (const user of users) {
     const listedMatchingMethods = user.loginMethods.filter(
@@ -3293,6 +3299,7 @@ export async function prepareEmailForPasswordlessAuth(input: {
     if (listedMatchingMethods.length === 0) continue;
 
     const inspection = await inspectLinkedUserMetadata(user.id, input.userContext, user);
+    snapshot.inspections.set(user.id, inspection);
     const metadata = inspection.combinedMetadata;
     const committingPlans = getCommittingEmailPlansForTenant(
       metadata,
@@ -3389,7 +3396,7 @@ export async function prepareEmailForPasswordlessAuth(input: {
     }
   }
 
-  if (matchingPlans.length === 0) return { status: "ALLOW" } as const;
+  if (matchingPlans.length === 0) return { status: "ALLOW", snapshot } as const;
   if (matchingPlans.length > 1) {
     throw new Error("multiple matching email reconciliation accounts found");
   }
@@ -3426,10 +3433,24 @@ export async function validateConsumedPasswordlessEmail(input: {
   tenantId: string;
   intent?: "sign_in" | "sign_up";
   createdNewRecipeUser: boolean;
+  recipeUserId?: string;
   userContext?: Record<string, any>;
 }) {
+  clearSuperTokensCoreCallCache(input.userContext ?? {});
+  invalidateReconciliationReads();
+  const historicalScope = getHistoricalPasswordlessScope(input.userContext);
+  let historicalOwner: Awaited<ReturnType<typeof validateHistoricalPasswordlessOwner>>;
+  if (historicalScope) {
+    if (input.userId !== historicalScope.userId || input.tenantId !== historicalScope.tenantId ||
+      input.recipeUserId !== historicalScope.recipeUserId ||
+      normalizeEmail(input.email) !== historicalScope.email ||
+      !(historicalOwner = await validateHistoricalPasswordlessOwner(historicalScope, input.userContext, true))) {
+      historicalScope.denied = true;
+      return { status: "REJECT" } as const;
+    }
+  }
   if (isSuperTokensFakeEmail(input.email)) return { status: "REJECT" } as const;
-  const owner = await SuperTokens.getUser(input.userId, input.userContext);
+  const owner = historicalOwner ?? await SuperTokens.getUser(input.userId, input.userContext);
   if (!owner || owner.id !== input.userId) {
     return { status: "REJECT" } as const;
   }
@@ -3456,7 +3477,13 @@ export async function validateConsumedPasswordlessEmail(input: {
       );
       if (
         input.intent === "sign_in" &&
-        !isLinkedToVerifiedMatchingEmailMethod
+        !isLinkedToVerifiedMatchingEmailMethod &&
+        !historicalOwner &&
+        !(await hasHistoricalEmailEligibility({
+          ...owner,
+          loginMethods: owner.loginMethods.filter((candidate) =>
+            candidate.recipeUserId.getAsString() !== recipeUserId),
+        }, input.email, input.tenantId, input.userContext))
       ) {
         return { status: "REJECT" } as const;
       }
@@ -3504,14 +3531,19 @@ export async function deleteRejectedConsumedPasswordlessUser(input: {
   recipeUserId: string;
   tenantId: string;
   email: string;
+  onlyIfStillStandalone?: boolean;
   userContext?: Record<string, any>;
 }) {
+  // A throwing callback may have linked or promoted this user through another client.
+  clearSuperTokensCoreCallCache(input.userContext ?? {});
+  invalidateReconciliationReads();
   const owner = await SuperTokens.getUser(input.recipeUserId, input.userContext);
   const method = owner?.loginMethods[0];
   if (
     !owner ||
     owner.id !== input.userId ||
     owner.id !== input.recipeUserId ||
+    (input.onlyIfStillStandalone && owner.isPrimaryUser) ||
     owner.loginMethods.length !== 1 ||
     method?.recipeUserId.getAsString() !== input.recipeUserId ||
     method.recipeId !== "passwordless" ||
@@ -3519,6 +3551,7 @@ export async function deleteRejectedConsumedPasswordlessUser(input: {
     method.tenantIds[0] !== input.tenantId ||
     normalizeEmail(method.email ?? "") !== normalizeEmail(input.email)
   ) {
+    if (input.onlyIfStillStandalone) return;
     throw new Error("refusing to delete non-standalone consumed user");
   }
   await SuperTokens.deleteUser(input.recipeUserId, false, input.userContext);

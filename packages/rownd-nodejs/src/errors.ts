@@ -41,6 +41,16 @@ export class RowndConfigResolutionError extends Error {
   }
 }
 
+export class RowndPasswordlessCleanupError extends Error {
+  constructor(
+    public readonly cause: unknown,
+    public readonly cleanupError: unknown,
+  ) {
+    super("Historical passwordless linking and cleanup failed");
+    this.name = "RowndPasswordlessCleanupError";
+  }
+}
+
 // Explicit invariant failures are policy blocks; unknown errors remain operational.
 export class RowndMigrationPolicyError extends Error {
   constructor(message: string) {

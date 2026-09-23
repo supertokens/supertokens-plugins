@@ -18,6 +18,7 @@ import UserMetadata, {
 import Passwordless from "supertokens-node/recipe/passwordless";
 import type { APIInterface as PasswordlessAPIInterface } from "supertokens-node/recipe/passwordless";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
+import { withReconciliationReads } from "./reconciliation-reads";
 import EmailVerification from "supertokens-node/recipe/emailverification";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
@@ -48,6 +49,7 @@ import {
 import {
   ROWND_PLUGIN_ERROR_MESSAGES,
   RowndConfigResolutionError,
+  RowndPasswordlessCleanupError,
 } from "./errors";
 import {
   DEFAULT_ROWND_SCHEMA,
@@ -58,6 +60,10 @@ import {
   buildRowndOAuthPayload,
   combineLinkedMetadata,
   doesRowndAccountInfoExist,
+  findHistoricalEmailOwner,
+  hasHistoricalEmailEligibility,
+  validateHistoricalPasswordlessOwner,
+  passwordlessHistoryOwner,
   mapRowndUserToSuperTokens,
   shouldLinkRowndAccounts,
 } from "./rownd-compatibility";
@@ -658,6 +664,122 @@ describe("rownd-nodejs plugin", () => {
       ).rejects.toThrow("UNKNOWN_USER_ID_ERROR");
       expect(associate).toHaveBeenCalledTimes(2);
       expect(disassociate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("historical email eligibility", () => {
+    it("does not reuse reconciliation facade evidence across historical validation boundaries", async () => {
+      const email = "reconciliation-history@example.com";
+      const user = { id: "owner", loginMethods: [{ recipeId: "thirdparty",
+        recipeUserId: SuperTokens.convertToRecipeUserId("owner"), email, verified: false,
+        tenantIds: ["public"], thirdParty: { id: "google", userId: "google-owner" } }] } as any;
+      vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([user]);
+      vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({ status: "UNKNOWN_MAPPING_ERROR" });
+      const metadata = vi.spyOn(UserMetadata, "getUserMetadata").mockResolvedValue({ status: "OK",
+        metadata: { first_sign_in: "2024-01-01" } });
+      await withReconciliationReads(async () => {
+        const scope = { userId: user.id, email, tenantId: "public", ownerRecipeUserIds: [user.id] };
+        const context = {};
+        expect(await validateHistoricalPasswordlessOwner(scope, context)).toBe(user);
+        metadata.mockResolvedValue({ status: "OK", metadata: { first_sign_in: "2024-01-01",
+          rownd_email_recipe_user_id: "no-longer-canonical" } });
+        expect(await validateHistoricalPasswordlessOwner(scope, context)).toBeUndefined();
+      });
+    });
+    it.each(["passwordless", "thirdparty"])("reuses one snapshot for stable %s create authorization", async (recipeId) => {
+      const email = "io@example.com";
+      const user = { id: "io-owner", loginMethods: [{ recipeId,
+        recipeUserId: SuperTokens.convertToRecipeUserId("io-owner"), email,
+        verified: false, tenantIds: ["public"], thirdParty: { id: "google", userId: "io-google" } }] } as any;
+      const list = vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([user]);
+      const mapping = vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({ status: "UNKNOWN_MAPPING_ERROR" });
+      const metadata = vi.spyOn(UserMetadata, "getUserMetadata").mockResolvedValue({ status: "OK", metadata: { first_sign_in: "2024-01-01" } });
+      const preparation = await prepareEmailForPasswordlessAuth({ email, tenantId: "public", reconcileTarget: true });
+      expect(await doesRowndAccountInfoExist({ email, tenantId: "public",
+        snapshot: "snapshot" in preparation ? preparation.snapshot : undefined })).toBe(true);
+      expect([list.mock.calls.length, mapping.mock.calls.length, metadata.mock.calls.length]).toEqual([1, 2, 1]);
+    });
+    it.each(["passwordless", "verified-provider"])("avoids historical reads during normal %s consume preparation", async (kind) => {
+      const email = "normal@example.com";
+      const user = { id: "normal", loginMethods: [{ recipeId: kind === "passwordless" ? kind : "thirdparty",
+        recipeUserId: SuperTokens.convertToRecipeUserId("normal"), email, verified: kind !== "passwordless",
+        tenantIds: ["public"], thirdParty: { id: "google", userId: "normal-google" } }] } as any;
+      const list = vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([user]);
+      const mapping = vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({ status: "UNKNOWN_MAPPING_ERROR" });
+      const metadata = vi.spyOn(UserMetadata, "getUserMetadata").mockResolvedValue({ status: "OK", metadata: {} });
+      const preparation = await prepareEmailForPasswordlessAuth({ email, tenantId: "public", reconcileTarget: false });
+      const readsBeforeHistory = [list.mock.calls.length, mapping.mock.calls.length, metadata.mock.calls.length];
+      expect(await findHistoricalEmailOwner({ email, tenantId: "public", requireNewPasswordless: true,
+        snapshot: "snapshot" in preparation ? preparation.snapshot : undefined })).toBeUndefined();
+      expect([list.mock.calls.length, mapping.mock.calls.length, metadata.mock.calls.length]).toEqual(readsBeforeHistory);
+    });
+    it("reads linked history once even when a primary empty value masks it", async () => {
+      vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({ status: "UNKNOWN_MAPPING_ERROR" });
+      const metadata = vi.spyOn(UserMetadata, "getUserMetadata").mockImplementation(async (id) => ({
+        status: "OK", metadata: { first_sign_in: id === "sibling" ? "2024-01-01" : "" },
+      }));
+      const user = { id: "owner", loginMethods: ["owner", "sibling"].map((id) => ({ recipeId: "thirdparty",
+        recipeUserId: SuperTokens.convertToRecipeUserId(id), email: "linked@example.com", verified: false,
+        tenantIds: ["public"], thirdParty: { id: "google", userId: id } })) } as any;
+      expect(await hasHistoricalEmailEligibility(user, "linked@example.com", "public")).toBe(true);
+      expect(metadata.mock.calls.map(([id]) => id).sort()).toEqual(["owner", "sibling"]);
+    });
+    it.each(["recipe", "email", "tenant", "provider"])("explicitly denies a mismatched scoped %s callback", async (mismatch) => {
+      const scope = { userId: "owner", email: "scope@example.com", tenantId: "public",
+        ownerRecipeUserIds: ["google-owner"], recipeUserId: "consumed-passwordless" };
+      const decision = await shouldLinkRowndAccounts([
+        { recipeId: mismatch === "provider" ? "thirdparty" : "passwordless",
+          recipeUserId: SuperTokens.convertToRecipeUserId(mismatch === "recipe" ? "unrelated" : "consumed-passwordless"),
+          email: mismatch === "email" ? "other@example.com" : scope.email },
+        undefined, undefined, mismatch === "tenant" ? "other" : "public",
+        { [passwordlessHistoryOwner]: scope },
+      ]);
+      expect(decision).toMatchObject({ shouldAutomaticallyLink: false });
+      expect(scope).toMatchObject({ denied: true });
+    });
+    it.each([
+      [{ first_sign_in: "2024-01-01" }, true],
+      [{ last_sign_in: "2024-01-01" }, true],
+      [{ original_rownd_user: { meta: { last_sign_in: "2024-01-01" } } }, true],
+      [{}, false],
+      [{ first_sign_in: "", last_sign_in: "  " }, false],
+      [{ first_sign_in: true, last_sign_in: 123 }, false],
+      [{ original_rownd_user: { meta: { first_sign_in: null } } }, false],
+    ])("requires nonempty string history: %j", async (metadata, expected) => {
+      vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({ status: "UNKNOWN_MAPPING_ERROR" });
+      vi.spyOn(UserMetadata, "getUserMetadata").mockResolvedValue({ status: "OK", metadata });
+      const user = { id: "history-user", loginMethods: [{ recipeId: "thirdparty",
+        recipeUserId: { getAsString: () => "history-user" }, email: "history@example.com",
+        verified: false, tenantIds: ["public"], thirdParty: { id: "google", userId: "google-history" } }] } as any;
+      expect(await hasHistoricalEmailEligibility(user, "history@example.com", "public")).toBe(expected);
+      expect(await hasHistoricalEmailEligibility(user, "other@example.com", "public")).toBe(false);
+      expect(await hasHistoricalEmailEligibility(user, "history@example.com", "other")).toBe(false);
+      for (const provider of ["guest", "instant"]) {
+        user.loginMethods[0].thirdParty.id = provider;
+        expect(await hasHistoricalEmailEligibility(user, "history@example.com", "public")).toBe(false);
+      }
+    });
+
+    it("keeps canonical conflicts, synthetic addresses and ambiguous owners ineligible", async () => {
+      vi.spyOn(SuperTokens, "getUserIdMapping").mockResolvedValue({ status: "UNKNOWN_MAPPING_ERROR" });
+      const metadata = { first_sign_in: "2024-01-01", rownd_email_recipe_user_id: "canonical" };
+      vi.spyOn(UserMetadata, "getUserMetadata").mockResolvedValue({ status: "OK", metadata });
+      const method = (id: string, email: string) => ({ recipeId: "thirdparty",
+        recipeUserId: { getAsString: () => id }, email, verified: false,
+        tenantIds: ["public"], thirdParty: { id: "google", userId: id } });
+      const user = { id: "history-user", loginMethods: [method("old", "old@example.com"), method("canonical", "new@example.com")] } as any;
+      expect(await hasHistoricalEmailEligibility(user, "old@example.com", "public")).toBe(false);
+      expect(await hasHistoricalEmailEligibility(user, "new@example.com", "public")).toBe(true);
+      metadata.rownd_email_recipe_user_id = "missing";
+      expect(await hasHistoricalEmailEligibility(user, "new@example.com", "public")).toBe(false);
+      metadata.rownd_email_recipe_user_id = "canonical";
+      Object.assign(metadata, { rownd_pending_verification: [{ tenantId: "public", status: "COMMITTING", value: "new@example.com", retiredMethods: [{ recipeUserId: "old", email: "old@example.com" }] }] });
+      expect(await hasHistoricalEmailEligibility(user, "new@example.com", "public")).toBe(false);
+      Object.assign(metadata, { rownd_pending_verification: undefined });
+      user.loginMethods[1].email = "fake@stfakeemail.supertokens.com";
+      expect(await hasHistoricalEmailEligibility(user, user.loginMethods[1].email, "public")).toBe(false);
+      vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([user, { ...user, id: "another" }]);
+      expect(await doesRowndAccountInfoExist({ email: "old@example.com", tenantId: "public" })).toBe(false);
     });
   });
 
@@ -10004,6 +10126,222 @@ describe("rownd-nodejs plugin", () => {
         },
       );
 
+      it.each(["standalone", "primary", "sibling", "OTP", "denied", "absent", "empty", "ambiguous", "external", "racing-owner", "reparented", "canonical-changed", "remote-callback-owner", "remote-callback-canonical", "remote-link-owner", "remote-link-canonical", "postconsume-canonical", "postconsume-owner", "callback-throws", "callback-throws-linked", "callback-throws-cleanup"])("applies historical Google-only email sign-in policy (%s)", async (scenario) => {
+        const passwordlessLinks: string[] = [];
+        const passwordlessCodes: string[] = [];
+        let callbackThrew = false;
+        const requestErrors: unknown[] = [];
+        const linkingFailure = new Error("application linking callback failed after consumption");
+        const cleanupFailure = new Error("Core delete request failed");
+        const coreWrite = async (path: string, body: Record<string, unknown>, method = "POST") => {
+          const response = await fetch(`${importCoreConnectionURI}${path}`, {
+            method, headers: { "content-type": "application/json", "cdi-version": "5.4" },
+            body: JSON.stringify(body),
+          });
+          expect(response.status).toBe(200);
+          expect(await response.json()).toMatchObject({ status: "OK" });
+        };
+        let remoteMutation = false;
+        const { server: s, port } = await setup(importCoreConnectionURI, {
+          appConfig: { auth: { useExplicitSignUpFlow: true }, signInMethods: [{ method: "email" }] },
+        }, { passwordlessLinks, passwordlessCodes, requestErrors,
+          passwordlessFlowType: scenario === "OTP" ? "USER_INPUT_CODE_AND_MAGIC_LINK" : "MAGIC_LINK",
+          automaticAccountLinking: scenario !== "denied",
+          onAutomaticAccountLinking: async (...args) => {
+            const scope = args[4][passwordlessHistoryOwner];
+            if (scenario.startsWith("remote-") && scope?.recipeUserId && !remoteMutation &&
+              (!scenario.startsWith("remote-link-") || args[1])) {
+              remoteMutation = true;
+              if (scenario.endsWith("canonical")) {
+                await coreWrite("/recipe/user/metadata", { userId: scope.userId,
+                  metadataUpdate: { rownd_email_recipe_user_id: "no-longer-canonical" } }, "PUT");
+              } else {
+                await coreWrite("/public/recipe/signinup", { thirdPartyId: "google",
+                  thirdPartyUserId: randomUUID(), email: { id: scope.email, isVerified: false } });
+              }
+            }
+            if (scenario.startsWith("callback-throws") && scope?.recipeUserId && !callbackThrew) {
+              callbackThrew = true;
+              const consumed = await SuperTokens.getUser(scope.recipeUserId, args[4]);
+              expect(consumed?.id).toBe(scope.recipeUserId);
+              expect(consumed?.loginMethods).toHaveLength(1);
+              if (scenario === "callback-throws-linked") {
+                const owner = await SuperTokens.getUser(scope.userId);
+                await coreWrite("/recipe/accountlinking/user/primary", { recipeUserId: owner!.loginMethods[0].recipeUserId.getAsString() });
+                await coreWrite("/recipe/accountlinking/user/link", { recipeUserId: scope.recipeUserId, primaryUserId: scope.userId });
+              }
+              if (scenario === "callback-throws-cleanup") {
+                vi.spyOn(SuperTokens, "deleteUser").mockRejectedValueOnce(cleanupFailure);
+              }
+              throw linkingFailure;
+            }
+          },
+        });
+        server = s;
+        testPORT = port;
+        const email = `historical-google-${randomUUID()}@example.com`;
+        const imported = await importUser({
+          userMetadata: { original_rownd_user: {
+            data: { user_id: randomUUID(), email },
+            meta: { first_sign_in: "2024-01-01T00:00:00Z" },
+            verified_data: {},
+          } },
+          loginMethods: [{ recipeId: "thirdparty", email, isVerified: false,
+            thirdPartyId: "google", thirdPartyUserId: randomUUID(), tenantIds: ["public"] }],
+        }, { connectionURI: importCoreConnectionURI });
+        if (scenario === "absent" || scenario === "empty") {
+          await UserMetadata.updateUserMetadata(imported.id, { original_rownd_user: null,
+            first_sign_in: scenario === "empty" ? "  " : null, last_sign_in: "" });
+        }
+        if (scenario === "ambiguous") {
+          await ThirdParty.manuallyCreateOrUpdateUser("public", "google", randomUUID(), email, false,
+            undefined, { rowndDisableAutomaticAccountLinking: true });
+        }
+        let expectedUserId = imported.id;
+        if (scenario === "external") {
+          const externalId = `rownd-${randomUUID()}`;
+          expect((await SuperTokens.createUserIdMapping({ superTokensUserId: imported.id, externalUserId: externalId, force: true })).status).toBe("OK");
+          await UserMetadata.updateUserMetadata(imported.id, { original_rownd_user: null });
+          await UserMetadata.updateUserMetadata(externalId, { last_sign_in: "2024-01-01" });
+          expectedUserId = externalId;
+        }
+        if (scenario === "primary" || scenario === "sibling") {
+          expect((await AccountLinking.createPrimaryUser(SuperTokens.convertToRecipeUserId(imported.loginMethods[0].recipeUserId))).status).toBe("OK");
+        }
+        if (scenario === "sibling") {
+          const sibling = await ThirdParty.manuallyCreateOrUpdateUser("public", "apple", randomUUID(),
+            `sibling-${randomUUID()}@stfakeemail.supertokens.com`, false, undefined, { rowndDisableAutomaticAccountLinking: true });
+          if (sibling.status !== "OK") throw new Error("failed to create sibling");
+          expect((await AccountLinking.linkAccounts(sibling.recipeUserId, imported.id)).status).toBe("OK");
+          await UserMetadata.updateUserMetadata(imported.id, { original_rownd_user: null, first_sign_in: "" });
+          await UserMetadata.updateUserMetadata(sibling.recipeUserId.getAsString(), { first_sign_in: "2024-01-01" });
+        }
+        const code = await (await requestPasswordlessCode(email, "sign_in")).json() as any;
+        if (["absent", "empty", "ambiguous"].includes(scenario)) {
+          expect(code.status).not.toBe("OK");
+          expect(passwordlessLinks).toHaveLength(0);
+          return;
+        }
+        expect(code).toMatchObject({ status: "OK" });
+        expect((await SuperTokens.getUser(imported.id))?.loginMethods[0].verified).toBe(false);
+        let racedOwnerId: string | undefined;
+        if (["racing-owner", "reparented", "canonical-changed"].includes(scenario)) {
+          const implementation = PasswordlessRaw.getInstanceOrThrowError().recipeInterfaceImpl;
+          const originalConsume = implementation.consumeCode.bind(implementation);
+          vi.spyOn(implementation, "consumeCode").mockImplementationOnce(async (consumeInput) => {
+            expect(consumeInput.userContext[passwordlessHistoryOwner]).toMatchObject({ userId: imported.id });
+            if (scenario === "canonical-changed") {
+              await UserMetadata.updateUserMetadata(imported.id, { rownd_email_recipe_user_id: "no-longer-canonical" });
+            } else {
+              const other = await ThirdParty.manuallyCreateOrUpdateUser("public", "google", randomUUID(),
+                scenario === "racing-owner" ? email : `other-${randomUUID()}@example.com`, false,
+                undefined, { rowndDisableAutomaticAccountLinking: true });
+              if (other.status !== "OK") throw new Error("failed to create racing owner");
+              racedOwnerId = other.user.id;
+              if (scenario === "reparented") {
+                expect((await AccountLinking.createPrimaryUser(other.recipeUserId)).status).toBe("OK");
+                expect((await AccountLinking.linkAccounts(
+                  SuperTokens.convertToRecipeUserId(imported.loginMethods[0].recipeUserId), other.user.id,
+                )).status).toBe("OK");
+                expect((await SuperTokens.getUser(imported.id))?.id).toBe(other.user.id);
+              }
+            }
+            return originalConsume(consumeInput);
+          });
+        }
+        if (scenario.startsWith("postconsume-")) {
+          const implementation = SessionRaw.getInstanceOrThrowError().recipeInterfaceImpl;
+          const originalCreate = implementation.createNewSession.bind(implementation);
+          vi.spyOn(implementation, "createNewSession").mockImplementationOnce(async (sessionInput) => {
+            const result = await originalCreate(sessionInput);
+            if (scenario === "postconsume-canonical") {
+              await coreWrite("/recipe/user/metadata", { userId: imported.id,
+                metadataUpdate: { rownd_email_recipe_user_id: "no-longer-canonical" } }, "PUT");
+            } else {
+              await coreWrite("/public/recipe/signinup", { thirdPartyId: "google",
+                thirdPartyUserId: randomUUID(), email: { id: email, isVerified: false } });
+            }
+            return result;
+          });
+        }
+        const consume = scenario === "OTP" ? await fetch(`http://localhost:${testPORT}/auth/signinup/code/consume`, {
+          method: "POST", headers: { rid: "passwordless", "content-type": "application/json", "fdi-version": "1.18", "st-auth-mode": "header" },
+          body: JSON.stringify({ preAuthSessionId: code.preAuthSessionId, deviceId: code.deviceId, userInputCode: passwordlessCodes[0], intent: "sign_in" }),
+        }) : await consumePasswordlessLink(passwordlessLinks[0], "sign_in");
+        if (scenario.startsWith("callback-throws")) {
+          expect(callbackThrew).toBe(true);
+          expect(consume.status).toBe(500);
+          const matching = await SuperTokens.listUsersByAccountInfo("public", { email }, true);
+          if (scenario === "callback-throws-cleanup") {
+            expect(requestErrors[0]).toBeInstanceOf(RowndPasswordlessCleanupError);
+            expect(requestErrors[0]).toMatchObject({ cause: linkingFailure, cleanupError: cleanupFailure });
+            expect(matching).toHaveLength(2);
+            expect((await SuperTokens.getUser(imported.id))?.loginMethods).toHaveLength(1);
+            return;
+          }
+          expect(requestErrors[0]).toBe(linkingFailure);
+          expect(matching).toHaveLength(1);
+          expect(matching[0].id).toBe(imported.id);
+          expect(matching[0].loginMethods).toHaveLength(scenario === "callback-throws-linked" ? 2 : 1);
+          await expect((await requestPasswordlessCode(email, "sign_in")).json()).resolves.toMatchObject({ status: "OK" });
+          const retry = await consumePasswordlessLink(passwordlessLinks[passwordlessLinks.length - 1], "sign_in");
+          await expect(retry.json()).resolves.toMatchObject({ status: "OK", user: { id: imported.id } });
+          return;
+        }
+        if (scenario.startsWith("remote-")) expect(remoteMutation).toBe(true);
+        if (scenario.startsWith("remote-") || ["denied", "racing-owner", "reparented", "canonical-changed", "postconsume-canonical", "postconsume-owner"].includes(scenario)) {
+          expect(requestErrors).toEqual([]);
+          await expect(consume.json()).resolves.toMatchObject({ status: "SIGN_IN_UP_NOT_ALLOWED" });
+          if (scenario.startsWith("postconsume-")) {
+            await expect(Session.getSessionWithoutRequestResponse(consume.headers.get("st-access-token")!)).rejects.toThrow();
+            if (scenario === "postconsume-canonical") {
+              const sentBeforeRetry = passwordlessLinks.length;
+              const retry = await requestPasswordlessCode(email, "sign_in");
+              expect((await retry.json() as any).status).not.toBe("OK");
+              expect(passwordlessLinks).toHaveLength(sentBeforeRetry);
+            }
+          } else {
+            const owner = await SuperTokens.getUser(imported.id);
+            expect(owner?.loginMethods.some((method) => method.recipeId === "passwordless")).toBe(false);
+            if (racedOwnerId) {
+              expect((await SuperTokens.getUser(racedOwnerId))?.loginMethods.some((method) => method.recipeId === "passwordless")).toBe(false);
+            }
+            expect((await SuperTokens.listUsersByAccountInfo("public", { email }, true))
+              .flatMap((user) => user.loginMethods).some((method) => method.recipeId === "passwordless")).toBe(false);
+          }
+          return;
+        }
+        await expect(consume.json()).resolves.toMatchObject({ status: "OK", user: { id: expectedUserId }, createdNewRecipeUser: true });
+        const session = await Session.getSessionWithoutRequestResponse(consume.headers.get("st-access-token")!);
+        expect(session?.getUserId()).toBe(expectedUserId);
+        const owner = await SuperTokens.getUser(imported.id);
+        expect(owner?.loginMethods).toHaveLength(scenario === "sibling" ? 3 : 2);
+        expect(owner?.loginMethods).toContainEqual(expect.objectContaining({ recipeId: "passwordless", email, verified: true }));
+      });
+
+      it.each(["verified-provider", "passwordless"])("allows ordinary %s sign-in alongside an unverified same-email owner", async (kind) => {
+        const passwordlessLinks: string[] = [];
+        const { server: s, port } = await setup(importCoreConnectionURI, {
+          appConfig: { auth: { useExplicitSignUpFlow: true }, signInMethods: [{ method: "email" }] },
+        }, { passwordlessLinks });
+        server = s;
+        testPORT = port;
+        const email = `ordinary-shared-${randomUUID()}@example.com`;
+        const eligible = kind === "passwordless"
+          ? await Passwordless.signInUp({ tenantId: "public", email })
+          : await ThirdParty.manuallyCreateOrUpdateUser("public", "google", randomUUID(), email, true);
+        if (eligible.status !== "OK") throw new Error("failed to create eligible owner");
+        expect((await AccountLinking.createPrimaryUser(eligible.recipeUserId)).status).toBe("OK");
+        const other = await ThirdParty.manuallyCreateOrUpdateUser("public", "apple", randomUUID(), email, false,
+          undefined, { rowndDisableAutomaticAccountLinking: true });
+        if (other.status !== "OK") throw new Error("failed to create unverified owner");
+        expect(other.user.id).not.toBe(eligible.user.id);
+        await expect((await requestPasswordlessCode(email, "sign_in")).json()).resolves.toMatchObject({ status: "OK" });
+        const consume = await consumePasswordlessLink(passwordlessLinks[0], "sign_in");
+        await expect(consume.json()).resolves.toMatchObject({ status: "OK", user: { id: eligible.user.id } });
+        expect((await SuperTokens.getUser(other.user.id))?.loginMethods).toHaveLength(1);
+      });
+
       it("allows first explicit email sign-in to a verified Google-only primary account", async () => {
         const passwordlessLinks: string[] = [];
         const { server: s, port } = await setup(
@@ -14325,6 +14663,9 @@ async function setup(
   coreConnectionURI: string,
   config?: Partial<RowndPluginConfig>,
   options?: {
+    automaticAccountLinking?: boolean;
+    onAutomaticAccountLinking?: (...input: Parameters<typeof shouldLinkRowndAccounts>[0]) => Promise<void>;
+    requestErrors?: unknown[];
     enableEmailVerification?: boolean;
     enableEmailSignIn?: boolean;
     emailVerificationMode?: "OPTIONAL" | "REQUIRED";
@@ -14353,9 +14694,13 @@ async function setup(
         },
         recipeList: [
           AccountLinking.init({
-            shouldDoAutomaticAccountLinking: async () => ({
-              shouldAutomaticallyLink: false,
-            }),
+            shouldDoAutomaticAccountLinking: async (...input) => {
+              await options?.onAutomaticAccountLinking?.(...input);
+              return {
+                shouldAutomaticallyLink: options?.automaticAccountLinking ?? false,
+                shouldRequireVerification: true,
+              };
+            },
           }),
           Session.init(),
           UserMetadata.init(),
@@ -14429,6 +14774,12 @@ async function setup(
       });
 
       app.use(middleware());
+      if (options?.requestErrors) {
+        app.use((error: unknown, _req: express.Request, _res: express.Response, next: express.NextFunction) => {
+          options.requestErrors!.push(error);
+          next(error);
+        });
+      }
       app.use(errorHandler());
 
       resolve({ server: s, port });

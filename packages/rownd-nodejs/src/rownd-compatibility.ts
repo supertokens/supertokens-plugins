@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 import { normalizeOptionalRowndIdentities, resolveRowndProviderSubject } from "./provider-identity";
 
 import { reconciliationSuperTokens as SuperTokens, reconciliationAccountLinking as AccountLinking, reconciliationUserMetadata as UserMetadata } from "./reconciliation-sdk";
-import type { JSONObject } from "supertokens-node/types";
+import type { JSONObject, UserContext } from "supertokens-node/types";
 
 import {
   DEFAULT_ROWND_SCHEMA,
   GUEST_AUTH_METHOD_ID,
   INSTANT_AUTH_METHOD_ID,
+  PUBLIC_TENANT_ID,
   RESERVED_SESSION_CLAIMS,
   ROWND_JWT_CLAIMS,
 } from "./constants";
@@ -24,7 +25,8 @@ import type {
   SuperTokensUserImport,
 } from "./types";
 import type { JsonRecord, JsonValue } from "./utils";
-import { getStringList, isJsonRecord } from "./utils";
+import { clearSuperTokensCoreCallCache, getStringList, isJsonRecord } from "./utils";
+import { invalidateReconciliationReads } from "./reconciliation-reads";
 import { readOwnerPlanCheckpoint } from "./migration-owner-plan";
 import { RowndMigrationPolicyError } from "./errors";
 
@@ -34,6 +36,7 @@ export type LinkedUserMetadataInspection = {
   user?: SuperTokensUser;
   primaryUserId: string;
   linkedUserIds: string[];
+  linkedMetadata: Array<{ userId: string; metadata: RowndMetadata }>;
   primaryMetadata: RowndMetadata;
   combinedMetadata: RowndMetadata;
   metadataUpdate: JsonRecord;
@@ -224,6 +227,7 @@ export function combineLinkedMetadata(input: {
   return {
     primaryUserId: input.primaryUserId,
     linkedUserIds: linkedMetadata.map(({ userId }) => userId),
+    linkedMetadata,
     primaryMetadata: input.primaryMetadata,
     combinedMetadata: {
       ...input.primaryMetadata,
@@ -298,6 +302,7 @@ export async function inspectLinkedUserMetadata(
       user: undefined,
       primaryUserId: userId,
       linkedUserIds: [],
+      linkedMetadata: [],
       primaryMetadata: metadata,
       combinedMetadata: metadata,
       metadataUpdate: {},
@@ -899,6 +904,219 @@ function buildRowndOAuthSessionClaims(
   });
 }
 
+// Consumption runs with automatic linking disabled until its exact recipe ID is known.
+export const passwordlessHistoryOwner = Symbol("rownd.passwordlessHistoryOwner");
+
+export type HistoricalPasswordlessScope = {
+  userId: string;
+  email: string;
+  tenantId: string;
+  ownerRecipeUserIds: string[];
+  recipeUserId?: string;
+  denied?: boolean;
+};
+
+export function getHistoricalPasswordlessScope(userContext?: Record<string, any>) {
+  return (userContext as Record<PropertyKey, any> | undefined)?.[
+    passwordlessHistoryOwner
+  ] as HistoricalPasswordlessScope | undefined;
+}
+
+export async function validateHistoricalPasswordlessOwner(
+  scope: HistoricalPasswordlessScope,
+  userContext?: Record<string, any>,
+  requireLinked = false,
+) {
+  return (await loadHistoricalPasswordlessOwner(scope, userContext, requireLinked))?.owner;
+}
+
+async function loadHistoricalPasswordlessOwner(
+  scope: HistoricalPasswordlessScope,
+  userContext?: Record<string, any>,
+  requireLinked = false,
+) {
+  const reject = () => {
+    scope.denied = true;
+    return undefined;
+  };
+  if (scope.denied) return undefined;
+  // App callbacks and remote Core writes do not invalidate either local cache.
+  clearSuperTokensCoreCallCache(userContext ?? {});
+  invalidateReconciliationReads();
+  // The SDK returns complete owner graphs, including recipe IDs, from this query.
+  // Resolve both identities from the same response instead of fetching them again.
+  const users = await SuperTokens.listUsersByAccountInfo(
+    scope.tenantId, { email: scope.email }, true, userContext,
+  );
+  const owner = users.find((user) => user.id === scope.userId);
+  if (!owner) return reject();
+  let method: SuperTokensLoginMethod | undefined;
+  if (scope.recipeUserId) {
+    const consumedOwner = users.find((user) => user.loginMethods.some((candidate) =>
+      candidate.recipeUserId.getAsString() === scope.recipeUserId));
+    method = consumedOwner?.loginMethods.find((candidate) =>
+      candidate.recipeUserId.getAsString() === scope.recipeUserId);
+    if (!consumedOwner || !method || method.recipeId !== "passwordless" ||
+      !method.verified || method.email?.trim().toLowerCase() !== scope.email ||
+      !method.tenantIds.includes(scope.tenantId) ||
+      (consumedOwner.id !== scope.userId && (requireLinked ||
+        consumedOwner.id !== scope.recipeUserId || consumedOwner.isPrimaryUser ||
+        consumedOwner.loginMethods.length !== 1))) return reject();
+  } else if (requireLinked) return reject();
+  if (users.some((user) => user.id !== scope.userId &&
+    !(scope.recipeUserId && user.id === scope.recipeUserId &&
+      !user.isPrimaryUser && user.loginMethods.length === 1 &&
+      user.loginMethods[0]?.recipeUserId.getAsString() === scope.recipeUserId))) return reject();
+  const historicalOwner = {
+    ...owner,
+    loginMethods: owner.loginMethods.filter((method) =>
+      method.recipeUserId.getAsString() !== scope.recipeUserId),
+  };
+  if (!(await hasHistoricalEmailEligibility(
+    historicalOwner, scope.email, scope.tenantId, userContext,
+  ))) return reject();
+  return { owner, method };
+}
+
+export async function hasHistoricalEmailEligibility(
+  user: SuperTokensUser,
+  email: string,
+  tenantId: string,
+  userContext?: Record<string, any>,
+) {
+  if (!hasUnverifiedMatchingEmail(user, email, tenantId)) return false;
+  return evaluateHistoricalEmailEligibility(user, email, tenantId,
+    await inspectLinkedUserMetadata(user.id, userContext, user));
+}
+
+function hasUnverifiedMatchingEmail(user: SuperTokensUser, email: string, tenantId: string) {
+  if (isSyntheticEmail(email)) return false;
+  email = email.trim().toLowerCase();
+  const matching = user.loginMethods.filter(
+    (method) =>
+      !isGuestLoginMethod(method) &&
+      method.tenantIds.includes(tenantId) &&
+      method.email?.trim().toLowerCase() === email,
+  );
+  return matching.length > 0 && !matching.some((method) => method.verified);
+}
+
+export function evaluateHistoricalEmailEligibility(
+  user: SuperTokensUser,
+  email: string,
+  tenantId: string,
+  inspection: LinkedUserMetadataInspection,
+) {
+  if (!hasUnverifiedMatchingEmail(user, email, tenantId)) return false;
+  email = email.trim().toLowerCase();
+  const metadata = inspection.combinedMetadata;
+  const pending = metadata.rownd_pending_verification;
+  if (
+    pending !== undefined &&
+    (!Array.isArray(pending) || pending.some((plan) =>
+      isJsonRecord(plan) && (plan.tenantId ?? PUBLIC_TENANT_ID) === tenantId &&
+      (plan.status === "COMMITTING" || "retiredMethods" in plan ||
+        "targetCanonicalRecipeUserId" in plan)))
+  ) return false;
+  if (metadata.rownd_migration_email_retirements?.[tenantId] !== undefined) {
+    return false;
+  }
+  const hasHistory = (record: RowndMetadata) => [
+    record.first_sign_in,
+    record.last_sign_in,
+    record.original_rownd_user?.meta?.first_sign_in,
+    record.original_rownd_user?.meta?.last_sign_in,
+  ].some((value) => typeof value === "string" && value.trim().length > 0);
+  if (!hasHistory(metadata) && !hasHistory(inspection.primaryMetadata)) {
+    if (!inspection.linkedMetadata.some(({ metadata }) => hasHistory(metadata))) return false;
+  }
+  const canonical = resolveEmailForAuthentication({
+    user, metadata, email, tenantId,
+  });
+  if (
+    canonical.status !== "NO_EMAIL" &&
+    !(canonical.status === "SELECTED" && canonical.email === email)
+  ) return false;
+
+  // A policy-only view: never persist verification or relax the shared resolver.
+  const historical = resolveEmailForAuthentication({
+    user: {
+      ...user,
+      loginMethods: user.loginMethods.map((method) => ({
+        ...method,
+        verified: method.verified || (
+          !isGuestLoginMethod(method) && method.tenantIds.includes(tenantId)
+        ),
+      })),
+    },
+    metadata,
+    email,
+    tenantId,
+  });
+  return historical.status === "SELECTED" && historical.email === email;
+}
+
+export async function findHistoricalEmailOwner(input: {
+  email: string;
+  tenantId: string;
+  userContext?: Record<string, any>;
+  snapshot?: PasswordlessAuthSnapshot;
+  requireNewPasswordless?: boolean;
+}) {
+  const users = input.snapshot?.users ?? await SuperTokens.listUsersByAccountInfo(
+    input.tenantId,
+    { email: input.email },
+    true,
+    input.userContext,
+  );
+  if (users.length !== 1) return undefined;
+  if (input.requireNewPasswordless && users[0]!.loginMethods.some((method) => method.recipeId === "passwordless" &&
+    method.email?.trim().toLowerCase() === input.email.trim().toLowerCase() &&
+    method.tenantIds.includes(input.tenantId))) return undefined;
+  const inspection = input.snapshot?.inspections.get(users[0]!.id);
+  if (inspection) return evaluateHistoricalEmailEligibility(users[0]!, input.email, input.tenantId, inspection)
+    ? users[0] : undefined;
+  return await hasHistoricalEmailEligibility(
+    users[0]!, input.email, input.tenantId, input.userContext,
+  )
+    ? users[0] : undefined;
+}
+
+export async function linkHistoricalPasswordlessUser(
+  scope: HistoricalPasswordlessScope,
+  decide: NonNullable<NonNullable<Parameters<typeof AccountLinking.init>[0]>["shouldDoAutomaticAccountLinking"]>,
+  userContext: UserContext,
+) {
+  const reject = () => {
+    scope.denied = true;
+    return undefined;
+  };
+  const initial = await loadHistoricalPasswordlessOwner(scope, userContext);
+  if (!initial || !scope.recipeUserId || !initial.method) return reject();
+  let owner = initial.owner;
+  const method = initial.method;
+  const recipeUserId = SuperTokens.convertToRecipeUserId(scope.recipeUserId);
+  if (!owner.isPrimaryUser) {
+    if (!(await decide(method, undefined, undefined, scope.tenantId, userContext)).shouldAutomaticallyLink) return reject();
+    const currentOwner = await validateHistoricalPasswordlessOwner(scope, userContext);
+    if (!currentOwner) return reject();
+    owner = currentOwner;
+    const promotionMethod = owner.loginMethods[0]!;
+    if (!(await decide(promotionMethod, undefined, undefined, scope.tenantId, userContext)).shouldAutomaticallyLink ||
+      !(await validateHistoricalPasswordlessOwner(scope, userContext))) return reject();
+    const primary = await AccountLinking.createPrimaryUser(promotionMethod.recipeUserId, userContext);
+    if (primary.status !== "OK" || primary.user.id !== scope.userId) return reject();
+    const promotedOwner = await validateHistoricalPasswordlessOwner(scope, userContext);
+    if (!promotedOwner) return reject();
+    owner = promotedOwner;
+  }
+  if (!owner || !(await decide(method, owner, undefined, scope.tenantId, userContext)).shouldAutomaticallyLink ||
+    !(await validateHistoricalPasswordlessOwner(scope, userContext))) return reject();
+  const linked = await AccountLinking.linkAccounts(recipeUserId, scope.userId, userContext);
+  if (linked.status !== "OK" || linked.user.id !== scope.userId) return reject();
+  return validateHistoricalPasswordlessOwner(scope, userContext, true);
+}
+
 export async function shouldLinkRowndAccounts(
   input: Parameters<
     NonNullable<
@@ -909,6 +1127,36 @@ export async function shouldLinkRowndAccounts(
   >,
 ) {
   const [newAccountInfo, existingUser, session, tenantId, userContext] = input;
+
+  const scope = getHistoricalPasswordlessScope(userContext);
+  if (scope) {
+    const deny = { shouldAutomaticallyLink: false, shouldRequireVerification: false };
+    // The SDK must finish consuming before we can distinguish its recipe user
+    // from another passwordless identity that appeared concurrently.
+    if (!scope.recipeUserId) return deny;
+    const recipeUserId = (newAccountInfo as SuperTokensLoginMethod)?.recipeUserId?.getAsString();
+    if (session || tenantId !== scope.tenantId ||
+      newAccountInfo?.email?.trim().toLowerCase() !== scope.email ||
+      !recipeUserId || (newAccountInfo.recipeId === "passwordless"
+      ? recipeUserId !== scope.recipeUserId
+      : !scope.ownerRecipeUserIds.includes(recipeUserId)) ||
+      (existingUser && existingUser.id !== scope.userId)) {
+      scope.denied = true;
+      return deny;
+    }
+    const owner = await validateHistoricalPasswordlessOwner(scope, userContext);
+    if (!owner) return deny;
+    const method = owner.loginMethods.find((candidate) =>
+      candidate.recipeUserId.getAsString() === recipeUserId);
+    if (recipeUserId !== scope.recipeUserId && (!method ||
+      method.recipeId !== newAccountInfo.recipeId || isGuestLoginMethod(method) ||
+      method.email?.trim().toLowerCase() !== scope.email ||
+      !method.tenantIds.includes(tenantId))) {
+      scope.denied = true;
+      return deny;
+    }
+    return { shouldAutomaticallyLink: true, shouldRequireVerification: false, historicalEmail: true };
+  }
 
   if (session) {
     const currentUser = await SuperTokens.getUser(
@@ -951,6 +1199,15 @@ export async function shouldLinkRowndAccounts(
       true,
       userContext,
     );
+
+  if (newAccountInfo.recipeId === "passwordless" && matchingUsers.length === 1 &&
+    hasUnverifiedMatchingEmail(matchingUsers[0]!, email, tenantId)) {
+    const owner = await findHistoricalEmailOwner({ email, tenantId, userContext,
+      snapshot: existingUser ? undefined : { users: matchingUsers, inspections: new Map() } });
+    if (owner && (!existingUser || existingUser.id === owner.id)) {
+      return { shouldAutomaticallyLink: true, shouldRequireVerification: false, historicalEmail: true };
+    }
+  }
 
   let verifiedMatches = matchingUsers.filter((user) =>
     hasVerifiedMatchingEmailLoginMethod(user, accountInfo, tenantId),
@@ -1010,13 +1267,20 @@ export async function shouldLinkRowndAccounts(
   return undefined;
 }
 
+// Passed explicitly between adjacent read-only phases; never retained in userContext.
+export type PasswordlessAuthSnapshot = {
+  users: SuperTokensUser[];
+  inspections: Map<string, LinkedUserMetadataInspection>;
+};
+
 export async function doesRowndAccountInfoExist(input: {
   tenantId: string;
   email?: string;
   phoneNumber?: string;
   userContext?: Record<string, any>;
+  snapshot?: PasswordlessAuthSnapshot;
 }) {
-  const users = await SuperTokens.listUsersByAccountInfo(
+  const users = input.snapshot?.users ?? await SuperTokens.listUsersByAccountInfo(
     input.tenantId,
     input.email ? { email: input.email } : { phoneNumber: input.phoneNumber! },
     true,
@@ -1030,9 +1294,9 @@ export async function doesRowndAccountInfoExist(input: {
   const email = input.email.trim().toLowerCase();
   const matches = await Promise.all(
     users.map(async (user) => {
-      const metadata = (
-        await inspectLinkedUserMetadata(user.id, input.userContext, user)
-      ).combinedMetadata;
+      const inspection = input.snapshot?.inspections.get(user.id) ??
+        await inspectLinkedUserMetadata(user.id, input.userContext, user);
+      const metadata = inspection.combinedMetadata;
       const resolutionInput = {
         user,
         metadata,
@@ -1048,7 +1312,8 @@ export async function doesRowndAccountInfoExist(input: {
         ...resolutionInput,
         passwordlessOnly: true,
       });
-      return passwordless.status === "SELECTED" && passwordless.email === email;
+      return (passwordless.status === "SELECTED" && passwordless.email === email) ||
+        (users.length === 1 && evaluateHistoricalEmailEligibility(user, email, input.tenantId, inspection));
     }),
   );
   return matches.some(Boolean);
