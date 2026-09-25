@@ -84,10 +84,7 @@ are not required. The session uses an authenticated login method when the mapped
 user has one in the tenant, or an instant/guest method otherwise.
 The default JWKS URL is
 `https://rownd-hub.supertokens.com/.well-known/rownd-jwks.json`; `jwksUrl`
-can select another trusted endpoint. For offline development, run
-`npm run jwks:local -w @supertokens-plugins/rownd-nodejs` from this repository
-and configure `jwksUrl: "http://127.0.0.1:3002/hub/auth/keys"`. This local
-server serves a public-key snapshot and has no signing keys.
+can select another trusted endpoint.
 Configure both `rowndAppKey` and
 `rowndAppSecret` to retain full profile reconciliation.
 

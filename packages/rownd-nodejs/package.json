@@ -22,7 +22,6 @@
   "scripts": {
     "build": "rm -rf dist && tsup",
     "cli": "npm run build && node dist/cli.js",
-    "jwks:local": "tsx scripts/serveRowndJwks.ts",
     "lint": "eslint ./src --ext .ts",
     "prepack": "npm run build",
     "typecheck": "tsc --noEmit",

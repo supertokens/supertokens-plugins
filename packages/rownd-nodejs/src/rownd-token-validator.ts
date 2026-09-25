@@ -7,7 +7,7 @@ const appUserIdClaim = "https://auth.rownd.io/app_user_id";
 export interface RowndTokenValidationConfig {
   /** Trusted application audience; this does not require administrative credentials. */
   audience: string;
-  /** Override for a trusted Rownd-compatible key endpoint (for example, a local test server). */
+  /** Override for a trusted Rownd-compatible key endpoint. */
   jwksUrl?: string;
   /** Expected token issuer; defaults to the production Rownd issuer. */
   issuer?: string;

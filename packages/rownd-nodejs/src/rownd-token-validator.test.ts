@@ -1,10 +1,12 @@
+import { createServer, type Server } from "node:http";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createRowndTokenValidator } from "./rownd-token-validator";
-import { startRowndJwksServer } from "./fixtures/rownd-jwks-server";
 
 describe("Rownd token verification", () => {
-  let server: Awaited<ReturnType<typeof startRowndJwksServer>>;
+  let server: Server;
+  let jwksUrl: string;
+  let requests = 0;
   let privateKey: Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
   let verify: ReturnType<typeof createRowndTokenValidator>;
 
@@ -12,10 +14,23 @@ describe("Rownd token verification", () => {
     const pair = await generateKeyPair("EdDSA");
     privateKey = pair.privateKey;
     const publicKey = { ...await exportJWK(pair.publicKey), kid: "test-key", alg: "EdDSA", use: "sig" };
-    server = await startRowndJwksServer({ keys: [publicKey] });
-    verify = createRowndTokenValidator({ audience: "app:my-app", jwksUrl: server.url });
+    server = createServer((request, response) => {
+      if (request.url !== "/keys" || request.method !== "GET") {
+        response.writeHead(404).end();
+        return;
+      }
+      requests++;
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ keys: [publicKey] }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Test JWKS server has no TCP address");
+    jwksUrl = `http://127.0.0.1:${address.port}/keys`;
+    verify = createRowndTokenValidator({ audience: "app:my-app", jwksUrl });
   });
-  afterAll(async () => { await server?.close(); });
+  afterAll(async () => {
+    if (server) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
 
   async function token(input: { issuer?: string; audience?: string; claims?: Record<string, unknown>; expiresIn?: string | number } = {}) {
     return new SignJWT({ "https://auth.rownd.io/app_user_id": "user-1", ...input.claims })
@@ -29,9 +44,9 @@ describe("Rownd token verification", () => {
 
   it("verifies signed tokens and shares one JWKS fetch across validators", async () => {
     const signed = await token();
-    const other = createRowndTokenValidator({ audience: "app:my-app", jwksUrl: server.url });
+    const other = createRowndTokenValidator({ audience: "app:my-app", jwksUrl });
     expect(await Promise.all([verify(signed), other(signed)])).toEqual([{ user_id: "user-1" }, { user_id: "user-1" }]);
-    expect(server.requests()).toBe(1);
+    expect(requests).toBe(1);
   });
 
   it("rejects wrong issuer, audience, expiry, absent and malformed app user IDs", async () => {
