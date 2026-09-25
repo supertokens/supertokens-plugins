@@ -10,6 +10,7 @@ import UserMetadata from "supertokens-node/recipe/usermetadata";
 import Multitenancy from "supertokens-node/recipe/multitenancy";
 import { GenericContainer, Network, Wait, type StartedNetwork, type StartedTestContainer } from "testcontainers";
 import { init } from "./plugin";
+import { setRowndTokenValidator } from "./rownd-repository";
 import { mapRowndUserToSuperTokens } from "./rownd-compatibility";
 import { importUser, reconcileRowndUserWithExistingLoginMethods } from "./supertokens-repository";
 import { authenticateRowndMigration } from "./migration-email";
@@ -44,8 +45,9 @@ describe("verified Rownd provider replacement", { timeout: 30000 }, () => {
       recipeList: [AccountLinking.init({ shouldDoAutomaticAccountLinking: async () => ({ shouldAutomaticallyLink: false }) }),
         Session.init(), UserMetadata.init(), EmailVerification.init({ mode: "OPTIONAL" }),
         Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" }), ThirdParty.init()],
-      experimental: { plugins: [init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret" })] },
+      experimental: { plugins: [init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret", rowndJwtAudience: "app:test-app" })] },
     });
+    setRowndTokenValidator(rownd.validateToken);
   }, 120000);
   afterAll(async () => { await core?.stop(); await postgres?.stop(); await network?.stop(); });
 

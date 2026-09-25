@@ -9,7 +9,7 @@ import EmailVerification from "supertokens-node/recipe/emailverification";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
 import { GenericContainer, Network, Wait } from "testcontainers";
 import type { StartedNetwork, StartedTestContainer } from "testcontainers";
-import { setRowndClient } from "./rownd-repository";
+import { setRowndClient, setRowndTokenValidator } from "./rownd-repository";
 import { fetchAdministrativeMigrationSource } from "./migration-email";
 import {
   AmbiguousAdministrativeElection,
@@ -24,7 +24,8 @@ import { reconcileUser } from "./reconcile-user";
 import { init } from "./plugin";
 import { createMissingLoginMethod } from "./supertokens-repository";
 
-vi.mock("@rownd/node", () => ({ createInstance: () => ({ validateToken: vi.fn(), fetchUserInfo: vi.fn() }) }));
+const rownd = vi.hoisted(() => ({ validateToken: vi.fn(), fetchUserInfo: vi.fn() }));
+vi.mock("@rownd/node", () => ({ createInstance: () => rownd }));
 
 describe("standalone verified-phone source election", () => {
   let network: StartedNetwork;
@@ -53,8 +54,9 @@ describe("standalone verified-phone source election", () => {
         Session.init(), EmailVerification.init({ mode: "OPTIONAL" }), ThirdParty.init(),
         Passwordless.init({ contactMethod: "PHONE", flowType: "USER_INPUT_CODE" }),
       ],
-      experimental: { plugins: [init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret" })] },
+      experimental: { plugins: [init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret", rowndJwtAudience: "app:test-app" })] },
     });
+    setRowndTokenValidator(rownd.validateToken);
   }, 120000);
   afterAll(async () => {
     setRowndClient(undefined);

@@ -14,7 +14,7 @@ function validId(value: unknown): value is string {
 export function createRowndClient(config: { appKey: string; appSecret: string; appId?: string }): IRowndClient {
   const sdk = createInstance({ app_key: config.appKey, app_secret: config.appSecret });
   const client: IRowndClient = {
-    validateToken: (token) => sdk.validateToken(token),
+    validateToken: async () => { throw new Error("Rownd JWT validator is not configured"); },
     fetchUserInfo: (opts) => sdk.fetchUserInfo({ ...opts, ...(config.appId ? { app_id: config.appId } : {}) }),
   };
   if (config.appId === undefined) return client;

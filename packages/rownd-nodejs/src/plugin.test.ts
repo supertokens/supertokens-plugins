@@ -1,5 +1,6 @@
 import express from "express";
 import { createHash, randomUUID } from "node:crypto";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import {
   describe,
   it,
@@ -40,7 +41,7 @@ import { Server } from "http";
 import { GenericContainer, StartedTestContainer, Wait } from "testcontainers";
 import { Network, StartedNetwork } from "testcontainers";
 
-import { init } from "./plugin";
+import { init as initPlugin } from "./plugin";
 import {
   RowndPluginConfig,
   RowndPluginDynamicConfig,
@@ -95,7 +96,7 @@ import {
   handleGuestLogin,
   handleMigrate,
 } from "./pluginImplementation";
-import { setRowndClient } from "./rownd-repository";
+import { setRowndClient, setRowndTokenValidator } from "./rownd-repository";
 import { createDerivedUserContext, resolveTenantId } from "./utils";
 
 let testPORT = 30001;
@@ -114,6 +115,17 @@ const mockRowndClient = {
   fetchUserInfo: vi.fn(),
 };
 
+const tokenValidatorFixture = vi.hoisted(() => ({ useRealValidator: false }));
+
+function init(config: RowndPluginConfig) {
+  return initPlugin({
+    ...(!config.disableRowndUserMigration && !config.rowndAppId && !config.appConfig?.id && !config.rowndJwtAudience
+      ? { rowndJwtAudience: "app:test-app" }
+      : {}),
+    ...config,
+  });
+}
+
 const ACCOUNT_LINKING_TEST_LICENSE =
   "N2uEOdEzd1XZZ5VBSTGYaM7Ia4s8wAqRWFAxLqTYrB6GQ=" +
   "vssOLo3c=PkFgcExkaXs=IA-d9UWccoNKsyUgNhOhcKtM1bjC5OLrYRpTAgN-2EbKYsQGGQRQHuUN4EO1V";
@@ -121,6 +133,16 @@ const ACCOUNT_LINKING_TEST_LICENSE =
 vi.mock("@rownd/node", () => ({
   createInstance: () => mockRowndClient,
 }));
+
+vi.mock("./rownd-token-validator", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./rownd-token-validator")>();
+  return {
+    createRowndTokenValidator: (config: Parameters<typeof actual.createRowndTokenValidator>[0]) =>
+      tokenValidatorFixture.useRealValidator
+        ? actual.createRowndTokenValidator(config)
+        : (token: string) => mockRowndClient.validateToken(token),
+  };
+});
 
 describe("rownd-nodejs plugin", () => {
   let server: Server | undefined;
@@ -256,6 +278,8 @@ describe("rownd-nodejs plugin", () => {
 
   beforeEach(() => {
     resetST();
+    setRowndClient(undefined);
+    tokenValidatorFixture.useRealValidator = false;
     vi.clearAllMocks();
     vi.restoreAllMocks();
   });
@@ -1668,14 +1692,153 @@ describe("rownd-nodejs plugin", () => {
   });
 
   describe("disabled Rownd user migration", () => {
-    it("requires credentials unless migration is explicitly disabled", () => {
-      expect(() => init({})).toThrow(
-        "Missing rowndAppKey or rowndAppSecret in plugin config",
-      );
+    it("accepts no credentials for completed-user migration and rejects partial credentials", () => {
+      expect(() => initPlugin({})).toThrow("requires rowndJwtAudience");
+      expect(() => init({ rowndJwtAudience: "app:test-app" })).not.toThrow();
+      expect(() => initPlugin({ rowndJwtAudience: "app:wrong", rowndAppId: "test-app" })).toThrow("must match rowndAppId");
+      expect(() => initPlugin({ rowndJwtAudience: "app:other:app" })).toThrow("requires rowndJwtAudience");
+      expect(() => init({ rowndAppKey: "key" })).toThrow("must be configured together");
+      expect(() => init({ rowndAppSecret: "secret" })).toThrow("must be configured together");
       expect(() => init({ disableRowndUserMigration: true })).not.toThrow();
       expect(() => init({ disableRowndUserMigration: "false" } as any)).toThrow(
         "disableRowndUserMigration must be a boolean",
       );
+    });
+
+    it("registers both migration routes without credentials", () => {
+      const plugin = init({ rowndJwtAudience: "app:test-app" }) as any;
+      const result = plugin.routeHandlers(makePublicConfig("https://api.example.com", "/auth"));
+      const paths = result.routeHandlers.map((routeHandler: { path: string }) => routeHandler.path);
+      expect(paths).toContain("/auth/plugin/rownd/migrate");
+      expect(paths).toContain("/auth/plugin/migrate-session");
+    });
+
+    it("validates signed JWTs without authentication-level claims and rejects another app audience", async () => {
+      const { publicKey, privateKey } = await generateKeyPair("EdDSA");
+      const jwk = { ...(await exportJWK(publicKey)), kid: "local-test-key", alg: "EdDSA", use: "sig" };
+      const jwksApp = express();
+      jwksApp.get("/jwks", (_req, res) => res.json({ keys: [jwk] }));
+      const jwksServer = await new Promise<Server>((resolve) => {
+        const listening = jwksApp.listen(0, "127.0.0.1", () => resolve(listening));
+      });
+      try {
+        tokenValidatorFixture.useRealValidator = true;
+        const jwksPort = (jwksServer.address() as { port: number }).port;
+        const { server: s, port } = await setup(importCoreConnectionURI, {
+          rowndAppKey: undefined,
+          rowndAppSecret: undefined,
+          rowndJwtAudience: "app:test-app",
+          jwksUrl: `http://127.0.0.1:${jwksPort}/jwks`,
+        });
+        server = s;
+
+        const email = `signed-jwt-${randomUUID()}@example.com`;
+        const signedIn = await Passwordless.signInUp({ tenantId: "public", email });
+        const rowndId = `signed-jwt-${randomUUID()}`;
+        const instantMethod = await ThirdParty.manuallyCreateOrUpdateUser(
+          "public", "instant", rowndId, `${rowndId}@anonymous.local`, false,
+        );
+        expect(instantMethod.status).toBe("OK");
+        if (instantMethod.status !== "OK") throw new Error("Failed to create instant method");
+        const primary = await AccountLinking.createPrimaryUser(signedIn.recipeUserId);
+        expect(primary.status).toBe("OK");
+        if (primary.status !== "OK") throw new Error("Failed to create primary user");
+        const linked = await AccountLinking.linkAccounts(instantMethod.recipeUserId, primary.user.id);
+        expect(linked.status).toBe("OK");
+        expect((await SuperTokens.createUserIdMapping({
+          superTokensUserId: primary.user.id, externalUserId: rowndId,
+        })).status).toBe("OK");
+        await UserMetadata.updateUserMetadata(primary.user.id, { rownd_migration_complete: true });
+        const mappedMethods = (await SuperTokens.getUser(rowndId))!.loginMethods;
+        const passwordlessRecipeId = mappedMethods.find((method) => method.recipeId === "passwordless")!.recipeUserId.getAsString();
+        const sign = (audience: string, claims: Record<string, unknown> = {}) => new SignJWT({
+          "https://auth.rownd.io/app_user_id": rowndId,
+          ...claims,
+        }).setProtectedHeader({ alg: "EdDSA", kid: "local-test-key" })
+          .setIssuer("https://api.rownd.io").setAudience(audience)
+          .setIssuedAt().setExpirationTime("5m").sign(privateKey);
+        const migrate = async (token: string) => {
+          const response = await fetch(`http://localhost:${port}/auth/plugin/rownd/migrate`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}`, "st-auth-mode": "header" },
+          });
+          return { response, body: await response.json() };
+        };
+        const fetchProfile = vi.spyOn(mockRowndClient, "fetchUserInfo");
+        const wrongAudience = await migrate(await sign("app:another-app"));
+        expect(wrongAudience.response.status).toBe(400);
+        expect(wrongAudience.body).toMatchObject({ status: "ERROR" });
+        expect(wrongAudience.response.headers.has("st-access-token")).toBe(false);
+        const verified = await migrate(await sign("app:test-app"));
+        expect(verified.response.status).toBe(200);
+        expect(verified.body).toEqual({ status: "OK" });
+        const authenticatedSession = await Session.getSessionWithoutRequestResponse(verified.response.headers.get("st-access-token")!);
+        expect(authenticatedSession?.getRecipeUserId().getAsString()).toBe(passwordlessRecipeId);
+        expect(authenticatedSession?.getAccessTokenPayload().rownd_session_authentication).toBe("authenticated");
+        const instantClaim = await migrate(await sign("app:test-app", { "https://auth.rownd.io/auth_level": "instant" }));
+        expect(instantClaim.response.status).toBe(200);
+        const sameUserSession = await Session.getSessionWithoutRequestResponse(instantClaim.response.headers.get("st-access-token")!);
+        expect(sameUserSession?.getRecipeUserId().getAsString()).toBe(passwordlessRecipeId);
+        expect(fetchProfile).not.toHaveBeenCalled();
+        expect(mockRowndClient.validateToken).not.toHaveBeenCalled();
+      } finally {
+        await new Promise<void>((resolve, reject) => jwksServer.close((error) => error ? reject(error) : resolve()));
+      }
+    });
+
+    it("creates a session only for a completed mapped owner in the requested tenant without profile reads", async () => {
+      init({ rowndAppId: "app" });
+      setRowndTokenValidator(vi.fn().mockResolvedValue({ user_id: "rownd-id" }));
+      const recipeUserId = { getAsString: () => "recipe-id" } as any;
+      const fetchProfile = vi.spyOn(mockRowndClient, "fetchUserInfo");
+      const mapping = vi.spyOn(SuperTokens, "getUserIdMapping").mockImplementation(async (input: any) =>
+        input.userIdType === "EXTERNAL"
+          ? { status: "OK", externalUserId: "rownd-id", superTokensUserId: "internal-id" } as any
+          : { status: "OK", externalUserId: "rownd-id", superTokensUserId: "internal-id" } as any);
+      const getUser = vi.spyOn(SuperTokens, "getUser").mockResolvedValue({
+        id: "rownd-id", loginMethods: [{ recipeId: "passwordless", recipeUserId, tenantIds: ["tenant-a"] }],
+      } as any);
+      let completed = true;
+      vi.spyOn(UserMetadata, "getUserMetadata").mockImplementation(async (id: string) => ({
+        status: "OK", metadata: id === "internal-id" ? { rownd_migration_complete: completed } : {},
+      } as any));
+      const createSession = vi.spyOn(Session, "createNewSession").mockResolvedValue({
+        getUserId: () => "rownd-id", getRecipeUserId: () => recipeUserId,
+        getTenantId: () => "tenant-a", getHandle: () => "handle",
+      } as any);
+      const deps = {
+        pluginConfig: getPluginConfig()!,
+        stConfig: { supertokens: { connectionURI: "http://core.example.com" } } as any,
+        telemetryClient: { recordEvent: vi.fn(), recordSuccess: vi.fn(), recordError: vi.fn() },
+      };
+      const req = { getHeaderValue: (key: string) => key === "authorization" ? "Bearer token" : undefined,
+        getKeyValueFromQuery: (key: string) => key === "tenantId" ? "tenant-a" : undefined } as any;
+      const res = { setHeader: vi.fn(), removeHeader: vi.fn(), setCookie: vi.fn() } as any;
+      expect(await handleMigrate(deps)(req, res, undefined, {})).toEqual({ status: "OK" });
+      expect(createSession).toHaveBeenCalledTimes(1);
+      expect(fetchProfile).not.toHaveBeenCalled();
+      completed = false;
+      expect((await handleMigrate(deps)(req, res, undefined, {})).status).toBe("ERROR");
+      expect(createSession).toHaveBeenCalledTimes(1);
+      completed = true;
+
+      getUser.mockResolvedValueOnce({ id: "rownd-id", loginMethods: [
+        { recipeId: "passwordless", recipeUserId, tenantIds: ["tenant-b"] },
+      ] } as any);
+      expect((await handleMigrate(deps)(req, res, undefined, {})).status).toBe("ERROR");
+      expect(createSession).toHaveBeenCalledTimes(1);
+      expect(fetchProfile).not.toHaveBeenCalled();
+      mapping.mockResolvedValue({ status: "UNKNOWN_MAPPING_ERROR" } as any);
+      expect((await handleMigrate(deps)(req, res, undefined, {})).status).toBe("ERROR");
+      expect(createSession).toHaveBeenCalledTimes(1);
+      mapping.mockImplementation(async () => ({ status: "OK", externalUserId: "rownd-id", superTokensUserId: "internal-id" } as any));
+      const revokeSession = vi.spyOn(Session, "revokeSession").mockResolvedValue({ status: "OK" } as any);
+      createSession.mockResolvedValueOnce({
+        getUserId: () => "different-user", getRecipeUserId: () => recipeUserId,
+        getTenantId: () => "tenant-a", getHandle: () => "unbound-handle",
+      } as any);
+      expect((await handleMigrate(deps)(req, res, undefined, {})).status).toBe("ERROR");
+      expect(revokeSession).toHaveBeenCalledWith("unbound-handle", expect.anything());
     });
 
     it("rejects unknown telemetry providers", () => {

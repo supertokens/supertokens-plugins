@@ -9,6 +9,7 @@ import ThirdParty from "supertokens-node/recipe/thirdparty";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import { GenericContainer, Network, Wait, type StartedNetwork, type StartedTestContainer } from "testcontainers";
 import { init } from "./plugin";
+import { setRowndTokenValidator } from "./rownd-repository";
 import { reconcileUser } from "./reconcile-user";
 import { inspectInstantPrimaryProof } from "./migration-instant-election";
 import { buildRowndSessionAndAnonymousClaims, RowndIsAnonymousClaim } from "./supertokens-repository";
@@ -38,7 +39,8 @@ beforeAll(async () => {
     recipeList: [AccountLinking.init({ shouldDoAutomaticAccountLinking: async () => ({ shouldAutomaticallyLink: false }) }),
       Session.init(), UserMetadata.init(), EmailVerification.init({ mode: "OPTIONAL" }),
       Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" }), ThirdParty.init()],
-    experimental: { plugins: [init({ rowndAppKey: "test", rowndAppSecret: "test" })] } });
+    experimental: { plugins: [init({ rowndAppKey: "test", rowndAppSecret: "test", rowndJwtAudience: "app:test-app" })] } });
+  setRowndTokenValidator(rownd.validateToken);
 }, 120000);
 afterEach(() => vi.restoreAllMocks());
 afterAll(async () => {
@@ -234,7 +236,7 @@ it("requires fresh authentication for legacy verified sessions on relocated alia
   })).not.toHaveProperty("rownd_session_authentication");
 
   const refreshed = await Session.refreshSessionWithoutRequestResponse(anonymous.getAllSessionTokensDangerously().refreshToken!, true);
-  const failedSignIn = (init({ rowndAppKey: "test", rowndAppSecret: "test" }) as any).overrideMap.thirdparty.apis({
+  const failedSignIn = (init({ rowndAppKey: "test", rowndAppSecret: "test", rowndJwtAudience: "app:test-app" }) as any).overrideMap.thirdparty.apis({
     signInUpPOST: async () => ({ status: "GENERAL_ERROR", message: "credentials rejected" }),
   });
   expect(await failedSignIn.signInUpPOST({ provider: { id: "google" }, tenantId: "public", session: refreshed,

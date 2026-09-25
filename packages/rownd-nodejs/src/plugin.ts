@@ -55,7 +55,8 @@ import {
   type PasswordlessAuthSnapshot,
   shouldLinkRowndAccounts,
 } from "./rownd-compatibility";
-import { setRowndClient } from "./rownd-repository";
+import { setRowndClient, setRowndTokenValidator } from "./rownd-repository";
+import { createRowndTokenValidator } from "./rownd-token-validator";
 import {
   buildRowndSessionAndAnonymousClaims,
   completePendingEmailVerification,
@@ -253,6 +254,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
       };
 
       setRowndClient(rowndClient);
+      setRowndTokenValidator(!pluginConfig.disableRowndUserMigration
+        ? createRowndTokenValidator({
+          audience: pluginConfig.rowndJwtAudience!,
+          jwksUrl: pluginConfig.jwksUrl,
+        }) : undefined);
       setPluginConfig(pluginConfig);
 
       if (pluginConfig.enableDebugLogs) {
@@ -1367,13 +1373,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           "disableRowndUserMigration must be a boolean in plugin config",
         );
       }
-      if (
-        !config?.disableRowndUserMigration &&
-        (!config?.rowndAppKey || !config?.rowndAppSecret)
-      ) {
-        throw new Error(
-          "Missing rowndAppKey or rowndAppSecret in plugin config. Set disableRowndUserMigration to true to disable migration.",
-        );
+      if ((config.rowndAppKey && !config.rowndAppSecret) ||
+          (!config.rowndAppKey && config.rowndAppSecret)) {
+        throw new Error("rowndAppKey and rowndAppSecret must be configured together");
       }
       if (config.telemetry?.provider === "axiom") {
         if (!config.telemetry.token || !config.telemetry.dataset) {
@@ -1393,10 +1395,23 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
       if (config.rowndAppId !== undefined && (typeof config.rowndAppId !== "string" || !config.rowndAppId.trim() || config.rowndAppId.trim() !== config.rowndAppId)) {
         throw new Error("rowndAppId must be a non-empty app ID in plugin config");
       }
+      const audience = config.rowndJwtAudience ?? (config.rowndAppId || config.appConfig?.id
+        ? `app:${config.rowndAppId ?? config.appConfig?.id}` : undefined);
+      if (config.rowndJwtAudience && config.rowndAppId && config.rowndJwtAudience !== `app:${config.rowndAppId}`) {
+        throw new Error("rowndJwtAudience must match rowndAppId when both are configured");
+      }
+      if (!config.disableRowndUserMigration && (typeof audience !== "string" || !/^app:[^\s:]+$/.test(audience))) {
+        throw new Error("Migration requires rowndJwtAudience, rowndAppId, or appConfig.id to bind Rownd tokens to this application");
+      }
+      if (config.jwksUrl !== undefined && (typeof config.jwksUrl !== "string" || !config.jwksUrl.trim())) {
+        throw new Error("jwksUrl must be a non-empty URL in plugin config");
+      }
       return {
         rowndAppKey: config.rowndAppKey ?? DISABLED_MIGRATION_ROWND_APP_KEY,
         rowndAppId: config.rowndAppId,
         rowndAppSecret: config.rowndAppSecret,
+        rowndJwtAudience: audience,
+        jwksUrl: config.jwksUrl,
         disableRowndUserMigration: config.disableRowndUserMigration === true,
         enableDebugLogs: config.enableDebugLogs,
         clientDomains: config.clientDomains,

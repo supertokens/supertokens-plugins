@@ -721,9 +721,13 @@ export interface RowndPluginConfig extends RowndPluginDynamicConfig {
   /** App scope for administrative email discovery and uncached profile reads. */
   rowndAppId?: string;
   rowndAppSecret?: string;
+  /** Expected app:<id> audience for migration JWTs, without Rownd credentials. */
+  rowndJwtAudience?: string;
+  /** Trusted Rownd JWKS endpoint for credential-free migration token verification. */
+  jwksUrl?: string;
   /**
-   * Disables Rownd user and session migration. This must be enabled when
-   * rowndAppKey or rowndAppSecret is omitted.
+    * Disables Rownd user and session migration. Without app credentials,
+    * migration accepts only already completed, mapped users.
    * @default false
    */
   disableRowndUserMigration?: boolean;
@@ -894,6 +898,8 @@ export interface RowndPluginNormalisedConfig {
   rowndAppKey: string;
   rowndAppId?: string;
   rowndAppSecret?: string;
+  rowndJwtAudience?: string;
+  jwksUrl?: string;
   disableRowndUserMigration: boolean;
   enableDebugLogs?: boolean;
   clientDomains?: RowndClientDomains;

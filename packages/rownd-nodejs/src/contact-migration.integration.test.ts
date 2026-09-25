@@ -27,6 +27,7 @@ import UserRolesRaw from "supertokens-node/lib/build/recipe/userroles/recipe";
 import { GenericContainer, Network, Wait } from "testcontainers";
 import type { StartedNetwork, StartedTestContainer } from "testcontainers";
 import { init } from "./plugin";
+import { setRowndTokenValidator } from "./rownd-repository";
 import { getCombinedUserMetadata, mapRowndUserToSuperTokens } from "./rownd-compatibility";
 import { reconcileRowndUserWithExistingLoginMethods } from "./supertokens-repository";
 import type { RowndUser } from "./types";
@@ -93,8 +94,9 @@ describe("authenticated Rownd contact reconciliation", () => {
         Session.init(), UserMetadata.init(), EmailVerification.init({ mode: "OPTIONAL" }),
         Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" }), ThirdParty.init(),
       ],
-      experimental: { plugins: [init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret" })] },
+      experimental: { plugins: [init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret", rowndJwtAudience: "app:test-app" })] },
     });
+    setRowndTokenValidator(rownd.validateToken);
     app.use(middleware());
     app.use(errorHandler());
   });

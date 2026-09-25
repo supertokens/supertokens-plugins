@@ -2,8 +2,10 @@ import { RowndMigrationPolicyError, RowndPluginError } from "./errors";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { hasReconciliationReads, reconciliationRead } from "./reconciliation-reads";
 import type { IRowndClient, RowndUser } from "./types";
+import type { createRowndTokenValidator } from "./rownd-token-validator";
 
 let rowndClient: IRowndClient | undefined;
+let rowndTokenValidator: ReturnType<typeof createRowndTokenValidator> | undefined;
 const freshReads = new AsyncLocalStorage<boolean>();
 
 export function withFreshRowndReads<T>(action: () => Promise<T>) {
@@ -12,6 +14,11 @@ export function withFreshRowndReads<T>(action: () => Promise<T>) {
 
 export function setRowndClient(client: IRowndClient | undefined) {
   rowndClient = client;
+  if (client === undefined) rowndTokenValidator = undefined;
+}
+
+export function setRowndTokenValidator(validator: ReturnType<typeof createRowndTokenValidator> | undefined) {
+  rowndTokenValidator = validator;
 }
 
 export function getRowndClient() {
@@ -22,8 +29,10 @@ export function getRowndClient() {
 }
 
 export async function validateRowndToken(token: string): Promise<string> {
-  const client = getRowndClient();
-  const tokenInfo = await client.validateToken(token);
+  const tokenInfo = await (rowndTokenValidator ?? getRowndClient().validateToken)(token);
+  if (typeof tokenInfo?.user_id !== "string" || !tokenInfo.user_id || tokenInfo.user_id.trim() !== tokenInfo.user_id ||
+    [...tokenInfo.user_id].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) ||
+    tokenInfo.user_id === "." || tokenInfo.user_id === "..") throw new Error("Invalid Rownd token user ID");
   return tokenInfo.user_id;
 }
 

@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "kty": "OKP",
+      "alg": "EdDSA",
+      "kid": "sig-1644937360",
+      "use": "sig",
+      "crv": "Ed25519",
+      "x": "ChrFqbu1T7TTuLFg3o_coBNwqdm_O5Llok1dey0G2Tg"
+    }
+  ]
+}

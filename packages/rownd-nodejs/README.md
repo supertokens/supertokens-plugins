@@ -37,6 +37,7 @@ SuperTokens.init({
       RowndMigrationPlugin.init({
         rowndAppKey: process.env.ROWND_APP_KEY,
         rowndAppSecret: process.env.ROWND_APP_SECRET,
+        rowndJwtAudience: process.env.ROWND_JWT_AUDIENCE, // e.g. app:your-rownd-app-id
         enableDebugLogs: process.env.ENABLE_DEBUG_LOGS === "true",
       }),
     ],
@@ -61,8 +62,34 @@ endpoints remain enabled. Passwordless and email-verification links continue to
 use the Rownd Hub with an internal dummy app key when `rowndAppKey` is omitted.
 The plugin logs a warning during initialization while migration is disabled.
 
-Without `disableRowndUserMigration: true`, both `rowndAppKey` and
-`rowndAppSecret` are required.
+### Migrating existing users without Rownd app credentials
+
+If the Rownd application credentials are unavailable, leave all three app
+credential fields out and keep migration enabled:
+
+```typescript
+RowndMigrationPlugin.init({ rowndJwtAudience: "app:your-rownd-app-id" });
+```
+
+Both migration routes remain available. A valid Rownd token can create a
+SuperTokens session only for an already completed migration with a published
+bidirectional user-ID mapping and a login method in the requested tenant. This
+mode does not fetch Rownd profiles, import users, reconcile identities, or
+associate users with new tenants. New, incomplete, or conflicting migrations
+fail. Token verification uses the hosted JWKS in both migration modes. A trusted
+`app:<id>` audience is required: set `rowndJwtAudience` without Rownd credentials,
+or derive it from `rowndAppId`/`appConfig.id`.
+The token's signed user ID selects the completed mapping; authentication claims
+are not required. The session uses an authenticated login method when the mapped
+user has one in the tenant, or an instant/guest method otherwise.
+The default JWKS URL is
+`https://rownd-hub.supertokens.com/.well-known/rownd-jwks.json`; `jwksUrl`
+can select another trusted endpoint. For offline development, run
+`npm run jwks:local -w @supertokens-plugins/rownd-nodejs` from this repository
+and configure `jwksUrl: "http://127.0.0.1:3002/hub/auth/keys"`. This local
+server serves a public-key snapshot and has no signing keys.
+Configure both `rowndAppKey` and
+`rowndAppSecret` to retain full profile reconciliation.
 
 ### Tenant-Specific Configuration
 
@@ -87,7 +114,8 @@ RowndMigrationPlugin.init({
 });
 ```
 
-`rowndAppKey`, `rowndAppSecret`, `rowndAppId`, `disableRowndUserMigration`, debug logging,
+`rowndAppKey`, `rowndAppSecret`, `rowndAppId`, `rowndJwtAudience`, `jwksUrl`,
+`disableRowndUserMigration`, debug logging,
 and telemetry remain startup-static. Resolver failures and malformed results
 fail the operation instead of falling back to another tenant. The plugin keeps
 the resolved snapshot tenant-bound and does not place static credentials in the

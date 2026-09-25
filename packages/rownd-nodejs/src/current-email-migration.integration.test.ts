@@ -33,6 +33,7 @@ import UserRolesRaw from "supertokens-node/lib/build/recipe/userroles/recipe";
 import { GenericContainer, Network, Wait } from "testcontainers";
 import type { StartedNetwork, StartedTestContainer } from "testcontainers";
 import { init } from "./plugin";
+import { setRowndTokenValidator } from "./rownd-repository";
 import { getCombinedUserMetadata, isSuperTokensFakeEmail, mapRowndUserToSuperTokens } from "./rownd-compatibility";
 import { importUser, prepareEmailForPasswordlessAuth, reconcileRowndUserWithExistingLoginMethods } from "./supertokens-repository";
 import type { RowndUser } from "./types";
@@ -100,8 +101,9 @@ describe("Apple relay migration and explicit administrative reconciliation", { t
         Session.init(), UserMetadata.init(), EmailVerification.init({ mode: "OPTIONAL" }),
         Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" }), ThirdParty.init(), EmailPassword.init(),
       ],
-      experimental: { plugins: [init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret" })] },
+      experimental: { plugins: [init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret", rowndJwtAudience: "app:test-app" })] },
     });
+    setRowndTokenValidator(rownd.validateToken);
     app.use(middleware());
     app.post("/test/native-session", async (req, res) => {
       try {

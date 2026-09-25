@@ -84,6 +84,13 @@ function pending(
   return false;
 }
 
+export function hasPendingMigrationById(input: MigrationIdDiscovery): boolean {
+  const target = input.mapping.status === "OK" ? input.mapping.superTokensUserId : input.sourceId;
+  for (const metadata of input.metadata) readRetirements(metadata.rownd_migration_provider_retirements);
+  return input.pendingProviderOperations === true || input.metadata.some((metadata) =>
+    pending(metadata, input.tenantId, input.sourceId, target));
+}
+
 // This stage only follows IDs. Contact and exact provider-subject discovery is
 // deferred to reconciliation when the completed mapping cannot satisfy login.
 export async function discoverMigrationById(
@@ -112,11 +119,11 @@ export async function discoverMigrationById(
     sourceId,
     ...(user
       ? [
-          user.id,
-          ...user.loginMethods.map((method) =>
-            method.recipeUserId.getAsString(),
-          ),
-        ]
+        user.id,
+        ...user.loginMethods.map((method) =>
+          method.recipeUserId.getAsString(),
+        ),
+      ]
       : []),
   ]);
   const metadata: JsonRecord[] = [];

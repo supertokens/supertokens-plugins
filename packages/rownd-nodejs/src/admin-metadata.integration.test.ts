@@ -20,6 +20,7 @@ import UserMetadataRaw from "supertokens-node/lib/build/recipe/usermetadata/reci
 import UserRolesRaw from "supertokens-node/lib/build/recipe/userroles/recipe";
 import { GenericContainer, Network, Wait, type StartedNetwork, type StartedTestContainer } from "testcontainers";
 import { init } from "./plugin";
+import { setRowndTokenValidator } from "./rownd-repository";
 import { reconcileUser } from "./reconcile-user";
 import { fetchAdministrativeMigrationSource } from "./migration-email";
 import { backfillAdministrativeMetadata, inspectAdministrativeMetadataBackfill, publishPublicMetadata } from "./migration-admin-metadata";
@@ -80,8 +81,9 @@ describe("administrative custom metadata backfill", { timeout: 60000, sequential
       recipeList: [AccountLinking.init({ shouldDoAutomaticAccountLinking: async () => ({ shouldAutomaticallyLink: false }) }),
         Session.init(), UserMetadata.init(), EmailVerification.init({ mode: "OPTIONAL" }),
         Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" }), ThirdParty.init()],
-      experimental: { plugins: [init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret" })] },
+      experimental: { plugins: [init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret", rowndJwtAudience: "app:test-app" })] },
     });
+    setRowndTokenValidator(rownd.validateToken);
   });
   afterEach(() => { vi.restoreAllMocks(); resetST(); });
 

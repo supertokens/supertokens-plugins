@@ -34,6 +34,7 @@ import UserRolesRaw from "supertokens-node/lib/build/recipe/userroles/recipe";
 import { GenericContainer, Network, Wait } from "testcontainers";
 import type { StartedNetwork, StartedTestContainer } from "testcontainers";
 import { init } from "./plugin";
+import { setRowndTokenValidator } from "./rownd-repository";
 import { createMissingLoginMethod } from "./supertokens-repository";
 import type { RowndTelemetryEvent, RowndUser } from "./types";
 
@@ -259,6 +260,7 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
           init({
             rowndAppKey: "test-key",
             rowndAppSecret: "test-secret",
+            rowndJwtAudience: "app:test-app",
             enableDebugLogs: true,
             telemetry: {
               provider: "custom",
@@ -268,6 +270,7 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
         ],
       },
     });
+    setRowndTokenValidator(mockRowndClient.validateToken);
     app.use(middleware());
     app.use(errorHandler());
   }

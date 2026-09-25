@@ -9,6 +9,7 @@ import ThirdParty from "supertokens-node/recipe/thirdparty";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import { GenericContainer, Network, Wait, type StartedNetwork, type StartedTestContainer } from "testcontainers";
 import { init } from "./plugin";
+import { setRowndTokenValidator } from "./rownd-repository";
 import { reconcileUser } from "./reconcile-user";
 import type { RowndUser } from "./types";
 
@@ -32,7 +33,8 @@ beforeAll(async () => {
     recipeList: [AccountLinking.init({ shouldDoAutomaticAccountLinking: async () => ({ shouldAutomaticallyLink: false }) }),
       Session.init(), UserMetadata.init(), EmailVerification.init({ mode: "OPTIONAL" }),
       Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" }), ThirdParty.init()],
-    experimental: { plugins: [init({ rowndAppKey: "test", rowndAppSecret: "test" })] } });
+    experimental: { plugins: [init({ rowndAppKey: "test", rowndAppSecret: "test", rowndJwtAudience: "app:test-app" })] } });
+  setRowndTokenValidator(rownd.validateToken);
 }, 120000);
 afterEach(() => vi.restoreAllMocks());
 afterAll(async () => {

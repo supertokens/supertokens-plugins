@@ -3,8 +3,8 @@ import { withProvenSessionAuthentication } from "./session-authentication";
 import { MigrationTelemetry } from "./telemetry/migrationTelemetry";
 import { assertMigrationMapping, resolveMigrationMapping } from "./migration-mapping";
 import { resolveConsolidatedTokenOwner } from "./migration-consolidation";
-import { discoverMigrationById, planMigration } from "./migration-plan";
-import { authenticateRowndMigration, assertAuthenticatedMigrationSource } from "./migration-email";
+import { discoverMigrationById, hasPendingMigrationById, planMigration } from "./migration-plan";
+import { authenticateExistingRowndMigration, authenticateRowndMigration, assertAuthenticatedMigrationSource } from "./migration-email";
 import { resolveCanonicalEmailForTenant } from "./canonical-email";
 import SuperTokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
@@ -338,6 +338,19 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       const parsed = await parseRequest(req);
       const appVariantId = getRequestedAppVariantIdFromRequest(req);
       assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
+      if (!deps.pluginConfig.rowndAppSecret) {
+        telemetry.stage = "token_validation";
+        rowndUserId = await authenticateExistingRowndMigration(parsed.token, tenantId, resolved.userContext);
+        telemetry.stage = "completed_mapping_lookup";
+        await migrateExistingMappedUser({
+          rowndUserId, tenantId, appVariantId, req, res,
+          config: resolved.config, userContext: resolved.userContext, telemetry,
+        });
+        telemetry.sessionCreated = true;
+        telemetry.canonicalRowndUserId = rowndUserId;
+        telemetry.emit("terminal", "session_created");
+        return { status: "OK" as const };
+      }
       telemetry.stage = "token_validation";
       const authenticated = await authenticateRowndMigration(parsed.token, tenantId, resolved.userContext);
       rowndUserId = authenticated.rowndUserId;
@@ -543,6 +556,87 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       };
     }
   };
+}
+
+async function migrateExistingMappedUser(input: {
+  rowndUserId: string;
+  tenantId: string;
+  appVariantId?: string;
+  req: SuperTokensRequest;
+  res: SuperTokensResponse;
+  config: RowndPluginNormalisedConfig;
+  userContext: SuperTokensUserContext;
+  telemetry: MigrationTelemetry;
+}) {
+  const { rowndUserId, tenantId, appVariantId, req, res, config, userContext, telemetry } = input;
+  const checkOwner = async () => {
+    clearSuperTokensCoreCallCache(userContext);
+    const discovery = await discoverMigrationById(rowndUserId, tenantId, userContext);
+    const { mapping, reverse } = discovery;
+    if (mapping.status !== "OK" || mapping.externalUserId !== rowndUserId ||
+        reverse?.status !== "OK" || reverse.superTokensUserId !== mapping.superTokensUserId ||
+        reverse.externalUserId !== rowndUserId || hasPendingMigrationById(discovery)) {
+      throw new Error("Completed Rownd mapping is unavailable");
+    }
+    const internalUserId = mapping.superTokensUserId;
+    await assertMigrationMapping(internalUserId, rowndUserId, userContext);
+    const user = discovery.user;
+    const ownerMetadata = discovery.metadataById.get(internalUserId) ?? {};
+    const sourceMetadata = discovery.metadataById.get(rowndUserId) ?? {};
+    const complete = [ownerMetadata, sourceMetadata]
+      .find((metadata) => metadata.rownd_migration_complete !== undefined)?.rownd_migration_complete === true;
+    if (!user || ![internalUserId, rowndUserId].includes(user.id) ||
+        !complete || sourceMetadata.rownd_migration_complete === false) {
+      throw new Error("Completed Rownd owner is unavailable");
+    }
+    for (const metadata of [ownerMetadata, sourceMetadata]) {
+      if ([metadata.rownd_migration_canonical_target, metadata.rownd_migration_target]
+        .some((target) => target !== undefined && target !== internalUserId)) {
+        throw new Error("Completed Rownd owner changed");
+      }
+    }
+    const methods = user.loginMethods.filter((method) => method.tenantIds.includes(tenantId));
+    const method = methods.find((candidate) => candidate.recipeId !== "thirdparty" ||
+      !["instant", "guest"].includes(candidate.thirdParty?.id ?? "")) ?? methods[0];
+    if (!method) throw new Error("Completed Rownd owner does not belong to tenant");
+    return {
+      internalUserId, userId: user.id, recipeUserId: method.recipeUserId,
+      provenAuthentication: method.recipeId !== "thirdparty" || !["instant", "guest"].includes(method.thirdParty?.id ?? ""),
+    };
+  };
+
+  const owner = await checkOwner();
+  telemetry.superTokensUserId = owner.userId;
+  telemetry.recipeUserId = owner.recipeUserId.getAsString();
+  telemetry.stage = "session_creation";
+  const responseWrites: Array<() => void> = [];
+  const sessionResponse: SuperTokensResponse = Object.create(res);
+  sessionResponse.setHeader = (...args) => { responseWrites.push(() => res.setHeader(...args)); };
+  sessionResponse.removeHeader = (...args) => { responseWrites.push(() => res.removeHeader(...args)); };
+  sessionResponse.setCookie = (...args) => { responseWrites.push(() => res.setCookie(...args)); };
+  const createSession = () => Session.createNewSession(
+    req, sessionResponse, tenantId, owner.recipeUserId,
+    { ...buildRowndAudience({}, appVariantId, config) }, {}, userContext,
+  );
+  const createdSession = await (owner.provenAuthentication
+    ? withProvenSessionAuthentication(createSession) : createSession());
+  try {
+    if (createdSession.getUserId(userContext) !== owner.userId ||
+        createdSession.getRecipeUserId(userContext).getAsString() !== owner.recipeUserId.getAsString() ||
+        createdSession.getTenantId(userContext) !== tenantId) {
+      throw new Error("Created session does not match the completed Rownd owner");
+    }
+    const current = await checkOwner();
+    if (current.internalUserId !== owner.internalUserId || current.userId !== owner.userId ||
+        !(await SuperTokens.getUser(current.internalUserId, userContext))?.loginMethods.some((method) =>
+          method.recipeUserId.getAsString() === owner.recipeUserId.getAsString() && method.tenantIds.includes(tenantId))) {
+      throw new Error("Completed Rownd owner changed before session publication");
+    }
+  } catch (error) {
+    await Session.revokeSession(createdSession.getHandle(userContext), userContext);
+    throw error;
+  }
+  for (const write of responseWrites) write();
 }
 
 export async function associateUserLoginMethodsToTenant(

@@ -136,6 +136,18 @@ export async function authenticateRowndMigration(token: string, tenantId: string
   return { rowndUserId, source };
 }
 
+/** Authenticate a token without requesting a Rownd profile or creating import evidence. */
+export async function authenticateExistingRowndMigration(token: string, tenantId: string, userContext: JsonRecord) {
+  if (!tenantId) throw new RowndMigrationPolicyError("Authenticated Rownd migration requires a tenant");
+  const rowndUserId = await validateRowndToken(token);
+  if (typeof rowndUserId !== "string" || !rowndUserId.trim() || rowndUserId !== rowndUserId.trim()) {
+    throw new RowndMigrationPolicyError("Validated Rownd token has no valid user ID");
+  }
+  const telemetry = migrationTelemetry(userContext);
+  if (telemetry) telemetry.rowndUserId = rowndUserId;
+  return rowndUserId;
+}
+
 export function getAuthenticatedMigrationEmail(source: SuperTokensUserImport, tenantId: string) {
   const proof = authenticatedMigrations.get(source) ?? administrativeMigrations.get(source);
   if (!proof) return undefined;

@@ -29,7 +29,7 @@ import type { StartedNetwork, StartedTestContainer } from "testcontainers";
 import { init } from "./plugin";
 import { reconcileUser, type ReconcileUserInput } from "./reconcile-user";
 import type { RowndUser } from "./types";
-import { setRowndClient } from "./rownd-repository";
+import { setRowndClient, setRowndTokenValidator } from "./rownd-repository";
 
 const rownd = { validateToken: vi.fn(), fetchUserInfo: vi.fn() };
 vi.mock("@rownd/node", () => ({ createInstance: () => rownd }));
@@ -575,8 +575,9 @@ describe("revised reconciliation separates the canonical Rownd profile from the 
         Session.init(), UserMetadata.init(), EmailVerification.init({ mode: "OPTIONAL" }),
         Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" }), ThirdParty.init(), EmailPassword.init(),
       ],
-      experimental: { plugins: [init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret" })] },
+      experimental: { plugins: [init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret", rowndJwtAudience: "app:test-app" })] },
     });
+    setRowndTokenValidator(rownd.validateToken);
     app.use(middleware());
     app.post("/test/native-session", async (req, res) => {
       try {

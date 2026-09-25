@@ -4,6 +4,7 @@ import UserMetadata from "supertokens-node/recipe/usermetadata";
 import { LoginMethod, User } from "supertokens-node/lib/build/user";
 import {
   discoverMigrationById,
+  hasPendingMigrationById,
   planMigration as planAuthenticatedMigration,
   type MigrationIdDiscovery,
 } from "./migration-plan";
@@ -53,6 +54,17 @@ function discovered(): MigrationIdDiscovery {
 afterEach(() => vi.restoreAllMocks());
 
 describe("ID-first migration planning", () => {
+  it("blocks recipe-level checkpoints but allows completed records for other tenants", () => {
+    const input = discovered();
+    input.metadataById.set("recipe", { rownd_migration_provider_introduction: { rowndUserId: "rownd" } });
+    input.metadata.push(input.metadataById.get("recipe")!);
+    expect(hasPendingMigrationById(input)).toBe(true);
+
+    input.metadataById.set("recipe", {});
+    input.metadata[input.metadata.length - 1] = {};
+    input.metadata[0] = { rownd_migration_email_retirements: { other: {} } };
+    expect(hasPendingMigrationById(input)).toBe(false);
+  });
   it.each(["unchanged", "recipe introduction", "ledger only", "other tenant history", "reintroduced history"])(
     "reads each discovery ID once with linked methods and %s", async (scenario) => {
       const input = discovered();
