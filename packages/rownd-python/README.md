@@ -1,0 +1,852 @@
+# SuperTokens Rownd Python Plugin
+
+Rownd migration plugin for `supertokens_python`.
+
+Requires Python **3.9+** and SuperTokens Python SDK **0.31.3+**. CLI profile
+add/remove operations additionally require Unix `fcntl` file locking.
+
+## Administrative reconciliation
+
+After initializing SuperTokens with this plugin, backend code can inspect or
+repair an account without a Rownd JWT or user session:
+
+```python
+from supertokens_rownd import reconcile_user
+
+preview = await reconcile_user(rownd_user_id="rownd-user-id", dry_run=True)
+result = await reconcile_user(rownd_user_id="rownd-user-id")
+# Alternative selectors:
+# await reconcile_user(email="user@example.com")
+# await reconcile_user(supertokens_user_id="internal-external-or-recipe-id")
+```
+
+Provide exactly one selector. Optional arguments are `tenant_id` (default
+`"public"`), `user_context`, `dry_run`, and `on_progress`. The function uses the
+initialized plugin credentials and Core connection; it does not read CLI profiles
+or create a session. Keep this administrative function behind your application's
+own operator authorization if exposing it through an API.
+
+Results use Node-compatible field names:
+
+- `OK`: `rownd_user_id`, immutable `supertokens_user_id`, `recipe_user_ids`,
+  `changed`, and `actions`.
+- `PREVIEW`: `dryRun`, `snapshotOnly`, `canReconcile`, `matchesSource`,
+  `proposedActions`, `missingMethods`, `blockers`, and `requiresExecutionProof`.
+- `NOT_FOUND`, `AMBIGUOUS`, `BLOCKED`, or `ERROR`: reconciliation could not
+  establish completion. `partialProgress` indicates mutations may have occurred;
+  `changed: null` means the final change state is unknown.
+
+An unsuccessful dry run may return one of these failure statuses rather than
+`PREVIEW`. These administrative results are not migration HTTP `reason`/`retryable`
+envelopes. CSV records still use `type: "result"`; the outcome is in `result.status`.
+
+`requested_rownd_user_id` preserves an explicit Rownd selector even if another
+source wins election. `requested_supertokens_user_id` preserves a SuperTokens
+selector; reconciliation cannot silently switch its target. `on_progress` accepts
+a callback receiving a dictionary with `stage` and any stage-specific details;
+an async callback is also supported.
+
+The winning Rownd profile and surviving SuperTokens primary are separate choices.
+Eligible profiles compete using valid `meta.last_sign_in` / `meta.last_active`
+timestamps; a tie requires established canonical provenance. Activity alone does
+not authorize merging unrelated accounts. Whole-owner consolidation is limited to
+public-only recipe graphs and preserves immutable recipe IDs. Single-owner repairs
+can run in the requested tenant, preserving other tenant memberships; this does not
+authorize cross-tenant whole-owner consolidation. Checkpoints record
+multi-step repairs so retries can validate committed state before continuing.
+These Core operations are not an atomic transaction.
+
+Checkpoint compatibility targets `rownd-plugin` at `d34639e`: owner consolidation
+uses version 2 plans, while Python administrative method, publication, finalization,
+and lifecycle journals use version 1. These are separate record formats, not
+interchangeable versions of one schema. Supported Node lifecycle receipts are
+validated against fresh source, mapping, and recipe state before cleanup. Durable
+lineage and revocation debt survive interrupted cleanup; retries may repeat revocation
+or other recoverable operations, so this is not an exactly-once guarantee.
+
+Metadata backfill fills only absent, non-identity fields. Existing values, including
+nulls and opaque objects on linked identities or aliases, remain occupied; existing
+`original_rownd_user` provenance is preserved rather than overwritten by the winner.
+
+Administrative current-email ownership and email verification are distinct:
+verification requires `verified_data.email` to be `true` or match the current
+email. A native pending email change blocks conflicting reconciliation. Mapping
+changes must preserve verification for the same immutable credential, rather
+than inherit unrelated verification stored under an alias. Retired Rownd aliases
+cannot reclaim account ownership through later migration.
+
+## Administrative CLI
+
+Installing this package provides `rownd-python`; `python -m supertokens_rownd`
+is equivalent. From this package directory, prefix commands with `uv run`.
+The CLI initializes the SuperTokens recipes and Rownd plugin from a local
+profile without starting a web server.
+
+### Profiles
+
+```sh
+rownd-python profiles add --profile production
+rownd-python profiles list
+rownd-python profiles show --profile production
+rownd-python profiles remove --profile production
+```
+
+Interactive addition requests Rownd app ID, app key, app secret, SuperTokens
+connection URI, optional Core API key, and tenant ID (default `public`). Keys,
+secrets and connection URIs use masked terminal entry. Ctrl-C cancels without
+saving. For noninteractive use, supply `--app-id`, `--app-key`, `--app-secret`
+and `--connection-uri`, optionally `--api-key` and `--tenant-id`. Connection URIs
+must use HTTP(S), with no embedded username or password. `profile` is an alias
+for `profiles`; a positional profile name is also accepted.
+
+Profiles are stored in `~/.config/rownd-python/profiles.json`, with an owner-only
+directory (`0700`), owner-only file (`0600`), and atomic replacement on updates.
+Profile updates require Unix file locking. A separate owner-only (`0600`)
+`profiles.lock` file serializes concurrent additions and removals; credential
+prompts occur before locking, and the latest profiles are revalidated under the
+lock before saving. The lock file remains in place between commands.
+Profile output masks credentials and removes URI query strings and fragments.
+Dry-run profile reads do not change local permissions.
+
+### Reconcile one user
+
+```sh
+rownd-python reconcile-user --profile production --rownd-user-id ROWND_ID --dry-run
+rownd-python reconcile-user --profile production --rownd-user-id ROWND_ID
+rownd-python reconcile-user --profile production --email user@example.com
+rownd-python reconcile-user --profile production --supertokens-user-id SUPERTOKENS_ID
+```
+
+Supply exactly one selector. The configured profile supplies the tenant and both
+services' credentials. Results are structured JSON on stdout; stage progress
+goes to stderr. Credentials are redacted and transport diagnostics are replaced
+with sanitized explanations. Execution exits zero for `OK`; a dry-run `PREVIEW`
+exits zero only when `canReconcile` is true. Other results and command errors
+exit with code `1`; Ctrl-C exits with code `130`. Argument, configuration, or
+output failures may produce only sanitized stderr, without a JSON result or final
+batch summary. If an exception escapes reconciliation, the CLI emits an `ERROR`
+fallback with `changed: null` and `partialProgress: true` for execution; an unknown
+result does not imply rollback. Its dry-run fallback reports `changed: false`,
+`canReconcile: false`, and an `OBSERVATION_FAILED` blocker. Normally returned API
+failures retain their reported change and partial-progress state.
+
+`--dry-run` inspects live state without applying authentication changes.
+`proposedActions`, `blockers`, `requiresExecutionProof`, and `canReconcile`
+describe that snapshot. A preview is not authorization for later execution:
+run again without `--dry-run` to revalidate live state and apply repairs.
+
+### Reconcile a CSV
+
+```sh
+rownd-python reconcile-csv --profile production --file users.csv \
+  --concurrency 5 --failed-file failures.csv --dry-run > results.jsonl
+```
+
+The default selector column is `rownd_user_id`; use `--id-column "Rownd ID"`
+for another header. Other columns do not provide identity or verification
+evidence. For example:
+
+```csv
+rownd_user_id,email
+user_123,first@example.com
+user_456,second@example.com
+```
+
+The entire file is validated before SDK initialization or repairs. CSV quoting,
+escaped quotes, commas and newlines inside quoted fields, UTF-8 BOM, and CRLF
+are supported. Blank physical lines are ignored; explicit quoted empty or
+whitespace-only IDs are rejected. ID edges are trimmed. Missing or
+repeated ID headers, missing IDs, whitespace/control characters inside IDs,
+inconsistent columns and malformed quotes reject the file. Duplicate IDs are
+processed once in first-seen order.
+
+`--concurrency` bounds simultaneous users (default `1`). Individual failures
+do not stop other users. Stdout contains JSON Lines: each `type: "result"`
+record has a one-based unique-input `index` and sanitized `result`; the final
+`type: "summary"` includes `total`, `duplicatesSkipped`, `succeeded`, `failed`,
+`statuses`, and `dryRun`. Results appear in completion order. The result's
+`requested_rownd_user_id` retains the CSV ID if canonical source election
+changes `rownd_user_id`.
+
+Progress goes to stderr at startup, every second, and at completion. It includes
+completed/total users, active calls, success/failure counts, average users/second,
+elapsed time and estimated time remaining. A `complete` progress line means
+processing finished; consult the summary and exit status for success.
+
+`--failed-file` creates a **new** owner-only (`0600`) CSV with columns
+`rownd_user_id,status,error_code,error_message`. It records original input IDs
+for unsuccessful results, including previews with `canReconcile: false`.
+Blocker and execution-proof codes are joined with semicolons; messages are
+sanitized. Existing files are never overwritten. If writing the retry CSV,
+stdout results, or stderr progress fails, dispatch stops and in-flight users
+finish before the command exits nonzero. Result output and retry-file writes
+are attempted independently, so a broken output pipe does not discard in-flight
+failed IDs from a writable retry CSV. The first output error is preserved. Dry run
+still writes this explicitly requested local report. Retry it using a new
+output filename:
+
+```sh
+rownd-python reconcile-csv --profile production --file failures.csv \
+  --concurrency 5 --failed-file failures-retry.csv
+```
+
+The batch exits zero only if every unique ID succeeds (`OK`, or `PREVIEW` with
+`canReconcile: true`). Batch repairs are not atomic; completed changes remain
+if another user fails or the command is interrupted.
+The failure CSV is an input for manual retries, not a promise that each failure is
+transient. Resolve identity and policy blockers before retrying those rows.
+
+> [!IMPORTANT]
+> JWT migration mapping rejections for existing Session or UserMetadata references return `CORE_CAPABILITY_REQUIRED` (HTTP 503, `retryable: false`, `stage: "mapping"`). JWT migration does not automatically repair these references, force mappings, or revoke existing sessions to unblock mapping. Administrative reconciliation separately uses checkpointed, guarded mapping deletion and publication with Core force semantics; this does not relax the JWT migration boundary.
+
+This rejection classification is compatibility-tested with Python SDK **0.31.3** and Core **12.0.10**: the SDK-wrapped HTTP 400 from `POST /recipe/userid/map` with message `UserId is already in use in Session recipe` or `UserId is already in use in UserMetadata recipe`. Other recipes and error formats are not assumed recognized; other errors retain existing handling. Exact bidirectional mapping postconditions still recover races, including when the mapping call reports an error.
+
+Administrative force operations are limited to validated mapping plans and their exact
+alias/recipe cells, with ownership and verification checks. There is no general-purpose
+`force` argument on `reconcile_user` or the CLI.
+
+This package is managed by Turborepo through `package.json`, but published as a Python package named `supertokens-rownd`.
+
+## Installation
+
+Install from PyPI:
+
+```bash
+pip install supertokens-rownd
+```
+
+With `uv`:
+
+```bash
+uv add supertokens-rownd
+```
+
+For local development, install from this repository checkout with `uv sync --dev`.
+
+## Local Development
+
+```bash
+cd packages/rownd-python
+uv sync --dev
+uv run python -m build
+uv run pytest
+```
+
+Integration tests require Docker. If its default address pools are exhausted, choose
+an available subnet that does not overlap host, VPN, or other Docker networks:
+
+```bash
+ROWND_TEST_DOCKER_SUBNET="$AVAILABLE_TEST_SUBNET" uv run pytest
+```
+
+Set `AVAILABLE_TEST_SUBNET` to your chosen CIDR first; parallel runs need distinct
+subnets. Omit `ROWND_TEST_DOCKER_SUBNET` to use Docker's default network allocation.
+
+From the repository root, Turborepo can run the Python package tasks because this directory has a `package.json` workspace adapter:
+
+```bash
+npm run build -- --filter=@supertokens-plugins/rownd-python
+npm run test -- --filter=@supertokens-plugins/rownd-python
+```
+
+## Usage
+
+```python
+from supertokens_python import (
+    InputAppInfo,
+    SupertokensConfig,
+    SupertokensExperimentalConfig,
+    init,
+)
+from supertokens_python.recipe import accountlinking, emailverification, passwordless, session, thirdparty, usermetadata
+from supertokens_rownd import init as RowndMigrationPlugin
+
+init(
+    app_info=InputAppInfo(
+        app_name="My App",
+        api_domain="https://api.example.com",
+        website_domain="https://example.com",
+        api_base_path="/auth",
+    ),
+    framework="fastapi",
+    supertokens_config=SupertokensConfig(
+        connection_uri="https://try.supertokens.com",
+    ),
+    recipe_list=[
+        accountlinking.init(),
+        session.init(),
+        usermetadata.init(),
+        passwordless.init(
+            contact_config=passwordless.ContactEmailOrPhoneConfig(),
+            flow_type="MAGIC_LINK",
+        ),
+        emailverification.init(mode="OPTIONAL"),
+        thirdparty.init(sign_in_and_up_feature=thirdparty.SignInAndUpFeature(providers=[])),
+    ],
+    experimental=SupertokensExperimentalConfig(
+        plugins=[
+            RowndMigrationPlugin(
+                rownd_app_key="rownd_app_key",
+                rownd_app_secret="rownd_app_secret",
+                # Optional: trusted Rownd application ID, not a token or UI config value.
+                rownd_app_id="your-rownd-app-id",
+                # Must match InputAppInfo.api_base_path.
+                api_base_path="/auth",
+                # Should match InputAppInfo.api_domain.
+                api_domain="https://api.example.com",
+                # Should match InputAppInfo.website_domain when using passwordless confirmation bypass.
+                website_domain="https://example.com",
+                app_name="My App",
+                email_change={
+                    "max_session_age_seconds": 600,
+                    "retirement_mode": "observe",
+                },
+                app_config={
+                    "auth": {
+                        "enforceSameDevicePasswordlessSignIn": True,
+                    }
+                },
+            )
+        ]
+    ),
+)
+```
+
+`app_config.auth.enforceSameDevicePasswordlessSignIn` controls the Hub UI policy for
+passwordless flows originating from `mobile_app`. It does not enforce server-side device binding.
+
+### Rownd application ID and hosted signing keys
+
+Set `rownd_app_id` to bind migration JWTs to the trusted audience `app:<id>`.
+Migration verifies EdDSA signatures against the public keys at
+`https://rownd-hub.supertokens.com/.well-known/rownd-jwks.json` and requires issuer
+`https://api.rownd.io`, expiration, issued-at time, and the namespaced user ID claim.
+The app ID also determines profile URLs when administrative credentials are configured.
+With app key and secret, the plugin can discover the app ID from Rownd if omitted.
+Neither `app_config` nor token claims choose the expected app ID.
+The migration identity remains `https://auth.rownd.io/app_user_id`, not `sub`.
+Tokens without an expiration are rejected by hosted migration validation.
+
+Provide `rownd_app_id` when omitting credentials. Configure `rownd_app_key` and `rownd_app_secret` together to reconcile profiles and
+import new users. With only `rownd_app_id`, both migration endpoints remain available
+but issue sessions solely for existing, completed, consistently mapped users in the
+requested tenant. This mode never fetches Rownd profiles and cannot import users or
+repair incomplete migrations. It does not require an auth-level claim in the JWT.
+
+Plugin initialization rejects invalid IDs with `ValueError`: supply a nonempty ASCII
+URL-path-segment string using letters, digits, or `._~!$&'()*+,;=:@-`, excluding `.`
+and `..`. Whitespace, slashes, backslashes, percent escapes, query/fragment delimiters,
+and non-string values are rejected rather than normalized.
+
+## Routes
+
+The plugin registers these routes below `api_base_path`:
+
+- `GET /plugin/rownd/app-config`
+- `POST /plugin/rownd/guest`
+- `POST /plugin/rownd/migrate`
+- `POST /plugin/migrate-session`
+- `POST /plugin/passwordless-cross-device-confirmation/validate`
+- `POST /plugin/rownd/signout`
+
+`GET /plugin/rownd/app-config` returns HTTP 400 for an unknown `app_variant_id`, with
+`{"status":"ERROR","reason":"UNKNOWN_APP_VARIANT","message":"Unknown Rownd app variant: <id>"}`.
+The message is unchanged; valid or omitted variants retain their HTTP 200 behavior.
+
+Migration and guest routes accept an optional `tenantId` query parameter and default to `public`. Compatibility user views, sessions, and pending email verification are scoped to that tenant; user metadata remains shared across tenant memberships.
+
+The guest route selects instant login for `{"auth_level":"instant"}`; other or
+omitted values select guest login. Success returns HTTP 200 with
+`{"status":"OK","createdNewRecipeUser":true}` for a newly created recipe user.
+Disabled sign-in methods and configuration-resolution failures return HTTP 200
+with `{"status":"ERROR","message":"..."}` without creating a session. Guest
+clients must check the response body's `status`, unlike migration clients below.
+
+Both migration routes return HTTP 200 with `{"status":"OK"}` on success. Failures use a
+non-2xx status and a stable body containing `reason`, `retryable`, `stage`, and
+`operationId`. Callers must branch on the HTTP status and `reason`, not the human-readable
+`message`. Rownd profile 404s, rejected plugin credentials, malformed app configuration or
+profile data, and transient Rownd failures have distinct stable classifications. Authenticated
+app-config and profile 401/403 responses indicate invalid plugin credentials because the
+repository has no structured Rownd error code proving another category. HTTP 408, 429, and
+5xx responses are retryable Rownd unavailability. Authenticated app-config and profile
+requests reject redirects; network and body-read operations use a total request deadline, and
+response bodies are streamed under a 1 MiB limit. JSON parsing is synchronous and cannot be
+preempted by the event-loop deadline, but its work is bounded by that response limit. The plugin
+rejects a present source `state` other than `"enabled"`; an omitted state defaults to
+enabled. JWT source-authority validation reports `SOURCE_IDENTITY_INVALID`, while
+administrative validation reports a blocked policy outcome. These checks do not use
+the separate `ROWND_USER_DISABLED` reason.
+
+A missing Rownd user returns `ROWND_USER_NOT_FOUND` (HTTP 401, `retryable: false`),
+not a successful no-op, on both migration routes.
+
+Recognized Core transport failures and SDK 0.31.3-wrapped HTTP 5xx errors become
+`CORE_UNAVAILABLE` (HTTP 503, `retryable: true`) when reconciliation cannot establish
+completion. Recognition uses the verified SDK exception envelope, not arbitrary
+error text or a recipe error code. Other unresolved failures can remain
+`MIGRATION_INCOMPLETE` (HTTP 503, `retryable: true`); read the returned `stage` rather
+than assuming it identifies the original failing write.
+
+Core bulk import uses 5-second HTTPX operation/inactivity timeouts, a practical
+15-second total request deadline, and a streamed 1 MiB response limit. It requests
+`Accept-Encoding: identity` and refuses non-identity compression before decoding.
+Invalid lengths, oversized bodies, malformed JSON, and invalid success envelopes
+are rejected; rejected HTTP 5xx responses retain outage classification. Synchronous
+JSON parsing and uncooperative cancellation are not independently preemptible.
+These are per-import bounds, not an end-to-end migration deadline.
+
+A timeout, lost acknowledgement, or rejected response does **not** prove an import
+failed to commit. There are no blind transport write retries: the request-local Core
+call cache is cleared even on failure/cancellation, and reconciliation reads fresh
+state before deciding whether another write is needed. Success requires completed
+postconditions; unavailable inspection is not success. Bulk-import error objects
+retain no response body; duplicate recovery remains limited to HTTP 400 with a
+nonempty error list containing only `E006:` entries. `E027` is not treated as E006.
+
+Decoded token `kid` values containing lone Unicode surrogates are rejected as
+`TOKEN_MALFORMED` (HTTP 401) before network requests, cache work, or JWKS diagnostics,
+regardless of diagnostic sampling. Valid non-ASCII Unicode key IDs remain supported.
+
+Migration conflicts return HTTP 422 with body `code: 422` and `retryable: false`.
+HTTP 409 is avoided because existing native clients interpret it as an existing session.
+These blocked outcomes create no session and return no session credentials. Email-change
+conflicts retain their HTTP 409 status.
+
+If a Passwordless identity is created but linking is interrupted, migration can recover
+the standalone email/phone owner using an exact Rownd mapping or a non-raw target already
+pinned in the invocation. Recovery requires either verification of the exact identifier
+by both the Rownd source and Core owner, or trusted same-Rownd provenance in the owner's
+`original_rownd_user.data.user_id`. The latter permits interrupted unverified-email
+repairs to resume without marking the email verified. Both paths still require an exact
+recipe/identifier match, same-tenant membership, a nonprimary owner, valid metadata,
+and no conflicting Rownd ownership/mapping.
+Multiple owners of the same identity always block. Separate email/phone owners without
+that authority remain ambiguous; raw-ID graph overlap alone does not bypass this check.
+
+| Migration Reason | HTTP Status | Retryable |
+| --- | --- | --- |
+| `IDENTITY_AMBIGUOUS` | 422 | false |
+| `IDENTITY_OWNED_BY_ANOTHER_USER` | 422 | false |
+| `MAPPING_CONFLICT` | 422 | false |
+| `RAW_USER_ID_COLLISION` | 422 | false |
+| `PRIMARY_ACCOUNT_MERGE_REQUIRED` | 422 | false |
+| `MIGRATION_STATE_INVALID` | 422 | false |
+
+Rownd migration tokens must use `EdDSA`, include a non-empty `kid`, and contain valid `aud`
+and `iat` claims, plus a non-empty string `https://auth.rownd.io/app_user_id`. Legacy Rownd tokens
+issued with `meta.access_token_ttl: "never"` may omit `exp`; expiration is still verified when
+`exp` is present. `nbf` is also validated when present. The expected audience is the configured
+Rownd application (`app:<app-id>`). If trusted Rownd discovery metadata publishes an `issuer`,
+the token must also contain the matching `iss`; no issuer is assumed when discovery omits it.
+
+An unknown signing key triggers at most one generation-aware, single-flight JWKS refresh. If the
+key is confirmed absent after a fetch (or a valid negative-cache lookup for the current
+generation), migration returns HTTP 401 with `reason: "TOKEN_KID_UNKNOWN"` and
+`retryable: false`. The caller must discard the token and reauthenticate; repeatedly submitting
+the same token cannot help until Rownd publishes its key. Refreshes have a 5-second global
+cooldown. If that cooldown suppresses a refresh for an unconfirmed miss, both migration routes
+return HTTP 503 with `reason: "ROWND_UNAVAILABLE"` and `retryable: true`; retry after the cooldown
+without discarding the token. Suppressed misses are not negative-cached, and known cached keys
+remain usable. Confirmed misses enter a 256-entry per-`kid` negative cache for 5 seconds. Negative
+entries never suppress the first generation-aware refresh permitted after the global cooldown,
+so maximum policy-induced new-key recognition delay is 5 seconds, independent of the normal
+5-minute JWKS TTL; network and refresh execution time is additional. Cold-cache and expired-cache
+failures use the same backoff. Failed refreshes retain the last known-good keys and repeat their
+typed JWKS failure during the cooldown. `asyncio.wait_for` applies a practical 10-second total
+timeout to discovery plus JWKS. On Python 3.9 it cannot provide a strict cancellation-independent
+deadline if lower-level code suppresses cancellation.
+
+The migration `Authorization` header must be exactly `Bearer <token>`; the scheme remains
+case-insensitive for compatibility. For known keys, signature and
+issuer-independent temporal verification happen before the authenticated app-ID request; forged,
+expired, and not-active tokens therefore cannot amplify authenticated requests. Discovered app
+IDs use a single-flight, generation-counted 5-minute cache, bounding requests from valid-signature
+cross-audience tokens while final audience and trusted issuer validation remain mandatory. Fast
+app-config failures are single-flight and replay their typed error for 5 seconds. An expired app ID
+is not served stale during failure because the plugin cannot safely distinguish an outage from an
+application-ID change.
+
+### Logging and migration telemetry
+
+The plugin uses standard Python logging under `supertokens_rownd`, not direct
+`print` calls. `enable_debug_logs=True` opts diagnostic messages in at **INFO**;
+logger/handler levels still apply. Warnings do not require that flag. Configure
+application handlers to collect this logger and its children.
+
+Each migration handler emits one sanitized local terminal summary before telemetry
+delivery, independently of the debug flag and telemetry client: errors at WARNING,
+success/cancellation at INFO. Fields are `operationId`, `outcome`, allowlisted
+`stage`, `reason`, and `retryable`; no raw identities, tokens, request URLs, response
+bodies, exception text, or tracebacks are included. Guest-login and confirmation-
+bypass failure logs use fixed codes; unknown app-variant warnings omit the supplied
+variant. This does not sanitize application/SDK/transport logging or legacy guest
+telemetry.
+
+The plugin samples 10% of key-miss diagnostics, globally limits them to one submission per second,
+and delivers them through a dedicated four-slot registry that requests cancellation after 250 ms.
+Terminal migration telemetry has separate capacity. If custom telemetry suppresses cancellation,
+its slot remains occupied until it actually exits; this keeps pending diagnostic deliveries hard
+bounded at four rather than accumulating detached tasks. Diagnostic events contain only a
+16-hex-character `kid` hash, bounded outcome and reason values, key count, and cache generation;
+they never contain the token or raw `kid`, and the `kid` is not used as a metric label.
+
+The plugin constructs exactly one terminal telemetry event and awaits best-effort delivery
+for up to 250 ms per migration request, allowing cooperative clients to finish before a
+request-scoped event loop (such as Django WSGI) closes. Migration events contain stable result and reconciliation
+fields, but no raw Rownd or SuperTokens IDs, tokens, URLs, response bodies, stack traces, or
+exception messages. Delivery uses application-event-loop tasks tracked in a process-wide
+128-slot registry. Delivery is lossy: a new event is dropped when all slots are
+occupied. Timeout requests cancellation without waiting for acknowledgement. A hung or
+cancellation-resistant delivery retains its slot until it exits but does not prevent
+other available slots from delivering independently. In-process custom async telemetry is
+trusted extension code and runs on the application event loop where it was submitted; it must
+not perform synchronous blocking work on that loop. The plugin cannot preempt arbitrary
+blocking Python callback code, so the deadline requires a responsive event loop. A client
+that suppresses cancellation can also delay framework-owned loop teardown; the plugin does
+not wait for it after the deadline. Synchronous implementations are rejected. Client failures
+(including client cancellation) do not change the migration result; external request cancellation
+during delivery cancels the delivery task and propagates promptly. Early failures report `attemptCount: 0`; recovery paths
+distinguish retry convergence from final postcondition recovery. Cancelled requests construct
+a terminal `outcome: "cancelled"` event with telemetry-only `httpStatus: 499`, attempt delivery
+subject to the same deadline and bounded-capacity drop policy, do not fabricate an HTTP response, and
+re-raise cancellation. These privacy guarantees apply to migration events. Guest telemetry
+retains its legacy payload and delivery path and is outside this migration contract.
+
+### Migration and compatibility behavior
+
+New-user import payloads from both the Rownd mapper and online migration builder set
+the first login method's `isPrimary: true`, including single-method users. The target
+Core must have the primary-user/account-linking feature enabled even for these singleton
+imports; SDK recipe initialization alone does not enable the Core feature. Standalone
+missing-identity additions remain nonprimary (`isPrimary` is omitted) so they can be
+linked to the existing target. `MAKE_PRIMARY` recovery for existing nonprimary targets
+is unchanged.
+
+Online migration accepts eligible emails and Google/Apple identifiers without historical
+`verified_data` markers. A validated Rownd JWT authorizes its current real profile email;
+this proof is privately bound to the source object, tenant, and identities. A fetched
+profile alone needs `verified_data.email: true` or a matching normalized email to establish
+verification. Generated provider/guest placeholder emails remain unverified; a Google/Apple
+identifier alone does not prove email ownership. Native canonical emails and pending email
+changes restrict reconciliation, and cleanup retires only snapshot-proven email methods.
+Existing Core verification for the exact email is preserved and takes precedence over
+historical metadata in compatibility email-verification claims.
+
+Eligibility does not authorize adopting or linking an unrelated email or provider owner.
+Provider-owner adoption/linking requires matching source verification or positive same-Rownd
+owner provenance; a mapping to a different target is not authority over that owner.
+JWT migration rejects a raw `rownd_migration_superseded` tombstone even after its alias
+mapping is removed; administrative recovery references cannot reauthorize that source.
+Google/Apple matching requires the exact provider namespace
+and case-sensitive subject after trimming. Tenant, mapping, collision, and primary-account
+guards remain in place. The plugin's `schema` is local profile configuration, not an
+upstream Rownd authentication configuration; it does not select migration lookup fields.
+Google/Apple subjects prefer nonempty strings in `verified_data`, falling back to `data`;
+boolean verification evidence is preserved. Optional absent, null, and exact-empty identity
+cells are ignored, while malformed and whitespace-only source values are rejected.
+Provider replacement links the current credential before removing obsolete tenant membership.
+Durable introduction, retirement, and revocation records support interrupted work. Confirmed
+creation receipts bind recipe IDs, subjects, join times, and tenant membership. An uncertain
+creation is treated as an existing donor, never as permission to delete an unknown account.
+Obsolete recipes are deleted only after their last tenant membership is removed and a
+replacement remains linked; recipe-only deletion retains the primary user and mapping.
+Uncommitted sole anchors remain quarantined rather than deleting the primary account.
+JWT lifecycle repair does not merge a separate primary owner. An obsolete recipe that
+originally anchored the current primary may nevertheless be retired using recipe-only
+deletion after a replacement is linked; the primary user ID and mapping remain intact.
+Repeated completed provider-only migrations may use ID-only discovery when the
+bidirectional mapping, source identities, tenant membership, and checkpoint state are
+stable. Any expected email or phone identity requires full account discovery, including
+cross-recipe contact ownership checks, even when the migration was already completed.
+Unknown operational markers or repair/debt conditions fall back to account discovery.
+Fresh source, mapping, method, and final session checks still run; no completion result
+is cached across requests or writes.
+Provider membership introductions record the original tenant set before association;
+source drift removes only the newly introduced membership. Native session creation and
+refresh reject pending provider introductions and recipes missing the requested tenant.
+Email retirement revocation debt is settled before evaluating a changed current source.
+
+Phone migration remains verified-only: missing verification preserves the phone in original
+profile metadata, not as a Core login method; contradictory phone evidence blocks migration.
+Mexico's retired `+521` mobile prefix is normalized to `+52` at the Core boundary only;
+the current and verified Rownd phone values must still agree before this normalization.
+Preserving a provider identifier does not itself create verified provider claims. Source
+authentication level remains separate from contact and provider verification evidence.
+When an eligible source email exists, migration sessions use its owned, tenant-scoped
+canonical Passwordless method and the SDK's actual email-verification claim.
+Linked metadata does not fill missing identity or verification fields in the authoritative
+original profile. Missing non-identity `original.data` profile fields (such as `first_name`)
+may fall back to snapshots with the same Rownd user ID; authority fields and non-variant
+attributes do not fall back. App-variant membership is still unioned.
+OAuth email selection and verification use only the active tenant's canonical pointer and
+login methods. Native provider authentication replacing a synthetic email with a real email
+supersedes historical provider evidence without changing the original snapshot or treating
+synthetic-email EV as provider authentication.
+
+App-variant membership stays at `original_rownd_user.attributes["rownd:app_variants"]`.
+Recording a variant preserves genuine Rownd metadata without synthesizing `data.user_id`
+or `verified_data`. An attributes-only wrapper is valid operational metadata, not identity
+provenance. Historical profiles with a valid Rownd user ID remain opaque provenance
+when old identity cells cannot be parsed: they do not attest current identities, and
+fresh-source repair is required. Invalid provenance structure or conflicting ownership
+still blocks migration; unsupported historical cells alone do not block benign writes.
+
+Email-change completion no longer synthesizes a Rownd `data.user_id` from the SuperTokens
+user ID. Native attributes-only wrappers remain non-provenance, while genuine linked
+profiles retain their Rownd identity. Invalid provenance structure or conflicting
+metadata returns the SDK
+`GENERAL_ERROR` response before credential additions or session revocation.
+
+To remove both migration routes, configure `disable_rownd_user_migration=True`. Without
+an app key the plugin uses an internal app key for passwordless and verification-link rewriting.
+
+Passwordless resend requests preserve Rownd display, redirect, client-domain, app-variant, and OAuth context. Combined OTP and magic-link deliveries add the Hub `passwordlessFlowType=USER_INPUT_CODE_AND_MAGIC_LINK` parameter; OTP-only deliveries are left unchanged.
+
+- `GET /plugin/rownd/user`
+- `PUT /plugin/rownd/user`
+- `DELETE /plugin/rownd/user`
+- `GET /plugin/rownd/user/meta`
+- `PUT /plugin/rownd/user/meta`
+- `GET /plugin/rownd/user/field`
+- `PUT /plugin/rownd/user/field`
+
+## Rownd Compatibility
+
+The plugin exposes Rownd-compatible user/session behavior for migrated and new SuperTokens users:
+
+- Guest sessions use the `guest` third-party provider.
+- Instant sessions use the `instant` third-party provider and preserve `auth_level: "instant"`.
+- Guest and instant login require a matching `{"method": "anonymous", "type": "guest"}` or `{"method": "anonymous", "type": "instant"}` entry in `app_config.signInMethods`. Omitted anonymous type defaults to guest. A sub-brand's `signInMethods` replaces the base list, including an empty list that disables anonymous login.
+- Instant sessions stay anonymous and have `is_verified_user: false` after account linking. Only successful credential authentication upgrades that session; profile and metadata changes cannot attest authentication.
+- Passwordless and third-party sign-in refresh Rownd session claims after account linking while preserving the linked guest's `anonymous_id`.
+
+- Compatibility reads combine metadata from the primary and linked recipe users. Profile and metadata writes target the primary user without relocating linked Rownd metadata.
+- Google and Apple third-party login methods are exposed as `google_id` and `apple_id` in Rownd-compatible user payloads.
+- OAuth2 Provider tokens and userinfo responses include Rownd claims plus standard `email`, `phone`, and `profile` claims when those scopes are requested.
+- OAuth2 `resource=app:*` requests are translated to SuperTokens `audience=app:*` for Rownd-compatible OAuth clients.
+- Rownd compatibility user routes ignore the global email verification claim validator for profile access; secure email changes apply their own checks.
+
+`resolve_config` is currently invoked by the anonymous-login route and administrative
+`reconcile_user` calls. It receives
+one dictionary containing `tenant_id`, `request`, and `user_context`. Administrative
+calls supply `request: None`:
+
+```python
+async def resolve_config(operation):
+    tenant = await load_tenant_configuration(operation["tenant_id"])
+    return {"app_config": tenant["app_config"]}
+```
+
+Pass the callback as `RowndPluginConfig(resolve_config=resolve_config, ...)`.
+Supported overrides are `app_config`, `sub_brands`, `schema`, `client_domains`,
+`cross_device_confirmation_bypass`, and `email_change.max_session_age_seconds`.
+Top-level values replace static values rather than being deep-merged; `None` is
+ignored. The permitted email-change setting is merged with static email-change
+settings; `retirement_mode` remains startup-static. Resolution errors prevent the
+operation: anonymous login returns its error response, while administrative
+reconciliation returns an unsuccessful result.
+The snapshot applies to that operation and any anonymous session creation, not globally.
+App-config, migration, profile/email-change routes and subsequent session requests
+do not independently invoke this resolver.
+
+After upgrading, instant sessions report `is_verified_user: false`. Older unmarked
+sessions with owner-consolidation metadata require structural and fresh completed-plan
+validation; ambiguous moved aliases remain instant until fresh credential authentication.
+Incomplete or invalid checkpoints fail closed on that legacy inference path. Successful
+native credential authentication and explicitly authenticated sessions do not depend on
+an old completed administrative checkpoint, even if it is malformed. In-flight mapping
+publication and orphan recovery still block unsafe native session issuance.
+`rownd_session_authentication` is internal state, not a configurable claim or a
+user-context flag for upgrading authentication.
+
+### Email Changes
+
+Email credential retirement has two rollout modes:
+
+- `observe` is the default. It classifies Passwordless email state but preserves legacy authentication and profile email-change behavior. Legacy completion creates or reuses a Passwordless target and retains previous Passwordless email methods as login aliases. This flow is not distributed-safe: metadata publication has no compare-and-swap or fencing support.
+- `guard` rejects retired or malformed Passwordless email create, resend, helper, and consume attempts. Phone credentials are not classified for email retirement; consume session binding still applies as described below. Because safe completion requires metadata compare-and-swap, guard mode also disables starting and completing profile email changes.
+
+Guard enforcement covers the plugin-owned Passwordless HTTP APIs and exported helpers. Calls made directly to the SuperTokens SDK outside those paths are not guarded.
+
+In guard mode, Passwordless consume requires a fresh internal postcheck marker
+binding the checked owner and recipe user to the request tenant. The returned
+session's recipe user and tenant must match that marker. Both the consume result's
+user ID and `returned_session.get_user_id()` must independently match the checked
+owner through mapping-aware comparison; native/external aliases are not compared
+as raw strings alone. Stale, missing, malformed, or mismatched evidence
+denies success. This session-binding check also covers phone consumes; phone
+credentials are not subject to email-retirement classification. Observe mode does
+not enforce this post-session guard.
+
+Defensive cleanup revokes the returned handle through the SDK boolean-returning
+API and always attempts to queue credential clearing. Only literal `True` confirms
+targeted revocation. An exact `False` triggers a fresh session-information read;
+confirmed absence avoids unnecessary account-wide logout. Failed or unconfirmed targeted cleanup
+falls back to linked-account revocation scoped to the **request tenant**, not all
+tenants. Cleanup tracks revocation and explicit response-clear queueing separately;
+growth of the response-mutator list does not prove clearing succeeded. If clearing
+was not queued and response mutators existed before or remain after cleanup, the
+handler raises rather than returning normally; otherwise it requests flow restart.
+Cancellation propagates, so cleanup completion is not guaranteed.
+
+The `supertokens_rownd` logger emits stable warning diagnostics without emails,
+codes, tokens, session handles, or exception text. Observe-mode classification
+rejections include `operation`, `code=classification_rejected`, `state`, and
+`reason`; classification failures include `operation` and
+`code=classification_exception`. Cleanup diagnostics distinguish
+`targeted_revoke_failed`, `targeted_revoke_unconfirmed`, `response_clear_failed`,
+`account_revoke_failed`, `account_revoke_unconfirmed` (including an empty fallback
+result), and `account_revoke_unavailable`. These warnings are independent of
+`enable_debug_logs`; none asserts that revocation completed.
+
+When email sign-in is configured in observe mode, changing the profile email starts a
+verified Passwordless email change for the initiating tenant. For accounts containing
+only real third-party methods, the plugin creates and links the first Passwordless
+method after verification. Guest/instant-only accounts and unsupported mixed-account
+topologies are rejected. Configure the mode and maximum initiating-session age:
+
+```python
+RowndMigrationPlugin(
+    rownd_app_key="rownd_app_key",
+    rownd_app_secret="rownd_app_secret",
+    app_config={"signInMethods": [{"method": "email"}]},
+    email_change={
+        "max_session_age_seconds": 600,
+        "retirement_mode": "observe",
+    },
+)
+```
+
+Before enabling `guard`, stop new email changes and drain or manually resolve all
+pending changes. Inventory malformed or ambiguous canonical metadata and repair only
+state that an operator has reviewed; the plugin does not guess or automatically repair
+security metadata. Inspect metadata on the primary user, specifically
+`rownd_pending_verification`, `rownd_email_recipe_user_id`, and
+`rownd_email_recipe_user_ids`, to locate pending operations and canonical security
+state. Upgrade every worker before changing the mode; mixed observe/guard workers do
+not provide a safe rollout boundary. Guard mode protects retirement state published by
+prior completed changes, but new email changes must remain disabled until Core and the
+Python SDK expose metadata compare-and-swap/revision fencing.
+
+The flow requires Passwordless, EmailVerification, and AccountLinking. It rejects
+stale sessions, checks target ownership across all tenants, and binds pending
+verification metadata to the initiating user, session, tenant, purpose, and status
+before consuming the Core token. In observe mode, completion revokes all account
+sessions and returns a replacement session for the new canonical method, but concurrent
+completion claims are local compatibility behavior rather than a distributed guarantee.
+The tenant's canonical email method is tracked separately from its login aliases.
+Existing metadata using `rownd_email_recipe_user_id` remains
+supported; new updates also maintain the tenant-scoped `rownd_email_recipe_user_ids`
+map. Guard mode permits the verified canonical Passwordless email, or an unverified
+canonical email with valid migration-completion metadata and a matching tenant canonical
+pointer. This permits a Passwordless challenge, not an EV bypass. Explicit canonical
+pointers and retirement metadata block excluded aliases during create, resend, and
+consume. A historical profile email preference alone does not retire another
+attached, verified, nonsynthetic Passwordless email: eligible aliases remain usable
+subject to tenant, credential-match, and unambiguous topology checks. Migration publishes
+the tenant canonical email pointer and can retire snapshot-proven obsolete Passwordless
+email methods when source, provider-continuity, ownership, and replacement-verification
+checks pass. Retirement revokes old email codes and tenant account sessions, removes
+obsolete tenant membership, and deletes the recipe only when no tenant memberships
+remain and the replacement is still linked. This differs from native profile email
+changes in observe mode, which retain previous aliases. Completion metadata alone is
+not verification proof.
+
+Successful profile or field updates that start verification return
+`email_verification_pending: true`. Until verification completes, the returned profile
+continues to expose the current canonical email.
+
+Native clients using `rowndDisplayContext: "mobile_app"` must send
+`rowndNativeEmailVerification: true` in the request `context`. Older clients receive
+HTTP 426 before metadata or email-delivery side effects. Only validated display,
+client-domain, and native-capability values are propagated; request-provided redirect
+paths are ignored. This applies to both `PUT /plugin/rownd/user` and
+`PUT /plugin/rownd/user/field`.
+
+Pending email-change links retain the raw SuperTokens `token` and add
+`rowndPendingVerificationId`. Custom email delivery must preserve both parameters.
+The marker selects the profile-change flow and requires the initiating session.
+Unmarked verification remains ordinary SuperTokens verification and is
+session-optional; removing the marker can therefore consume the raw token without
+completing the credential change. Concurrent duplicate consumption allows at most
+one completion within the behavior covered by the current Core calls; without metadata
+compare-and-swap this is not a cross-process guarantee. Failed completion and
+replacement-session creation are compensated; rollback failures require account
+reconciliation.
+
+### Passwordless Confirmation Bypass
+
+Use `create_magic_link_with_confirmation_bypass` when your backend needs to create a passwordless magic link that can be opened on a different device without showing the SuperTokens cross-device confirmation prompt.
+This is intended for trusted server-side flows only.
+
+First, configure the exact post-login paths that may use the bypass:
+
+```python
+from supertokens_rownd import RowndPluginConfig
+
+rownd_plugin_config = RowndPluginConfig(
+    rownd_app_key="rownd_app_key",
+    rownd_app_secret="rownd_app_secret",
+    api_base_path="/auth",
+    api_domain="https://api.example.com",
+    website_domain="https://example.com",
+    client_domains={"browser": "https://app.example.com"},
+    cross_device_confirmation_bypass={
+        "allowed_redirect_paths": ["/profile", "/settings/security"],
+    },
+)
+```
+
+Then call the helper from your backend after SuperTokens has been initialized with the Rownd plugin:
+
+```python
+from supertokens_rownd import create_magic_link_with_confirmation_bypass
+
+magic_link = await create_magic_link_with_confirmation_bypass(
+    email="user@example.com",
+    client_domain="browser",
+    redirect_to_path="/profile",
+    display_context="browser",
+)
+```
+
+`redirect_to_path` is required and must match `cross_device_confirmation_bypass.allowed_redirect_paths` exactly after normalization. Absolute URLs are accepted only when their origin matches the resolved `client_domain`; they are normalized back to a relative path before being added to the magic link.
+
+`client_domain` must be a configured `client_domains` key, not a raw domain. Omit it to use `website_domain`.
+
+Pass exactly one of `email` or `phone_number`. The helper returns the rewritten magic link with `bypassDeviceConfirmation=true`. In retirement guard mode, email helper calls enforce canonical credential state; phone helper calls remain unchanged.
+
+Before skipping the cross-device confirmation prompt, the frontend should validate the callback against the plugin:
+
+- **POST** `/plugin/passwordless-cross-device-confirmation/validate`
+- **Body**: `{ "clientDomain": "browser", "redirectToPath": "/profile", "appVariantId": "optional_variant" }`
+- **Success response**: `{ "status": "OK", "bypass": true }`
+
+If validation fails, the frontend should show the normal cross-device confirmation prompt.
+
+Apple sign-in methods may include SuperTokens client type mapping fields:
+
+```python
+"signInMethods": [
+    {
+        "method": "apple",
+        "clientId": "com.example.service",
+        "webClientType": "web",
+        "iosClientType": "ios",
+        "androidClientType": "android",
+    }
+]
+```
+
+See [OAUTH_MIGRATION_TUTORIAL.md](./OAUTH_MIGRATION_TUTORIAL.md) for OAuth/OIDC client migration steps.
+
+## Notes
+
+The Python SDK plugin API does not currently pass `app_info` into plugin route construction. Configure `api_base_path`, `api_domain`, `website_domain`, and `app_name` on the Rownd plugin so it can register routes and rewrite Rownd hub links consistently.
+
+`api_base_path` must match `InputAppInfo.api_base_path`. If these differ, Rownd plugin routes are mounted at the Rownd plugin value, not the SuperTokens app value.
+
+`api_domain` should match `InputAppInfo.api_domain`. This value is added to rewritten Rownd hub links so browser and mobile flows can call back to the correct API domain.
+
+`website_domain` should match `InputAppInfo.website_domain`. It is required when `create_magic_link_with_confirmation_bypass` is called without `client_domain`.

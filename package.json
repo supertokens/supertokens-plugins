@@ -4,20 +4,23 @@
     "build": "turbo run build",
     "dev": "turbo run dev",
     "lint": "turbo run lint",
-    "test": "turbo run test --concurrency=1 -- --passWithNoTests",
+    "test": "npm run test:scripts && turbo run test --concurrency=1",
+    "test:scripts": "node --test scripts/*.test.mjs",
     "test:watch": "turbo run test:watch",
     "clean": "turbo run clean && rm -rf node_modules",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
+    "check:python-versions": "node scripts/check-python-package-versions.mjs",
     "changeset": "changeset",
-    "version": "changeset version",
+    "version": "changeset version && node scripts/sync-python-package-versions.mjs",
     "version:private": "changeset version --snapshot",
-    "release": "changeset publish",
+    "release": "npm run check:python-versions && changeset publish && node scripts/publish-python-packages.mjs",
     "release:private": "changeset publish --tag"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.1",
     "@typescript-eslint/eslint-plugin": "^8.39.1",
     "@vitejs/plugin-react": "^4.5.2",
+    "es-module-lexer": "^1.7.0",
     "eslint": "^8.57.0",
     "eslint-plugin-import": "^2.32.0",
     "eslint-plugin-react-hooks": "^5.2.0",
@@ -43,8 +46,8 @@
     "@shared/nodejs": "*",
     "@shared/react": "*",
     "@shared/ui": "*",
-    "@supertokens-plugins/profile-details-shared": "*",
     "@supertokens-plugins/profile-base-react": "*",
+    "@supertokens-plugins/profile-details-shared": "*",
     "tsup": "^8.5.0"
   }
 }
