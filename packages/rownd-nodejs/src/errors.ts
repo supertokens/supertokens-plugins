@@ -11,3 +11,50 @@ export class RowndPluginError extends Error {
     super(ROWND_PLUGIN_ERROR_MESSAGES[type]);
   }
 }
+
+export class RowndLegacyUserNotFoundError extends Error {
+  readonly code = "LEGACY_USER_NOT_FOUND" as const;
+
+  constructor() {
+    super("Your previous session could not be restored. Please sign in again.");
+    this.name = "RowndLegacyUserNotFoundError";
+  }
+}
+
+export class RowndEmailChangeError extends Error {
+  constructor(
+    public readonly code: "CONFLICT" | "AMBIGUOUS" | "INVALID_EMAIL",
+    public readonly httpStatus: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export class RowndConfigResolutionError extends Error {
+  readonly cause!: unknown;
+
+  constructor(cause: unknown) {
+    super("Rownd configuration could not be resolved");
+    this.name = "RowndConfigResolutionError";
+    Object.defineProperty(this, "cause", { enumerable: false, value: cause });
+  }
+}
+
+export class RowndPasswordlessCleanupError extends Error {
+  constructor(
+    public readonly cause: unknown,
+    public readonly cleanupError: unknown,
+  ) {
+    super("Historical passwordless linking and cleanup failed");
+    this.name = "RowndPasswordlessCleanupError";
+  }
+}
+
+// Explicit invariant failures are policy blocks; unknown errors remain operational.
+export class RowndMigrationPolicyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RowndMigrationPolicyError";
+  }
+}

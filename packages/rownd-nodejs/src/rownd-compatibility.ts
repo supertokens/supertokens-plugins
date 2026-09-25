@@ -1,0 +1,1575 @@
+import { createHash } from "node:crypto";
+import { normalizeOptionalRowndIdentities, resolveRowndProviderSubject } from "./provider-identity";
+
+import { reconciliationSuperTokens as SuperTokens, reconciliationAccountLinking as AccountLinking, reconciliationUserMetadata as UserMetadata } from "./reconciliation-sdk";
+import type { JSONObject, UserContext } from "supertokens-node/types";
+
+import {
+  DEFAULT_ROWND_SCHEMA,
+  GUEST_AUTH_METHOD_ID,
+  INSTANT_AUTH_METHOD_ID,
+  PUBLIC_TENANT_ID,
+  RESERVED_SESSION_CLAIMS,
+  ROWND_JWT_CLAIMS,
+} from "./constants";
+import { getConfigForUserContext, getPluginConfig } from "./config";
+import {
+  isSyntheticEmail,
+  resolveEmailForAuthentication,
+  SUPERTOKENS_FAKE_EMAIL_DOMAIN,
+} from "./canonical-email";
+import type {
+  RowndPluginNormalisedConfig,
+  RowndUser,
+  RowndUserMetadata,
+  SuperTokensUserImport,
+} from "./types";
+import type { JsonRecord, JsonValue } from "./utils";
+import { clearSuperTokensCoreCallCache, getStringList, isJsonRecord } from "./utils";
+import { invalidateReconciliationReads } from "./reconciliation-reads";
+import { readOwnerPlanCheckpoint } from "./migration-owner-plan";
+import { RowndMigrationPolicyError } from "./errors";
+
+export type RowndMetadata = RowndUserMetadata & JsonRecord;
+
+export type LinkedUserMetadataInspection = {
+  user?: SuperTokensUser;
+  primaryUserId: string;
+  linkedUserIds: string[];
+  linkedMetadata: Array<{ userId: string; metadata: RowndMetadata }>;
+  primaryMetadata: RowndMetadata;
+  combinedMetadata: RowndMetadata;
+  metadataUpdate: JsonRecord;
+  rowndMetadataSourceUserId?: string;
+  rowndMetadataSourceMetadata?: RowndMetadata;
+};
+
+export type RowndVerifiableField = string;
+
+export type RowndPendingVerification = {
+  id: string;
+  field: RowndVerifiableField;
+  value: string;
+  created_at: string;
+  tenantId?: string;
+  purpose?: "UPDATE_PASSWORDLESS" | "ADD_PASSWORDLESS";
+  initiatingSessionHandle?: string;
+  verificationRecipeUserId?: string;
+  status?: "PENDING" | "COMMITTING";
+  targetCanonicalRecipeUserId?: string;
+  retiredMethods?: Array<{ recipeUserId: string; email: string }>;
+};
+
+export type RowndCompatUserResponse = {
+  rownd_user: string;
+  data: JsonRecord;
+  meta: JsonRecord;
+  verified_data: JsonRecord;
+  state: string;
+  auth_level: string;
+  redacted: string[];
+  groups: JSONObject[];
+  attributes?: JsonRecord;
+};
+
+export type SuperTokensUser = NonNullable<
+  Awaited<ReturnType<typeof SuperTokens.getUser>>
+>;
+export type SuperTokensLoginMethod = SuperTokensUser["loginMethods"][number];
+
+const IDENTITY_USER_DATA_FIELDS = new Set([
+  "user_id",
+  "email",
+  "phone_number",
+  "google_id",
+  "apple_id",
+]);
+
+const INTERNAL_METADATA_FIELDS = new Set([
+  "rownd_migration_placeholder_provenance_override",
+  "original_rownd_user",
+  "rownd_email_recipe_user_id",
+  "rownd_email_recipe_user_ids",
+  "rownd_migration_complete",
+  "rownd_migration_email_retirements",
+  "rownd_migration_provider_retirements",
+  "rownd_migration_provider_introductions",
+  "rownd_migration_provider_introduction",
+  "rownd_pending_verification",
+  "rownd_migration_superseded",
+  "rownd_migration_target",
+  "rownd_migration_canonical_target",
+  "rownd_migration_reconciliation",
+  "rownd_migration_owner_consolidation",
+  "rownd_migration_owner_recovery",
+  "rownd_migration_admin_donor_sessions",
+  "rownd_migration_mapping_publication",
+]);
+
+const LINKED_OPERATIONAL_METADATA_FIELDS = new Set([
+  "rownd_migration_placeholder_provenance_override",
+  "rownd_migration_owner_consolidation",
+  "rownd_migration_owner_recovery",
+  "rownd_migration_admin_donor_sessions",
+  "rownd_migration_mapping_publication",
+  "rownd_migration_superseded",
+  "rownd_migration_target",
+  "rownd_migration_canonical_target",
+  "rownd_migration_reconciliation",
+  "rownd_email_recipe_user_id",
+  "rownd_email_recipe_user_ids",
+  "rownd_migration_complete",
+  "rownd_migration_email_retirements",
+  "rownd_pending_verification",
+]);
+
+export async function getRawUserMetadata(
+  userId: string,
+  userContext?: Record<string, any>,
+): Promise<RowndMetadata> {
+  const result = await UserMetadata.getUserMetadata(userId, userContext);
+  return (result.metadata || {}) as RowndMetadata;
+}
+
+function getOriginalRowndUserId(metadata: { original_rownd_user?: JsonValue }) {
+  const originalRowndUser = metadata.original_rownd_user;
+  const data = isJsonRecord(originalRowndUser)
+    ? originalRowndUser.data
+    : undefined;
+  return isJsonRecord(data) && typeof data.user_id === "string"
+    ? data.user_id
+    : undefined;
+}
+
+export function mergeMissingValues(primary: JsonRecord, secondary: JsonRecord) {
+  const merged: JsonRecord = { ...primary };
+
+  for (const [key, secondaryValue] of Object.entries(secondary)) {
+    const primaryValue = merged[key];
+    if (primaryValue === undefined) {
+      merged[key] = secondaryValue;
+    } else if (isJsonRecord(primaryValue) && isJsonRecord(secondaryValue)) {
+      merged[key] = mergeMissingValues(primaryValue, secondaryValue);
+    }
+  }
+
+  return merged;
+}
+
+export function combineLinkedMetadata(input: {
+  primaryUserId: string;
+  primaryMetadata: RowndMetadata;
+  linkedMetadata: Array<{ userId: string; metadata: RowndMetadata }>;
+  canonicalRowndUserId?: string;
+}): LinkedUserMetadataInspection {
+  const linkedMetadata = [...input.linkedMetadata].sort((a, b) => {
+    const aMatchesCanonical =
+      input.canonicalRowndUserId !== undefined &&
+      getOriginalRowndUserId(a.metadata) === input.canonicalRowndUserId;
+    const bMatchesCanonical =
+      input.canonicalRowndUserId !== undefined &&
+      getOriginalRowndUserId(b.metadata) === input.canonicalRowndUserId;
+    if (aMatchesCanonical !== bMatchesCanonical) {
+      return aMatchesCanonical ? -1 : 1;
+    }
+    return a.userId.localeCompare(b.userId);
+  });
+  const primaryRowndUserId = getOriginalRowndUserId(input.primaryMetadata);
+  const canonicalLinkedMetadata =
+    input.canonicalRowndUserId === undefined
+      ? undefined
+      : linkedMetadata.find(
+        ({ metadata }) =>
+          getOriginalRowndUserId(metadata) === input.canonicalRowndUserId,
+      );
+  const canonicalMetadataReplacesPrimary =
+    canonicalLinkedMetadata !== undefined &&
+    primaryRowndUserId !== input.canonicalRowndUserId;
+
+  const metadataUpdate: JsonRecord = canonicalMetadataReplacesPrimary
+    ? {
+      original_rownd_user:
+          canonicalLinkedMetadata.metadata.original_rownd_user!,
+    }
+    : {};
+  for (const { metadata } of linkedMetadata) {
+    for (const [key, value] of Object.entries(metadata)) {
+      if (LINKED_OPERATIONAL_METADATA_FIELDS.has(key)) {
+        continue;
+      }
+      if (
+        key === "original_rownd_user" &&
+        input.canonicalRowndUserId !== undefined &&
+        (primaryRowndUserId === input.canonicalRowndUserId ||
+          canonicalLinkedMetadata !== undefined) &&
+        getOriginalRowndUserId(metadata) !== input.canonicalRowndUserId
+      ) {
+        continue;
+      }
+
+      const currentValue = Object.prototype.hasOwnProperty.call(
+        metadataUpdate,
+        key,
+      )
+        ? metadataUpdate[key]
+        : input.primaryMetadata[key];
+      if (currentValue === undefined) {
+        metadataUpdate[key] = value;
+      } else if (isJsonRecord(currentValue) && isJsonRecord(value)) {
+        const mergedValue = mergeMissingValues(currentValue, value);
+        if (JSON.stringify(mergedValue) !== JSON.stringify(currentValue)) {
+          metadataUpdate[key] = mergedValue;
+        }
+      }
+    }
+  }
+
+  return {
+    primaryUserId: input.primaryUserId,
+    linkedUserIds: linkedMetadata.map(({ userId }) => userId),
+    linkedMetadata,
+    primaryMetadata: input.primaryMetadata,
+    combinedMetadata: {
+      ...input.primaryMetadata,
+      ...metadataUpdate,
+    } as RowndMetadata,
+    metadataUpdate,
+    rowndMetadataSourceUserId:
+      primaryRowndUserId !== undefined &&
+      (input.canonicalRowndUserId === undefined ||
+        primaryRowndUserId === input.canonicalRowndUserId ||
+        canonicalLinkedMetadata === undefined)
+        ? input.primaryUserId
+        : (canonicalLinkedMetadata?.userId ??
+          linkedMetadata.find(
+            ({ metadata }) => getOriginalRowndUserId(metadata) !== undefined,
+          )?.userId),
+    rowndMetadataSourceMetadata:
+      primaryRowndUserId !== undefined &&
+      (input.canonicalRowndUserId === undefined ||
+        primaryRowndUserId === input.canonicalRowndUserId ||
+        canonicalLinkedMetadata === undefined)
+        ? input.primaryMetadata
+        : (canonicalLinkedMetadata?.metadata ??
+          linkedMetadata.find(
+            ({ metadata }) => getOriginalRowndUserId(metadata) !== undefined,
+          )?.metadata),
+  };
+}
+
+async function getPrimaryUserMapping(
+  userId: string,
+  userContext?: Record<string, any>,
+) {
+  const internalMapping = await SuperTokens.getUserIdMapping({
+    userId,
+    userIdType: "SUPERTOKENS",
+    userContext,
+  });
+  if (internalMapping.status === "OK") {
+    return internalMapping;
+  }
+
+  const externalMapping = await SuperTokens.getUserIdMapping({
+    userId,
+    userIdType: "EXTERNAL",
+    userContext,
+  });
+  return externalMapping.status === "OK" ? externalMapping : undefined;
+}
+
+export async function inspectLinkedUserMetadata(
+  userId: string,
+  userContext?: Record<string, any>,
+  userSnapshot?: SuperTokensUser,
+): Promise<LinkedUserMetadataInspection> {
+  let user = userSnapshot ?? (await SuperTokens.getUser(userId, userContext));
+  const references = new Set<string>([userId]);
+  let referenceId = userId;
+  // Retired aliases are literal metadata records, not SDK users. Resolve their
+  // profile references here only; migration checkpoints must keep using raw reads.
+  while (!user) {
+    const metadata = await getRawUserMetadata(referenceId, userContext);
+    const target = metadata.rownd_migration_canonical_target ?? metadata.rownd_migration_target;
+    if (typeof target !== "string" || !target || references.has(target)) break;
+    references.add(target);
+    referenceId = target;
+    user = await SuperTokens.getUser(target, userContext);
+  }
+  if (!user) {
+    const metadata = await getRawUserMetadata(userId, userContext);
+    return {
+      user: undefined,
+      primaryUserId: userId,
+      linkedUserIds: [],
+      linkedMetadata: [],
+      primaryMetadata: metadata,
+      combinedMetadata: metadata,
+      metadataUpdate: {},
+      rowndMetadataSourceUserId:
+        getOriginalRowndUserId(metadata) === undefined ? undefined : userId,
+      rowndMetadataSourceMetadata:
+        getOriginalRowndUserId(metadata) === undefined ? undefined : metadata,
+    };
+  }
+
+  const mapping = await getPrimaryUserMapping(user.id, userContext);
+  const primaryUserId = mapping?.superTokensUserId ?? user.id;
+  const linkedUserIds = [
+    ...new Set(
+      [...references, ...(mapping ? [mapping.externalUserId] : []),
+        ...user.loginMethods.map((method) => method.recipeUserId.getAsString())]
+        .filter((id) => id !== primaryUserId),
+    ),
+  ];
+  const [primaryMetadata, linkedMetadata] = await Promise.all([
+    getRawUserMetadata(primaryUserId, userContext),
+    Promise.all(
+      linkedUserIds.map(async (linkedUserId) => ({
+        userId: linkedUserId,
+        metadata: await getRawUserMetadata(linkedUserId, userContext),
+      })),
+    ),
+  ]);
+
+  // Retired aliases no longer appear in the SDK graph, but their application
+  // metadata still belongs to the preserved owner. Checkpoint provenance keeps
+  // these literal records discoverable without restoring their login mapping.
+  let plan: ReturnType<typeof readOwnerPlanCheckpoint>;
+  try {
+    plan = readOwnerPlanCheckpoint(primaryMetadata);
+  } catch (error) {
+    // Profile enrichment must not turn administrative checkpoint drift into a
+    // native-login gate. Reconciliation validates these checkpoints separately.
+    if (!(error instanceof RowndMigrationPolicyError)) throw error;
+  }
+  if (plan?.target === primaryUserId)
+    for (const alias of plan.retiredAliases ?? []) {
+      if (linkedUserIds.includes(alias.id)) continue;
+      const metadata = await getRawUserMetadata(alias.id, userContext);
+      const retirement = metadata.rownd_migration_superseded;
+      if (!isJsonRecord(retirement) || retirement.rowndUserId !== plan.sourceId ||
+        retirement.targetUserId !== primaryUserId) continue;
+      linkedUserIds.push(alias.id);
+      linkedMetadata.push({ userId: alias.id, metadata });
+    }
+
+  return {
+    ...combineLinkedMetadata({
+      primaryUserId,
+      primaryMetadata,
+      linkedMetadata,
+      canonicalRowndUserId: mapping?.externalUserId,
+    }),
+    user,
+  };
+}
+
+export async function getCombinedUserMetadata(
+  userId: string,
+  userContext?: Record<string, any>,
+) {
+  return (await inspectLinkedUserMetadata(userId, userContext))
+    .combinedMetadata;
+}
+
+export async function updatePrimaryUserMetadata(
+  userId: string,
+  metadataUpdate: JsonRecord,
+  userContext?: Record<string, any>,
+) {
+  const user = await SuperTokens.getUser(userId, userContext);
+  const primaryUserId = user?.id ?? userId;
+  const result = await UserMetadata.updateUserMetadata(
+    primaryUserId,
+    metadataUpdate as JSONObject,
+    userContext,
+  );
+
+  return {
+    primaryUserId,
+    metadata: result.metadata as RowndMetadata,
+  };
+}
+
+export function isSuperTokensFakeEmail(email: unknown): email is string {
+  return isSyntheticEmail(email);
+}
+
+function buildSuperTokensFakeEmail(
+  thirdPartyUserId: string,
+  thirdPartyId: string,
+) {
+  const hash = createHash("sha256")
+    .update(`${thirdPartyId}:${thirdPartyUserId}`)
+    .digest("hex")
+    .slice(0, 32);
+
+  return `st-${thirdPartyId}-${hash}@${SUPERTOKENS_FAKE_EMAIL_DOMAIN}`;
+}
+
+export function isIdentityField(field: string) {
+  return IDENTITY_USER_DATA_FIELDS.has(field);
+}
+
+export function isInternalMetadataField(field: string) {
+  return INTERNAL_METADATA_FIELDS.has(field);
+}
+
+export function mapRowndUserToSuperTokens(
+  rowndUser: RowndUser,
+  tenantId?: string,
+): SuperTokensUserImport {
+  rowndUser = normalizeOptionalRowndIdentities(rowndUser);
+  const loginMethods: SuperTokensUserImport["loginMethods"] = [];
+  const rowndUserData = rowndUser.data || {};
+  const rowndUserVerifiedData = rowndUser.verified_data || {};
+  if (!rowndUserData.user_id) {
+    throw new Error("Rownd user has no user_id");
+  }
+
+  const googleId = resolveRowndProviderSubject(rowndUser, "google");
+  const appleId = resolveRowndProviderSubject(rowndUser, "apple");
+  if (googleId) {
+    loginMethods.push({
+      recipeId: "thirdparty",
+      thirdPartyId: "google",
+      thirdPartyUserId: googleId,
+      email: buildSuperTokensFakeEmail(googleId, "google"),
+      isVerified: false,
+      ...(tenantId ? { tenantIds: [tenantId] } : {}),
+    });
+  }
+
+  if (appleId) {
+    loginMethods.push({
+      recipeId: "thirdparty",
+      thirdPartyId: "apple",
+      thirdPartyUserId: appleId,
+      email: buildSuperTokensFakeEmail(appleId, "apple"),
+      isVerified: false,
+      ...(tenantId ? { tenantIds: [tenantId] } : {}),
+    });
+  }
+
+  if (rowndUserData.phone_number) {
+    loginMethods.push({
+      recipeId: "passwordless",
+      phoneNumber: rowndUserData.phone_number,
+      isVerified: !!rowndUserVerifiedData.phone_number,
+      ...(tenantId ? { tenantIds: [tenantId] } : {}),
+    });
+  }
+
+  if (rowndUserData.email) {
+    loginMethods.push({
+      recipeId: "passwordless",
+      email: rowndUserData.email,
+      isVerified:
+        rowndUserVerifiedData.email === true ||
+        (typeof rowndUserVerifiedData.email === "string" &&
+          rowndUserVerifiedData.email.toLowerCase() ===
+            rowndUserData.email.toLowerCase()),
+      ...(tenantId ? { tenantIds: [tenantId] } : {}),
+    });
+  }
+
+  let authLevel = rowndUser.auth_level;
+  if (loginMethods.length === 0) {
+    const thirdPartyId =
+      authLevel === GUEST_AUTH_METHOD_ID
+        ? GUEST_AUTH_METHOD_ID
+        : INSTANT_AUTH_METHOD_ID;
+    if (!authLevel) authLevel = thirdPartyId;
+    loginMethods.push({
+      recipeId: "thirdparty",
+      thirdPartyId,
+      thirdPartyUserId: rowndUserData.user_id,
+      email: `${rowndUserData.user_id}@anonymous.local`,
+      isVerified: false,
+      ...(tenantId ? { tenantIds: [tenantId] } : {}),
+    });
+  }
+
+  if (loginMethods.length > 1) {
+    loginMethods[0]!.isPrimary = true;
+  }
+
+  const userMetadata = buildRowndUserMetadata(rowndUser);
+
+  return {
+    externalUserId: rowndUserData.user_id,
+    loginMethods,
+    userMetadata,
+  };
+}
+
+export function buildRowndUserMetadata(rowndUser: RowndUser): JSONObject {
+  const metadata: JsonRecord = {
+    ...Object.fromEntries(Object.entries((rowndUser.meta || {}) as JsonRecord)
+      .filter(([key]) => !isInternalMetadataField(key))),
+    original_rownd_user: rowndUser as unknown as JsonValue,
+    rownd_migration_complete: true,
+  };
+
+  for (const [key, value] of Object.entries(rowndUser.data || {})) {
+    if (!isIdentityField(key) && !isInternalMetadataField(key) && value !== undefined) {
+      metadata[key] = value as JsonValue;
+    }
+  }
+
+  return metadata;
+}
+
+export function buildRowndAudience(
+  currentPayload: JsonRecord,
+  appVariantId?: string,
+  pluginConfig: RowndPluginNormalisedConfig | undefined = getPluginConfig(),
+) {
+  const audience = getStringList(currentPayload.aud);
+  const appId = pluginConfig?.appConfig?.id;
+
+  if (appId) {
+    audience.push(`app:${appId}`);
+  }
+
+  if (appVariantId) {
+    audience.push(`app_variant:${appVariantId}`);
+  }
+
+  return audience.length > 0 ? { aud: [...new Set(audience)] } : {};
+}
+
+export function buildConfiguredSessionClaims(
+  metadata?: RowndMetadata,
+  pluginConfig: RowndPluginNormalisedConfig | undefined = getPluginConfig(),
+): JsonRecord {
+  if (!metadata) {
+    return {};
+  }
+
+  const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;
+  const claims: JsonRecord = {};
+
+  for (const [key, field] of Object.entries(schema)) {
+    if (field.include_in_session_claims !== true) {
+      continue;
+    }
+
+    const claimName = field.session_claim_name || key;
+    if (RESERVED_SESSION_CLAIMS.has(claimName)) {
+      continue;
+    }
+    const value = metadata.original_rownd_user?.data?.[key] ?? metadata[key];
+    if (value !== undefined) {
+      claims[claimName] = value as JsonValue;
+    }
+  }
+
+  return claims;
+}
+
+export function getRowndAppUserId(
+  userId: string,
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+  currentPayload: JsonRecord,
+  metadata?: RowndMetadata,
+) {
+  const originalUserId = metadata?.original_rownd_user?.data?.user_id;
+  if (typeof originalUserId === "string") {
+    return originalUserId;
+  }
+
+  if (typeof currentPayload.app_user_id === "string") {
+    return currentPayload.app_user_id;
+  }
+
+  return user?.id || userId;
+}
+
+export function getAnonymousId(
+  userId: string,
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+  metadata?: RowndMetadata,
+  currentPayload?: JsonRecord,
+) {
+  const originalAnonymousId = metadata?.original_rownd_user?.data?.anonymous_id;
+  if (typeof originalAnonymousId === "string") {
+    return originalAnonymousId;
+  }
+
+  const guestMethod = user?.loginMethods.find((loginMethod) => {
+    return (
+      loginMethod.recipeId === "thirdparty" &&
+      getThirdPartyId(loginMethod) === GUEST_AUTH_METHOD_ID
+    );
+  });
+
+  if (!guestMethod) {
+    return undefined;
+  }
+
+  return typeof currentPayload?.anonymous_id === "string"
+    ? currentPayload.anonymous_id
+    : `anon_${user?.id || userId}`;
+}
+
+export function buildRowndSessionClaimPayload(input: {
+  userId: string;
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>;
+  metadata?: RowndMetadata;
+  currentPayload?: JsonRecord;
+  appVariantId?: string;
+  pluginConfig?: RowndPluginNormalisedConfig;
+  authenticationOrigin?: "instant" | "authenticated";
+}) {
+  const currentPayload = input.currentPayload ?? {};
+  const originalRowndUser = input.metadata?.original_rownd_user;
+  const verifiedData = originalRowndUser?.verified_data as
+    JsonRecord | undefined;
+  const recordedOrigin = currentPayload.rownd_session_authentication;
+  const authenticationOrigin = input.authenticationOrigin ??
+    (recordedOrigin === "instant" || recordedOrigin === "authenticated" ? recordedOrigin : undefined);
+  const authLevel = authenticationOrigin === "instant" ||
+    (authenticationOrigin === undefined && currentPayload.auth_level === "instant") ? "instant" : getEffectiveAuthLevel(
+      input.user,
+      typeof currentPayload.auth_level === "string"
+        ? currentPayload.auth_level
+        : originalRowndUser?.auth_level,
+      verifiedData,
+    );
+  const appUserId = getRowndAppUserId(
+    input.userId,
+    input.user,
+    currentPayload,
+    input.metadata,
+  );
+  const isAnonymous = [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(
+    authLevel,
+  );
+  const anonymousId = getAnonymousId(
+    input.userId,
+    input.user,
+    input.metadata,
+    currentPayload,
+  );
+  const isVerifiedUser = authLevel !== "instant" && authLevel !== "unverified";
+  const audience = buildRowndAudience(
+    currentPayload,
+    input.appVariantId,
+    input.pluginConfig,
+  );
+  const configuredClaims = buildConfiguredSessionClaims(
+    input.metadata,
+    input.pluginConfig,
+  );
+  return {
+    ...audience,
+    ...configuredClaims,
+    app_user_id: appUserId,
+    auth_level: authLevel,
+    ...(input.authenticationOrigin ? { rownd_session_authentication: input.authenticationOrigin } : {}),
+    is_verified_user: isVerifiedUser,
+    [ROWND_JWT_CLAIMS.AppUserId]: appUserId,
+    [ROWND_JWT_CLAIMS.AuthLevel]: authLevel,
+    [ROWND_JWT_CLAIMS.IsVerifiedUser]: isVerifiedUser,
+    ...(isAnonymous ? { [ROWND_JWT_CLAIMS.IsAnonymous]: true } : {}),
+    ...(anonymousId ? { anonymous_id: anonymousId } : {}),
+  };
+}
+
+type OAuthClientLike = {
+  audience?: string[];
+};
+
+export function normalizeRowndOAuthScopes(scopes: string[]) {
+  return [...new Set(scopes.filter((scope) => scope.length > 0))];
+}
+
+export function getRowndOAuthAudience(input: {
+  requestedAudience?: string;
+  requestedResource?: string;
+}) {
+  const requested = input.requestedResource ?? input.requestedAudience;
+  if (requested?.startsWith("app:")) {
+    return requested;
+  }
+
+  return undefined;
+}
+
+export function applyRowndOAuthResourceParams(input: {
+  params: Record<string, any>;
+  userContext: Record<string, any>;
+}) {
+  const resource = firstString(input.params.resource);
+  const audience = firstString(input.params.audience);
+  const rowndAudience = getRowndOAuthAudience({
+    requestedResource: resource,
+    requestedAudience: audience,
+  });
+
+  if (!rowndAudience) {
+    return undefined;
+  }
+
+  input.params.audience = audience ?? rowndAudience;
+  delete input.params.resource;
+  return rowndAudience;
+}
+
+export async function buildRowndOAuthPayload(input: {
+  user: SuperTokensUser | undefined;
+  client?: OAuthClientLike;
+  scopes: string[];
+  currentPayload?: JsonRecord;
+  userContext?: Record<string, any>;
+}) {
+  const currentPayload = input.currentPayload ?? {};
+  const metadata = input.user
+    ? await getRowndMetadata(input.user, input.userContext)
+    : undefined;
+  const standardClaims = input.user
+    ? buildStandardOAuthClaims(input.user, input.scopes, metadata!)
+    : {};
+  const rowndClaims = input.user
+    ? buildRowndOAuthSessionClaims(
+      input.user,
+      currentPayload,
+        metadata!,
+        getConfigForUserContext(input.userContext),
+    )
+    : {};
+  const audience = getRowndOAuthAudience({
+    requestedAudience:
+      typeof input.userContext?.rowndOAuthAudience === "string"
+        ? input.userContext.rowndOAuthAudience
+        : undefined,
+  });
+  return {
+    ...currentPayload,
+    ...standardClaims,
+    ...rowndClaims,
+    ...(audience ? { aud: audience } : {}),
+  };
+}
+
+export async function buildRowndOAuthUserInfo(input: {
+  user: SuperTokensUser;
+  accessTokenPayload: JsonRecord;
+  scopes: string[];
+  currentPayload?: JsonRecord;
+  userContext?: Record<string, any>;
+}) {
+  const standardClaims = buildStandardOAuthClaims(
+    input.user,
+    input.scopes,
+    await getRowndMetadata(input.user, input.userContext),
+  );
+  const rowndClaims = pickOAuthUserInfoRowndClaims(input.accessTokenPayload);
+
+  return {
+    ...input.currentPayload,
+    ...standardClaims,
+    ...rowndClaims,
+  };
+}
+
+function buildStandardOAuthClaims(
+  user: SuperTokensUser,
+  scopes: string[],
+  metadata: RowndMetadata,
+) {
+  const claims: JsonRecord = {};
+  const rowndData = isJsonRecord(metadata.original_rownd_user?.data)
+    ? metadata.original_rownd_user.data
+    : ({} as JsonRecord);
+  const verifiedData = isJsonRecord(metadata.original_rownd_user?.verified_data)
+    ? metadata.original_rownd_user.verified_data
+    : ({} as JsonRecord);
+
+  if (scopes.includes("email")) {
+    const email = firstRealEmail(firstString(rowndData.email), ...user.emails);
+    if (email) {
+      claims.email = email;
+      claims.email_verified = isOAuthClaimVerified(
+        verifiedData.email,
+        email,
+        user.loginMethods.some(
+          (method) => method.hasSameEmailAs(email) && method.verified,
+        ),
+      );
+    }
+  }
+
+  if (scopes.includes("phone")) {
+    const phoneNumber =
+      firstString(rowndData.phone_number) ?? user.phoneNumbers[0];
+    if (phoneNumber) {
+      claims.phone_number = phoneNumber;
+      claims.phone_number_verified = isOAuthClaimVerified(
+        verifiedData.phone_number,
+        phoneNumber,
+        user.loginMethods.some(
+          (method) =>
+            method.hasSamePhoneNumberAs(phoneNumber) && method.verified,
+        ),
+      );
+    }
+  }
+
+  if (scopes.includes("profile")) {
+    const givenName = firstString(rowndData.first_name);
+    const familyName = firstString(rowndData.last_name);
+    const name = [givenName, familyName].filter(Boolean).join(" ");
+
+    if (name) claims.name = name;
+    if (givenName) claims.given_name = givenName;
+    if (familyName) claims.family_name = familyName;
+    if (typeof metadata.original_rownd_user?.data?.updated_at === "string") {
+      claims.updated_at = metadata.original_rownd_user.data.updated_at;
+    }
+  }
+
+  return claims;
+}
+
+async function getRowndMetadata(
+  user: SuperTokensUser,
+  userContext?: Record<string, any>,
+): Promise<RowndMetadata> {
+  return (await inspectLinkedUserMetadata(user.id, userContext, user))
+    .combinedMetadata;
+}
+
+function pickOAuthUserInfoRowndClaims(payload: JsonRecord) {
+  const claims: JsonRecord = {};
+  for (const key of [
+    "app_user_id",
+    "auth_level",
+    "is_verified_user",
+    "is_anonymous",
+    "anonymous_id",
+    "https://auth.rownd.io/app_user_id",
+    "https://auth.rownd.io/auth_level",
+    "https://auth.rownd.io/is_verified_user",
+    "https://auth.rownd.io/is_anonymous",
+  ]) {
+    if (payload[key] !== undefined) {
+      claims[key] = payload[key];
+    }
+  }
+
+  return claims;
+}
+
+function firstString(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.find((entry): entry is string => typeof entry === "string");
+  }
+
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function firstRealEmail(...values: unknown[]) {
+  return values.find((entry): entry is string => {
+    return (
+      typeof entry === "string" &&
+      entry.length > 0 &&
+      !isSuperTokensFakeEmail(entry)
+    );
+  });
+}
+
+function isOAuthClaimVerified(
+  value: unknown,
+  expectedValue: string,
+  fallback: boolean,
+) {
+  return value === true || value === expectedValue || fallback;
+}
+
+function buildRowndOAuthSessionClaims(
+  user: SuperTokensUser,
+  currentPayload: JsonRecord,
+  metadata: RowndMetadata,
+  pluginConfig?: RowndPluginNormalisedConfig,
+) {
+  return buildRowndSessionClaimPayload({
+    userId: user.id,
+    user,
+    metadata,
+    currentPayload,
+    pluginConfig,
+  });
+}
+
+// Consumption runs with automatic linking disabled until its exact recipe ID is known.
+export const passwordlessHistoryOwner = Symbol("rownd.passwordlessHistoryOwner");
+
+export type HistoricalPasswordlessScope = {
+  userId: string;
+  email: string;
+  tenantId: string;
+  ownerRecipeUserIds: string[];
+  recipeUserId?: string;
+  denied?: boolean;
+};
+
+export function getHistoricalPasswordlessScope(userContext?: Record<string, any>) {
+  return (userContext as Record<PropertyKey, any> | undefined)?.[
+    passwordlessHistoryOwner
+  ] as HistoricalPasswordlessScope | undefined;
+}
+
+export async function validateHistoricalPasswordlessOwner(
+  scope: HistoricalPasswordlessScope,
+  userContext?: Record<string, any>,
+  requireLinked = false,
+) {
+  return (await loadHistoricalPasswordlessOwner(scope, userContext, requireLinked))?.owner;
+}
+
+async function loadHistoricalPasswordlessOwner(
+  scope: HistoricalPasswordlessScope,
+  userContext?: Record<string, any>,
+  requireLinked = false,
+) {
+  const reject = () => {
+    scope.denied = true;
+    return undefined;
+  };
+  if (scope.denied) return undefined;
+  // App callbacks and remote Core writes do not invalidate either local cache.
+  clearSuperTokensCoreCallCache(userContext ?? {});
+  invalidateReconciliationReads();
+  // The SDK returns complete owner graphs, including recipe IDs, from this query.
+  // Resolve both identities from the same response instead of fetching them again.
+  const users = await SuperTokens.listUsersByAccountInfo(
+    scope.tenantId, { email: scope.email }, true, userContext,
+  );
+  const owner = users.find((user) => user.id === scope.userId);
+  if (!owner) return reject();
+  let method: SuperTokensLoginMethod | undefined;
+  if (scope.recipeUserId) {
+    const consumedOwner = users.find((user) => user.loginMethods.some((candidate) =>
+      candidate.recipeUserId.getAsString() === scope.recipeUserId));
+    method = consumedOwner?.loginMethods.find((candidate) =>
+      candidate.recipeUserId.getAsString() === scope.recipeUserId);
+    if (!consumedOwner || !method || method.recipeId !== "passwordless" ||
+      !method.verified || method.email?.trim().toLowerCase() !== scope.email ||
+      !method.tenantIds.includes(scope.tenantId) ||
+      (consumedOwner.id !== scope.userId && (requireLinked ||
+        consumedOwner.id !== scope.recipeUserId || consumedOwner.isPrimaryUser ||
+        consumedOwner.loginMethods.length !== 1))) return reject();
+  } else if (requireLinked) return reject();
+  if (users.some((user) => user.id !== scope.userId &&
+    !(scope.recipeUserId && user.id === scope.recipeUserId &&
+      !user.isPrimaryUser && user.loginMethods.length === 1 &&
+      user.loginMethods[0]?.recipeUserId.getAsString() === scope.recipeUserId))) return reject();
+  const historicalOwner = {
+    ...owner,
+    loginMethods: owner.loginMethods.filter((method) =>
+      method.recipeUserId.getAsString() !== scope.recipeUserId),
+  };
+  if (!(await hasHistoricalEmailEligibility(
+    historicalOwner, scope.email, scope.tenantId, userContext,
+  ))) return reject();
+  return { owner, method };
+}
+
+export async function hasHistoricalEmailEligibility(
+  user: SuperTokensUser,
+  email: string,
+  tenantId: string,
+  userContext?: Record<string, any>,
+) {
+  if (!hasUnverifiedMatchingEmail(user, email, tenantId)) return false;
+  return evaluateHistoricalEmailEligibility(user, email, tenantId,
+    await inspectLinkedUserMetadata(user.id, userContext, user));
+}
+
+function hasUnverifiedMatchingEmail(user: SuperTokensUser, email: string, tenantId: string) {
+  if (isSyntheticEmail(email)) return false;
+  email = email.trim().toLowerCase();
+  const matching = user.loginMethods.filter(
+    (method) =>
+      !isGuestLoginMethod(method) &&
+      method.tenantIds.includes(tenantId) &&
+      method.email?.trim().toLowerCase() === email,
+  );
+  return matching.length > 0 && !matching.some((method) => method.verified);
+}
+
+export function evaluateHistoricalEmailEligibility(
+  user: SuperTokensUser,
+  email: string,
+  tenantId: string,
+  inspection: LinkedUserMetadataInspection,
+) {
+  if (!hasUnverifiedMatchingEmail(user, email, tenantId)) return false;
+  email = email.trim().toLowerCase();
+  const metadata = inspection.combinedMetadata;
+  const pending = metadata.rownd_pending_verification;
+  if (
+    pending !== undefined &&
+    (!Array.isArray(pending) || pending.some((plan) =>
+      isJsonRecord(plan) && (plan.tenantId ?? PUBLIC_TENANT_ID) === tenantId &&
+      (plan.status === "COMMITTING" || "retiredMethods" in plan ||
+        "targetCanonicalRecipeUserId" in plan)))
+  ) return false;
+  if (metadata.rownd_migration_email_retirements?.[tenantId] !== undefined) {
+    return false;
+  }
+  const hasHistory = (record: RowndMetadata) => [
+    record.first_sign_in,
+    record.last_sign_in,
+    record.original_rownd_user?.meta?.first_sign_in,
+    record.original_rownd_user?.meta?.last_sign_in,
+  ].some((value) => typeof value === "string" && value.trim().length > 0);
+  if (!hasHistory(metadata) && !hasHistory(inspection.primaryMetadata)) {
+    if (!inspection.linkedMetadata.some(({ metadata }) => hasHistory(metadata))) return false;
+  }
+  const canonical = resolveEmailForAuthentication({
+    user, metadata, email, tenantId,
+  });
+  if (
+    canonical.status !== "NO_EMAIL" &&
+    !(canonical.status === "SELECTED" && canonical.email === email)
+  ) return false;
+
+  // A policy-only view: never persist verification or relax the shared resolver.
+  const historical = resolveEmailForAuthentication({
+    user: {
+      ...user,
+      loginMethods: user.loginMethods.map((method) => ({
+        ...method,
+        verified: method.verified || (
+          !isGuestLoginMethod(method) && method.tenantIds.includes(tenantId)
+        ),
+      })),
+    },
+    metadata,
+    email,
+    tenantId,
+  });
+  return historical.status === "SELECTED" && historical.email === email;
+}
+
+export async function findHistoricalEmailOwner(input: {
+  email: string;
+  tenantId: string;
+  userContext?: Record<string, any>;
+  snapshot?: PasswordlessAuthSnapshot;
+  requireNewPasswordless?: boolean;
+}) {
+  const users = input.snapshot?.users ?? await SuperTokens.listUsersByAccountInfo(
+    input.tenantId,
+    { email: input.email },
+    true,
+    input.userContext,
+  );
+  if (users.length !== 1) return undefined;
+  if (input.requireNewPasswordless && users[0]!.loginMethods.some((method) => method.recipeId === "passwordless" &&
+    method.email?.trim().toLowerCase() === input.email.trim().toLowerCase() &&
+    method.tenantIds.includes(input.tenantId))) return undefined;
+  const inspection = input.snapshot?.inspections.get(users[0]!.id);
+  if (inspection) return evaluateHistoricalEmailEligibility(users[0]!, input.email, input.tenantId, inspection)
+    ? users[0] : undefined;
+  return await hasHistoricalEmailEligibility(
+    users[0]!, input.email, input.tenantId, input.userContext,
+  )
+    ? users[0] : undefined;
+}
+
+export async function linkHistoricalPasswordlessUser(
+  scope: HistoricalPasswordlessScope,
+  decide: NonNullable<NonNullable<Parameters<typeof AccountLinking.init>[0]>["shouldDoAutomaticAccountLinking"]>,
+  userContext: UserContext,
+) {
+  const reject = () => {
+    scope.denied = true;
+    return undefined;
+  };
+  const initial = await loadHistoricalPasswordlessOwner(scope, userContext);
+  if (!initial || !scope.recipeUserId || !initial.method) return reject();
+  let owner = initial.owner;
+  const method = initial.method;
+  const recipeUserId = SuperTokens.convertToRecipeUserId(scope.recipeUserId);
+  if (!owner.isPrimaryUser) {
+    if (!(await decide(method, undefined, undefined, scope.tenantId, userContext)).shouldAutomaticallyLink) return reject();
+    const currentOwner = await validateHistoricalPasswordlessOwner(scope, userContext);
+    if (!currentOwner) return reject();
+    owner = currentOwner;
+    const promotionMethod = owner.loginMethods[0]!;
+    if (!(await decide(promotionMethod, undefined, undefined, scope.tenantId, userContext)).shouldAutomaticallyLink ||
+      !(await validateHistoricalPasswordlessOwner(scope, userContext))) return reject();
+    const primary = await AccountLinking.createPrimaryUser(promotionMethod.recipeUserId, userContext);
+    if (primary.status !== "OK" || primary.user.id !== scope.userId) return reject();
+    const promotedOwner = await validateHistoricalPasswordlessOwner(scope, userContext);
+    if (!promotedOwner) return reject();
+    owner = promotedOwner;
+  }
+  if (!owner || !(await decide(method, owner, undefined, scope.tenantId, userContext)).shouldAutomaticallyLink ||
+    !(await validateHistoricalPasswordlessOwner(scope, userContext))) return reject();
+  const linked = await AccountLinking.linkAccounts(recipeUserId, scope.userId, userContext);
+  if (linked.status !== "OK" || linked.user.id !== scope.userId) return reject();
+  return validateHistoricalPasswordlessOwner(scope, userContext, true);
+}
+
+export async function shouldLinkRowndAccounts(
+  input: Parameters<
+    NonNullable<
+      NonNullable<
+        Parameters<typeof AccountLinking.init>[0]
+      >["shouldDoAutomaticAccountLinking"]
+    >
+  >,
+) {
+  const [newAccountInfo, existingUser, session, tenantId, userContext] = input;
+
+  const scope = getHistoricalPasswordlessScope(userContext);
+  if (scope) {
+    const deny = { shouldAutomaticallyLink: false, shouldRequireVerification: false };
+    // The SDK must finish consuming before we can distinguish its recipe user
+    // from another passwordless identity that appeared concurrently.
+    if (!scope.recipeUserId) return deny;
+    const recipeUserId = (newAccountInfo as SuperTokensLoginMethod)?.recipeUserId?.getAsString();
+    if (session || tenantId !== scope.tenantId ||
+      newAccountInfo?.email?.trim().toLowerCase() !== scope.email ||
+      !recipeUserId || (newAccountInfo.recipeId === "passwordless"
+      ? recipeUserId !== scope.recipeUserId
+      : !scope.ownerRecipeUserIds.includes(recipeUserId)) ||
+      (existingUser && existingUser.id !== scope.userId)) {
+      scope.denied = true;
+      return deny;
+    }
+    const owner = await validateHistoricalPasswordlessOwner(scope, userContext);
+    if (!owner) return deny;
+    const method = owner.loginMethods.find((candidate) =>
+      candidate.recipeUserId.getAsString() === recipeUserId);
+    if (recipeUserId !== scope.recipeUserId && (!method ||
+      method.recipeId !== newAccountInfo.recipeId || isGuestLoginMethod(method) ||
+      method.email?.trim().toLowerCase() !== scope.email ||
+      !method.tenantIds.includes(tenantId))) {
+      scope.denied = true;
+      return deny;
+    }
+    return { shouldAutomaticallyLink: true, shouldRequireVerification: false, historicalEmail: true };
+  }
+
+  if (session) {
+    const currentUser = await SuperTokens.getUser(
+      session.getUserId(userContext),
+      userContext,
+    );
+
+    if (hasOnlyGuestLoginMethods(currentUser)) {
+      return {
+        shouldAutomaticallyLink: true,
+        shouldRequireVerification: false,
+      };
+    }
+
+    if (
+      currentUser &&
+      !isGuestAccountInfo(newAccountInfo) &&
+      doesAccountInfoMatchAuthMethod(currentUser, newAccountInfo, tenantId)
+    ) {
+      return {
+        shouldAutomaticallyLink: true,
+        shouldRequireVerification: true,
+      };
+    }
+
+    return undefined;
+  }
+
+  const email = newAccountInfo?.email;
+  if (!email || isGuestAccountInfo(newAccountInfo)) {
+    return undefined;
+  }
+  const accountInfo = { ...newAccountInfo, email };
+
+  const matchingUsers = existingUser
+    ? [existingUser]
+    : await SuperTokens.listUsersByAccountInfo(
+      tenantId,
+      { email },
+      true,
+      userContext,
+    );
+
+  if (newAccountInfo.recipeId === "passwordless" && matchingUsers.length === 1 &&
+    hasUnverifiedMatchingEmail(matchingUsers[0]!, email, tenantId)) {
+    const owner = await findHistoricalEmailOwner({ email, tenantId, userContext,
+      snapshot: existingUser ? undefined : { users: matchingUsers, inspections: new Map() } });
+    if (owner && (!existingUser || existingUser.id === owner.id)) {
+      return { shouldAutomaticallyLink: true, shouldRequireVerification: false, historicalEmail: true };
+    }
+  }
+
+  let verifiedMatches = matchingUsers.filter((user) =>
+    hasVerifiedMatchingEmailLoginMethod(user, accountInfo, tenantId),
+  );
+  let canonicalMatches = await Promise.all(
+    verifiedMatches.map((user) =>
+      hasAuthenticationEmailForTenant(user, email, tenantId, userContext),
+    ),
+  );
+  if (
+    verifiedMatches.length > 0 &&
+    canonicalMatches.every((match) => match === undefined)
+  ) {
+    const listedUsers = existingUser
+      ? await SuperTokens.listUsersByAccountInfo(
+        tenantId,
+        { email },
+        true,
+        userContext,
+      )
+      : matchingUsers;
+    verifiedMatches = listedUsers.filter((user) =>
+      user.loginMethods.some(
+        (method) =>
+          !isGuestLoginMethod(method) &&
+          method.tenantIds.includes(tenantId) &&
+          method.verified &&
+          method.email?.toLowerCase() === email.toLowerCase(),
+      ),
+    );
+    canonicalMatches = await Promise.all(
+      verifiedMatches.map((user) =>
+        hasAuthenticationEmailForTenant(user, email, tenantId, userContext),
+      ),
+    );
+  }
+  const canonicalMatchCount = canonicalMatches.filter(
+    (match) => match === true,
+  ).length;
+  const hasCanonicalConflict = canonicalMatches.some(
+    (match) => match === false,
+  );
+  if (canonicalMatchCount === 1 && !hasCanonicalConflict) {
+    return {
+      shouldAutomaticallyLink: true,
+      shouldRequireVerification: true,
+    };
+  }
+
+  if (canonicalMatchCount > 0 || hasCanonicalConflict) {
+    return {
+      shouldAutomaticallyLink: false,
+      shouldRequireVerification: false,
+    };
+  }
+
+  return undefined;
+}
+
+// Passed explicitly between adjacent read-only phases; never retained in userContext.
+export type PasswordlessAuthSnapshot = {
+  users: SuperTokensUser[];
+  inspections: Map<string, LinkedUserMetadataInspection>;
+};
+
+export async function doesRowndAccountInfoExist(input: {
+  tenantId: string;
+  email?: string;
+  phoneNumber?: string;
+  userContext?: Record<string, any>;
+  snapshot?: PasswordlessAuthSnapshot;
+}) {
+  const users = input.snapshot?.users ?? await SuperTokens.listUsersByAccountInfo(
+    input.tenantId,
+    input.email ? { email: input.email } : { phoneNumber: input.phoneNumber! },
+    true,
+    input.userContext,
+  );
+  if (!input.email) {
+    return users.length > 0;
+  }
+  if (isSyntheticEmail(input.email)) return false;
+
+  const email = input.email.trim().toLowerCase();
+  const matches = await Promise.all(
+    users.map(async (user) => {
+      const inspection = input.snapshot?.inspections.get(user.id) ??
+        await inspectLinkedUserMetadata(user.id, input.userContext, user);
+      const metadata = inspection.combinedMetadata;
+      const resolutionInput = {
+        user,
+        metadata,
+        tenantId: input.tenantId,
+        email,
+      };
+      const canonical = resolveEmailForAuthentication(resolutionInput);
+      if (canonical.status === "SELECTED" && canonical.email === email) {
+        return true;
+      }
+      // Imported passwordless methods can receive a sign-in code before verification.
+      const passwordless = resolveEmailForAuthentication({
+        ...resolutionInput,
+        passwordlessOnly: true,
+      });
+      return (passwordless.status === "SELECTED" && passwordless.email === email) ||
+        (users.length === 1 && evaluateHistoricalEmailEligibility(user, email, input.tenantId, inspection));
+    }),
+  );
+  return matches.some(Boolean);
+}
+
+async function hasAuthenticationEmailForTenant(
+  user: NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>,
+  email: string,
+  tenantId: string,
+  userContext?: Record<string, any>,
+) {
+  if (isSyntheticEmail(email)) return false;
+  const metadata = (await inspectLinkedUserMetadata(user.id, userContext, user))
+    .combinedMetadata;
+  const canonical = resolveEmailForAuthentication({
+    user,
+    metadata,
+    tenantId,
+    email,
+  });
+  if (canonical.status === "NO_EMAIL") return undefined;
+  return (
+    canonical.status === "SELECTED" &&
+    canonical.email === email.trim().toLowerCase()
+  );
+}
+
+export function mapMethod(method: SuperTokensLoginMethod) {
+  if (method.recipeId === "thirdparty") {
+    if (getThirdPartyId(method) === "google") return "google";
+    if (getThirdPartyId(method) === "apple") return "apple";
+  } else if (method.recipeId === "passwordless") {
+    if (method.email) return "email";
+    if (method.phoneNumber) return "phone";
+  } else if (method.recipeId === "emailpassword") {
+    return "email";
+  }
+
+  return "email";
+}
+
+export function getThirdPartyId(method: SuperTokensLoginMethod) {
+  return method.thirdParty?.id;
+}
+
+export function getThirdPartyUserId(method: SuperTokensLoginMethod) {
+  return method.thirdParty?.userId;
+}
+
+function getGuestAuthLevel(
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+) {
+  const guestMethod = user?.loginMethods.find((method) => {
+    return (
+      method.recipeId === "thirdparty" &&
+      getThirdPartyId(method) === GUEST_AUTH_METHOD_ID
+    );
+  });
+  if (guestMethod) {
+    return GUEST_AUTH_METHOD_ID;
+  }
+
+  const instantMethod = user?.loginMethods.find((method) => {
+    return (
+      method.recipeId === "thirdparty" &&
+      getThirdPartyId(method) === INSTANT_AUTH_METHOD_ID
+    );
+  });
+
+  return instantMethod ? INSTANT_AUTH_METHOD_ID : undefined;
+}
+
+export function hasOnlyGuestLoginMethods(
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+) {
+  return (
+    !!user?.loginMethods.length && user.loginMethods.every(isGuestLoginMethod)
+  );
+}
+
+export function isGuestLoginMethod(method: SuperTokensLoginMethod) {
+  const thirdPartyId = getThirdPartyId(method);
+  return (
+    method.recipeId === "thirdparty" &&
+    (thirdPartyId === GUEST_AUTH_METHOD_ID ||
+      thirdPartyId === INSTANT_AUTH_METHOD_ID)
+  );
+}
+
+function isGuestAccountInfo(input?: {
+  recipeId: string;
+  thirdParty?: { id: string };
+}) {
+  return (
+    input?.recipeId === "thirdparty" &&
+    (input.thirdParty?.id === GUEST_AUTH_METHOD_ID ||
+      input.thirdParty?.id === INSTANT_AUTH_METHOD_ID)
+  );
+}
+
+function doesAccountInfoMatchAuthMethod(
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+  accountInfo: {
+    recipeId: string;
+    email?: string;
+    phoneNumber?: string;
+    thirdParty?: { id: string; userId: string };
+  },
+  tenantId: string,
+) {
+  if (!user) {
+    return false;
+  }
+
+  const normalizedEmail = accountInfo.email?.toLowerCase();
+  if (normalizedEmail) {
+    return user.loginMethods.some((method) => {
+      if (
+        isGuestLoginMethod(method) ||
+        !method.tenantIds.includes(tenantId) ||
+        !method.email ||
+        !method.verified
+      ) {
+        return false;
+      }
+
+      return method.email.toLowerCase() === normalizedEmail;
+    });
+  }
+
+  if (accountInfo.phoneNumber) {
+    return user.loginMethods.some((method) => {
+      return (
+        !isGuestLoginMethod(method) &&
+        method.tenantIds.includes(tenantId) &&
+        method.verified &&
+        method.phoneNumber === accountInfo.phoneNumber
+      );
+    });
+  }
+
+  return false;
+}
+
+function hasVerifiedMatchingEmailLoginMethod(
+  user: NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>,
+  accountInfo: {
+    recipeId: string;
+    email: string;
+    thirdParty?: { id: string; userId: string };
+  },
+  tenantId: string,
+) {
+  const normalizedEmail = accountInfo.email.toLowerCase();
+  const thirdParty = accountInfo.thirdParty;
+
+  const hasConflictingProviderIdentity =
+    accountInfo.recipeId === "thirdparty" &&
+    thirdParty !== undefined &&
+    user.loginMethods.some((method) => {
+      const existingThirdParty = method.thirdParty;
+      return (
+        method.recipeId === "thirdparty" &&
+        method.tenantIds.includes(tenantId) &&
+        existingThirdParty?.id === thirdParty.id &&
+        existingThirdParty.userId !== thirdParty.userId
+      );
+    });
+
+  return user.loginMethods.some((method) => {
+    if (
+      isGuestLoginMethod(method) ||
+      !method.tenantIds.includes(tenantId) ||
+      !method.verified ||
+      method.email?.toLowerCase() !== normalizedEmail
+    ) {
+      return false;
+    }
+
+    // A verified passwordless email can anchor linking despite a historical provider identity.
+    if (hasConflictingProviderIdentity) {
+      return method.recipeId === "passwordless";
+    }
+
+    if (method.recipeId !== accountInfo.recipeId) {
+      return true;
+    }
+
+    return (
+      method.recipeId === "thirdparty" &&
+      method.thirdParty?.id !== accountInfo.thirdParty?.id
+    );
+  });
+}
+
+function hasVerifiedRealLoginMethod(
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+) {
+  return !!user?.loginMethods.some((method) => {
+    if (isGuestLoginMethod(method)) {
+      return false;
+    }
+
+    if (method.recipeId === "passwordless") {
+      return !!(method.email || method.phoneNumber);
+    }
+
+    if (method.recipeId === "thirdparty") {
+      return !!getThirdPartyUserId(method) && method.verified === true;
+    }
+
+    if (method.recipeId === "emailpassword") {
+      return !!method.email && method.verified === true;
+    }
+
+    return method.verified === true;
+  });
+}
+
+export function getEffectiveAuthLevel(
+  user: Awaited<ReturnType<typeof SuperTokens.getUser>>,
+  originalAuthLevel?: string,
+  verifiedData?: JsonRecord,
+) {
+  if (hasVerifiedRealLoginMethod(user)) {
+    return "verified";
+  }
+
+  if (originalAuthLevel === INSTANT_AUTH_METHOD_ID) {
+    return INSTANT_AUTH_METHOD_ID;
+  }
+
+  return (
+    getGuestAuthLevel(user) ||
+    originalAuthLevel ||
+    (verifiedData && Object.keys(verifiedData).length > 0
+      ? "verified"
+      : "unverified")
+  );
+}
+
+export function canUpdateUserDataField(
+  field: string,
+  pluginConfig: RowndPluginNormalisedConfig | undefined = getPluginConfig(),
+) {
+  const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;
+  const schemaField = schema[field];
+
+  if (!schemaField) {
+    return false;
+  }
+
+  const ownedBy =
+    field === "google_id" || field === "apple_id"
+      ? "app"
+      : schemaField.owned_by || "user";
+
+  return ownedBy !== "app" && schemaField.read_only !== true;
+}

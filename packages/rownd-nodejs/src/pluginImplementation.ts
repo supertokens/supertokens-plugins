@@ -1,187 +1,1167 @@
-import { BaseRequest } from "supertokens-node/lib/build/framework/request";
-import { RowndUser, SuperTokensUserImport, IRowndClient } from "./types";
-import { RowndPluginError } from "./errors";
+import { randomUUID } from "crypto";
+import { withProvenSessionAuthentication } from "./session-authentication";
+import { MigrationTelemetry } from "./telemetry/migrationTelemetry";
+import { assertMigrationMapping, resolveMigrationMapping } from "./migration-mapping";
+import { resolveConsolidatedTokenOwner } from "./migration-consolidation";
+import { discoverMigrationById, hasPendingMigrationById, planMigration } from "./migration-plan";
+import { authenticateExistingRowndMigration, authenticateRowndMigration, assertAuthenticatedMigrationSource } from "./migration-email";
+import { resolveCanonicalEmailForTenant } from "./canonical-email";
+import SuperTokens from "supertokens-node";
+import Session from "supertokens-node/recipe/session";
+import ThirdParty from "supertokens-node/recipe/thirdparty";
+import MultiTenancy from "supertokens-node/recipe/multitenancy";
+import UserMetadata from "supertokens-node/recipe/usermetadata";
 import type {
-  JSONObject,
+  PluginRouteHandler,
   SuperTokensPublicConfig,
 } from "supertokens-node/types";
 
-let rowndClient: IRowndClient | undefined;
+import {
+  GUEST_AUTH_METHOD_ID,
+  INSTANT_AUTH_METHOD_ID,
+  NATIVE_EMAIL_VERIFICATION_UPGRADE_REQUIRED_MESSAGE,
+} from "./constants";
+import { RowndEmailChangeError, RowndLegacyUserNotFoundError, RowndPluginError } from "./errors";
+import { logDebugMessage } from "./logger";
+import type {
+  RowndEmailChangeRequestContext,
+  RowndPluginNormalisedConfig,
+} from "./types";
+import { createClient } from "./telemetry/createTelemetryClient";
+import {
+  assertRowndAppVariantIsConfigured,
+  buildRowndAppConfig,
+  isAnonymousSignInEnabled,
+  isEmailSignInEnabled,
+  resolvePluginConfigSnapshot,
+} from "./config";
+import {
+  buildRowndAudience,
+  canUpdateUserDataField,
+  isInternalMetadataField,
+} from "./rownd-compatibility";
+import {
+  getUserById,
+  getUserMetadata,
+  importUser,
+  isBulkImportDuplicateIdentityError,
+  reconcileRowndUserWithExistingLoginMethods,
+  recordRowndAppVariantForUser,
+  startPendingEmailVerification,
+  updateUserData,
+  updateUserMetadata,
+} from "./supertokens-repository";
+import {
+  assertAllowedBypassRedirectPath,
+  clearSuperTokensCoreCallCache,
+  getErrorMessage,
+  getJsonBody,
+  normalizeRedirectToPathForClientDomain,
+  getRequestedAppVariantIdFromRequest,
+  hasOwn,
+  isRecord,
+  missingFieldResponse,
+  parseGuestBody,
+  parseRequest,
+  parseUpdateFieldBody,
+  parseUpdateMetaBody,
+  parseUpdateUserBody,
+  resolveTenantId,
+  resolveAllowedClientDomain,
+  createDerivedUserContext,
+} from "./utils";
 
-export function setRowndClient(client: IRowndClient) {
-  rowndClient = client;
+type SuperTokensRequest = Parameters<PluginRouteHandler["handler"]>[0];
+type SuperTokensResponse = Parameters<PluginRouteHandler["handler"]>[1];
+type SuperTokensSession = Parameters<PluginRouteHandler["handler"]>[2];
+type SuperTokensUserContext = Parameters<PluginRouteHandler["handler"]>[3];
+type TelemetryClient = ReturnType<typeof createClient>;
+
+function isBodyString(
+  body: unknown,
+  key: string,
+): body is Record<string, string> {
+  return (
+    isRecord(body) && typeof body[key] === "string" && body[key].length > 0
+  );
 }
 
-export function getRowndClient() {
-  if (!rowndClient) {
-    throw new Error("Rownd client not initialized");
-  }
-  return rowndClient;
-}
+export type RowndRouteHandlerDeps = {
+  pluginConfig: RowndPluginNormalisedConfig;
+  stConfig: SuperTokensPublicConfig;
+  telemetryClient: TelemetryClient;
+};
 
-export async function parseRequest(req: BaseRequest): Promise<{
-  token: string;
-}> {
-  const authHeader = req.getHeaderValue("authorization");
-  if (!authHeader) {
-    throw new RowndPluginError("MISSING_AUTHORIZATION_HEADER");
-  }
-
-  const token = authHeader.replace(/^Bearer /i, "");
-  if (!token) {
-    throw new RowndPluginError("INVALID_TOKEN");
-  }
-
-  return {
-    token,
-  };
-}
-
-export function mapRowndUserToSuperTokens(
-  rowndUser: RowndUser,
-): SuperTokensUserImport {
-  const loginMethods: SuperTokensUserImport["loginMethods"] = [];
-  const rowndUserData = rowndUser.data || {};
-  const rowndUserVerifiedData = rowndUser.verified_data || {};
-  if (!rowndUserData.user_id) {
-    throw new Error("Rownd user has no user_id");
-  }
-
-  if (rowndUserData.google_id) {
-    if (!rowndUserData.email) {
-      throw new Error("Rownd Google user is missing email");
-    }
-
-    loginMethods.push({
-      recipeId: "thirdparty",
-      thirdPartyId: "google",
-      thirdPartyUserId: rowndUserData.google_id,
-      email: rowndUserData.email,
-      isVerified: !!rowndUserVerifiedData.google_id,
+export function handleGetAppConfig(deps: RowndRouteHandlerDeps) {
+  return async (
+    req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    _session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+      tenantId: resolveTenantId(req),
+      request: req,
+      userContext,
     });
-  }
-
-  if (rowndUserData.apple_id) {
-    if (!rowndUserData.email) {
-      throw new Error("Rownd Apple user is missing email");
-    }
-
-    loginMethods.push({
-      recipeId: "thirdparty",
-      thirdPartyId: "apple",
-      thirdPartyUserId: rowndUserData.apple_id,
-      email: rowndUserData.email,
-      isVerified: !!rowndUserVerifiedData.apple_id,
-    });
-  }
-
-  if (rowndUserData.phone_number) {
-    loginMethods.push({
-      recipeId: "passwordless",
-      phoneNumber: rowndUserData.phone_number,
-      isVerified: !!rowndUserVerifiedData.phone_number,
-    });
-  }
-
-  if (rowndUserData.email && loginMethods.length === 0) {
-    loginMethods.push({
-      recipeId: "passwordless",
-      email: rowndUserData.email,
-      isVerified: !!rowndUserVerifiedData.email,
-    });
-  }
-
-  if (loginMethods.length === 0) {
-    throw new Error("No valid login methods found in Rownd user data");
-  }
-
-  const rowndUserMeta = rowndUser.meta || {};
-  const rowndUserAttributes = rowndUser.attributes || {};
-
-  const userMetadata: JSONObject = {
-    data: {
-      ...rowndUserData,
-    },
-    meta: {
-      ...rowndUserMeta,
-    },
-    verified_data: {
-      ...rowndUserVerifiedData,
-    },
-    attributes: {
-      ...rowndUserAttributes,
-    },
-    rownd_migrated: true,
-    rownd_user_id: rowndUserData.user_id,
-  };
-
-  return {
-    externalUserId: rowndUserData.user_id,
-    loginMethods,
-    userMetadata,
-  };
-}
-
-export async function importUser(
-  stUser: SuperTokensUserImport,
-  config: NonNullable<SuperTokensPublicConfig["supertokens"]>,
-): Promise<{
-  id: string;
-  loginMethods: Array<{
-    recipeUserId: string;
-  }>;
-}> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (config.apiKey) {
-    headers["api-key"] = config.apiKey;
-  }
-
-  const response = await fetch(`${config.connectionURI}/bulk-import/import`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(stUser),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(
-      `Bulk import failed with status ${response.status}: ${errorText}`,
+    const appVariantId = getRequestedAppVariantIdFromRequest(req);
+    const appConfig = buildRowndAppConfig(
+      resolved.config,
+      deps.stConfig,
+      appVariantId,
     );
-  }
 
-  const importResponse = (await response.json()) as {
-    status: string;
-    message?: string;
-    user?: {
-      id: string;
-      loginMethods: Array<{
-        recipeUserId: string;
-      }>;
+    if (!appConfig) {
+      return {
+        status: "ERROR" as const,
+        message: `Unknown Rownd app variant: ${appVariantId}`,
+      };
+    }
+
+    return {
+      status: "OK" as const,
+      ...appConfig,
+    };
+  };
+}
+
+export function handleValidatePasswordlessConfirmationBypass(
+  deps: RowndRouteHandlerDeps,
+) {
+  return async (
+    req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    _session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    try {
+      const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+        tenantId: resolveTenantId(req),
+        request: req,
+        userContext,
+      });
+      const body = await getJsonBody(req);
+      const clientDomain = isBodyString(body, "clientDomain")
+        ? body.clientDomain
+        : undefined;
+      const redirectToPath = isBodyString(body, "redirectToPath")
+        ? body.redirectToPath
+        : undefined;
+      const appVariantId = isBodyString(body, "appVariantId")
+        ? body.appVariantId
+        : undefined;
+
+      assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
+      const resolvedClientDomain = resolveAllowedClientDomain({
+        clientDomain,
+        pluginConfig: resolved.config,
+        stConfig: deps.stConfig,
+        request: req,
+      });
+      const normalizedRedirectToPath = normalizeRedirectToPathForClientDomain(
+        redirectToPath,
+        resolvedClientDomain,
+      );
+      assertAllowedBypassRedirectPath(
+        resolved.config,
+        normalizedRedirectToPath,
+      );
+
+      return {
+        status: "OK" as const,
+        bypass: true,
+      };
+    } catch (error) {
+      logDebugMessage(
+        `Passwordless confirmation bypass validation failed. Error: ${getErrorMessage(error)}`,
+      );
+      return {
+        status: "ERROR" as const,
+        bypass: false,
+      };
+    }
+  };
+}
+
+export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
+  return async (
+    req: SuperTokensRequest,
+    res: SuperTokensResponse,
+    _session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const startedAt = Date.now();
+    const guestId = `guest_${randomUUID()}`;
+    let tenantId: string | undefined;
+
+    try {
+      tenantId = resolveTenantId(req);
+      const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+        tenantId,
+        request: req,
+        userContext,
+      });
+
+      const body = parseGuestBody(await getJsonBody(req));
+      const appVariantId = getRequestedAppVariantIdFromRequest(req);
+      assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
+      const thirdPartyId =
+        body.authLevel === INSTANT_AUTH_METHOD_ID
+          ? INSTANT_AUTH_METHOD_ID
+          : GUEST_AUTH_METHOD_ID;
+      if (!isAnonymousSignInEnabled(resolved.config, thirdPartyId, appVariantId)) {
+        return {
+          status: "ERROR" as const,
+          message: `${thirdPartyId === INSTANT_AUTH_METHOD_ID ? "Instant" : "Guest"} sign-in is not enabled`,
+        };
+      }
+      const thirdPartyUserId =
+        thirdPartyId === INSTANT_AUTH_METHOD_ID
+          ? `anon_${randomUUID()}`
+          : guestId;
+      const authLevel =
+        thirdPartyId === INSTANT_AUTH_METHOD_ID
+          ? INSTANT_AUTH_METHOD_ID
+          : GUEST_AUTH_METHOD_ID;
+
+      const response = await ThirdParty.manuallyCreateOrUpdateUser(
+        tenantId,
+        thirdPartyId,
+        thirdPartyUserId,
+        `${thirdPartyUserId}@anonymous.local`,
+        false,
+        undefined,
+        resolved.userContext,
+      );
+
+      if (response.status !== "OK") {
+        throw new Error(
+          `Guest user creation failed with status: ${response.status}`,
+        );
+      }
+
+      await recordRowndAppVariantForUser(
+        response.user.id,
+        appVariantId,
+        resolved.userContext,
+        tenantId,
+      );
+
+      await Session.createNewSession(
+        req,
+        res,
+        tenantId,
+        response.recipeUserId,
+        {
+          ...buildRowndAudience({}, appVariantId, resolved.config),
+          auth_level: authLevel,
+          ...([GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(authLevel)
+            ? { is_anonymous: true }
+            : {}),
+          app_user_id: response.user.id,
+        },
+        {},
+        resolved.userContext,
+      );
+
+      logDebugMessage(`Guest session created for user: ${response.user.id}`);
+      deps.telemetryClient.recordSuccess({
+        outcome: "success",
+        durationMs: Date.now() - startedAt,
+        tenantId,
+        superTokensUserId: response.user.id,
+      });
+
+      return {
+        status: "OK" as const,
+        createdNewRecipeUser: response.createdNewRecipeUser,
+      };
+    } catch (error) {
+      logDebugMessage(`Guest login failed. Error: ${getErrorMessage(error)}`);
+      deps.telemetryClient.recordError({
+        error,
+        startedAt,
+        tenantId,
+      });
+      return {
+        status: "ERROR" as const,
+        message: "Guest login failed",
+      };
+    }
+  };
+}
+
+export function handleMigrationRequest(deps: RowndRouteHandlerDeps): PluginRouteHandler["handler"] {
+  const migrate = handleMigrate(deps);
+  return async (req, res, session, userContext) => {
+    const result = await migrate(req, res, session, userContext);
+    res.setStatusCode(result.status === "OK" ? 200 : result.code === "LEGACY_USER_NOT_FOUND" ? 410 : 400);
+    res.sendJSONResponse(result);
+    return null;
+  };
+}
+
+export function handleMigrate(deps: RowndRouteHandlerDeps) {
+  return async (
+    req: SuperTokensRequest,
+    res: SuperTokensResponse,
+    _session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const telemetry = new MigrationTelemetry(deps.telemetryClient.recordEvent);
+    const operationContext = createDerivedUserContext(userContext, {
+      rowndMigrationRequestId: telemetry.requestId,
+      rowndMigrationTelemetry: telemetry,
+    });
+    let tenantId: string | undefined;
+    let rowndUserId: string | undefined;
+    let superTokensUserId: string | undefined;
+    let user: Awaited<ReturnType<typeof SuperTokens.getUser>>;
+    let recipeUserId:
+      Parameters<typeof Session.createNewSession>[3] | undefined;
+
+    try {
+      res.setHeader("x-rownd-migration-request-id", telemetry.requestId, false);
+      if (!deps.stConfig.supertokens) {
+        throw new Error("Supertokens config not found");
+      }
+
+      tenantId = resolveTenantId(req);
+      telemetry.tenantId = tenantId;
+      const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+        tenantId,
+        request: req,
+        userContext: operationContext,
+      });
+
+      telemetry.stage = "request_validation";
+      const parsed = await parseRequest(req);
+      const appVariantId = getRequestedAppVariantIdFromRequest(req);
+      assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
+      if (!deps.pluginConfig.rowndAppSecret) {
+        telemetry.stage = "token_validation";
+        rowndUserId = await authenticateExistingRowndMigration(parsed.token, tenantId, resolved.userContext);
+        telemetry.stage = "completed_mapping_lookup";
+        await migrateExistingMappedUser({
+          rowndUserId, tenantId, appVariantId, req, res,
+          config: resolved.config, userContext: resolved.userContext, telemetry,
+        });
+        telemetry.sessionCreated = true;
+        telemetry.canonicalRowndUserId = rowndUserId;
+        telemetry.emit("terminal", "session_created");
+        return { status: "OK" as const };
+      }
+      telemetry.stage = "token_validation";
+      const authenticated = await authenticateRowndMigration(parsed.token, tenantId, resolved.userContext);
+      rowndUserId = authenticated.rowndUserId;
+      const stUserImport = authenticated.source;
+
+      if (!stUserImport) {
+        throw new Error("Authenticated Rownd migration source is unavailable");
+      }
+
+      telemetry.stage = "supertokens_lookup";
+      const discovery = await discoverMigrationById(rowndUserId, tenantId, resolved.userContext);
+      const plan = planMigration(discovery, stUserImport);
+      if (plan.status === "BLOCKED") throw new Error(plan.reason);
+      user = discovery.user;
+      const consolidatedAlias = plan.status === "NOOP" ? undefined : await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext);
+      telemetry.superTokensUserId = user?.id;
+      const existingMetadata = plan.status === "PLAN" && user
+        ? await getUserMetadata(user.id, resolved.userContext)
+        : undefined;
+
+      if (plan.status === "NOOP") {
+        user = plan.user;
+        superTokensUserId = user.id;
+        recipeUserId = SuperTokens.convertToRecipeUserId(plan.recipeUserId);
+      } else if (consolidatedAlias) {
+        user = consolidatedAlias.user;
+        superTokensUserId = user.id;
+        recipeUserId = consolidatedAlias.recipeUserId;
+      } else if (!user || existingMetadata?.rownd_migration_complete !== true) {
+        telemetry.stage = "reconciliation";
+        const reconciled = await reconcileRowndUserWithExistingLoginMethods(
+          stUserImport,
+          tenantId,
+          resolved.userContext,
+        );
+        if (!reconciled) {
+          if (user) {
+            throw new Error("Incomplete migrated user could not be reconciled");
+          }
+          try {
+            telemetry.stage = "bulk_import";
+            await importUser(stUserImport, deps.stConfig.supertokens);
+            telemetry.emit("transition", "bulk_import_completed");
+          } catch (importError) {
+            if (!isBulkImportDuplicateIdentityError(importError)) {
+              throw importError;
+            }
+            // Another migration may have completed after the initial reconciliation.
+            telemetry.stage = "duplicate_import_reconciliation";
+            const recovered =
+              await reconcileRowndUserWithExistingLoginMethods(
+                stUserImport,
+                tenantId,
+                resolved.userContext,
+              );
+            if (!recovered) {
+              throw importError;
+            }
+          }
+        }
+        telemetry.stage = "imported_user_lookup";
+        clearSuperTokensCoreCallCache(resolved.userContext);
+        user = await SuperTokens.getUser(rowndUserId, resolved.userContext);
+        if (!user) {
+          throw new Error("Imported user could not be resolved");
+        }
+        superTokensUserId = user.id;
+        recipeUserId = user.loginMethods[0]?.recipeUserId;
+
+        logDebugMessage(
+          `User migrated successfully. tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,
+        );
+      } else {
+        telemetry.stage = "repair";
+        await reconcileRowndUserWithExistingLoginMethods(
+          stUserImport,
+          tenantId,
+          resolved.userContext,
+          { repairUser: plan.action.repairUser },
+        );
+        telemetry.stage = "repaired_user_lookup";
+        clearSuperTokensCoreCallCache(resolved.userContext);
+        user = await SuperTokens.getUser(rowndUserId, resolved.userContext);
+        if (!user) {
+          throw new Error("Repaired migrated user could not be resolved");
+        }
+        superTokensUserId = user.id;
+        recipeUserId = user.loginMethods[0]?.recipeUserId;
+        logDebugMessage(
+          `User already migrated. tenantId: ${tenantId}, rowndUserId: ${rowndUserId}`,
+        );
+      }
+
+      telemetry.superTokensUserId = superTokensUserId;
+      telemetry.stage = "app_variant_metadata";
+      if (superTokensUserId) {
+        await recordRowndAppVariantForUser(
+          superTokensUserId,
+          appVariantId,
+          resolved.userContext,
+          tenantId,
+        );
+      }
+
+      telemetry.stage = "recipe_selection";
+      const tenantLoginMethod = user?.loginMethods.find((method) =>
+        method.tenantIds.includes(tenantId!) && (!consolidatedAlias || method.recipeUserId.getAsString() === rowndUserId),
+      );
+      recipeUserId = tenantLoginMethod?.recipeUserId ?? recipeUserId;
+      telemetry.recipeUserId = recipeUserId?.getAsString();
+      telemetry.recipeId = user?.loginMethods.find(
+        (method) => method.recipeUserId.getAsString() === telemetry.recipeUserId,
+      )?.recipeId;
+
+      if (!recipeUserId) {
+        throw new Error("User not found or has no login methods");
+      }
+
+      telemetry.stage = "tenant_association";
+      if (user && plan.status !== "NOOP") {
+        await associateUserLoginMethodsToTenant(
+          user,
+          tenantId,
+          resolved.userContext,
+        );
+      }
+
+      telemetry.stage = "session_creation";
+      const authenticatedSession = await assertAuthenticatedMigrationSource(stUserImport, tenantId);
+      if (consolidatedAlias && (await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext))?.canonicalRowndId !== consolidatedAlias.canonicalRowndId) {
+        throw new Error("Consolidated Rownd alias ownership changed before session creation");
+      }
+      const { internalUserId, metadata: sourceMetadata } = await resolveMigrationMapping(rowndUserId, resolved.userContext);
+      if (sourceMetadata.rownd_migration_canonical_target !== internalUserId) {
+        await UserMetadata.updateUserMetadata(rowndUserId, {
+          rownd_migration_canonical_target: internalUserId,
+        }, resolved.userContext);
+      }
+      await assertMigrationMapping(internalUserId, rowndUserId, resolved.userContext);
+      // Keep newly issued credentials off the response until the actual session
+      // binding has been checked. Existing browser credentials are never cleared.
+      const responseWrites: Array<() => void> = [];
+      const sessionResponse: SuperTokensResponse = Object.create(res);
+      sessionResponse.setHeader = (...args) => {
+        responseWrites.push(() => res.setHeader(...args));
+      };
+      sessionResponse.removeHeader = (...args) => {
+        responseWrites.push(() => res.removeHeader(...args));
+      };
+      sessionResponse.setCookie = (...args) => {
+        responseWrites.push(() => res.setCookie(...args));
+      };
+      const sessionTenantId = tenantId;
+      const sessionRecipeUserId = recipeUserId;
+      const createSession = () => Session.createNewSession(
+        req,
+        sessionResponse,
+        sessionTenantId,
+        sessionRecipeUserId,
+        {
+          ...buildRowndAudience({}, appVariantId, resolved.config),
+        },
+        {},
+        resolved.userContext,
+      );
+      const hasAuthenticatedMethod = stUserImport.loginMethods.some((method) => method.recipeId !== "thirdparty" ||
+        !["instant", "guest"].includes(method.thirdPartyId));
+      const createdSession = await (authenticatedSession && hasAuthenticatedMethod ? withProvenSessionAuthentication(createSession) : createSession());
+      try {
+        if (createdSession.getUserId(resolved.userContext) !== (consolidatedAlias?.canonicalRowndId ?? rowndUserId) ||
+            createdSession.getRecipeUserId(resolved.userContext).getAsString() !== recipeUserId.getAsString() ||
+            createdSession.getTenantId(resolved.userContext) !== tenantId) {
+          telemetry.canonicalRowndUserId = createdSession.getUserId(resolved.userContext);
+          throw new Error("Created session does not match the requested Rownd identity");
+        }
+        await assertMigrationMapping(internalUserId, rowndUserId, resolved.userContext);
+        if (consolidatedAlias && (await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext))?.canonicalRowndId !== consolidatedAlias.canonicalRowndId) {
+          throw new Error("Consolidated Rownd alias ownership changed after session creation");
+        }
+      } catch (error) {
+        await Promise.allSettled([Session.revokeSession(createdSession.getHandle(resolved.userContext), resolved.userContext)]);
+        throw error;
+      }
+      for (const write of responseWrites) write();
+
+      telemetry.sessionCreated = true;
+      telemetry.canonicalRowndUserId = consolidatedAlias?.canonicalRowndId ?? rowndUserId;
+      telemetry.emit("terminal", "session_created");
+
+      return { status: "OK" as const };
+    } catch (error) {
+      if (error instanceof RowndLegacyUserNotFoundError) {
+        telemetry.emit("terminal", "rownd_user_not_found", "error", error);
+        return { status: "ERROR" as const, code: error.code, message: error.message };
+      }
+      telemetry.emit("terminal", "stage_failed", "error", error);
+      return {
+        status: "ERROR" as const,
+        message:
+          error instanceof RowndPluginError
+            ? error.message
+            : "Migration failed",
+      };
+    }
+  };
+}
+
+async function migrateExistingMappedUser(input: {
+  rowndUserId: string;
+  tenantId: string;
+  appVariantId?: string;
+  req: SuperTokensRequest;
+  res: SuperTokensResponse;
+  config: RowndPluginNormalisedConfig;
+  userContext: SuperTokensUserContext;
+  telemetry: MigrationTelemetry;
+}) {
+  const { rowndUserId, tenantId, appVariantId, req, res, config, userContext, telemetry } = input;
+  const checkOwner = async () => {
+    clearSuperTokensCoreCallCache(userContext);
+    const discovery = await discoverMigrationById(rowndUserId, tenantId, userContext);
+    const { mapping, reverse } = discovery;
+    if (mapping.status !== "OK" || mapping.externalUserId !== rowndUserId ||
+        reverse?.status !== "OK" || reverse.superTokensUserId !== mapping.superTokensUserId ||
+        reverse.externalUserId !== rowndUserId || hasPendingMigrationById(discovery)) {
+      throw new Error("Completed Rownd mapping is unavailable");
+    }
+    const internalUserId = mapping.superTokensUserId;
+    await assertMigrationMapping(internalUserId, rowndUserId, userContext);
+    const user = discovery.user;
+    const ownerMetadata = discovery.metadataById.get(internalUserId) ?? {};
+    const sourceMetadata = discovery.metadataById.get(rowndUserId) ?? {};
+    const complete = [ownerMetadata, sourceMetadata]
+      .find((metadata) => metadata.rownd_migration_complete !== undefined)?.rownd_migration_complete === true;
+    if (!user || ![internalUserId, rowndUserId].includes(user.id) ||
+        !complete || sourceMetadata.rownd_migration_complete === false) {
+      throw new Error("Completed Rownd owner is unavailable");
+    }
+    for (const metadata of [ownerMetadata, sourceMetadata]) {
+      if ([metadata.rownd_migration_canonical_target, metadata.rownd_migration_target]
+        .some((target) => target !== undefined && target !== internalUserId)) {
+        throw new Error("Completed Rownd owner changed");
+      }
+    }
+    const methods = user.loginMethods.filter((method) => method.tenantIds.includes(tenantId));
+    const method = methods.find((candidate) => candidate.recipeId !== "thirdparty" ||
+      !["instant", "guest"].includes(candidate.thirdParty?.id ?? "")) ?? methods[0];
+    if (!method) throw new Error("Completed Rownd owner does not belong to tenant");
+    return {
+      internalUserId, userId: user.id, recipeUserId: method.recipeUserId,
+      provenAuthentication: method.recipeId !== "thirdparty" || !["instant", "guest"].includes(method.thirdParty?.id ?? ""),
     };
   };
 
-  if (importResponse.status !== "OK" || !importResponse.user) {
-    throw new Error(
-      `Bulk import failed: ${importResponse.message || "Missing user in response"}`,
+  const owner = await checkOwner();
+  telemetry.superTokensUserId = owner.userId;
+  telemetry.recipeUserId = owner.recipeUserId.getAsString();
+  telemetry.stage = "session_creation";
+  const responseWrites: Array<() => void> = [];
+  const sessionResponse: SuperTokensResponse = Object.create(res);
+  sessionResponse.setHeader = (...args) => { responseWrites.push(() => res.setHeader(...args)); };
+  sessionResponse.removeHeader = (...args) => { responseWrites.push(() => res.removeHeader(...args)); };
+  sessionResponse.setCookie = (...args) => { responseWrites.push(() => res.setCookie(...args)); };
+  const createSession = () => Session.createNewSession(
+    req, sessionResponse, tenantId, owner.recipeUserId,
+    { ...buildRowndAudience({}, appVariantId, config) }, {}, userContext,
+  );
+  const createdSession = await (owner.provenAuthentication
+    ? withProvenSessionAuthentication(createSession) : createSession());
+  try {
+    if (createdSession.getUserId(userContext) !== owner.userId ||
+        createdSession.getRecipeUserId(userContext).getAsString() !== owner.recipeUserId.getAsString() ||
+        createdSession.getTenantId(userContext) !== tenantId) {
+      throw new Error("Created session does not match the completed Rownd owner");
+    }
+    const current = await checkOwner();
+    if (current.internalUserId !== owner.internalUserId || current.userId !== owner.userId ||
+        !(await SuperTokens.getUser(current.internalUserId, userContext))?.loginMethods.some((method) =>
+          method.recipeUserId.getAsString() === owner.recipeUserId.getAsString() && method.tenantIds.includes(tenantId))) {
+      throw new Error("Completed Rownd owner changed before session publication");
+    }
+  } catch (error) {
+    await Session.revokeSession(createdSession.getHandle(userContext), userContext);
+    throw error;
+  }
+  for (const write of responseWrites) write();
+}
+
+export async function associateUserLoginMethodsToTenant(
+  user: NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>,
+  tenantId: string,
+  userContext: SuperTokensUserContext,
+) {
+  let canonicalEmailRecipeUserIds: string[] | undefined;
+  if (user.loginMethods.some((method) => method.recipeId === "passwordless" && method.email &&
+      !method.tenantIds.includes(tenantId))) {
+    const metadata = await getUserMetadata(user.id, userContext);
+    const pointer = metadata.rownd_email_recipe_user_ids?.[tenantId] ??
+      (metadata.rownd_email_recipe_user_ids === undefined ? metadata.rownd_email_recipe_user_id : undefined);
+    // A legacy global pointer to another tenant is not a choice for a new tenant.
+    const pointerMethod = user.loginMethods.find((method) => method.recipeUserId.getAsString() === pointer);
+    const legacyPointerBelongsToAnotherTenant = metadata.rownd_email_recipe_user_ids === undefined &&
+      pointerMethod !== undefined && !pointerMethod.tenantIds.includes(tenantId);
+    if (pointer !== undefined && !legacyPointerBelongsToAnotherTenant) {
+      const canonical = resolveCanonicalEmailForTenant({ user, metadata, tenantId, passwordlessOnly: true });
+      if (canonical.status !== "SELECTED") {
+        throw new Error("Canonical passwordless email method is invalid for tenant association");
+      }
+      canonicalEmailRecipeUserIds = canonical.recipeUserIds;
+    }
+  }
+  for (const loginMethod of user.loginMethods) {
+    if (loginMethod.tenantIds.includes(tenantId)) continue;
+    if (canonicalEmailRecipeUserIds && loginMethod.recipeId === "passwordless" && loginMethod.email &&
+        !canonicalEmailRecipeUserIds.includes(loginMethod.recipeUserId.getAsString())) continue;
+
+    const associationResult = await MultiTenancy.associateUserToTenant(
+      tenantId,
+      loginMethod.recipeUserId,
+      userContext,
     );
+    if (associationResult.status !== "OK") {
+      throw new Error(
+        `Failed to associate migrated user with tenant: ${associationResult.status}`,
+      );
+    }
   }
-
-  return importResponse.user;
 }
 
-export async function validateRowndToken(token: string): Promise<string> {
-  const client = getRowndClient();
-  const tokenInfo = await client.validateToken(token);
-  return tokenInfo.user_id;
+function getEmailChangeUserContextValues(
+  payloadContext?: Record<string, unknown>,
+): RowndEmailChangeRequestContext {
+  const displayContext = payloadContext?.rowndDisplayContext;
+  const emailChangeContext: RowndEmailChangeRequestContext = {
+    rowndDisplayContext:
+      displayContext === "browser" ||
+      displayContext === "mobile_app" ||
+      displayContext === "customer_web_view"
+        ? displayContext
+        : undefined,
+    rowndClientDomain:
+      typeof payloadContext?.rowndClientDomain === "string"
+        ? payloadContext.rowndClientDomain
+        : undefined,
+    rowndNativeEmailVerification:
+      typeof payloadContext?.rowndNativeEmailVerification === "boolean"
+        ? payloadContext.rowndNativeEmailVerification
+        : undefined,
+  };
+
+  return emailChangeContext;
 }
 
-export async function fetchRowndUserInfo(userId: string): Promise<RowndUser> {
-  const client = getRowndClient();
-  const rowndUser = await client.fetchUserInfo({ user_id: userId });
-  if (!rowndUser) {
-    throw new RowndPluginError("ROWND_USER_NOT_FOUND");
+function nativeEmailVerificationUpgradeRequired(context: Record<string, any>) {
+  return (
+    context.rowndDisplayContext === "mobile_app" &&
+    context.rowndNativeEmailVerification !== true
+  );
+}
+
+function nativeEmailVerificationUpgradeRequiredResponse() {
+  return {
+    status: "ERROR" as const,
+    code: 426,
+    message: NATIVE_EMAIL_VERIFICATION_UPGRADE_REQUIRED_MESSAGE,
+  };
+}
+
+export function handleGetUser(deps: RowndRouteHandlerDeps) {
+  return async (
+    req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+      tenantId: session!.getTenantId(userContext),
+      request: req,
+      userContext,
+    });
+    const user = await getUserById(
+      session!.getUserId(resolved.userContext),
+      session!.getTenantId(resolved.userContext),
+      resolved.userContext,
+    );
+    return {
+      status: "OK" as const,
+      ...user,
+    };
+  };
+}
+
+export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
+  return async (
+    req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const tenantId = session!.getTenantId(userContext);
+    const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+      tenantId,
+      request: req,
+      userContext,
+    });
+    const appVariantId = getRequestedAppVariantIdFromRequest(req);
+    assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
+    const payload = parseUpdateUserBody(await getJsonBody(req));
+    const inputData = payload.data ?? {};
+    const operationContext = createDerivedUserContext(resolved.userContext, {
+      ...getEmailChangeUserContextValues(payload.context),
+      rowndAppVariantId: appVariantId,
+    });
+    {
+      const { email, ...dataWithoutEmail } = inputData;
+      const hasEmailField = hasOwn(inputData, "email");
+      if (
+        hasEmailField &&
+        (typeof email !== "string" || email.trim().length === 0)
+      ) {
+        return {
+          status: "ERROR" as const,
+          code: 400,
+          message: "email must be a non-empty string",
+        };
+      }
+      const hasEmailUpdate = hasEmailField && typeof email === "string";
+      const permissionError = validateWritableFields(
+        Object.keys(dataWithoutEmail),
+        resolved.config,
+      );
+
+      if (permissionError) {
+        return permissionError;
+      }
+
+      const currentEmail = hasEmailUpdate
+        ? (
+          await getUserById(
+              session!.getUserId(operationContext),
+              session!.getTenantId(operationContext),
+              operationContext,
+          )
+        ).data.email
+        : undefined;
+      const changesEmail =
+        hasEmailUpdate &&
+        (typeof currentEmail !== "string" ||
+          currentEmail.trim().toLowerCase() !== email.trim().toLowerCase());
+
+      if (changesEmail) {
+        if (nativeEmailVerificationUpgradeRequired(operationContext)) {
+          return nativeEmailVerificationUpgradeRequiredResponse();
+        }
+        const sessionError = await validateEmailChangeSession(
+          { ...deps, pluginConfig: resolved.config },
+          session!,
+          appVariantId,
+          operationContext,
+        );
+        if (sessionError) return sessionError;
+      }
+
+      if (hasEmailUpdate) {
+        try {
+          const pendingVerificationResult = await startPendingEmailVerification(
+            {
+              userId: session!.getUserId(operationContext),
+              recipeUserId: session!.getRecipeUserId(operationContext),
+              initiatingSessionHandle: session!.getHandle(operationContext),
+              tenantId: session!.getTenantId(operationContext),
+              email,
+              pendingVerificationId: randomUUID(),
+              userContext: operationContext,
+            },
+          );
+          const updateResult =
+            Object.keys(dataWithoutEmail).length > 0
+              ? await updateUserData(
+                  session!.getUserId(operationContext),
+                  dataWithoutEmail,
+                  session!.getTenantId(operationContext),
+                  operationContext,
+              )
+              : pendingVerificationResult;
+          return {
+            status: "OK" as const,
+            ...updateResult,
+            email_verification_pending: changesEmail,
+          };
+        } catch (error) {
+          if (error instanceof RowndEmailChangeError) {
+            return {
+              status: "ERROR" as const,
+              code: error.httpStatus,
+              message: error.message,
+            };
+          }
+          throw error;
+        }
+      }
+
+      if (Object.keys(dataWithoutEmail).length > 0) {
+        await updateUserData(
+          session!.getUserId(operationContext),
+          dataWithoutEmail,
+          session!.getTenantId(operationContext),
+          operationContext,
+        );
+      }
+
+      const user = await getUserById(
+        session!.getUserId(operationContext),
+        session!.getTenantId(operationContext),
+        operationContext,
+      );
+      return {
+        status: "OK" as const,
+        ...user,
+      };
+    }
+  };
+}
+
+export function handleDeleteUser() {
+  return async (
+    _req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    await SuperTokens.deleteUser(
+      session!.getUserId(userContext),
+      true,
+      userContext,
+    );
+    return { status: "OK" as const };
+  };
+}
+
+export function handleSignOut() {
+  return async (
+    _req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    await Session.revokeAllSessionsForUser(
+      session!.getUserId(userContext),
+      true,
+      session!.getTenantId(userContext),
+      userContext,
+    );
+
+    return { status: "OK" as const };
+  };
+}
+
+export function handleGetUserMeta() {
+  return async (
+    _req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const metadata = await getUserMetadata(
+      session!.getUserId(userContext),
+      userContext,
+    );
+    return {
+      status: "OK" as const,
+      id: session!.getUserId(userContext),
+      meta: Object.fromEntries(
+        Object.entries(metadata).filter(
+          ([key]) => !isInternalMetadataField(key),
+        ),
+      ),
+    };
+  };
+}
+
+export function handleUpdateUserMeta() {
+  return async (
+    req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const payload = parseUpdateMetaBody(await getJsonBody(req));
+    const internalField = Object.keys(payload.meta ?? {}).find(
+      isInternalMetadataField,
+    );
+
+    if (internalField) {
+      return {
+        status: "ERROR" as const,
+        code: 403,
+        message: `field is not writable: ${internalField}`,
+      };
+    }
+
+    const updateMetadataResult = await updateUserMetadata(
+      session!.getUserId(userContext),
+      payload.meta ?? {},
+      userContext,
+    );
+    return {
+      status: "OK" as const,
+      ...updateMetadataResult,
+    };
+  };
+}
+
+export function handleGetUserField(deps: RowndRouteHandlerDeps) {
+  return async (
+    req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+      tenantId: session!.getTenantId(userContext),
+      request: req,
+      userContext,
+    });
+    const field = req.getKeyValueFromQuery("field");
+    if (!field) {
+      return missingFieldResponse();
+    }
+
+    const user = await getUserById(
+      session!.getUserId(resolved.userContext),
+      session!.getTenantId(resolved.userContext),
+      resolved.userContext,
+    );
+    return {
+      status: "OK" as const,
+      value: user.data[field],
+    };
+  };
+}
+
+export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
+  return async (
+    req: SuperTokensRequest,
+    _res: SuperTokensResponse,
+    session: SuperTokensSession,
+    userContext: SuperTokensUserContext,
+  ) => {
+    const tenantId = session!.getTenantId(userContext);
+    const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
+      tenantId,
+      request: req,
+      userContext,
+    });
+    const appVariantId = getRequestedAppVariantIdFromRequest(req);
+    assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
+    const field = req.getKeyValueFromQuery("field");
+    if (!field) {
+      return missingFieldResponse();
+    }
+
+    const payload = parseUpdateFieldBody(await getJsonBody(req));
+    const operationContext = createDerivedUserContext(resolved.userContext, {
+      ...getEmailChangeUserContextValues(payload.context),
+      rowndAppVariantId: appVariantId,
+    });
+    {
+      if (field === "email") {
+        if (
+          typeof payload.value !== "string" ||
+          payload.value.trim().length === 0
+        ) {
+          return {
+            status: "ERROR" as const,
+            code: 400,
+            message: "email must be a non-empty string",
+          };
+        }
+
+        const currentEmail = (
+          await getUserById(
+            session!.getUserId(operationContext),
+            session!.getTenantId(operationContext),
+            operationContext,
+          )
+        ).data.email;
+        const changesEmail =
+          typeof currentEmail !== "string" ||
+          currentEmail.trim().toLowerCase() !==
+            payload.value.trim().toLowerCase();
+        if (changesEmail) {
+          if (nativeEmailVerificationUpgradeRequired(operationContext)) {
+            return nativeEmailVerificationUpgradeRequiredResponse();
+          }
+          const sessionError = await validateEmailChangeSession(
+            { ...deps, pluginConfig: resolved.config },
+            session!,
+            appVariantId,
+            operationContext,
+          );
+          if (sessionError) return sessionError;
+        }
+
+        try {
+          const pendingVerificationResult = await startPendingEmailVerification(
+            {
+              userId: session!.getUserId(operationContext),
+              recipeUserId: session!.getRecipeUserId(operationContext),
+              initiatingSessionHandle: session!.getHandle(operationContext),
+              tenantId: session!.getTenantId(operationContext),
+              email: payload.value,
+              pendingVerificationId: randomUUID(),
+              userContext: operationContext,
+            },
+          );
+          return {
+            status: "OK" as const,
+            ...pendingVerificationResult,
+            email_verification_pending: changesEmail,
+          };
+        } catch (error) {
+          if (error instanceof RowndEmailChangeError) {
+            return {
+              status: "ERROR" as const,
+              code: error.httpStatus,
+              message: error.message,
+            };
+          }
+          throw error;
+        }
+      }
+
+      const permissionError = validateWritableFields([field], resolved.config);
+      if (permissionError) {
+        return permissionError;
+      }
+
+      const updateUserDataResult = await updateUserData(
+        session!.getUserId(operationContext),
+        { [field]: payload.value },
+        session!.getTenantId(operationContext),
+        operationContext,
+      );
+      return {
+        status: "OK" as const,
+        ...updateUserDataResult,
+      };
+    }
+  };
+}
+
+async function validateEmailChangeSession(
+  deps: RowndRouteHandlerDeps,
+  session: NonNullable<SuperTokensSession>,
+  appVariantId: string | undefined,
+  userContext: SuperTokensUserContext,
+) {
+  if (!isEmailSignInEnabled(deps.pluginConfig, appVariantId)) {
+    return {
+      status: "ERROR" as const,
+      code: 403,
+      message: "email sign-in is not enabled",
+    };
   }
-  return rowndUser;
+  if (
+    !SuperTokens.isRecipeInitialized("passwordless") ||
+    !SuperTokens.isRecipeInitialized("emailverification")
+  ) {
+    return {
+      status: "ERROR" as const,
+      code: 503,
+      message: "email sign-in is not available",
+    };
+  }
+
+  const authenticationTime = await session.getTimeCreated(userContext);
+  const sessionAgeMs = Date.now() - authenticationTime;
+  if (
+    sessionAgeMs >
+    deps.pluginConfig.emailChange.maxSessionAgeSeconds * 1000
+  ) {
+    return recentAuthenticationRequiredResponse();
+  }
+
+  return undefined;
+}
+
+function recentAuthenticationRequiredResponse() {
+  return {
+    status: "ERROR" as const,
+    code: 403,
+    message: "recent authentication is required to change email",
+  };
+}
+
+function validateWritableFields(
+  fields: string[],
+  pluginConfig?: RowndPluginNormalisedConfig,
+) {
+  const readOnlyField = fields.find(
+    (field) => !canUpdateUserDataField(field, pluginConfig),
+  );
+
+  if (!readOnlyField) {
+    return undefined;
+  }
+
+  return {
+    status: "ERROR" as const,
+    code: 403,
+    message: `field is not writable: ${readOnlyField}`,
+  };
 }
