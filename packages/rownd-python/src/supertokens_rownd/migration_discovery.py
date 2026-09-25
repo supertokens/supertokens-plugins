@@ -15,6 +15,7 @@ from .types import JsonDict
 async def completed_identity_user(
     source: RowndIdentitySnapshot, target: str, context: UserContext,
     *, reserved_contacts_checked: bool = False, source_profile: Optional[JsonDict] = None,
+    allow_source_anonymous_methods: bool = False,
 ) -> Optional[User]:
     from . import supertokens_repository as repo
 
@@ -84,8 +85,11 @@ async def completed_identity_user(
             not in {None, matches[0].recipe_user_id.get_as_string()} for record in records.values()
         ):
             return None
-    if any(source.tenant_id in method.tenant_ids and not any(
-        repo._migration_method_matches_identity(method, identity) for identity in source.expected_identities
+    if any(source.tenant_id in method.tenant_ids and not (
+        any(repo._migration_method_matches_identity(method, identity) for identity in source.expected_identities)
+        or (allow_source_anonymous_methods and method.recipe_id == "thirdparty"
+            and repo.rownd_compatibility.get_third_party_info(method) in
+            {("instant", source.rownd_user_id), ("guest", source.rownd_user_id)})
     ) for method in user.login_methods):
         return None
     try:

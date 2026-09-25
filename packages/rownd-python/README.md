@@ -315,15 +315,23 @@ init(
 `app_config.auth.enforceSameDevicePasswordlessSignIn` controls the Hub UI policy for
 passwordless flows originating from `mobile_app`. It does not enforce server-side device binding.
 
-### Optional Rownd application ID
+### Rownd application ID and hosted signing keys
 
-`rownd_app_id` defaults to `None`. When set, it supplies the expected token audience
-(`app:<id>`) and profile URL application ID, skipping authenticated `/hub/app-config`
-ID discovery. Omit it to retain cached discovery. A configured ID does not fall back
-to discovery on profile failures. Credentials are still required for migration, and
-OIDC discovery/JWKS, signature, temporal, audience, and discovery-issuer validation
-remain in place. Neither `app_config` nor token claims choose the expected app ID.
+Set `rownd_app_id` to bind migration JWTs to the trusted audience `app:<id>`.
+Migration verifies EdDSA signatures against the public keys at
+`https://rownd-hub.supertokens.com/.well-known/rownd-jwks.json` and requires issuer
+`https://api.rownd.io`, expiration, issued-at time, and the namespaced user ID claim.
+The app ID also determines profile URLs when administrative credentials are configured.
+With app key and secret, the plugin can discover the app ID from Rownd if omitted.
+Neither `app_config` nor token claims choose the expected app ID.
 The migration identity remains `https://auth.rownd.io/app_user_id`, not `sub`.
+Tokens without an expiration are rejected by hosted migration validation.
+
+Provide `rownd_app_id` when omitting credentials. Configure `rownd_app_key` and `rownd_app_secret` together to reconcile profiles and
+import new users. With only `rownd_app_id`, both migration endpoints remain available
+but issue sessions solely for existing, completed, consistently mapped users in the
+requested tenant. This mode never fetches Rownd profiles and cannot import users or
+repair incomplete migrations. It does not require an auth-level claim in the JWT.
 
 Plugin initialization rejects invalid IDs with `ValueError`: supply a nonempty ASCII
 URL-path-segment string using letters, digits, or `._~!$&'()*+,;=:@-`, excluding `.`
@@ -590,7 +598,8 @@ profiles retain their Rownd identity. Invalid provenance structure or conflictin
 metadata returns the SDK
 `GENERAL_ERROR` response before credential additions or session revocation.
 
-After all Rownd users have migrated, retain the compatibility routes without Rownd credentials by configuring `disable_rownd_user_migration=True`. This removes both migration routes; when no app key is configured, it uses an internal app key for passwordless and verification-link rewriting.
+To remove both migration routes, configure `disable_rownd_user_migration=True`. Without
+an app key the plugin uses an internal app key for passwordless and verification-link rewriting.
 
 Passwordless resend requests preserve Rownd display, redirect, client-domain, app-variant, and OAuth context. Combined OTP and magic-link deliveries add the Hub `passwordlessFlowType=USER_INPUT_CODE_AND_MAGIC_LINK` parameter; OTP-only deliveries are left unchanged.
 

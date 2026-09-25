@@ -103,6 +103,14 @@ class RowndClient:
         self._app_id_error: Optional[RowndAPIErrorReason] = None
         self._telemetry_client = telemetry_client
         self._random_value = random_value
+        self._hosted_validator: Optional[HostedRowndTokenValidator] = None
+
+    async def validate_migration_token(self, token: str) -> str:
+        if self._hosted_validator is None:
+            self._hosted_validator = HostedRowndTokenValidator(
+                self.config, transport=self._transport, telemetry_client=self._telemetry_client,
+            )
+        return await self._hosted_validator.validate_token(token)
 
     async def validate_token(self, token: str) -> str:
         try:
@@ -608,3 +616,51 @@ def valid_lookup_id(value: Any) -> bool:
     return (isinstance(value, str) and bool(value) and value.strip() == value
             and value not in {".", ".."}
             and all(ord(char) >= 32 and ord(char) != 127 for char in value))
+
+
+class HostedRowndTokenValidator(RowndClient):
+    JWKS_URL = "https://rownd-hub.supertokens.com/.well-known/rownd-jwks.json"
+    ISSUER = "https://api.rownd.io"
+
+    async def _perform_jwks_refresh(self) -> _JwksCache:
+        try:
+            keys = self._parse_jwks(await self._request_public_url(self.JWKS_URL))
+        except RowndTokenValidationError:
+            raise
+        except (httpx.HTTPError, asyncio.TimeoutError) as err:
+            raise RowndTokenValidationError(RowndTokenValidationReason.JWKS_FETCH_FAILED) from err
+        except (jwt.PyJWTError, ValueError, RowndPluginError) as err:
+            raise RowndTokenValidationError(RowndTokenValidationReason.JWKS_INVALID_RESPONSE) from err
+        cache = _JwksCache(self.JWKS_URL, keys, self.ISSUER,
+                           self._monotonic() + self._JWKS_CACHE_TTL_SECONDS,
+                           self._jwks_cache.generation + 1 if self._jwks_cache else 1)
+        self._jwks_cache = cache
+        return cache
+
+    async def validate_token(self, token: str) -> str:
+        try:
+            app_id = await self._fetch_app_id()
+            kid = self._parse_token_header(token)
+            cache, outcome = await self._load_jwks(False, self._jwks_cache.generation if self._jwks_cache else 0, kid)
+            if kid not in cache.keys:
+                cache, _ = await self._load_jwks(outcome != "refreshed", cache.generation, kid)
+            key = cache.keys.get(kid)
+            if key is None:
+                raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_KID_UNKNOWN)
+            data = jwt.decode(token, key, algorithms=["EdDSA"], issuer=self.ISSUER,
+                              audience="app:%s" % app_id,
+                              options={"require": ["exp", "iat", "iss", "aud", "https://auth.rownd.io/app_user_id"]})
+        except RowndTokenValidationError:
+            raise
+        except jwt.InvalidSignatureError as err:
+            raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_SIGNATURE_INVALID) from err
+        except jwt.ExpiredSignatureError as err:
+            raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_EXPIRED) from err
+        except jwt.ImmatureSignatureError as err:
+            raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_NOT_ACTIVE) from err
+        except jwt.PyJWTError as err:
+            raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_CLAIMS_INVALID) from err
+        user_id = data["https://auth.rownd.io/app_user_id"]
+        if not valid_lookup_id(user_id):
+            raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_CLAIMS_INVALID)
+        return user_id

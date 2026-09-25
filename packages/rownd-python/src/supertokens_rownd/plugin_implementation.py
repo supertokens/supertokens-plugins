@@ -287,7 +287,10 @@ async def handle_migrate(
         rownd_config.assert_app_variant_is_configured(config, app_variant_id)
         stage = "token_validate"
         try:
-            rownd_user_id = await client.validate_token(token)
+            rownd_user_id = await (
+                client.validate_token(token) if config.rownd_client is not None
+                else cast(Any, client).validate_migration_token(token)
+            )
         except RowndTokenValidationError as err:
             reason = _TOKEN_REASON_MAP.get(err.reason)
             if reason is None:
@@ -297,6 +300,20 @@ async def handle_migrate(
             raise _rownd_api_migration_error(err, stage) from err
         if not isinstance(rownd_user_id, str) or not rownd_user_id.strip():
             raise MigrationError(MigrationErrorReason.TOKEN_CLAIMS_INVALID, stage)
+        if config.rownd_app_secret is None:
+            from .mapped_session import create_mapped_session
+
+            stage = "state_inspect"
+            result = await create_mapped_session(
+                config, rownd_user_id, tenant_id, app_variant_id, request, response, user_context,
+            )
+            migration_state.update(path="already_complete", target_source="mapping", supertokens_user_id=result)
+            stage = "session_create"
+            terminal_outcome = "success"
+            terminal_http_status = 200
+            terminal_retryable = False
+            terminal_reason = None
+            return utils.json_response(response, {"status": "OK"})
         stage = "rownd_profile_fetch"
 
         async def fetch_fresh_profile(profile_id: str) -> Optional[JsonDict]:

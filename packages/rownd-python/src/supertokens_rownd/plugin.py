@@ -477,15 +477,11 @@ def init(
         raise ValueError("Pass either RowndPluginConfig or keyword arguments, not both")
     if not isinstance(config.disable_rownd_user_migration, bool):
         raise ValueError("disable_rownd_user_migration must be a boolean in plugin config")
-    if not config.disable_rownd_user_migration and (
-        not config.rownd_app_key or not config.rownd_app_secret
-    ):
-        raise ValueError(
-            "Missing rownd_app_key or rownd_app_secret in plugin config. "
-            "Set disable_rownd_user_migration to true to disable migration."
-        )
-    if config.disable_rownd_user_migration and not config.rownd_app_key:
-        config.rownd_app_key = "migration-disabled"
+    if bool(config.rownd_app_key) != bool(config.rownd_app_secret):
+        raise ValueError("rownd_app_key and rownd_app_secret must be configured together")
+    if (not config.disable_rownd_user_migration and config.rownd_client is None
+            and not config.rownd_app_id and not config.rownd_app_key):
+        raise ValueError("Migration requires rownd_app_id to verify the token audience")
 
     config.api_base_path = _normalise_path(config.api_base_path)
     _validate_config(config)
