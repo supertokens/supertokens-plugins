@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 1.0.0
+
+### Major Changes
+
+- Validate Rownd sessions against a SuperTokens hosted keyset
+
 ## 0.7.13
 
 ### Patch Changes
