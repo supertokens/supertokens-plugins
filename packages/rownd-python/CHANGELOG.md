@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 1.0.0
+
+### Major Changes
+
+- Validate Rownd tokens against a SuperTokens hosted keyset
+
 ## 0.2.5
 
 ### Patch Changes
