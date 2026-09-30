@@ -2,6 +2,11 @@ import type { ReconcileUserResult } from "../src/reconcile-user";
 import type { Profile } from "./profiles";
 
 const safeDiagnostics = new Set([
+  "SNAPSHOT_READ_FAILED: cannot read the DuckDB source",
+  "SOURCE_NOT_IN_SNAPSHOT: required Rownd user is missing from the selected migration run",
+  "SNAPSHOT_SOURCE_AMBIGUOUS: multiple rows match the source key",
+  "SNAPSHOT_PAYLOAD_INVALID: source_payload must contain a Rownd profile JSON object",
+  "SOURCE_ID_MISMATCH: snapshot profile does not match the source key",
   "Placeholder provenance override evidence changed",
   "Placeholder provenance override requires a live administrative source",
   "Duplicate owner consolidation blocked: a donor is not an eligible standalone owner",

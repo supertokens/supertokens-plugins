@@ -22,6 +22,7 @@
   "scripts": {
     "build": "rm -rf dist && tsup",
     "cli": "npm run build && node dist/cli.js",
+    "reconcile:duckdb": "tsx scripts/reconcileDuckdbCsv.ts",
     "lint": "eslint ./src --ext .ts",
     "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
@@ -35,6 +36,7 @@
   ],
   "license": "Apache-2.0",
   "dependencies": {
+    "@duckdb/node-api": "^1.5.6-r.1",
     "@opentelemetry/api": "^1.9.0",
     "@rownd/node": "^3.0.4",
     "jose": "^4.15.9",

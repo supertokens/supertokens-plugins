@@ -15,6 +15,7 @@ import { formatReconcileResult } from "./adminOutput";
 import { readRowndCsv, reconcileCsv } from "./reconcileCsv";
 import { createFailedIdsFile } from "./failedIds";
 import { formatReconcileProgress } from "./reconcileProgress";
+import { setRowndClient } from "../src/rownd-repository";
 
 export async function runAdmin(args: string[], output: (value: unknown) => void = console.log, prompt: ProfilePrompt = promptProfileValue) {
   const { values, positionals } = (() => {
@@ -27,6 +28,7 @@ export async function runAdmin(args: string[], output: (value: unknown) => void 
         file: { type: "string" }, "id-column": { type: "string" },
         concurrency: { type: "string" }, "failed-file": { type: "string" },
         "override-placeholder-provenance": { type: "boolean" },
+        duckdb: { type: "string" }, "run-id": { type: "string" },
       } });
     } catch { throw new CliValidationError("Invalid command arguments; run with --help"); }
   })();
@@ -34,9 +36,15 @@ export async function runAdmin(args: string[], output: (value: unknown) => void 
     output("Reconciliation option: --override-placeholder-provenance accepts an internal-UUID instant placeholder only when a live login identity matches; dry run previews the override.");
     output("profiles add --profile NAME (interactive; credential entry is masked)\nprofiles list\nprofiles show|remove --profile NAME\nNoninteractive add: --app-id ID --app-key KEY --app-secret SECRET --connection-uri URI [--api-key KEY] [--tenant-id public]\nreconcile-user --profile NAME (--rownd-user-id ID | --email EMAIL | --supertokens-user-id ID) [--dry-run]\nDry run returns a read-only PREVIEW; exit 0 only when canReconcile is true. Execution must revalidate the snapshot.");
     output("reconcile-csv --profile NAME --file users.csv [--id-column rownd_user_id] [--concurrency 1] [--failed-file failed.csv] [--dry-run]\nCSV requires a header. IDs are deduplicated; JSON lines contain results in completion order and a summary. Progress and average users/s are logged to stderr every second. The optional failure CSV must be a new file. Any unsuccessful result exits nonzero.");
+    output("Snapshot source: reconcile-csv ... --duckdb FILE [--run-id ID] reads Rownd profiles from a read-only bulk-import snapshot. All source checks use that snapshot; missing rows block reconciliation. No Rownd requests are made.");
     return 0;
   }
   const [command, operation, positionalName] = positionals;
+  if (values.duckdb !== undefined || values["run-id"] !== undefined) {
+    if (command !== "reconcile-csv") throw new CliValidationError("--duckdb and --run-id are only supported by reconcile-csv");
+    if (!values.duckdb?.trim()) throw new CliValidationError("--duckdb requires a non-empty database file path");
+    if (values["run-id"] !== undefined && !values["run-id"].trim()) throw new CliValidationError("--run-id must be non-empty");
+  }
   if (command !== "reconcile-csv" && (values.concurrency !== undefined || values["failed-file"] !== undefined)) {
     throw new CliValidationError("--concurrency and --failed-file are only supported by reconcile-csv");
   }
@@ -95,18 +103,26 @@ export async function runAdmin(args: string[], output: (value: unknown) => void 
   const profiles = await readProfiles(undefined, { readOnly: values["dry-run"] === true });
   const profile = Object.prototype.hasOwnProperty.call(profiles, values.profile) ? profiles[values.profile] : undefined;
   if (!profile) throw new CliValidationError("Profile not found");
-  const failures = values["failed-file"] !== undefined ? await createFailedIdsFile(values["failed-file"]) : undefined;
+  const snapshot = values.duckdb !== undefined
+    ? await (await import("./duckdbRowndClient")).openDuckdbRowndClient(values.duckdb, values["run-id"]) : undefined;
+  let failures: Awaited<ReturnType<typeof createFailedIdsFile>> | undefined;
   try {
+    failures = values["failed-file"] !== undefined ? await createFailedIdsFile(values["failed-file"]) : undefined;
     SuperTokens.init({ supertokens: profile.supertokens,
       appInfo: { appName: "Rownd reconciliation", apiDomain: "http://localhost", websiteDomain: "http://localhost" },
       recipeList: [AccountLinking.init({ shouldDoAutomaticAccountLinking: async () => ({ shouldAutomaticallyLink: false }) }),
         Session.init(), UserMetadata.init(), EmailVerification.init({ mode: "OPTIONAL" }),
         Passwordless.init({ contactMethod: "EMAIL_OR_PHONE", flowType: "MAGIC_LINK" }), ThirdParty.init()],
-      experimental: { plugins: [init({ rowndAppKey: profile.rownd.appKey, rowndAppSecret: profile.rownd.appSecret, rowndAppId: profile.rownd.appId })] },
+      experimental: { plugins: [init({ rowndAppKey: profile.rownd.appKey, rowndAppSecret: profile.rownd.appSecret, rowndAppId: profile.rownd.appId,
+        ...(snapshot ? { disableRowndUserMigration: true } : {}) })] },
     });
+    if (snapshot) {
+      setRowndClient(snapshot.client);
+      console.error(`[reconcile-csv] source=duckdb run-id=${JSON.stringify(snapshot.runId)}; source checks use the stored snapshot`);
+    }
     if (csv) return await reconcileCsv({ ...csv, profile, dryRun: values["dry-run"] ?? false, concurrency,
       overridePlaceholderProvenance: values["override-placeholder-provenance"],
-      recordFailure: failures ? (id, failure) => failures.append(id, failure) : undefined,
+      recordFailure: failures ? (id, failure) => failures!.append(id, failure) : undefined,
       onProgress: (progress) => console.error(formatReconcileProgress(progress)) }, output);
     const result = await reconcileUser({ ...input, tenantId: profile.supertokens.tenantId, dryRun: values["dry-run"] ?? false,
       overridePlaceholderProvenance: values["override-placeholder-provenance"],
@@ -114,6 +130,11 @@ export async function runAdmin(args: string[], output: (value: unknown) => void 
     output(formatReconcileResult(result, profile));
     return result.status === "OK" || (result.status === "PREVIEW" && result.canReconcile === true) ? 0 : 1;
   } finally {
-    await failures?.close();
+    try { await failures?.close(); } finally {
+      if (snapshot) {
+        setRowndClient(undefined);
+        await snapshot.close();
+      }
+    }
   }
 }

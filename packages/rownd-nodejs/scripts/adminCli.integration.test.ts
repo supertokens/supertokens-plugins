@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { parseRowndCsv } from "./reconcileCsv";
+import { DuckDBInstance } from "@duckdb/node-api";
 
 const exec = promisify(execFile);
 let home: string;
@@ -27,6 +28,66 @@ async function cli(args: string[], preload?: string, runtime: "node" | "bun" = "
     return { stdout: failure.stdout, stderr: failure.stderr, code: failure.code };
   }
 }
+
+it("uses only snapshot sources in packaged dry-run and execution commands", async () => {
+  const file = join(home, "snapshot.duckdb");
+  const db = await DuckDBInstance.create(file);
+  const connection = await db.connect();
+  try {
+    await connection.run("CREATE TABLE migration_runs (id VARCHAR)");
+    await connection.run("INSERT INTO migration_runs VALUES ('snapshot-run')");
+    await connection.run("CREATE TABLE migration_entries (run_id VARCHAR, source_key VARCHAR, source_payload VARCHAR)");
+    await connection.run("INSERT INTO migration_entries VALUES ('snapshot-run', 'disabled', ?)",
+      [JSON.stringify({ state: "disabled", data: { user_id: "disabled" } })]);
+  } finally { connection.closeSync(); db.closeSync(); }
+  const preload = join(home, "no-rownd.cjs");
+  await writeFile(preload, `const originalFetch = globalThis.fetch;
+globalThis.fetch = (input, options) => {
+  if (new URL(String(input)).hostname !== '127.0.0.1') throw new Error('unexpected remote request');
+  return originalFetch(input, options);
+};
+const Module = require('node:module');
+const original = Module._load;
+Module._load = function(id, ...args) {
+  if (id === '@rownd/node') return { createInstance: () => { throw new Error('Rownd SDK must not be initialized'); } };
+  return original.call(this, id, ...args);
+};\n`);
+  const unexpected: string[] = [];
+  const server = createServer((req, res) => {
+    const path = new URL(req.url!, "http://localhost").pathname;
+    const body = path === "/apiversion" ? { versions: ["5.4"] } :
+      path === "/recipe/userid/map" ? { status: "UNKNOWN_MAPPING_ERROR" } :
+      path === "/user" ? { status: "UNKNOWN_USER_ID_ERROR" } :
+      path === "/recipe/user/metadata" ? { status: "OK", metadata: {} } : undefined;
+    if (!body || req.method !== "GET") unexpected.push(`${req.method} ${path}`);
+    res.writeHead(body ? 200 : 500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(body ?? {}));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("No server address");
+    expect((await cli(["profiles", "add", "--profile", "snapshot", "--app-id", "app", "--app-key", "unused-key",
+      "--app-secret", "unused-secret", "--connection-uri", `http://127.0.0.1:${address.port}`])).code).toBe(0);
+    const csv = join(home, "snapshot-users.csv");
+    await writeFile(csv, "rownd_user_id\ndisabled\nmissing\n");
+    for (const dryRun of [true, false]) {
+      const result = await cli(["reconcile-csv", "--profile", "snapshot", "--file", csv, "--duckdb", file,
+        "--concurrency", "2", ...(dryRun ? ["--dry-run"] : [])], preload);
+      expect(result.code, result.stderr).toBe(1);
+      const results = result.stdout.trim().split("\n").map((line) => JSON.parse(line));
+      expect(unexpected).toEqual([]);
+      expect(results.find((entry) => entry.result?.rownd_user_id === "missing")?.result).toMatchObject({
+        status: "BLOCKED", message: "SOURCE_NOT_IN_SNAPSHOT: required Rownd user is missing from the selected migration run",
+      });
+      expect(results.find((entry) => entry.result?.rownd_user_id === "disabled")?.result).toMatchObject({
+        status: "BLOCKED", message: "Rownd source is not the requested enabled user",
+      });
+      expect(results.at(-1)).toMatchObject({ type: "summary", failed: 2 });
+      expect(result.stderr).toContain('source=duckdb run-id="snapshot-run"');
+    }
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+}, 20000);
 
 it("bundles plural commands and reports safe validation failures with nonzero exits", async () => {
   const args = ["profiles", "add", "--profile", "stardust", "--app-id", "app", "--app-key", 'key"\\value', "--app-secret", 'secret"\\value', "--connection-uri", "http://localhost:3567"];
