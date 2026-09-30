@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 1.0.1
+
+### Patch Changes
+
+- 12a30a2: Recover eligible historical accounts during passwordless sign-in even when the client sends a guest or instant session, preventing the passwordless method from attaching to the guest account instead.
+
 ## 1.0.0
 
 ### Major Changes

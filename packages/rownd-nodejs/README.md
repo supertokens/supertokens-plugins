@@ -804,9 +804,42 @@ preview returns `PREVIEW` with `canReconcile: true`. Batch execution is not
 atomic: completed repairs remain if another user fails or the command is
 interrupted. Results are emitted as each user finishes.
 
+### Reconcile from a DuckDB snapshot
+
+To use a bulk-import DuckDB snapshot instead of the Rownd API:
+
+```sh
+npm run reconcile:duckdb --workspace @supertokens-plugins/rownd-nodejs -- \
+  --profile musa --file ./users.csv \
+  --duckdb /Users/bogdan/src/supertokens/infra_tooling/tmp/bulk-import/musa-complete.duckdb \
+  --concurrency 5 --failed-file ./snapshot-failed.csv --dry-run
+```
+
+The packaged CLI also supports `rownd-nodejs reconcile-csv ... --duckdb FILE`.
+All existing CSV options apply; remove `--dry-run` to execute repairs.
+The profile supplies the SuperTokens connection and tenant. Rownd credentials
+remain part of the profile format but are not used to contact Rownd in this mode.
+
+The database is opened read-only. Disconnect DataGrip or other write connections
+before running. A single migration run is selected automatically; if there are
+multiple, pass `--run-id ID` from `SELECT id, run_name FROM migration_runs`.
+The selected run is logged to stderr.
+
+Every source lookup queries `migration_entries` by `(run_id, source_key)` and
+parses the original Rownd JSON in `source_payload`, regardless of import status.
+This requires a Rownd-source import database, not a database containing resubmitted
+Core bulk-import CSV rows. Transformed `mapped_payload` is not used.
+
+The snapshot is authoritative for this run: verification, activity elections,
+and repeated source checks reflect the export, not subsequent changes in Rownd.
+Other source IDs discovered through SuperTokens mappings must also be present.
+Missing rows block with `SOURCE_NOT_IN_SNAPSHOT`; they do not imply deletion and
+never trigger a Rownd fallback. SuperTokens reads and writes remain live.
+
 ### Reconciliation boundaries
 
-- **Live Rownd is the reference.** Stored migration snapshots identify a source
+- **Live Rownd is the default reference.** Explicit `--duckdb` CSV runs use the
+  selected export instead. Otherwise, stored migration snapshots identify a source
   and support retirement evidence; they do not override its current profile.
   Provider IDs use `verified_data` first, then `data`.
 - Email selection searches SuperTokens in the selected tenant, then resolves
