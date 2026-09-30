@@ -3,6 +3,7 @@ import { normalizeOptionalRowndIdentities, resolveRowndProviderSubject } from ".
 
 import { reconciliationSuperTokens as SuperTokens, reconciliationAccountLinking as AccountLinking, reconciliationUserMetadata as UserMetadata } from "./reconciliation-sdk";
 import type { JSONObject, UserContext } from "supertokens-node/types";
+import type { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 
 import {
   DEFAULT_ROWND_SCHEMA,
@@ -1059,10 +1060,14 @@ export function evaluateHistoricalEmailEligibility(
 export async function findHistoricalEmailOwner(input: {
   email: string;
   tenantId: string;
+  session?: SessionContainerInterface;
   userContext?: Record<string, any>;
   snapshot?: PasswordlessAuthSnapshot;
   requireNewPasswordless?: boolean;
 }) {
+  if (input.session && !hasOnlyGuestLoginMethods(await SuperTokens.getUser(
+    input.session.getUserId(input.userContext), input.userContext,
+  ))) return undefined;
   const users = input.snapshot?.users ?? await SuperTokens.listUsersByAccountInfo(
     input.tenantId,
     { email: input.email },

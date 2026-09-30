@@ -640,6 +640,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   (intent === "sign_in" || intent === "sign_up") &&
                   explicitFlowEnabled;
                 let authSnapshot: PasswordlessAuthSnapshot | undefined;
+                let useHistoricalSignIn = false;
                 if ("email" in input) {
                   let preparation: Awaited<
                     ReturnType<typeof prepareEmailForPasswordlessAuth>
@@ -652,6 +653,16 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       userContext: resolved.userContext,
                     });
                     authSnapshot = "snapshot" in preparation ? preparation.snapshot : undefined;
+                    if (input.session) {
+                      useHistoricalSignIn = !!(await findHistoricalEmailOwner({
+                        snapshot: authSnapshot,
+                        requireNewPasswordless: true,
+                        email: input.email,
+                        tenantId: input.tenantId,
+                        session: input.session,
+                        userContext: resolved.userContext,
+                      }));
+                    }
                   } catch (error) {
                     logDebugMessage(
                       `Explicit passwordless email preparation failed. Error: ${error instanceof Error ? error.message : String(error)}`,
@@ -701,6 +712,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 );
                 return originalImplementation.createCodePOST({
                   ...input,
+                  ...(useHistoricalSignIn ? { session: undefined, shouldTryLinkingWithSessionUser: false } : {}),
                   userContext: operationContext,
                 });
               },
@@ -751,6 +763,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     requestedIntent === "sign_up")
                     ? requestedIntent
                     : undefined;
+                let useHistoricalSignIn = false;
                 try {
                   const [deviceById, deviceByPreAuthSessionId] =
                     await Promise.all([
@@ -809,6 +822,16 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       }
                       return { status: "RESTART_FLOW_ERROR" as const };
                     }
+                    if (input.session) {
+                      useHistoricalSignIn = !!(await findHistoricalEmailOwner({
+                        snapshot: "snapshot" in preparation ? preparation.snapshot : undefined,
+                        requireNewPasswordless: true,
+                        email: deviceById.email!,
+                        tenantId: input.tenantId,
+                        session: input.session,
+                        userContext: resolved.userContext,
+                      }));
+                    }
                   }
                 } catch (error) {
                   logDebugMessage(
@@ -830,6 +853,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 );
                 return originalImplementation.resendCodePOST({
                   ...input,
+                  ...(useHistoricalSignIn ? { session: undefined, shouldTryLinkingWithSessionUser: false } : {}),
                   userContext: operationContext,
                 });
               },
@@ -925,12 +949,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   resolved.userContext,
                   { rowndAppVariantId: appVariantId },
                 );
-                const historicalOwner = consumedEmail && !input.session
+                const historicalOwner = consumedEmail
                   ? await findHistoricalEmailOwner({
                     snapshot: authSnapshot,
                     requireNewPasswordless: true,
                     email: consumedEmail,
                     tenantId: input.tenantId,
+                    session: input.session,
                     userContext: operationContext,
                   })
                   : undefined;
@@ -945,6 +970,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 });
                 const response = await originalImplementation.consumeCodePOST({
                   ...input,
+                  // Authenticate the historical owner instead of upgrading the incidental guest session.
+                  ...(historicalScope ? { session: undefined, shouldTryLinkingWithSessionUser: false } : {}),
                   userContext: consumeContext,
                   options: historicalScope ? {
                     ...input.options,

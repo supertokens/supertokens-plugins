@@ -10205,6 +10205,97 @@ describe("rownd-nodejs plugin", () => {
         );
       });
 
+      it.each([
+        { authLevel: "guest" as const, primary: false, otp: false },
+        { authLevel: "guest" as const, primary: true, otp: false },
+        { authLevel: "instant" as const, primary: false, otp: false },
+        { authLevel: "instant" as const, primary: true, otp: true },
+      ])("signs into historical Apple instead of upgrading $authLevel (primary=$primary, OTP=$otp)", async ({ authLevel, primary, otp }) => {
+        const passwordlessLinks: string[] = [];
+        const passwordlessCodes: string[] = [];
+        const { server: s, port } = await setup(importCoreConnectionURI, {
+          rowndAppKey: undefined,
+          rowndAppSecret: undefined,
+          appConfig: { signInMethods: [{ method: "email" }, { method: "anonymous", type: authLevel }] },
+        }, {
+          passwordlessLinks,
+          passwordlessCodes,
+          passwordlessFlowType: otp ? "USER_INPUT_CODE_AND_MAGIC_LINK" : "MAGIC_LINK",
+          enableEmailVerification: true,
+          automaticAccountLinking: true,
+        });
+        server = s;
+        testPORT = port;
+        const email = `historical-apple-${randomUUID()}@example.com`;
+        const rowndId = `rownd-${randomUUID()}`;
+        const imported = await importUser({
+          userMetadata: { original_rownd_user: {
+            data: { user_id: rowndId, email },
+            meta: { first_sign_in: "2026-04-09T16:12:35.600Z" },
+          } },
+          loginMethods: [{ recipeId: "thirdparty", email, isVerified: false,
+            thirdPartyId: "apple", thirdPartyUserId: randomUUID(), tenantIds: ["public"] }],
+        }, { connectionURI: importCoreConnectionURI });
+        if (primary) {
+          expect((await AccountLinking.createPrimaryUser(
+            SuperTokens.convertToRecipeUserId(imported.loginMethods[0].recipeUserId),
+          )).status).toBe("OK");
+        }
+        const guest = await createGuestSession(authLevel);
+        const headers = { ...getAuthedHeaders(guest.accessToken), rid: "passwordless", "content-type": "application/json" };
+        const createResponse = await fetch(`http://localhost:${testPORT}/auth/signinup/code`, {
+          method: "POST", headers,
+          body: JSON.stringify({ email, shouldTryLinkingWithSessionUser: true }),
+        });
+        const code = await createResponse.json() as { status: string; deviceId: string; preAuthSessionId: string; flowType: string };
+        expect(createResponse.status).toBe(200);
+        expect(code).toMatchObject({ status: "OK", flowType: otp ? "USER_INPUT_CODE_AND_MAGIC_LINK" : "MAGIC_LINK" });
+        expect(passwordlessLinks).toHaveLength(1);
+
+        const resend = await fetch(`http://localhost:${testPORT}/auth/signinup/code/resend`, {
+          method: "POST", headers,
+          body: JSON.stringify({ deviceId: code.deviceId, preAuthSessionId: code.preAuthSessionId,
+            shouldTryLinkingWithSessionUser: true }),
+        });
+        expect(resend.status).toBe(200);
+        expect(await resend.json()).toMatchObject({ status: "OK" });
+        expect(passwordlessLinks).toHaveLength(2);
+        expect((await SuperTokens.getUser(imported.id))?.loginMethods[0].verified).toBe(false);
+
+        if (otp) {
+          const invalidCode = passwordlessCodes[1] === "000000" ? "111111" : "000000";
+          const rejected = await fetch(`http://localhost:${testPORT}/auth/signinup/code/consume`, {
+            method: "POST", headers,
+            body: JSON.stringify({ deviceId: code.deviceId, preAuthSessionId: code.preAuthSessionId,
+              userInputCode: invalidCode, shouldTryLinkingWithSessionUser: true }),
+          });
+          expect(await rejected.json()).toMatchObject({ status: "INCORRECT_USER_INPUT_CODE_ERROR" });
+          expect(rejected.headers.get("st-access-token")).toBeNull();
+          expect((await SuperTokens.getUser(imported.id))?.loginMethods).toHaveLength(1);
+          expect((await SuperTokens.getUser(guest.userId))?.loginMethods).toHaveLength(1);
+        }
+
+        const consume = otp ? await fetch(`http://localhost:${testPORT}/auth/signinup/code/consume`, {
+          method: "POST", headers,
+          body: JSON.stringify({ deviceId: code.deviceId, preAuthSessionId: code.preAuthSessionId,
+            userInputCode: passwordlessCodes[1], shouldTryLinkingWithSessionUser: true }),
+        }) : await consumePasswordlessLink(passwordlessLinks[1], undefined, guest.accessToken);
+        expect(consume.status).toBe(200);
+        expect(await consume.json()).toMatchObject({ status: "OK", user: { id: imported.id }, createdNewRecipeUser: true });
+        const session = await Session.getSessionWithoutRequestResponse(consume.headers.get("st-access-token")!);
+        expect(session.getUserId()).toBe(imported.id);
+        expect(session.getAccessTokenPayload()).toMatchObject({ app_user_id: rowndId });
+        expect(session.getAccessTokenPayload().is_anonymous).not.toBe(true);
+        expect((await SuperTokens.getUser(guest.userId))?.loginMethods).toHaveLength(1);
+        const owners = await SuperTokens.listUsersByAccountInfo("public", { email }, true);
+        expect(owners).toHaveLength(1);
+        expect(owners[0].id).toBe(imported.id);
+        expect(owners[0].loginMethods).toHaveLength(2);
+        const sessionMethod = owners[0].loginMethods.find((method) =>
+          method.recipeUserId.getAsString() === session.getRecipeUserId().getAsString());
+        expect(sessionMethod).toMatchObject({ recipeId: "passwordless", email, verified: true });
+      });
+
       it.each(["empty", "Rownd snapshot"])(
         "allows explicit sign-in to an imported unverified passwordless user with %s metadata",
         async (metadataKind) => {

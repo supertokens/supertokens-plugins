@@ -200,7 +200,7 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
     }
   }
 
-  async function startServer() {
+  async function startServer(existingOnly = false, allowHistoricalLinking: boolean | "default" = false) {
     const app = express();
     const listeningServer = app.listen(0);
     server = listeningServer;
@@ -222,8 +222,10 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
       },
       recipeList: [
         AccountLinking.init({
-          shouldDoAutomaticAccountLinking: async () => ({
-            shouldAutomaticallyLink: false,
+          ...(allowHistoricalLinking === "default" ? {} : {
+            shouldDoAutomaticAccountLinking: async () => ({
+              shouldAutomaticallyLink: allowHistoricalLinking,
+            }),
           }),
           override: {
             functions: (original) => ({
@@ -258,8 +260,7 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
       experimental: {
         plugins: [
           init({
-            rowndAppKey: "test-key",
-            rowndAppSecret: "test-secret",
+            ...(!existingOnly ? { rowndAppKey: "test-key", rowndAppSecret: "test-secret" } : {}),
             rowndJwtAudience: "app:test-app",
             enableDebugLogs: true,
             telemetry: {
@@ -356,6 +357,136 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
       externalUserId: rowndId,
     });
   }
+
+  describe("passwordless login after rejected existing-only migration", () => {
+    it("leaves a standalone passwordless user when legacy guest linking conflicts with an Apple primary", async () => {
+      const email = `${randomUUID()}@example.com`;
+      const apple = await ThirdParty.manuallyCreateOrUpdateUser("public", "apple", randomUUID(), email,
+        false, undefined, { rowndDisableAutomaticAccountLinking: true });
+      if (apple.status !== "OK") throw new Error("Could not seed Apple account");
+      expect((await AccountLinking.createPrimaryUser(apple.recipeUserId)).status).toBe("OK");
+      await UserMetadata.updateUserMetadata(apple.user.id, {
+        first_sign_in: "2026-04-09T16:12:35.600Z",
+        original_rownd_user: { data: { user_id: apple.user.id, email } },
+      });
+      const instant = await ThirdParty.manuallyCreateOrUpdateUser("public", "instant", randomUUID(),
+        `${randomUUID()}@anonymous.local`, false, undefined, { rowndDisableAutomaticAccountLinking: true });
+      if (instant.status !== "OK") throw new Error("Could not seed instant session");
+      const guestSession = await Session.createNewSessionWithoutRequestResponse("public", instant.recipeUserId);
+      const code = await Passwordless.createCode({ tenantId: "public", email });
+
+      // Exercise the SDK path used before the HTTP override recovered historical owners with guest sessions.
+      const failed = await Passwordless.consumeCode({ tenantId: "public", session: guestSession,
+        preAuthSessionId: code.preAuthSessionId, linkCode: code.linkCode });
+      expect(failed).toMatchObject({ status: "LINKING_TO_SESSION_USER_FAILED",
+        reason: "ACCOUNT_INFO_ALREADY_ASSOCIATED_WITH_ANOTHER_PRIMARY_USER_ID_ERROR" });
+
+      const owners = await SuperTokens.listUsersByAccountInfo("public", { email }, true);
+      expect(owners).toHaveLength(2);
+      const duplicate = owners.find((user) => user.id !== apple.user.id)!;
+      expect(duplicate.loginMethods).toHaveLength(1);
+      expect(duplicate.loginMethods[0]).toMatchObject({ recipeId: "passwordless", email, verified: true });
+      expect(duplicate.id).toBe(duplicate.loginMethods[0].recipeUserId.getAsString());
+      expect((await SuperTokens.getUser(instant.user.id))?.loginMethods).toHaveLength(1);
+
+      const retryCode = await Passwordless.createCode({ tenantId: "public", email });
+      const retry = await fetch(`${baseUrl}/auth/signinup/code/consume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "st-auth-mode": "header", rid: "passwordless", "fdi-version": "1.18" },
+        body: JSON.stringify({ preAuthSessionId: retryCode.preAuthSessionId, linkCode: retryCode.linkCode }),
+      });
+      expect(await retry.json()).toMatchObject({ status: "OK", createdNewRecipeUser: false, user: { id: duplicate.id } });
+      const session = await Session.getSessionWithoutRequestResponse(retry.headers.get("st-access-token")!);
+      expect(session.getUserId()).toBe(duplicate.id);
+    });
+
+    it.each([
+      { scenario: "verified matching Apple email", verified: true, profileEmailMatches: true, linked: true },
+      { scenario: "unverified Apple email without sign-in history", verified: false, profileEmailMatches: true, linked: false },
+      { scenario: "verified Apple email conflicting with stored profile email", verified: true, profileEmailMatches: false, linked: false },
+      { scenario: "synthetic Apple email with real email only in metadata", verified: false, profileEmailMatches: true, synthetic: true, linked: false },
+      { scenario: "unverified Apple email with sign-in history", verified: false, profileEmailMatches: true, history: true, allowHistoricalLinking: true, linked: true },
+      { scenario: "historical linking vetoed by application", verified: false, profileEmailMatches: true, history: true, denied: true, linked: false },
+      { scenario: "unverified Apple email with history and an existing passwordless duplicate", verified: false, profileEmailMatches: true, history: true, duplicate: true, linked: false },
+      { scenario: "historical Apple with default linking and no session", verified: false, profileEmailMatches: true, history: true, allowHistoricalLinking: "default" as const, linked: true },
+      { scenario: "historical Apple with its unverified session attached", verified: false, profileEmailMatches: true, history: true, allowHistoricalLinking: "default" as const, existingSession: "owner", linked: false },
+      { scenario: "historical Apple with an unrelated authenticated session attached", verified: false, profileEmailMatches: true, history: true, allowHistoricalLinking: "default" as const, existingSession: "other", linked: false },
+      { scenario: "historical standalone Apple with an instant session attached", verified: false, profileEmailMatches: true, history: true, allowHistoricalLinking: "default" as const, existingSession: "instant", standaloneApple: true, linked: true },
+      { scenario: "historical linking vetoed with an instant session attached", verified: false, profileEmailMatches: true, history: true, existingSession: "instant", standaloneApple: true, denied: true, linked: false },
+    ])("handles $scenario", async ({ verified, profileEmailMatches, linked, synthetic, history, allowHistoricalLinking, denied, duplicate, existingSession, standaloneApple }) => {
+      const rowndId = `rownd-${randomUUID()}`;
+      const email = `${randomUUID()}@example.com`;
+      const apple = await ThirdParty.manuallyCreateOrUpdateUser(
+        "public", "apple", randomUUID(), synthetic ? `${randomUUID()}@stfakeemail.supertokens.com` : email, verified, undefined,
+        { rowndDisableAutomaticAccountLinking: true },
+      );
+      if (apple.status !== "OK") throw new Error("Could not seed Apple account");
+      if (!standaloneApple) {
+        await expect(AccountLinking.createPrimaryUser(apple.recipeUserId)).resolves.toMatchObject({ status: "OK" });
+      }
+      await expect(SuperTokens.createUserIdMapping({
+        superTokensUserId: apple.user.id, externalUserId: rowndId,
+      })).resolves.toMatchObject({ status: "OK" });
+      await UserMetadata.updateUserMetadata(rowndId, {
+        rownd_migration_complete: false,
+        original_rownd_user: { ...(history ? { meta: {
+          first_sign_in: "2026-04-09T16:12:35.600Z",
+          last_sign_in: "2026-04-09T16:12:35.600Z",
+          last_active: "2026-04-09T16:12:35.600Z",
+        } } : {}), data: { user_id: rowndId,
+          email: profileEmailMatches ? email : `other-${email}` } },
+      });
+      if (duplicate) {
+        await Passwordless.signInUp({ tenantId: "public", email,
+          userContext: { rowndDisableAutomaticAccountLinking: true } });
+      }
+
+      await stopServer();
+      resetST();
+      await startServer(true, allowHistoricalLinking);
+      mockRowndClient.validateToken.mockResolvedValue({ user_id: rowndId });
+      await expectRejectedMigration(await requestMigration("valid-rownd-token"));
+
+      let existingAccessToken: string | undefined;
+      if (existingSession) {
+        let sessionRecipeUserId = apple.recipeUserId;
+        if (existingSession === "other") {
+          sessionRecipeUserId = (await Passwordless.signInUp({ tenantId: "public", email: `unrelated-${email}` })).recipeUserId;
+        } else if (existingSession === "instant") {
+          const instant = await ThirdParty.manuallyCreateOrUpdateUser("public", "instant", randomUUID(),
+            `${randomUUID()}@anonymous.local`, false, undefined, { rowndDisableAutomaticAccountLinking: true });
+          if (instant.status !== "OK") throw new Error("Could not seed instant session");
+          sessionRecipeUserId = instant.recipeUserId;
+        }
+        const existing = await Session.createNewSessionWithoutRequestResponse("public", sessionRecipeUserId);
+        existingAccessToken = existing.getAccessToken();
+      }
+      const code = await Passwordless.createCode({ tenantId: "public", email });
+      const response = await fetch(`${baseUrl}/auth/signinup/code/consume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "st-auth-mode": "header", rid: "passwordless", "fdi-version": "1.18",
+          ...(existingAccessToken ? { Authorization: `Bearer ${existingAccessToken}` } : {}) },
+        body: JSON.stringify({ preAuthSessionId: code.preAuthSessionId, linkCode: code.linkCode }),
+      });
+      expect(response.status).toBe(200);
+      if (denied) {
+        expect(await response.json()).toMatchObject({ status: "SIGN_IN_UP_NOT_ALLOWED" });
+        expect(response.headers.get("st-access-token")).toBeNull();
+        expect(await SuperTokens.listUsersByAccountInfo("public", { email }, true)).toHaveLength(1);
+        return;
+      }
+      expect(await response.json()).toMatchObject({ status: "OK", createdNewRecipeUser: !duplicate });
+      const accessToken = response.headers.get("st-access-token");
+      expect(accessToken).toBeTruthy();
+      const session = await Session.getSessionWithoutRequestResponse(accessToken!);
+      expect(session.getUserId() === rowndId).toBe(linked);
+      const owners = await SuperTokens.listUsersByAccountInfo("public", { email }, true);
+      expect(owners).toHaveLength(linked || synthetic ? 1 : 2);
+      const original = await SuperTokens.getUser(rowndId);
+      expect(original?.loginMethods.some((method) => method.recipeId === "passwordless")).toBe(linked);
+      expect(mockRowndClient.fetchUserInfo).not.toHaveBeenCalled();
+    });
+  });
 
   describe("existing passwordless response ownership boundary", () => {
     it("allows overlapping migrations of the same profile when the creator links before the existing response is checked", async () => {

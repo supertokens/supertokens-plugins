@@ -221,6 +221,15 @@ top level or under `original_rownd_user.meta`. This compatibility policy still
 requires a unique matching owner, the same real email and tenant, and valid
 canonical-email state. Code issuance does not mark the imported method verified.
 
+An eligible historical email owner takes precedence over an attached guest or
+instant session during Passwordless code creation, resend, and consumption.
+Successful code consumption links the Passwordless method to that owner and
+issues a new session for it, rather than upgrading the guest account. This also
+works without explicit sign-in intent or Rownd credentials. Application linking
+callbacks still apply, and authenticated non-guest sessions retain their normal
+session-linking behavior. When there is no eligible historical owner, normal
+guest upgrade behavior applies.
+
 Adjacent read-only authorization steps reuse the same account and metadata
 snapshot. Historical linking reloads state across application callbacks, account
 promotion, linking, and session creation; snapshots are never cached globally or
