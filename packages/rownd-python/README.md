@@ -327,11 +327,35 @@ Neither `app_config` nor token claims choose the expected app ID.
 The migration identity remains `https://auth.rownd.io/app_user_id`, not `sub`.
 Tokens without an expiration are rejected by hosted migration validation.
 
+Send an unexpired Rownd access or refresh token as `Authorization: Bearer <token>`
+to either migration endpoint. The signed `https://auth.rownd.io/jwt_type` claim may
+be absent (normal access tokens), `access_token`, or `refresh_token`; other explicit
+values are rejected. Both token kinds require valid `exp` and numeric `iat` claims.
+A refresh token can migrate a session after its access token expires. Migration
+does not consume, rotate, or issue Rownd tokens, so the same valid bearer can be
+reused. After migration, refresh the resulting session with the SuperTokens refresh
+token through the SuperTokens session SDK.
+
+With app credentials, migration checks the verified JWT issued-at time against
+the fetched profile's `meta.tokens_valid_since` ISO timestamp, including refreshed
+profile reads during reconciliation. A token issued before the cutoff, an invalid
+cutoff, or missing verified issued-at time fails migration before that profile is
+used. Equality is accepted. Custom `rownd_client` implementations may return
+`RowndTokenInfo(user_id=..., iat=...)` from `validate_token` (import from
+`supertokens_rownd.types`); `iat` must come from verified JWT claims. Legacy clients
+returning only the user ID remain supported for profiles without a cutoff.
+
 Provide `rownd_app_id` when omitting credentials. Configure `rownd_app_key` and `rownd_app_secret` together to reconcile profiles and
 import new users. With only `rownd_app_id`, both migration endpoints remain available
-but issue sessions solely for existing, completed, consistently mapped users in the
-requested tenant. This mode never fetches Rownd profiles and cannot import users or
-repair incomplete migrations. It does not require an auth-level claim in the JWT.
+but issue sessions solely for existing users with a consistent bidirectional ID
+mapping and a login method in the requested tenant. The `rownd_migration_complete`
+flag is ignored, and a saved Rownd profile is not required. Missing mappings,
+pending migration operations, and conflicting ownership still fail. The session
+uses an authenticated login method when available, otherwise an instant/guest method.
+This mode never fetches Rownd profiles, imports users, reconciles identities, or adds
+tenant memberships. It does not require an auth-level claim in the JWT. Keys-only
+verification cannot check the live profile's token cutoff, disabled state, or other
+Rownd-side revocation; a valid signature alone does not establish live account validity.
 
 Plugin initialization rejects invalid IDs with `ValueError`: supply a nonempty ASCII
 URL-path-segment string using letters, digits, or `._~!$&'()*+,;=:@-`, excluding `.`

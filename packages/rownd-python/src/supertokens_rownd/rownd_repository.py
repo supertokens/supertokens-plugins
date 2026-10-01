@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json as json_module
+import math
 import random
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import quote, urlencode, urlsplit
@@ -16,7 +18,7 @@ import jwt
 
 from .errors import RowndPluginError
 from .telemetry.create_telemetry_client import record_jwks_diagnostic
-from .types import JsonDict, RowndPluginConfig, RowndTelemetryClient
+from .types import JsonDict, RowndPluginConfig, RowndTelemetryClient, RowndTokenInfo
 
 
 class RowndTokenValidationReason(str, Enum):
@@ -105,12 +107,12 @@ class RowndClient:
         self._random_value = random_value
         self._hosted_validator: Optional[HostedRowndTokenValidator] = None
 
-    async def validate_migration_token(self, token: str) -> str:
+    async def validate_migration_token(self, token: str) -> RowndTokenInfo:
         if self._hosted_validator is None:
             self._hosted_validator = HostedRowndTokenValidator(
                 self.config, transport=self._transport, telemetry_client=self._telemetry_client,
             )
-        return await self._hosted_validator.validate_token(token)
+        return await self._hosted_validator.validate_migration_token(token)
 
     async def validate_token(self, token: str) -> str:
         try:
@@ -618,6 +620,24 @@ def valid_lookup_id(value: Any) -> bool:
             and all(ord(char) >= 32 and ord(char) != 127 for char in value))
 
 
+def validate_profile_token_cutoff(profile: JsonDict, issued_at: Optional[float]) -> None:
+    meta = profile.get("meta")
+    if not isinstance(meta, dict) or "tokens_valid_since" not in meta:
+        return
+    try:
+        value = meta["tokens_valid_since"]
+        if not isinstance(value, str):
+            raise ValueError("Invalid token cutoff")
+        cutoff = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=timezone.utc)
+        if (not isinstance(issued_at, (int, float)) or isinstance(issued_at, bool) or not math.isfinite(issued_at)
+                or issued_at < cutoff.timestamp()):
+            raise ValueError("Token predates cutoff")
+    except (ValueError, TypeError, OverflowError) as err:
+        raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_CLAIMS_INVALID) from err
+
+
 class HostedRowndTokenValidator(RowndClient):
     JWKS_URL = "https://rownd-hub.supertokens.com/.well-known/rownd-jwks.json"
     ISSUER = "https://api.rownd.io"
@@ -638,6 +658,9 @@ class HostedRowndTokenValidator(RowndClient):
         return cache
 
     async def validate_token(self, token: str) -> str:
+        return (await self.validate_migration_token(token)).user_id
+
+    async def validate_migration_token(self, token: str) -> RowndTokenInfo:
         try:
             app_id = await self._fetch_app_id()
             kid = self._parse_token_header(token)
@@ -658,9 +681,14 @@ class HostedRowndTokenValidator(RowndClient):
             raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_EXPIRED) from err
         except jwt.ImmatureSignatureError as err:
             raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_NOT_ACTIVE) from err
-        except jwt.PyJWTError as err:
+        except (jwt.PyJWTError, ValueError, TypeError, OverflowError) as err:
             raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_CLAIMS_INVALID) from err
         user_id = data["https://auth.rownd.io/app_user_id"]
-        if not valid_lookup_id(user_id):
+        issued_at = data["iat"]
+        token_type = "https://auth.rownd.io/jwt_type"
+        if (not valid_lookup_id(user_id)
+                or type(issued_at) not in (int, float) or not math.isfinite(issued_at)
+                or type(data["exp"]) not in (int, float) or not math.isfinite(data["exp"])
+                or (token_type in data and data[token_type] not in ("access_token", "refresh_token"))):
             raise RowndTokenValidationError(RowndTokenValidationReason.TOKEN_CLAIMS_INVALID)
-        return user_id
+        return RowndTokenInfo(user_id, issued_at)

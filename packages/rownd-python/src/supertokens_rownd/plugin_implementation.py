@@ -37,9 +37,11 @@ from .rownd_repository import (
     RowndAPIErrorReason,
     RowndTokenValidationError,
     RowndTokenValidationReason,
+    valid_lookup_id,
+    validate_profile_token_cutoff,
 )
 from .session_authentication import proven_session_authentication
-from .types import JsonDict, MigrationStage, RowndClientProtocol, RowndPluginConfig, RowndTelemetryClient
+from .types import JsonDict, MigrationStage, RowndClientProtocol, RowndPluginConfig, RowndTelemetryClient, RowndTokenInfo
 
 
 _logger = logging.getLogger(__name__)
@@ -287,7 +289,7 @@ async def handle_migrate(
         rownd_config.assert_app_variant_is_configured(config, app_variant_id)
         stage = "token_validate"
         try:
-            rownd_user_id = await (
+            token_info = await (
                 client.validate_token(token) if config.rownd_client is not None
                 else cast(Any, client).validate_migration_token(token)
             )
@@ -298,7 +300,9 @@ async def handle_migrate(
             raise MigrationError(reason, stage, err) from err
         except RowndAPIError as err:
             raise _rownd_api_migration_error(err, stage) from err
-        if not isinstance(rownd_user_id, str) or not rownd_user_id.strip():
+        rownd_user_id = token_info.user_id if isinstance(token_info, RowndTokenInfo) else token_info
+        issued_at = token_info.iat if isinstance(token_info, RowndTokenInfo) else None
+        if not valid_lookup_id(rownd_user_id):
             raise MigrationError(MigrationErrorReason.TOKEN_CLAIMS_INVALID, stage)
         if config.rownd_app_secret is None:
             from .mapped_session import create_mapped_session
@@ -318,7 +322,12 @@ async def handle_migrate(
 
         async def fetch_fresh_profile(profile_id: str) -> Optional[JsonDict]:
             try:
-                return await client.fetch_optional_user_info(profile_id)
+                profile = await client.fetch_optional_user_info(profile_id)
+                if profile is not None:
+                    validate_profile_token_cutoff(profile, issued_at)
+                return profile
+            except RowndTokenValidationError as err:
+                raise MigrationError(MigrationErrorReason.TOKEN_CLAIMS_INVALID, "rownd_profile_fetch", err) from err
             except RowndAPIError as err:
                 raise _rownd_api_migration_error(err, "rownd_profile_fetch") from err
             except MigrationError:

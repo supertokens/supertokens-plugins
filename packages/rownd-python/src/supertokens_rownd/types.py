@@ -32,8 +32,15 @@ class RowndTelemetryClient(Protocol):
     async def record_event(self, event: JsonDict) -> None: ...
 
 
+@dataclass(frozen=True)
+class RowndTokenInfo:
+    user_id: str
+    # Verified JWT issued-at seconds; required for profiles with a token cutoff.
+    iat: Optional[float] = None
+
+
 class RowndClientProtocol(Protocol):
-    async def validate_token(self, token: str) -> str: ...
+    async def validate_token(self, token: str) -> Union[str, RowndTokenInfo]: ...
 
     async def fetch_user_info(self, user_id: str) -> JsonDict: ...
 
