@@ -17,6 +17,8 @@ rownd:
   appId: <APP_ID>
   appKey: <APP_KEY>
   appSecret: <APP_SECRET>
+  # Required when using generate-plugin-config --include-sub-brands.
+  # bearerToken: <ROWND_API_BEARER_TOKEN>
   # Number of Rownd users to request per page.
   pageSize: 100
 

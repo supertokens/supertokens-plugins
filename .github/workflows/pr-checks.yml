@@ -23,6 +23,14 @@ jobs:
           node-version: "18"
           cache: "npm"
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Start core
         run: docker compose -f .github/compose.yml up --build --wait
 
@@ -30,7 +38,7 @@ jobs:
         run: npm ci
 
       - name: Run tests
-        run: npm run test --affected
+        run: npm run test -- --affected
 
   lint:
     runs-on: ubuntu-latest
@@ -44,11 +52,19 @@ jobs:
           node-version: "18"
           cache: "npm"
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Install dependencies
         run: npm ci
 
       - name: Run lint
-        run: npm run lint --affected
+        run: npm run lint -- --affected
 
   build:
     runs-on: ubuntu-latest
@@ -62,8 +78,16 @@ jobs:
           node-version: "18"
           cache: "npm"
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Install dependencies
         run: npm ci
 
       - name: Run build
-        run: npm run build --affected
+        run: npm run build -- --affected

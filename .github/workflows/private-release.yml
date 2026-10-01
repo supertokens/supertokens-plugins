@@ -58,6 +58,14 @@ jobs:
         with:
           node-version: 18
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Install dependencies
         run: npm ci
 
@@ -74,7 +82,7 @@ jobs:
 
       - name: Publish to npm
         if: ${{ steps.check-changes.has-changes == true }}
-        run: npm run publish:private -- ${{ inputs.tag }}
+        run: npm run release:private -- ${{ inputs.tag }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

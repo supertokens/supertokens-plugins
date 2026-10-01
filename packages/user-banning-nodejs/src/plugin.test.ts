@@ -5,7 +5,7 @@ import Session from "supertokens-node/recipe/session";
 import UserRoles from "supertokens-node/recipe/userroles";
 import SessionRaw from "supertokens-node/lib/build/recipe/session/recipe";
 import UserRolesRaw from "supertokens-node/lib/build/recipe/userroles/recipe";
-import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import express from "express";
 import { middleware, errorHandler } from "supertokens-node/framework/express";
 import { verifySession } from "supertokens-node/recipe/session/framework/express";
@@ -18,19 +18,47 @@ import MultitenancyRaw from "supertokens-node/lib/build/recipe/multitenancy/reci
 import UserMetadataRaw from "supertokens-node/lib/build/recipe/usermetadata/recipe";
 import Multitenancy from "supertokens-node/recipe/multitenancy";
 import crypto from "node:crypto";
+import { GenericContainer, StartedTestContainer, Wait } from "testcontainers";
+import { Server } from "http";
 
 const testPORT = process.env.PORT || 3000;
 const testEmail = "user@test.com";
 const testPW = "test";
+let server: Server | undefined;
 
 describe("user-banning-nodejs", () => {
-  afterEach(() => {
+  let container: StartedTestContainer;
+  let coreConnectionURI: string;
+
+  beforeAll(async () => {
+    container = await new GenericContainer("supertokens/supertokens-postgresql")
+      .withExposedPorts(3567)
+      .withWaitStrategy(Wait.forHttp("/hello", 3567))
+      .start();
+
+    const mappedPort = container.getMappedPort(3567);
+    coreConnectionURI = `http://${container.getHost()}:${mappedPort}`;
+  }, 120000);
+
+  afterAll(async () => {
+    if (server) {
+      await closeServer();
+    }
+    if (container) {
+      await container.stop();
+    }
+  });
+
+  afterEach(async () => {
+    if (server) {
+      await closeServer();
+    }
     resetST();
   });
 
   describe("plugin", () => {
     it("should ban user by setting a role", async () => {
-      const { user } = await setup();
+      const { user } = await setup(coreConnectionURI);
 
       await UserRoles.createNewRoleOrAddPermissions(DEFAULT_BANNED_USER_ROLE, []);
       await UserRoles.addRoleToUser("public", user.id, DEFAULT_BANNED_USER_ROLE);
@@ -59,7 +87,7 @@ describe("user-banning-nodejs", () => {
     });
 
     it("should unban user by setting a role", async () => {
-      const { user } = await setup();
+      const { user } = await setup(coreConnectionURI);
 
       await UserRoles.createNewRoleOrAddPermissions(DEFAULT_BANNED_USER_ROLE, []);
       await UserRoles.addRoleToUser("public", user.id, DEFAULT_BANNED_USER_ROLE);
@@ -86,13 +114,14 @@ describe("user-banning-nodejs", () => {
     });
 
     it("should keep users banned after a server restart", async () => {
-      const { user, appId } = await setup();
+      const { user, appId } = await setup(coreConnectionURI);
 
       await UserRoles.createNewRoleOrAddPermissions(DEFAULT_BANNED_USER_ROLE, []);
       await UserRoles.addRoleToUser("public", user.id, DEFAULT_BANNED_USER_ROLE);
 
       resetST();
-      await setup({}, appId);
+      await closeServer();
+      await setup(coreConnectionURI, {}, appId);
 
       const response = await fetch(`http://localhost:${testPORT}/auth/signin`, {
         method: "POST",
@@ -118,7 +147,7 @@ describe("user-banning-nodejs", () => {
     });
 
     it("should ban sessions by setting a role", async () => {
-      const { user, appId } = await setup();
+      const { user } = await setup(coreConnectionURI);
 
       const session = await Session.createNewSessionWithoutRequestResponse(
         "public",
@@ -143,7 +172,7 @@ describe("user-banning-nodejs", () => {
     });
 
     it("should keep sessions banned after a server restart", async () => {
-      const { user, appId } = await setup();
+      const { user, appId } = await setup(coreConnectionURI);
 
       const session = await Session.createNewSessionWithoutRequestResponse(
         "public",
@@ -154,7 +183,8 @@ describe("user-banning-nodejs", () => {
       await UserRoles.addRoleToUser("public", user.id, DEFAULT_BANNED_USER_ROLE);
 
       resetST();
-      await setup({}, appId);
+      await closeServer();
+      await setup(coreConnectionURI, {}, appId);
 
       const response = await fetch(`http://localhost:${testPORT}/check-session`, {
         method: "GET",
@@ -171,7 +201,7 @@ describe("user-banning-nodejs", () => {
     });
 
     it("should ban sessions across tenants by setting a role", async () => {
-      const { user, appId } = await setup();
+      const { user } = await setup(coreConnectionURI);
 
       await Multitenancy.createOrUpdateTenant("tenant1");
       await Multitenancy.associateUserToTenant("tenant1", SuperTokens.convertToRecipeUserId(user.id));
@@ -199,7 +229,7 @@ describe("user-banning-nodejs", () => {
     });
 
     it("should ban user by setting a role on a different tenant", async () => {
-      const { user } = await setup();
+      const { user } = await setup(coreConnectionURI);
 
       await Multitenancy.createOrUpdateTenant("tenant1", { firstFactors: null });
       await Multitenancy.associateUserToTenant("tenant1", SuperTokens.convertToRecipeUserId(user.id));
@@ -232,6 +262,11 @@ describe("user-banning-nodejs", () => {
   });
 });
 
+async function closeServer() {
+  await new Promise((resolve) => server!.close(resolve));
+  server = undefined;
+}
+
 function resetST() {
   SuperTokensRaw.reset();
   SessionRaw.reset();
@@ -242,19 +277,19 @@ function resetST() {
   UserMetadataRaw.reset();
 }
 
-async function setup(pluginConfig?: SuperTokensPluginUserBanningPluginConfig, appId?: string) {
+async function setup(
+  coreBaseURL: string,
+  pluginConfig?: SuperTokensPluginUserBanningPluginConfig,
+  appId?: string,
+) {
   let isNewApp = false;
-  const coreBaseURL = process.env.CORE_BASE_URL || `http://localhost:3567`;
   if (appId === undefined) {
     isNewApp = true;
     appId = crypto.randomUUID();
     const headers = {
       "Content-Type": "application/json",
     };
-    if (process.env.CORE_API_KEY) {
-      headers["api-key"] = process.env.CORE_API_KEY;
-    }
-    const createAppResp = await fetch(`${coreBaseURL}/recipe/multitenancy/app/v2`, {
+    await fetch(`${coreBaseURL}/recipe/multitenancy/app/v2`, {
       method: "PUT",
       headers,
       body: JSON.stringify({
@@ -267,7 +302,6 @@ async function setup(pluginConfig?: SuperTokensPluginUserBanningPluginConfig, ap
   SuperTokens.init({
     supertokens: {
       connectionURI: `${coreBaseURL}/appid-${appId}`,
-      apiKey: process.env.CORE_API_KEY,
     },
     appInfo: {
       appName: "Test App",
@@ -289,7 +323,9 @@ async function setup(pluginConfig?: SuperTokensPluginUserBanningPluginConfig, ap
   });
   app.use(errorHandler());
 
-  await new Promise((resolve) => app.listen(testPORT, resolve));
+  server = await new Promise<Server>((resolve) => {
+    const listeningServer = app.listen(testPORT, () => resolve(listeningServer));
+  });
 
   let user;
   if (isNewApp) {
