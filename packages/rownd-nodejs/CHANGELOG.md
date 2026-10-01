@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 1.0.2
+
+### Patch Changes
+
+- Skip checking migration status in the migrte call
+
 ## 1.0.1
 
 ### Patch Changes
