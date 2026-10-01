@@ -954,6 +954,8 @@ export interface IRowndClient {
   findUserIdsByEmail?: (opts: { email: string }) => Promise<string[]>;
   validateToken: (token: string) => Promise<{
     user_id: string;
+    /** Verified JWT issued-at time in seconds; required when a profile has a token cutoff. */
+    iat?: number;
   }>;
   fetchUserInfo: (opts: {
     user_id: string;

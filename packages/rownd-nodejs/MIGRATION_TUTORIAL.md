@@ -119,13 +119,17 @@ A complete backend-only example is available in `packages/rownd-nodejs/example`.
 
 When `POST {apiDomain}{apiBasePath}/plugin/rownd/migrate` is called, for example `POST /auth/plugin/rownd/migrate` when `apiBasePath` is `/auth`, the plugin:
 
-1. Validates the Rownd access token via Rownd's API.
+1. Verifies the Rownd access or refresh bearer token against the trusted JWKS, checking its EdDSA signature, issuer, app audience, expiration, issued-at time, and app user ID. Access tokens normally omit `https://auth.rownd.io/jwt_type`; explicit `access_token` and `refresh_token` are accepted, and other explicit types are rejected.
 2. Resolves the existing SuperTokens account, if present.
 3. Imports or reconciles the user's login methods and Rownd metadata.
 4. Verifies reconciliation before publishing its completion marker. A failed final account or method check gets one fresh verification attempt against the same internal account, with renewed source and mapping checks.
 5. Creates a SuperTokens session in the requested tenant. A completion marker alone does not establish that session creation succeeded.
 
 For native/header-token clients, call the endpoint with `rid: session`, `fdi-version: 1.18`, and `st-auth-mode: header`. A successful migration response must include `st-access-token`, `st-refresh-token`, and `front-token`; clients should treat a 2xx response missing any of these headers as an incomplete session migration.
+
+Send either an unexpired Rownd access token or an unexpired Rownd refresh token in `Authorization: Bearer <token>`. A refresh token can migrate a session after its access token expires; it must still contain valid `exp` and `iat` claims. After migration, use the issued SuperTokens refresh token through the SuperTokens SDK/session refresh endpoint. Migration does not consume, rotate, or issue Rownd tokens, and the same valid Rownd bearer can be used again.
+
+With Rownd app credentials, migration fetches the user's profile and requires the verified JWT `iat` to be at or after `meta.tokens_valid_since`, when present (an ISO timestamp). An invalid cutoff or missing verified issued-at time fails migration. Without credentials, [keys-only migration](./README.md#migrating-existing-users-without-rownd-app-credentials) only supports completed mappings: it cannot check the live profile's token cutoff, disabled state, or other Rownd-side revocation. JWKS verification alone does not establish that a token remains valid in Rownd's live account state.
 
 `Session` and `UserMetadata` are required for migration. `ThirdParty` is required for Google, Apple, guest, and anonymous login methods. `Passwordless` is required for email and phone login methods. `EmailVerification` is required for verified email profile updates. `AccountLinking` should be initialized so migrated identities can link according to your account-linking policy.
 
@@ -166,7 +170,8 @@ sequenceDiagram
     App->>Rownd: Authenticate with Rownd
     Rownd-->>App: Rownd access token
     App->>Backend: POST /auth/plugin/rownd/migrate
-    Backend->>Rownd: Validate Rownd token
+    Backend->>Backend: Verify Rownd token using trusted JWKS
+    Backend->>Rownd: Fetch profile and check token cutoff
     Backend->>Core: Create or update migrated user
     Backend->>Core: Validate session migration
     Backend-->>App: Migration result

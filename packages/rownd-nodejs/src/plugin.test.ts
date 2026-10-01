@@ -1779,6 +1779,14 @@ describe("rownd-nodejs plugin", () => {
         expect(instantClaim.response.status).toBe(200);
         const sameUserSession = await Session.getSessionWithoutRequestResponse(instantClaim.response.headers.get("st-access-token")!);
         expect(sameUserSession?.getRecipeUserId().getAsString()).toBe(passwordlessRecipeId);
+        const refreshMigration = await migrate(await sign("app:test-app", { "https://auth.rownd.io/jwt_type": "refresh_token" }));
+        expect(refreshMigration.response.status).toBe(200);
+        expect(refreshMigration.response.headers.get("st-refresh-token")).toBeTruthy();
+        const refreshSession = await Session.getSessionWithoutRequestResponse(refreshMigration.response.headers.get("st-access-token")!);
+        expect(refreshSession?.getRecipeUserId().getAsString()).toBe(passwordlessRecipeId);
+        const unsupportedType = await migrate(await sign("app:test-app", { "https://auth.rownd.io/jwt_type": "id_token" }));
+        expect(unsupportedType.response.status).toBe(400);
+        expect(unsupportedType.response.headers.has("st-access-token")).toBe(false);
         expect(fetchProfile).not.toHaveBeenCalled();
         expect(mockRowndClient.validateToken).not.toHaveBeenCalled();
       } finally {
@@ -4860,6 +4868,68 @@ describe("rownd-nodejs plugin", () => {
     });
 
     describe("POST /migrate", () => {
+      it("rejects signed refresh tokens before the profile cutoff without side effects and accepts equality", async () => {
+        const { publicKey, privateKey } = await generateKeyPair("EdDSA");
+        const jwk = { ...(await exportJWK(publicKey)), kid: "cutoff-test-key", alg: "EdDSA", use: "sig" };
+        const jwksApp = express();
+        jwksApp.get("/jwks", (_req, res) => res.json({ keys: [jwk] }));
+        const jwksServer = await new Promise<Server>((resolve) => {
+          const listening = jwksApp.listen(0, "127.0.0.1", () => resolve(listening));
+        });
+        try {
+          tokenValidatorFixture.useRealValidator = true;
+          const jwksPort = (jwksServer.address() as { port: number }).port;
+          const { server: s, port } = await setup(importCoreConnectionURI, {
+            jwksUrl: `http://127.0.0.1:${jwksPort}/jwks`,
+          });
+          server = s;
+          const rowndUserId = `refresh-cutoff-${randomUUID()}`;
+          const cutoff = Math.floor(Date.now() / 1000) - 60;
+          mockRowndClient.fetchUserInfo.mockResolvedValue({
+            state: "enabled",
+            data: { user_id: rowndUserId, email: `${rowndUserId}@example.com` },
+            verified_data: { email: true },
+            meta: { tokens_valid_since: new Date(cutoff * 1000).toISOString() },
+          });
+          const createSession = vi.spyOn(Session, "createNewSession");
+          const writes = vi.spyOn(UserMetadata, "updateUserMetadata");
+          const migrate = async (issuedAt: number) => {
+            const token = await new SignJWT({
+              "https://auth.rownd.io/app_user_id": rowndUserId,
+              "https://auth.rownd.io/jwt_type": "refresh_token",
+            }).setProtectedHeader({ alg: "EdDSA", kid: "cutoff-test-key" })
+              .setIssuer("https://api.rownd.io").setAudience("app:test-app")
+              .setIssuedAt(issuedAt).setExpirationTime("5m").sign(privateKey);
+            return fetch(`http://localhost:${port}/auth/plugin/rownd/migrate`, {
+              method: "POST", headers: { Authorization: `Bearer ${token}`, "st-auth-mode": "header" },
+            });
+          };
+
+          const rejected = await migrate(cutoff - 1);
+          expect(rejected.status).toBe(400);
+          expect(await rejected.json()).toMatchObject({ status: "ERROR" });
+          for (const header of ["set-cookie", "st-access-token", "st-refresh-token", "front-token"]) {
+            expect(rejected.headers.has(header)).toBe(false);
+          }
+          expect(createSession).not.toHaveBeenCalled();
+          expect(writes).not.toHaveBeenCalled();
+          expect(await SuperTokens.getUser(rowndUserId)).toBeUndefined();
+          expect((await SuperTokens.getUserIdMapping({ userId: rowndUserId, userIdType: "EXTERNAL" })).status).toBe("UNKNOWN_MAPPING_ERROR");
+
+          const accepted = await migrate(cutoff);
+          expect(accepted.status).toBe(200);
+          expect(await accepted.json()).toEqual({ status: "OK" });
+          for (const header of ["st-access-token", "st-refresh-token", "front-token"]) {
+            expect(accepted.headers.get(header)).toBeTruthy();
+          }
+          const session = await Session.getSessionWithoutRequestResponse(accepted.headers.get("st-access-token")!);
+          expect(session?.getUserId()).toBe(rowndUserId);
+          expect(mockRowndClient.validateToken).not.toHaveBeenCalled();
+        } finally {
+          await new Promise<void>((resolve, reject) => jwksServer.close((error) => error ? reject(error) : resolve()));
+        }
+      });
+
       it("publishes the canonical target once and rejects a conflicting target on retry", async () => {
         const { server: s, port } = await setup(importCoreConnectionURI);
         server = s;

@@ -3,6 +3,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 const defaultJwksUrl = "https://rownd-hub.supertokens.com/.well-known/rownd-jwks.json";
 const defaultIssuer = "https://api.rownd.io";
 const appUserIdClaim = "https://auth.rownd.io/app_user_id";
+const jwtTypeClaim = "https://auth.rownd.io/jwt_type";
 
 export interface RowndTokenValidationConfig {
   /** Trusted application audience; this does not require administrative credentials. */
@@ -40,19 +41,23 @@ export function createRowndTokenValidator(config: RowndTokenValidationConfig) {
   if (typeof issuer !== "string" || !issuer) throw new Error("Invalid Rownd token issuer");
   const resolver = getResolver(url);
 
-  return async (token: string): Promise<{ user_id: string }> => {
+  return async (token: string): Promise<{ user_id: string; iat: number }> => {
     const { payload } = await jwtVerify(token, resolver, {
       issuer,
       audience: config.audience,
       algorithms: ["EdDSA"],
       requiredClaims: ["exp", "iat", appUserIdClaim],
     });
+    const tokenType = payload[jwtTypeClaim];
+    if (tokenType !== undefined && tokenType !== "access_token" && tokenType !== "refresh_token") {
+      throw new Error("Unsupported Rownd token type");
+    }
     const userId = payload[appUserIdClaim];
     if (typeof userId !== "string" || !userId || userId.trim() !== userId ||
       [...userId].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) ||
       userId === "." || userId === "..") {
       throw new Error("Invalid Rownd token app_user_id");
     }
-    return { user_id: userId };
+    return { user_id: userId, iat: payload.iat! };
   };
 }

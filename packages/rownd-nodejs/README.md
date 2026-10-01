@@ -88,6 +88,16 @@ can select another trusted endpoint.
 Configure both `rowndAppKey` and
 `rowndAppSecret` to retain full profile reconciliation.
 
+Send an unexpired Rownd access or refresh token as `Authorization: Bearer <token>`
+to `/plugin/rownd/migrate`. Verification requires `exp` and `iat`; the signed
+`https://auth.rownd.io/jwt_type` may be absent (normal access tokens),
+`access_token`, or `refresh_token`. Other explicit types are rejected.
+With credentials, migration checks the verified issued-at time against the fetched
+profile's `meta.tokens_valid_since` ISO timestamp. Keys-only mode cannot check that
+cutoff, live disabled state, or other Rownd-side revocation. Rownd tokens are not
+consumed or rotated by migration and can be reused while valid. After migration,
+refresh the resulting session using the SuperTokens refresh token and session SDK.
+
 ### Tenant-Specific Configuration
 
 Use `resolveConfig` when Rownd app configuration differs by SuperTokens tenant.

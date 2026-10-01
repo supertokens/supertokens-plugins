@@ -94,7 +94,7 @@ function migrationIdentities(source: SuperTokensUserImport) {
 // marker. Administrative contact ownership is separate from verification proof.
 export async function authenticateRowndMigration(token: string, tenantId: string, userContext: JsonRecord) {
   if (!tenantId) throw new Error("Authenticated Rownd migration requires a tenant");
-  const rowndUserId = await validateRowndToken(token);
+  const { user_id: rowndUserId, iat } = await validateRowndToken(token);
   if (typeof rowndUserId !== "string" || !rowndUserId.trim()) {
     throw new Error("Validated Rownd token has no user ID");
   }
@@ -121,6 +121,13 @@ export async function authenticateRowndMigration(token: string, tenantId: string
   if (rowndUser.data?.user_id !== rowndUserId || !isRowndMigrationProfileActive(rowndUser)) {
     throw new Error("Rownd profile does not match an enabled validated token user ID");
   }
+  const tokensValidSince = rowndUser.meta?.tokens_valid_since;
+  if (tokensValidSince !== undefined) {
+    const cutoff = typeof tokensValidSince === "string" ? Date.parse(tokensValidSince) : NaN;
+    if (!Number.isFinite(cutoff) || typeof iat !== "number" || !Number.isFinite(iat) || iat * 1000 < cutoff) {
+      throw new Error("Rownd token does not satisfy profile tokens_valid_since");
+    }
+  }
   const source = mapRowndUserToSuperTokens(rowndUser, tenantId);
   const email = typeof rowndUser.data.email === "string" && rowndUser.data.email.trim() &&
     !isSuperTokensFakeEmail(rowndUser.data.email.toLowerCase())
@@ -139,7 +146,8 @@ export async function authenticateRowndMigration(token: string, tenantId: string
 /** Authenticate a token without requesting a Rownd profile or creating import evidence. */
 export async function authenticateExistingRowndMigration(token: string, tenantId: string, userContext: JsonRecord) {
   if (!tenantId) throw new RowndMigrationPolicyError("Authenticated Rownd migration requires a tenant");
-  const rowndUserId = await validateRowndToken(token);
+  // Keys-only migration cannot check the live profile's tokens_valid_since cutoff.
+  const { user_id: rowndUserId } = await validateRowndToken(token);
   if (typeof rowndUserId !== "string" || !rowndUserId.trim() || rowndUserId !== rowndUserId.trim()) {
     throw new RowndMigrationPolicyError("Validated Rownd token has no valid user ID");
   }
