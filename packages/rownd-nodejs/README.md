@@ -72,14 +72,15 @@ RowndMigrationPlugin.init({ rowndJwtAudience: "app:your-rownd-app-id" });
 ```
 
 Both migration routes remain available. A valid Rownd token can create a
-SuperTokens session only for an already completed migration with a published
-bidirectional user-ID mapping and a login method in the requested tenant. This
+SuperTokens session only for an existing user with a published bidirectional
+user-ID mapping and a login method in the requested tenant. The
+`rownd_migration_complete` metadata flag is ignored in this mode. This
 mode does not fetch Rownd profiles, import users, reconcile identities, or
-associate users with new tenants. New, incomplete, or conflicting migrations
-fail. Token verification uses the hosted JWKS in both migration modes. A trusted
+associate users with new tenants. Missing mappings, pending migration operations,
+and conflicting ownership fail. Token verification uses the hosted JWKS in both migration modes. A trusted
 `app:<id>` audience is required: set `rowndJwtAudience` without Rownd credentials,
 or derive it from `rowndAppId`/`appConfig.id`.
-The token's signed user ID selects the completed mapping; authentication claims
+The token's signed user ID selects the existing mapping; authentication claims
 are not required. The session uses an authenticated login method when the mapped
 user has one in the tenant, or an instant/guest method otherwise.
 The default JWKS URL is

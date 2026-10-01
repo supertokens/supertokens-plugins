@@ -583,10 +583,7 @@ async function migrateExistingMappedUser(input: {
     const user = discovery.user;
     const ownerMetadata = discovery.metadataById.get(internalUserId) ?? {};
     const sourceMetadata = discovery.metadataById.get(rowndUserId) ?? {};
-    const complete = [ownerMetadata, sourceMetadata]
-      .find((metadata) => metadata.rownd_migration_complete !== undefined)?.rownd_migration_complete === true;
-    if (!user || ![internalUserId, rowndUserId].includes(user.id) ||
-        !complete || sourceMetadata.rownd_migration_complete === false) {
+    if (!user || ![internalUserId, rowndUserId].includes(user.id)) {
       throw new Error("Completed Rownd owner is unavailable");
     }
     for (const metadata of [ownerMetadata, sourceMetadata]) {

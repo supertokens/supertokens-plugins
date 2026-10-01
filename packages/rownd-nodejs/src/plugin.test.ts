@@ -1794,7 +1794,13 @@ describe("rownd-nodejs plugin", () => {
       }
     });
 
-    it("creates a session only for a completed mapped owner in the requested tenant without profile reads", async () => {
+    it.each([
+      { ownerComplete: undefined, sourceComplete: undefined },
+      { ownerComplete: false, sourceComplete: false },
+      { ownerComplete: true, sourceComplete: false },
+      { ownerComplete: false, sourceComplete: true },
+      { ownerComplete: true, sourceComplete: true },
+    ])("creates a session for a mapped owner regardless of completion markers ($ownerComplete/$sourceComplete) without profile reads", async ({ ownerComplete, sourceComplete }) => {
       init({ rowndAppId: "app" });
       setRowndTokenValidator(vi.fn().mockResolvedValue({ user_id: "rownd-id" }));
       const recipeUserId = { getAsString: () => "recipe-id" } as any;
@@ -1806,9 +1812,10 @@ describe("rownd-nodejs plugin", () => {
       const getUser = vi.spyOn(SuperTokens, "getUser").mockResolvedValue({
         id: "rownd-id", loginMethods: [{ recipeId: "passwordless", recipeUserId, tenantIds: ["tenant-a"] }],
       } as any);
-      let completed = true;
       vi.spyOn(UserMetadata, "getUserMetadata").mockImplementation(async (id: string) => ({
-        status: "OK", metadata: id === "internal-id" ? { rownd_migration_complete: completed } : {},
+        status: "OK", metadata: id === "internal-id"
+          ? (ownerComplete === undefined ? {} : { rownd_migration_complete: ownerComplete })
+          : (id === "rownd-id" && sourceComplete !== undefined ? { rownd_migration_complete: sourceComplete } : {}),
       } as any));
       const createSession = vi.spyOn(Session, "createNewSession").mockResolvedValue({
         getUserId: () => "rownd-id", getRecipeUserId: () => recipeUserId,
@@ -1822,14 +1829,10 @@ describe("rownd-nodejs plugin", () => {
       const req = { getHeaderValue: (key: string) => key === "authorization" ? "Bearer token" : undefined,
         getKeyValueFromQuery: (key: string) => key === "tenantId" ? "tenant-a" : undefined } as any;
       const res = { setHeader: vi.fn(), removeHeader: vi.fn(), setCookie: vi.fn() } as any;
-      expect(await handleMigrate(deps)(req, res, undefined, {})).toEqual({ status: "OK" });
+      const result = await handleMigrate(deps)(req, res, undefined, {});
+      expect(result, JSON.stringify(deps.telemetryClient.recordEvent.mock.calls)).toEqual({ status: "OK" });
       expect(createSession).toHaveBeenCalledTimes(1);
       expect(fetchProfile).not.toHaveBeenCalled();
-      completed = false;
-      expect((await handleMigrate(deps)(req, res, undefined, {})).status).toBe("ERROR");
-      expect(createSession).toHaveBeenCalledTimes(1);
-      completed = true;
-
       getUser.mockResolvedValueOnce({ id: "rownd-id", loginMethods: [
         { recipeId: "passwordless", recipeUserId, tenantIds: ["tenant-b"] },
       ] } as any);
