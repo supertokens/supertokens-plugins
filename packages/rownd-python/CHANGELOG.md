@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 1.0.1
+
+### Patch Changes
+
+- Migration endpoint fixes
+
 ## 1.0.0
 
 ### Major Changes
