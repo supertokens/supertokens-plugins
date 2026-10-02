@@ -358,7 +358,7 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
     });
   }
 
-  describe("passwordless login after rejected existing-only migration", () => {
+  describe("passwordless login with an existing mapped owner", () => {
     it("leaves a standalone passwordless user when legacy guest linking conflicts with an Apple primary", async () => {
       const email = `${randomUUID()}@example.com`;
       const apple = await ThirdParty.manuallyCreateOrUpdateUser("public", "apple", randomUUID(), email,
@@ -445,7 +445,8 @@ describe("duplicate Rownd profiles through legacy POST /migrate", () => {
       resetST();
       await startServer(true, allowHistoricalLinking);
       mockRowndClient.validateToken.mockResolvedValue({ user_id: rowndId });
-      await expectRejectedMigration(await requestMigration("valid-rownd-token"));
+      await expectSuccessfulMigration(await requestMigration("valid-rownd-token"), rowndId);
+      expect((await UserMetadata.getUserMetadata(rowndId)).metadata.rownd_migration_complete).toBe(false);
 
       let existingAccessToken: string | undefined;
       if (existingSession) {

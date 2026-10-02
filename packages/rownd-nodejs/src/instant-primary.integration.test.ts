@@ -19,6 +19,9 @@ import { getPluginConfig } from "./config";
 import { readOwnerPlanCheckpoint } from "./migration-owner-plan";
 import type { RowndUser } from "./types";
 
+// Multi-step reconciliation uses real Core/Postgres requests and can exceed 5s under CI load.
+vi.setConfig({ testTimeout: 30000 });
+
 const rownd = { validateToken: vi.fn(), fetchUserInfo: vi.fn() };
 vi.mock("@rownd/node", () => ({ createInstance: () => rownd }));
 let network: StartedNetwork, postgres: StartedTestContainer, core: StartedTestContainer;
