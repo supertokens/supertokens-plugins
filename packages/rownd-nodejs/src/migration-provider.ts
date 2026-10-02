@@ -317,11 +317,11 @@ export async function prepareRowndProviderRetirement(input: {
             [key]: pending.map((entry) =>
               entry.recipeUserId === retired.recipeUserId
                 ? {
-                    ...entry,
-                    pendingTenantIds: (entry.pendingTenantIds ?? []).filter(
-                      (id) => id !== tenantId,
-                    ),
-                  }
+                  ...entry,
+                  pendingTenantIds: (entry.pendingTenantIds ?? []).filter(
+                    (id) => id !== tenantId,
+                  ),
+                }
                 : entry,
             ),
           },
@@ -453,11 +453,11 @@ export async function prepareRowndProviderRetirement(input: {
           [key]: beforeRemoval.map((entry) =>
             entry.recipeUserId === retired.recipeUserId
               ? {
-                  ...entry,
-                  pendingTenantIds: [
-                    ...new Set([...(entry.pendingTenantIds ?? []), tenantId]),
-                  ],
-                }
+                ...entry,
+                pendingTenantIds: [
+                  ...new Set([...(entry.pendingTenantIds ?? []), tenantId]),
+                ],
+              }
               : entry,
           ),
         },
@@ -516,11 +516,11 @@ export async function prepareRowndProviderRetirement(input: {
           [key]: afterRevocation.map((entry) =>
             entry.recipeUserId === retired.recipeUserId
               ? {
-                  ...entry,
-                  pendingTenantIds: (entry.pendingTenantIds ?? []).filter(
-                    (id) => id !== tenantId,
-                  ),
-                }
+                ...entry,
+                pendingTenantIds: (entry.pendingTenantIds ?? []).filter(
+                  (id) => id !== tenantId,
+                ),
+              }
               : entry,
           ),
         },
@@ -901,9 +901,9 @@ export async function assertProviderSessionMembership(
     recipeMetadata[recipeIntroductionKey] === undefined
       ? introductions(primary[introductionKey])
       : [
-          ...introductions(primary[introductionKey]),
-          ...introductions([recipeMetadata[recipeIntroductionKey]]),
-        ];
+        ...introductions(primary[introductionKey]),
+        ...introductions([recipeMetadata[recipeIntroductionKey]]),
+      ];
   if (
     pending.some(
       (entry) =>

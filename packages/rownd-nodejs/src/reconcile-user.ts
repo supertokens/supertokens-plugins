@@ -224,8 +224,8 @@ async function inspectSourceElection(source: Source, selected: User | undefined,
   for (const method of source.loginMethods) {
     const accountInfo = method.recipeId === "passwordless" && method.email ? { email: method.email } :
       method.recipeId === "passwordless" && method.phoneNumber ? { phoneNumber: method.phoneNumber } :
-      method.recipeId === "thirdparty" && ["google", "apple"].includes(method.thirdPartyId)
-        ? { thirdParty: { id: method.thirdPartyId, userId: method.thirdPartyUserId } } : undefined;
+        method.recipeId === "thirdparty" && ["google", "apple"].includes(method.thirdPartyId)
+          ? { thirdParty: { id: method.thirdPartyId, userId: method.thirdPartyUserId } } : undefined;
     for (const info of accountInfo && "phoneNumber" in accountInfo
       ? migrationPhoneAccountInfos(accountInfo.phoneNumber!) : accountInfo ? [accountInfo] : [])
       users.push(...await SuperTokens.listUsersByAccountInfo(tenantId, info, false, userContext));

@@ -15,10 +15,10 @@ beforeAll(async () => {
 }, 30000);
 afterAll(async () => { await rm(home, { recursive: true, force: true }); });
 
-async function cli(args: string[], preload?: string, runtime: "node" | "bun" = "node") {
+async function cli(args: string[], preload?: string) {
   try {
-    const result = await exec(runtime === "bun" ? "bun" : process.execPath, [...(preload ? [runtime === "bun" ? "--preload" : "--require", preload] : []),
-      runtime === "bun" ? "scripts/adminCli.ts" : "dist/cli.js", ...args], {
+    const result = await exec(process.execPath, [...(preload ? ["--require", preload] : []),
+      "dist/cli.js", ...args], {
       env: { ...process.env, HOME: home, ...(preload ? { NODE_OPTIONS: `--require=${preload}` } : {}) }, timeout: 15000,
     });
     return { ...result, code: 0 };
@@ -61,7 +61,6 @@ globalThis.fetch = (input, options) => {
   return originalFetch(input, options);
 };
 const stub = { createInstance: () => ({ validateToken: async () => { throw new Error('unexpected token'); }, fetchUserInfo: async () => undefined }) };
-if (process.versions.bun) require('bun:test').mock.module('@rownd/node', () => stub);
 const Module = require('node:module');
 const original = Module._load;
 Module._load = function(id, ...args) {
@@ -85,11 +84,11 @@ Module._load = function(id, ...args) {
     expect(requests).toBeGreaterThan(0);
     expect(result.stdout + result.stderr).not.toContain("pass%22word");
     expect(result.stdout + result.stderr).not.toContain("secret");
-    const bunResult = await cli(["reconcile-user", "--profile", "local", "--supertokens-user-id", "missing", "--dry-run"], preload, "bun");
-    expect(bunResult.code, bunResult.stderr).toBe(1);
-    expect(JSON.parse(bunResult.stdout)).toMatchObject({ status: "ERROR", dryRun: true, changed: false });
-    expect(bunResult.stdout + bunResult.stderr).not.toContain("pass%22word");
-    expect(bunResult.stdout + bunResult.stderr).not.toContain("secret");
+    const dryRun = await cli(["reconcile-user", "--profile", "local", "--supertokens-user-id", "missing", "--dry-run"], preload);
+    expect(dryRun.code, dryRun.stderr).toBe(1);
+    expect(JSON.parse(dryRun.stdout)).toMatchObject({ status: "ERROR", dryRun: true, changed: false });
+    expect(dryRun.stdout + dryRun.stderr).not.toContain("pass%22word");
+    expect(dryRun.stdout + dryRun.stderr).not.toContain("secret");
     const override = await cli(["reconcile-user", "--profile", "local", "--rownd-user-id", "missing", "--dry-run", "--override-placeholder-provenance"], preload);
     expect(JSON.parse(override.stdout)).toMatchObject({ status: "ERROR", dryRun: true, changed: false });
     const csv = join(home, "users.csv");
