@@ -20,6 +20,8 @@
     "@shared/eslint": "*",
     "@shared/tsconfig": "*",
     "@shared/react": "*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "tsx": "^4.0.0",
     "@types/node": "^20.0.0"
   }

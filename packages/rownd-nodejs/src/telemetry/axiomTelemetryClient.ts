@@ -16,7 +16,8 @@ export class AxiomTelemetryClient implements RowndTelemetryClient {
   }
 
   async recordEvent(event: RowndTelemetryEvent): Promise<void> {
-    await fetch(this.url, {
+    const response = await fetch(this.url, {
+      signal: AbortSignal.timeout(5000),
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -30,5 +31,8 @@ export class AxiomTelemetryClient implements RowndTelemetryClient {
         },
       ]),
     });
+    if (!response.ok) {
+      throw new Error(`Axiom ingestion failed (${response.status})`);
+    }
   }
 }

@@ -6,7 +6,7 @@
     ".": "./src/index.ts"
   },
   "peerDependencies": {
-    "supertokens-node": "^23.0.1"
+    "supertokens-node": ">=23.0.0"
   },
   "devDependencies": {
     "@shared/eslint": "*",

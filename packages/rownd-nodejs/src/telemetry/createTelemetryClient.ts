@@ -28,6 +28,9 @@ export function createClient(
   }
 
   return {
+    recordEvent: (event: RowndTelemetryEvent) => {
+      if (client) safeRecordEvent(client, event, event.outcome);
+    },
     recordSuccess: (event: SuccessEvent) => {
       if (!client) {
         return;
@@ -70,18 +73,14 @@ function safeRecordEvent(
   outcome: "success" | "error",
 ) {
   try {
-    Promise.resolve(client.recordEvent(event)).catch((error) => {
+    Promise.resolve(client.recordEvent(event)).catch(() => {
       logDebugMessage(
-        `Failed to record telemetry ${outcome} event. Error: ${
-          error instanceof Error ? error.message : "Unknown error"
-        }`,
+        `Failed to record telemetry ${outcome} event.`,
       );
     });
-  } catch (error) {
+  } catch {
     logDebugMessage(
-      `Failed to record telemetry ${outcome} event. Error: ${
-        error instanceof Error ? error.message : "Unknown error"
-      }`,
+      `Failed to record telemetry ${outcome} event.`,
     );
   }
 }
