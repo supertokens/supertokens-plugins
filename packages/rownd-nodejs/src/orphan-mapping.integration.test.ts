@@ -204,6 +204,46 @@ it.each([false, true])("requires elected exact email proof before creating a mis
   expect(await reconcileUser({ rownd_user_id: f.sourceId })).toMatchObject({ status: "OK", changed: false });
 });
 
+it.each(["none", "published-value", "unexpected-field", "existing-value", "internal-field"])("validates public metadata on orphan handoff retry (%s drift)", async (drift) => {
+  const f = await fixture(true);
+  f.profile.meta = { last_active: "2025-01-01T00:00:00.000Z" };
+  await UserMetadata.updateUserMetadata(f.sourceId, { preference: "original" });
+  const update = UserMetadata.updateUserMetadata.bind(UserMetadata);
+  let interrupted = false;
+  const publication = vi.spyOn(UserMetadata, "updateUserMetadata").mockImplementation(async (...args) => {
+    const result = await update(...args);
+    if (args[0] === f.sourceId && args[1].last_active !== undefined) {
+      interrupted = true;
+      throw new Error("public metadata response lost");
+    }
+    return result;
+  });
+  expect(await reconcileUser({ rownd_user_id: f.sourceId })).toMatchObject({ status: "ERROR", partialProgress: true });
+  expect(interrupted).toBe(true);
+  publication.mockRestore();
+  expect((await UserMetadata.getUserMetadata(f.sourceId)).metadata).toMatchObject({
+    preference: "original", last_active: f.profile.meta.last_active,
+    rownd_migration_orphan_mapping_repair: { phase: "HANDOFF" },
+  });
+  if (drift === "none") {
+    expect(await reconcileUser({ rownd_user_id: f.sourceId })).toMatchObject({ status: "OK", rownd_user_id: f.sourceId });
+    expect((await UserMetadata.getUserMetadata(f.sourceId)).metadata.rownd_migration_orphan_mapping_repair.phase).toBe("COMPLETE");
+    return;
+  }
+  const changes = drift === "published-value" ? { last_active: "unexpected" } :
+    drift === "unexpected-field" ? { unexpected: "concurrent write" } :
+      drift === "existing-value" ? { preference: "changed" } : { rownd_migration_complete: true };
+  await UserMetadata.updateUserMetadata(f.sourceId, changes);
+  const nested = vi.fn(), mutation = vi.fn(), write = vi.spyOn(UserMetadata, "updateUserMetadata");
+  for (const dryRun of [true, false]) {
+    await expect(recoverOrphanMapping({ sourceId: f.sourceId, tenantId: "public", userContext: {}, dryRun,
+      onMutation: mutation, reconcile: nested })).rejects.toThrow("requested source metadata changed");
+  }
+  expect(nested).not.toHaveBeenCalled();
+  expect(mutation).not.toHaveBeenCalled();
+  expect(write).not.toHaveBeenCalled();
+});
+
 it.each([false, true].flatMap((mapped) => ["checkpoint", "deletion", "handoff", "publication"].map((crash) => ({ mapped, crash }))))("resumes a lost $crash response through the normal executor (existing alias: $mapped)", async ({ mapped, crash }) => {
   const f = await fixture(mapped);
   if (mapped) f.profile.meta = { last_active: "2025-01-01T00:00:00.000Z" };

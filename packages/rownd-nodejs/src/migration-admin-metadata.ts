@@ -14,6 +14,7 @@ import {
 import { assertMigrationOwnerGraph } from "./migration-postconditions";
 import {
   buildRowndUserMetadata,
+  combineLinkedMetadata,
   getRawUserMetadata,
   inspectLinkedUserMetadata,
   isInternalMetadataField,
@@ -134,7 +135,7 @@ export async function backfillAdministrativeMetadata(
   return true;
 }
 
-export async function inspectPublicMetadataPublication(input: MetadataBackfillInput): Promise<JsonRecord> {
+export async function getPublicMetadataPublicationValues(input: MetadataBackfillInput, sourceMetadata?: JsonRecord): Promise<JsonRecord> {
   const { source, tenantId, internalUserId, userContext } = input;
   if (!isAdministrativeMigration(source, tenantId) || source.externalUserId === internalUserId) return {};
   const profile = await assertAuthenticatedMigrationSource(source, tenantId);
@@ -145,14 +146,28 @@ export async function inspectPublicMetadataPublication(input: MetadataBackfillIn
   }
   // Core reads metadata by literal ID even though user APIs return external IDs.
   // Publish application fields there; migration checkpoints retain one owner.
+  // Recovery supplies the pre-publication source snapshot so new source fields cannot prove themselves.
+  const combinedMetadata = sourceMetadata === undefined ? inspection.combinedMetadata : combineLinkedMetadata({
+    primaryUserId: internalUserId,
+    primaryMetadata: inspection.primaryMetadata,
+    linkedMetadata: inspection.linkedMetadata.map((entry) => entry.userId === source.externalUserId
+      ? { ...entry, metadata: sourceMetadata } : entry),
+    canonicalRowndUserId: source.externalUserId,
+  }).combinedMetadata;
   const available = {
     ...buildRowndUserMetadata(profile),
-    ...inspection.combinedMetadata,
+    ...combinedMetadata,
     ...inspection.primaryMetadata,
   };
-  const published = await getRawUserMetadata(source.externalUserId!, userContext);
   return Object.fromEntries(Object.entries(available).filter(([field, value]) =>
-    !isInternalMetadataField(field) && value !== undefined && value !== null &&
+    !isInternalMetadataField(field) && value !== undefined && value !== null));
+}
+
+export async function inspectPublicMetadataPublication(input: MetadataBackfillInput): Promise<JsonRecord> {
+  const available = await getPublicMetadataPublicationValues(input);
+  if (!Object.keys(available).length) return {};
+  const published = await getRawUserMetadata(input.source.externalUserId!, input.userContext);
+  return Object.fromEntries(Object.entries(available).filter(([field]) =>
     !Object.prototype.hasOwnProperty.call(published, field)));
 }
 

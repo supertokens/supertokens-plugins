@@ -7,6 +7,7 @@ import { assertMigrationOwnerGraph } from "./migration-postconditions";
 import { assertSelectorNamespace } from "./migration-mapping";
 import { OWNER_POLICY_MARKER_KEYS, ownerStateAt, readOwnerPlanCheckpoint, sameOwnerPlan } from "./migration-owner-plan";
 import { inspectMappingPublication } from "./migration-publication";
+import { getPublicMetadataPublicationValues } from "./migration-admin-metadata";
 import { orphanCheckpointKey as key, readOrphanCheckpoint as read, sameOrphanSourceIdentity as sameSourceIdentity, sameEarlierOrphanEvidence, type OrphanRepair as Repair } from "./migration-orphan-checkpoint";
 import { assertVerificationCellInheritance } from "./migration-verification";
 import { getRawUserMetadata, mapRowndUserToSuperTokens } from "./rownd-compatibility";
@@ -234,6 +235,19 @@ async function assertRequestedHandoffOwnership(plan: Repair, context: JsonRecord
         receipted.rownd_migration_owner_recovery = actual.rownd_migration_owner_recovery;
       }
       if (isDeepStrictEqual(receipted, actual)) return;
+      if (owner.status === "COMPLETE" && plan.winner === plan.sourceId) {
+        const source = await fetchAdministrativeMigrationSource(plan.sourceId, plan.tenantId, context);
+        if (source) {
+          const publication = await getPublicMetadataPublicationValues({ source, tenantId: plan.tenantId,
+            internalUserId: plan.target, userContext: context }, expected);
+          // Normal reconciliation publishes missing public fields after completing the owner checkpoint.
+          for (const [field, value] of Object.entries(publication)) {
+            if (!Object.prototype.hasOwnProperty.call(receipted, field) &&
+              Object.prototype.hasOwnProperty.call(actual, field) && isDeepStrictEqual(actual[field], value)) receipted[field] = value;
+          }
+          if (isDeepStrictEqual(receipted, actual)) return;
+        }
+      }
     }
   }
   if (plan.winner === plan.sourceId) {

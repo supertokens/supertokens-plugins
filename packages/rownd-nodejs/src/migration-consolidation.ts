@@ -53,7 +53,6 @@ import {
 } from "./supertokens-repository";
 import { observeAdministrativeMethodCreation } from "./migration-method-receipts";
 import { assertMappingPublicationSessionMembership } from "./migration-publication";
-import { assertVerificationCellInheritance } from "./migration-verification";
 import { resolveRowndProviderSubject } from "./provider-identity";
 import {
   clearSuperTokensCoreCallCache,
@@ -466,11 +465,11 @@ async function observeInPhase(plan: OwnerPlanCheckpoint, context: JsonRecord) {
       id: recipe.id,
       ...(mapping.status === "OK"
         ? {
-            alias: mapping.externalUserId,
-            ...(mapping.externalUserIdInfo !== undefined
-              ? { info: mapping.externalUserIdInfo }
-              : {}),
-          }
+          alias: mapping.externalUserId,
+          ...(mapping.externalUserIdInfo !== undefined
+            ? { info: mapping.externalUserIdInfo }
+            : {}),
+        }
         : {}),
     });
     if (mapping.status === "OK") {
@@ -1018,11 +1017,11 @@ export async function prepareOwnerConsolidation(input: {
           id,
           ...(mapping.status === "OK"
             ? {
-                alias: mapping.externalUserId,
-                ...(mapping.externalUserIdInfo !== undefined
-                  ? { info: mapping.externalUserIdInfo }
-                  : {}),
-              }
+              alias: mapping.externalUserId,
+              ...(mapping.externalUserIdInfo !== undefined
+                ? { info: mapping.externalUserIdInfo }
+                : {}),
+            }
             : {}),
         });
       }
@@ -1032,13 +1031,13 @@ export async function prepareOwnerConsolidation(input: {
     const aliases = initial.mappings.flatMap((mapping) =>
       mapping.alias
         ? [
-            {
-              id: mapping.alias,
-              from: mapping.id,
-              to: mapping.id,
-              ...(mapping.info !== undefined ? { info: mapping.info } : {}),
-            },
-          ]
+          {
+            id: mapping.alias,
+            from: mapping.id,
+            to: mapping.id,
+            ...(mapping.info !== undefined ? { info: mapping.info } : {}),
+          },
+        ]
         : [],
     );
     const absentAliases: string[] = [];
@@ -1564,8 +1563,8 @@ export async function prepareOwnerConsolidation(input: {
           ?.alias ?? recipe.id;
       const expectedVerification = recipe.email
         ? observed.state.verifications.find(
-            (entry) => entry.id === address && entry.email === recipe.email,
-          )?.verified
+          (entry) => entry.id === address && entry.email === recipe.email,
+        )?.verified
         : recipe.verified;
       if (expectedVerification !== observed.methods.get(recipe.id)?.verified)
         fail(
@@ -1678,47 +1677,47 @@ export async function prepareOwnerConsolidation(input: {
     (op): ReconcilePreviewAction[] =>
       op.kind === "link"
         ? [
+          {
+            action: "link_method",
+            recipeUserId: op.id,
+            supertokens_user_id: target,
+          },
+        ]
+        : op.kind === "detach"
+          ? [
             {
-              action: "link_method",
+              action: "unlink_method",
               recipeUserId: op.id,
               supertokens_user_id: target,
             },
           ]
-        : op.kind === "detach"
-          ? [
-              {
-                action: "unlink_method",
-                recipeUserId: op.id,
-                supertokens_user_id: target,
-              },
-            ]
           : op.kind === "promote"
             ? [{ action: "create_primary", supertokens_user_id: target }]
             : op.kind === "delete_mapping"
               ? [
+                {
+                  action: "remove_mapping",
+                  supertokens_user_id: op.id,
+                  rownd_user_id: op.alias,
+                },
+              ]
+              : op.kind === "create_mapping"
+                ? [
                   {
-                    action: "remove_mapping",
+                    action: "create_mapping",
                     supertokens_user_id: op.id,
                     rownd_user_id: op.alias,
                   },
                 ]
-              : op.kind === "create_mapping"
-                ? [
-                    {
-                      action: "create_mapping",
-                      supertokens_user_id: op.id,
-                      rownd_user_id: op.alias,
-                    },
-                  ]
                 : op.kind === "verify_email"
                   ? [
-                      {
-                        action: "verify_email",
-                        recipeUserId: op.id,
-                        rownd_user_id: op.id,
-                        email: op.email,
-                      },
-                    ]
+                    {
+                      action: "verify_email",
+                      recipeUserId: op.id,
+                      rownd_user_id: op.id,
+                      email: op.email,
+                    },
+                  ]
                   : [],
   );
   if (pending.length || plan.status !== "COMPLETE")
