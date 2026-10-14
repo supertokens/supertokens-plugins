@@ -74,6 +74,7 @@ import {
   type RowndPendingVerification,
   getCombinedUserMetadata,
   getRawUserMetadata,
+  getPrimaryUserMetadata,
   mergeMissingValues,
   inspectLinkedUserMetadata,
   hasHistoricalEmailEligibility,
@@ -1825,12 +1826,12 @@ export async function updateUserData(
   tenantId: string = PUBLIC_TENANT_ID,
   userContext?: JsonRecord,
 ) {
-  const { primaryUserId } = await updatePrimaryUserMetadata(
+  const { sdkUserId } = await updatePrimaryUserMetadata(
     userId,
     inputData,
     userContext,
   );
-  return getUserById(primaryUserId, tenantId, userContext);
+  return getUserById(sdkUserId, tenantId, userContext);
 }
 
 export function addPendingEmailVerificationMarker(input: {
@@ -1876,13 +1877,13 @@ export async function resolvePendingEmailVerificationToken(input: {
   if (
     !sessionInformation ||
     sessionInformation.sessionHandle !== sessionHandle ||
-    sessionInformation.userId !== sessionUserId ||
+    !(await sdkUserIdMatchesInternalTarget(sessionUserId, sessionInformation.userId, input.userContext ?? {})) ||
     sessionInformation.tenantId !== sessionTenantId
   ) {
     return { status: "INVALID_PENDING" } as const;
   }
 
-  const metadata = await getRawUserMetadata(sessionUserId, input.userContext);
+  const metadata = await getPrimaryUserMetadata(sessionUserId, input.userContext);
   const pendingVerification = getPendingVerifications(metadata).find(
     (verification) =>
       verification.id === input.queryPendingVerificationId &&
@@ -1921,7 +1922,7 @@ export async function startPendingEmailVerification(input: {
   if (!user) {
     throw new RowndPluginError("ROWND_USER_NOT_FOUND");
   }
-  let metadata = await getRawUserMetadata(user.id, input.userContext);
+  let metadata = await getPrimaryUserMetadata(user.id, input.userContext, input.tenantId);
 
   const committingVerifications = getCommittingEmailPlansForTenant(
     metadata,
@@ -1948,7 +1949,7 @@ export async function startPendingEmailVerification(input: {
     if (!user) {
       throw new RowndPluginError("ROWND_USER_NOT_FOUND");
     }
-    metadata = await getRawUserMetadata(user.id, input.userContext);
+    metadata = await getPrimaryUserMetadata(user.id, input.userContext);
     const refreshedInitiatingLoginMethod = user.loginMethods.find(
       (method) =>
         method.recipeUserId.getAsString() ===
@@ -2193,7 +2194,7 @@ export async function completePendingEmailVerification(input: {
       "email change session is no longer active; start the email change again",
     );
   }
-  const metadata = await getRawUserMetadata(userId, input.userContext);
+  const metadata = await getPrimaryUserMetadata(userId, input.userContext);
   const pendingVerifications = getPendingVerifications(metadata);
   const normalizedEmail = normalizeEmail(input.email);
   const pendingVerification = pendingVerifications.find(
@@ -2278,7 +2279,7 @@ export async function completePendingEmailVerification(input: {
     );
     if (
       !initiatingSession ||
-      initiatingSession.userId !== userId ||
+      !(await sdkUserIdMatchesInternalTarget(userId, initiatingSession.userId, userContext)) ||
       initiatingSession.tenantId !== tenantId
     ) {
       return rejectInactivePendingEmailVerification(
@@ -2290,10 +2291,18 @@ export async function completePendingEmailVerification(input: {
       );
     }
     const currentUser = await SuperTokens.getUser(userId, input.userContext);
+    // Session information contains literal Core IDs; the SDK user graph exposes
+    // mapped recipe IDs. Compare the same namespace without accepting another owner.
+    const initiatingRecipeMapping = await SuperTokens.getUserIdMapping({
+      userId: initiatingSession.recipeUserId.getAsString(),
+      userIdType: "SUPERTOKENS",
+      userContext: input.userContext,
+    });
+    const initiatingRecipeId = initiatingRecipeMapping.status === "OK"
+      ? initiatingRecipeMapping.externalUserId : initiatingSession.recipeUserId.getAsString();
     const initiatingLoginMethod = currentUser?.loginMethods.find(
       (method) =>
-        method.recipeUserId.getAsString() ===
-          initiatingSession.recipeUserId.getAsString() &&
+        method.recipeUserId.getAsString() === initiatingRecipeId &&
         method.tenantIds.includes(tenantId),
     );
     if (!currentUser || !initiatingLoginMethod) {
@@ -2352,7 +2361,7 @@ export async function completePendingEmailVerification(input: {
       undefined,
       input.userContext,
     );
-    const committingMetadata = await getRawUserMetadata(
+    const committingMetadata = await getPrimaryUserMetadata(
       userId,
       input.userContext,
     );
@@ -2878,7 +2887,7 @@ async function removePendingEmailVerification(
   tenantId: string,
   userContext?: Record<string, any>,
 ) {
-  const metadata = await getRawUserMetadata(userId, userContext);
+  const metadata = await getPrimaryUserMetadata(userId, userContext);
   await updatePrimaryUserMetadata(
     userId,
     {
@@ -2897,7 +2906,7 @@ async function publishEmailReplacementPlan(
   plan: RowndPendingVerification,
   userContext?: Record<string, any>,
 ) {
-  const metadata = await getRawUserMetadata(userId, userContext);
+  const metadata = await getPrimaryUserMetadata(userId, userContext);
   let found = false;
   const pendingVerifications = getPendingVerifications(metadata).map(
     (verification) => {
@@ -2937,7 +2946,7 @@ async function updateEmailReplacementPlan(
   plan: RowndPendingVerification,
   userContext?: Record<string, any>,
 ) {
-  const metadata = await getRawUserMetadata(userId, userContext);
+  const metadata = await getPrimaryUserMetadata(userId, userContext);
   let found = false;
   const pendingVerifications = getPendingVerifications(metadata).map(
     (verification) => {
@@ -3025,7 +3034,7 @@ async function validateCommittingEmailVerificationPlan(input: {
   expectedEmail: string;
   userContext?: Record<string, any>;
 }) {
-  const metadata = await getRawUserMetadata(input.userId, input.userContext);
+  const metadata = await getPrimaryUserMetadata(input.userId, input.userContext);
   const committingEmailPlans = getCommittingEmailPlansForTenant(
     metadata,
     input.tenantId,
@@ -3191,7 +3200,7 @@ async function reconcileCommittingEmailVerification(input: {
     input.userContext,
   );
 
-  const finalMetadata = await getRawUserMetadata(
+  const finalMetadata = await getPrimaryUserMetadata(
     input.userId,
     input.userContext,
   );
@@ -3659,18 +3668,18 @@ export async function updateUserMetadata(
   inputMeta: JsonRecord,
   userContext?: JsonRecord,
 ) {
-  const { primaryUserId } = await updatePrimaryUserMetadata(
+  const { sdkUserId } = await updatePrimaryUserMetadata(
     userId,
     inputMeta,
     userContext,
   );
   const updatedMetadata = await getCombinedUserMetadata(
-    primaryUserId,
+    sdkUserId,
     userContext,
   );
 
   return {
-    id: primaryUserId,
+    id: sdkUserId,
     meta: Object.fromEntries(
       Object.entries(updatedMetadata).filter(
         ([key]) => !isInternalMetadataField(key),

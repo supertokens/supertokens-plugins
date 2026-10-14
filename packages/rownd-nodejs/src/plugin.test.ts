@@ -60,6 +60,7 @@ import {
 import {
   buildRowndOAuthPayload,
   combineLinkedMetadata,
+  getCombinedUserMetadata,
   doesRowndAccountInfoExist,
   findHistoricalEmailOwner,
   hasHistoricalEmailEligibility,
@@ -11245,7 +11246,7 @@ describe("rownd-nodejs plugin", () => {
           .mockImplementation(async (...input) => {
             const user = await originalGetUser(...input);
             getUserCallCount += 1;
-            return getUserCallCount === 2 && user
+            return getUserCallCount >= 2 && user
               ? { ...user, loginMethods: [] }
               : user;
           });
@@ -12624,9 +12625,13 @@ describe("rownd-nodejs plugin", () => {
           verificationUrl.searchParams.get("rowndPendingVerificationId") ||
           "unused";
 
-        const getUser = vi
-          .spyOn(SuperTokens, "getUser")
-          .mockRejectedValueOnce(new Error("completion crashed"));
+        const originalGetUser = SuperTokens.getUser;
+        const getUser = vi.spyOn(SuperTokens, "getUser").mockImplementation(async (...args) => {
+          if (await EmailVerification.isEmailVerified(initiatingUser.recipeUserId, targetEmail)) {
+            throw new Error("completion crashed");
+          }
+          return originalGetUser(...args);
+        });
         const crashedRes = await verifyEmailToken(
           token,
           initiatingUser.accessToken,
@@ -13745,6 +13750,49 @@ describe("rownd-nodejs plugin", () => {
         );
       });
 
+      it("returns the verified new email and edited name for a migrated mapped Google/passwordless owner", async () => {
+        const emailVerificationLinks: string[] = [];
+        const { server: s, port } = await setup(importCoreConnectionURI, undefined, {
+          enableEmailVerification: true, emailVerificationLinks,
+        });
+        server = s;
+        testPORT = port;
+        const rowndId = `mapped-profile-${randomUUID()}`;
+        const oldEmail = `${randomUUID()}@example.com`;
+        const newEmail = `${randomUUID()}@example.com`;
+        const imported = await importUser({
+          externalUserId: rowndId,
+          userMetadata: { first_name: "Old name", original_rownd_user: { data: { user_id: rowndId, first_name: "Old name", email: oldEmail } } },
+          loginMethods: [
+            { recipeId: "thirdparty", thirdPartyId: "google", thirdPartyUserId: randomUUID(), email: oldEmail, isVerified: true, isPrimary: true },
+            { recipeId: "passwordless", email: oldEmail, isVerified: true },
+          ],
+        }, { connectionURI: importCoreConnectionURI });
+        const session = await Session.createNewSessionWithoutRequestResponse("public",
+          SuperTokens.convertToRecipeUserId(imported.loginMethods[0].recipeUserId), {}, {}, true);
+        expect(session.getUserId()).toBe(rowndId);
+        const accessToken = session.getAccessToken();
+        expect((await requestEmailChange(accessToken, newEmail)).status).toBe(200);
+        const link = new URL(emailVerificationLinks[0]);
+        expect((await getCombinedUserMetadata(rowndId)).rownd_pending_verification).toEqual([
+          expect.objectContaining({ id: link.searchParams.get("rowndPendingVerificationId"), initiatingSessionHandle: session.getHandle() }),
+        ]);
+        const verified = await verifyEmailToken(link.searchParams.get("token")!, accessToken,
+          link.searchParams.get("rowndPendingVerificationId")!);
+        expect(await verified.json()).toEqual({ status: "OK" });
+        const replacementToken = verified.headers.get("st-access-token")!;
+        const read = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
+          headers: getAuthedHeaders(replacementToken),
+        });
+        expect(await read.json()).toMatchObject({ data: { user_id: rowndId, email: newEmail } });
+        const edit = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
+          method: "PUT", headers: { ...getAuthedHeaders(replacementToken), "Content-Type": "application/json" },
+          body: JSON.stringify({ data: { first_name: "New name" } }),
+        });
+        expect(await edit.json()).toMatchObject({ data: { user_id: rowndId, first_name: "New name", email: newEmail } });
+        expect((await getUserById(rowndId)).data).toMatchObject({ first_name: "New name", email: newEmail });
+      });
+
       it("removes only the completed pending email verification", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
@@ -14132,9 +14180,12 @@ describe("rownd-nodejs plugin", () => {
           },
         );
 
-        const metadata = await UserMetadata.getUserMetadata(
-          "metadata-structure-user",
-        );
+        const mapping = await SuperTokens.getUserIdMapping({ userId: "metadata-structure-user", userIdType: "EXTERNAL" });
+        if (mapping.status !== "OK") throw new Error("missing imported mapping");
+        expect((await UserMetadata.getUserMetadata(mapping.superTokensUserId)).metadata).toMatchObject({
+          first_name: "John", custom_field: "custom_value",
+        });
+        const metadata = { metadata: await getCombinedUserMetadata("metadata-structure-user") };
         expect(metadata.metadata).toEqual(
           expect.objectContaining({
             first_name: "John",

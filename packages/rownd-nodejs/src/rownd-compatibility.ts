@@ -29,7 +29,7 @@ import type { JsonRecord, JsonValue } from "./utils";
 import { clearSuperTokensCoreCallCache, getStringList, isJsonRecord } from "./utils";
 import { invalidateReconciliationReads } from "./reconciliation-reads";
 import { readOwnerPlanCheckpoint } from "./migration-owner-plan";
-import { RowndMigrationPolicyError } from "./errors";
+import { RowndEmailChangeError, RowndMigrationPolicyError } from "./errors";
 
 export type RowndMetadata = RowndUserMetadata & JsonRecord;
 
@@ -87,6 +87,7 @@ const IDENTITY_USER_DATA_FIELDS = new Set([
 ]);
 
 const INTERNAL_METADATA_FIELDS = new Set([
+  "rownd_email_metadata_version",
   "rownd_migration_placeholder_provenance_override",
   "original_rownd_user",
   "rownd_email_recipe_user_id",
@@ -108,6 +109,7 @@ const INTERNAL_METADATA_FIELDS = new Set([
 ]);
 
 const LINKED_OPERATIONAL_METADATA_FIELDS = new Set([
+  "rownd_email_metadata_version",
   "rownd_migration_placeholder_provenance_override",
   "rownd_migration_owner_consolidation",
   "rownd_migration_owner_recovery",
@@ -279,6 +281,53 @@ async function getPrimaryUserMapping(
   return externalMapping.status === "OK" ? externalMapping : undefined;
 }
 
+function getMappedEmailPointerFallback(
+  primary: RowndMetadata,
+  alias: RowndMetadata | undefined,
+  user: SuperTokensUser,
+): JsonRecord {
+  // Pointer families are indivisible: a scoped map (even empty) suppresses
+  // legacy scalar fallback. No timestamps exist to resolve populated conflicts.
+  if (!alias || primary.rownd_email_metadata_version !== undefined ||
+    primary.rownd_email_recipe_user_ids !== undefined ||
+    primary.rownd_email_recipe_user_id !== undefined) return {};
+  const ownsMethod = (id: unknown, tenantId?: string) => user.loginMethods.some((method) =>
+    method.recipeUserId.getAsString() === id && method.email && !isSyntheticEmail(method.email) &&
+    (tenantId === undefined || method.tenantIds.includes(tenantId)));
+  if (alias.rownd_email_recipe_user_ids !== undefined) {
+    if (!isJsonRecord(alias.rownd_email_recipe_user_ids)) return {};
+    return { rownd_email_recipe_user_ids: Object.fromEntries(
+      Object.entries(alias.rownd_email_recipe_user_ids).filter(([tenantId, id]) => ownsMethod(id, tenantId)),
+    ) };
+  }
+  return ownsMethod(alias.rownd_email_recipe_user_id)
+    ? { rownd_email_recipe_user_id: alias.rownd_email_recipe_user_id! } : {};
+}
+
+export async function getPrimaryUserMetadata(
+  userId: string,
+  userContext?: Record<string, any>,
+  startingEmailChangeInTenant?: string,
+): Promise<RowndMetadata> {
+  const user = await SuperTokens.getUser(userId, userContext);
+  const mapping = user ? await getPrimaryUserMapping(user.id, userContext) : undefined;
+  const primary = await getRawUserMetadata(mapping?.superTokensUserId ?? user?.id ?? userId, userContext);
+  if (!mapping || !user) return primary;
+  const alias = await getRawUserMetadata(mapping.externalUserId, userContext);
+  if (startingEmailChangeInTenant !== undefined && primary.rownd_email_metadata_version === undefined) {
+    const pending = alias.rownd_pending_verification;
+    // Legacy alias plans have no reliable ordering against internal state. Never
+    // replay destructive cleanup; an operator must resolve ambiguous commits.
+    if (pending !== undefined && (!Array.isArray(pending) || pending.some((plan) =>
+      isJsonRecord(plan) && (plan.tenantId ?? PUBLIC_TENANT_ID) === startingEmailChangeInTenant &&
+      (plan.status === "COMMITTING" || "retiredMethods" in plan || "targetCanonicalRecipeUserId" in plan)))) {
+      throw new RowndEmailChangeError("CONFLICT", 409,
+        "email change cleanup incomplete; account reconciliation is required");
+    }
+  }
+  return { ...primary, ...getMappedEmailPointerFallback(primary, alias, user) } as RowndMetadata;
+}
+
 export async function inspectLinkedUserMetadata(
   userId: string,
   userContext?: Record<string, any>,
@@ -355,13 +404,20 @@ export async function inspectLinkedUserMetadata(
       linkedMetadata.push({ userId: alias.id, metadata });
     }
 
+  const combined = combineLinkedMetadata({
+    primaryUserId,
+    primaryMetadata,
+    linkedMetadata,
+    canonicalRowndUserId: mapping?.externalUserId,
+  });
   return {
-    ...combineLinkedMetadata({
-      primaryUserId,
-      primaryMetadata,
-      linkedMetadata,
-      canonicalRowndUserId: mapping?.externalUserId,
-    }),
+    ...combined,
+    combinedMetadata: {
+      ...combined.combinedMetadata,
+      ...getMappedEmailPointerFallback(primaryMetadata,
+        mapping ? linkedMetadata.find(({ userId }) => userId === mapping.externalUserId)?.metadata : undefined,
+        user),
+    } as RowndMetadata,
     user,
   };
 }
@@ -380,15 +436,27 @@ export async function updatePrimaryUserMetadata(
   userContext?: Record<string, any>,
 ) {
   const user = await SuperTokens.getUser(userId, userContext);
-  const primaryUserId = user?.id ?? userId;
+  const mapping = user ? await getPrimaryUserMapping(user.id, userContext) : undefined;
+  const primaryUserId = mapping?.superTokensUserId ?? user?.id ?? userId;
+  const updatesEmailState = ["rownd_pending_verification", "rownd_email_recipe_user_ids", "rownd_email_recipe_user_id"]
+    .some((key) => Object.prototype.hasOwnProperty.call(metadataUpdate, key));
+  let pointerFallback: JsonRecord = {};
+  if (mapping && user && updatesEmailState) {
+    pointerFallback = getMappedEmailPointerFallback(
+      await getRawUserMetadata(primaryUserId, userContext),
+      await getRawUserMetadata(mapping.externalUserId, userContext), user);
+  }
   const result = await UserMetadata.updateUserMetadata(
     primaryUserId,
-    metadataUpdate as JSONObject,
+    { ...pointerFallback, ...metadataUpdate,
+      ...(updatesEmailState ? { rownd_email_metadata_version: 1 } : {}),
+    } as JSONObject,
     userContext,
   );
 
   return {
     primaryUserId,
+    sdkUserId: user?.id ?? userId,
     metadata: result.metadata as RowndMetadata,
   };
 }
