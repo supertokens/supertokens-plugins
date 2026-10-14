@@ -16,6 +16,7 @@ import {
   buildRowndUserMetadata,
   combineLinkedMetadata,
   getRawUserMetadata,
+  getAuthoritativeProfileFields,
   inspectLinkedUserMetadata,
   isInternalMetadataField,
 } from "./rownd-compatibility";
@@ -77,6 +78,7 @@ export async function inspectAdministrativeMetadataBackfill(
   // values, including null and opaque objects, always take precedence.
   const latestPrimary = await getRawUserMetadata(internalUserId, userContext);
   for (const field of Object.keys(latestPrimary)) occupied.add(field);
+  for (const field of getAuthoritativeProfileFields(latestPrimary)) occupied.add(field);
   // Core's patch API treats null as deletion; an absent null needs no addition.
   const mapped = buildRowndUserMetadata(profile);
   const patch = Object.fromEntries(
@@ -159,6 +161,9 @@ export async function getPublicMetadataPublicationValues(input: MetadataBackfill
     ...combinedMetadata,
     ...inspection.primaryMetadata,
   };
+  for (const field of getAuthoritativeProfileFields(inspection.primaryMetadata)) {
+    if (inspection.primaryMetadata[field] === undefined) delete available[field];
+  }
   return Object.fromEntries(Object.entries(available).filter(([field, value]) =>
     !isInternalMetadataField(field) && value !== undefined && value !== null));
 }

@@ -4,7 +4,7 @@ import {
   getRawUserMetadata,
   isInternalMetadataField,
   mapRowndUserToSuperTokens,
-  mergeMissingValues,
+  mergeMissingProfileMetadata,
 } from "./rownd-compatibility";
 import { fetchOptionalRowndUserInfo } from "./rownd-repository";
 import { migrationTelemetry } from "./telemetry/migrationTelemetry";
@@ -368,7 +368,7 @@ export async function retireDuplicateMapping(input: {
   await UserMetadata.updateUserMetadata(
     ownerInternalId,
     {
-      ...mergeMissingValues(ownerMetadata, contactProof
+      ...mergeMissingProfileMetadata(ownerMetadata, contactProof
         ? Object.fromEntries(Object.entries(duplicateMetadata).filter(([key]) => !isInternalMetadataField(key)))
         : duplicateMetadata),
       rownd_migration_reconciliation: {

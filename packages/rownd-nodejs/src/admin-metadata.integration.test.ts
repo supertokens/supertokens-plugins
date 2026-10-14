@@ -25,7 +25,7 @@ import { reconcileUser } from "./reconcile-user";
 import { fetchAdministrativeMigrationSource } from "./migration-email";
 import { backfillAdministrativeMetadata, inspectAdministrativeMetadataBackfill, publishPublicMetadata } from "./migration-admin-metadata";
 import { buildRowndUserMetadata, getRawUserMetadata, mapRowndUserToSuperTokens } from "./rownd-compatibility";
-import { importUser, reconcileRowndUserWithExistingLoginMethods } from "./supertokens-repository";
+import { getUserById, importUser, reconcileRowndUserWithExistingLoginMethods, updateUserData, updateUserMetadata } from "./supertokens-repository";
 import type { RowndUser, SuperTokensUserImport } from "./types";
 import type { JsonRecord } from "./utils";
 
@@ -152,6 +152,26 @@ describe("administrative custom metadata backfill", { timeout: 60000, sequential
     writes.mockClear();
     expect(await fixture.run()).toMatchObject({ status: "OK", changed: false, actions: [] });
     expect(writes).not.toHaveBeenCalled();
+  });
+
+  it("preserves explicit profile deletions and replacements across administrative backfill", async () => {
+    const fixture = await seed();
+    fixture.profile.data.first_name = "Historical";
+    fixture.profile.meta = { preference: "Historical", settings: { removed: true } };
+    await UserMetadata.updateUserMetadata(fixture.internalId, { original_rownd_user: fixture.profile });
+    await UserMetadata.updateUserMetadata(fixture.alias, { preference: "Alias", settings: { removed: true } });
+    expect((await updateUserData(fixture.alias, { first_name: null })).data.first_name).toBeUndefined();
+    expect((await updateUserMetadata(fixture.alias, { preference: null, settings: { nested: null } })).meta)
+      .toEqual({ settings: { nested: null } });
+    expect(await fixture.run()).toMatchObject({ status: "OK" });
+    expect((await getUserById(fixture.alias)).data.first_name).toBeUndefined();
+    const internal = (await UserMetadata.getUserMetadata(fixture.internalId)).metadata;
+    expect(internal.preference).toBeUndefined();
+    expect(internal.settings).toEqual({ nested: null });
+    const published = (await UserMetadata.getUserMetadata(fixture.alias)).metadata;
+    expect(published.first_name).toBeUndefined();
+    expect(published.rownd_profile_authoritative_fields).toBeUndefined();
+    expect((await updateUserMetadata(fixture.alias, { preference: "Restored" })).meta.preference).toBe("Restored");
   });
 
   it("preserves public edits and opaque values while excluding internal migration state", async () => {

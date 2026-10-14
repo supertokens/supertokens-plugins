@@ -4,7 +4,7 @@ import UserMetadata from "supertokens-node/recipe/usermetadata";
 import EmailVerification from "supertokens-node/recipe/emailverification";
 import Session from "supertokens-node/recipe/session";
 import MultiTenancy from "supertokens-node/recipe/multitenancy";
-import { getCombinedUserMetadata, updatePrimaryUserMetadata } from "./rownd-compatibility";
+import { buildConfiguredSessionClaims, buildRowndUserMetadata, getCombinedUserMetadata, updatePrimaryUserMetadata } from "./rownd-compatibility";
 import { getUserById, resolvePendingEmailVerificationToken, startPendingEmailVerification, updateUserData, updateUserMetadata } from "./supertokens-repository";
 import type { JsonRecord } from "./utils";
 
@@ -82,6 +82,76 @@ describe("mapped profile metadata", () => {
     expect(await updateUserMetadata(externalId, { preference: "new" })).toMatchObject({
       id: externalId, meta: { preference: "new" },
     });
+  });
+
+  it("does not restore deleted fields or replaced nested values from the alias", async () => {
+    records.set(externalId, { preference: "old", settings: { keep: true, removed: true } });
+    const result = await updateUserMetadata(externalId, { preference: null, settings: { keep: false } });
+    expect(result.meta.preference).toBeUndefined();
+    expect(result.meta.settings).toEqual({ keep: false });
+    expect((await getCombinedUserMetadata(externalId)).preference).toBeUndefined();
+  });
+
+  it("does not restore a deleted profile name from the original Rownd snapshot", async () => {
+    records.set(externalId, { first_name: "Alias name" });
+    expect((await updateUserData(externalId, { first_name: null })).data.first_name).toBeUndefined();
+    expect((await getUserById(externalId)).data.first_name).toBeUndefined();
+  });
+
+  it.each([true, false])("retains deletions and whole-object replacements through subsequent edits (mapped=%s)", async (isMapped) => {
+    mapped = isMapped;
+    const id = mapped ? externalId : ownerId;
+    records.set("passwordless", { preference: "old", settings: { removed: true }, first_name: "Alias" });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await updateUserMetadata(id, { preference: null, settings: { nested: null } });
+      await updateUserData(id, { first_name: null });
+      await updateUserMetadata(id, { unrelated: attempt });
+      const metadata = await getCombinedUserMetadata(id);
+      expect(metadata.preference).toBeUndefined();
+      expect(metadata.settings).toEqual({ nested: null });
+      expect((await getUserById(id)).data.first_name).toBeUndefined();
+    }
+    expect((await updateUserMetadata(id, { preference: "new", settings: {} })).meta).toMatchObject({ preference: "new", settings: {} });
+    expect((await updateUserData(id, { first_name: "Restored" })).data.first_name).toBe("Restored");
+    expect((await updateUserMetadata(id, { preference: "overwritten" })).meta.preference).toBe("overwritten");
+    const profile = await getUserById(id);
+    expect(profile.meta.preference).toBe("overwritten");
+    expect(profile.data.preference).toBeUndefined();
+  });
+
+  it("keeps field authority private and ignores alias and caller-supplied markers", async () => {
+    records.set(externalId, { rownd_profile_authoritative_fields: ["preference"], preference: "fallback" });
+    expect((await getCombinedUserMetadata(externalId)).rownd_profile_authoritative_fields).toBeUndefined();
+    await updateUserMetadata(externalId, { preference: null });
+    const response = await updateUserMetadata(externalId, { rownd_profile_authoritative_fields: null });
+    expect(response.meta.preference).toBeUndefined();
+    expect(response.meta.rownd_profile_authoritative_fields).toBeUndefined();
+    const profile = await getUserById(externalId);
+    expect(profile.data.rownd_profile_authoritative_fields).toBeUndefined();
+    expect(profile.meta.rownd_profile_authoritative_fields).toBeUndefined();
+  });
+
+  it("does not establish profile authority for operational writes carrying fallback data", async () => {
+    records.set(externalId, { settings: { legacy: true } });
+    await updatePrimaryUserMetadata(externalId, { settings: { current: true }, rownd_pending_verification: [] });
+    expect((await getCombinedUserMetadata(externalId)).settings).toEqual({ current: true, legacy: true });
+    expect(records.get(ownerId)?.rownd_profile_authoritative_fields).toBeUndefined();
+  });
+
+  it("applies profile authority to session claims and excludes reserved schema/import fields", async () => {
+    await updateUserData(externalId, { first_name: null });
+    const config = { schema: {
+      first_name: { include_in_session_claims: true },
+      rownd_profile_authoritative_fields: { include_in_session_claims: true },
+    } } as any;
+    expect(buildConfiguredSessionClaims(await getCombinedUserMetadata(externalId), config)).toEqual({});
+    await updateUserData(externalId, { first_name: "Current" });
+    expect(buildConfiguredSessionClaims(await getCombinedUserMetadata(externalId), config)).toEqual({ first_name: "Current" });
+    const imported = buildRowndUserMetadata({
+      data: { user_id: "source", rownd_profile_authoritative_fields: ["first_name"] },
+      meta: { rownd_profile_authoritative_fields: ["settings"] },
+    });
+    expect(imported.rownd_profile_authoritative_fields).toBeUndefined();
   });
 
   it.each([true, false])("returns the owner identity when editing through a linked recipe (mapped=%s)", async (isMapped) => {

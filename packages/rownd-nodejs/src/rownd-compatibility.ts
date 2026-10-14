@@ -87,6 +87,7 @@ const IDENTITY_USER_DATA_FIELDS = new Set([
 ]);
 
 const INTERNAL_METADATA_FIELDS = new Set([
+  "rownd_profile_authoritative_fields",
   "rownd_email_metadata_version",
   "rownd_migration_placeholder_provenance_override",
   "original_rownd_user",
@@ -109,6 +110,7 @@ const INTERNAL_METADATA_FIELDS = new Set([
 ]);
 
 const LINKED_OPERATIONAL_METADATA_FIELDS = new Set([
+  "rownd_profile_authoritative_fields",
   "rownd_email_metadata_version",
   "rownd_migration_placeholder_provenance_override",
   "rownd_migration_owner_consolidation",
@@ -165,6 +167,7 @@ export function combineLinkedMetadata(input: {
   linkedMetadata: Array<{ userId: string; metadata: RowndMetadata }>;
   canonicalRowndUserId?: string;
 }): LinkedUserMetadataInspection {
+  const authoritativeFields = new Set(getAuthoritativeProfileFields(input.primaryMetadata));
   const linkedMetadata = [...input.linkedMetadata].sort((a, b) => {
     const aMatchesCanonical =
       input.canonicalRowndUserId !== undefined &&
@@ -197,7 +200,7 @@ export function combineLinkedMetadata(input: {
     : {};
   for (const { metadata } of linkedMetadata) {
     for (const [key, value] of Object.entries(metadata)) {
-      if (LINKED_OPERATIONAL_METADATA_FIELDS.has(key)) {
+      if (LINKED_OPERATIONAL_METADATA_FIELDS.has(key) || authoritativeFields.has(key)) {
         continue;
       }
       if (
@@ -434,10 +437,23 @@ export async function updatePrimaryUserMetadata(
   userId: string,
   metadataUpdate: JsonRecord,
   userContext?: Record<string, any>,
+  profileUpdate = false,
 ) {
   const user = await SuperTokens.getUser(userId, userContext);
   const mapping = user ? await getPrimaryUserMapping(user.id, userContext) : undefined;
   const primaryUserId = mapping?.superTokensUserId ?? user?.id ?? userId;
+  // Only explicit profile edits establish authority. Operational writes often
+  // carry combined metadata and must not freeze incidental fallback values.
+  const profileFields = profileUpdate
+    ? Object.keys(metadataUpdate).filter((key) => !isInternalMetadataField(key) && !isIdentityField(key))
+    : [];
+  const profileAuthority = profileFields.length ? {
+    rownd_profile_authoritative_fields: [...new Set([
+      ...getAuthoritativeProfileFields(await getRawUserMetadata(primaryUserId, userContext)),
+      ...profileFields,
+    ])],
+  } : {};
+  const { rownd_profile_authoritative_fields: _reserved, ...updates } = metadataUpdate;
   const updatesEmailState = ["rownd_pending_verification", "rownd_email_recipe_user_ids", "rownd_email_recipe_user_id"]
     .some((key) => Object.prototype.hasOwnProperty.call(metadataUpdate, key));
   let pointerFallback: JsonRecord = {};
@@ -448,7 +464,7 @@ export async function updatePrimaryUserMetadata(
   }
   const result = await UserMetadata.updateUserMetadata(
     primaryUserId,
-    { ...pointerFallback, ...metadataUpdate,
+    { ...pointerFallback, ...updates, ...profileAuthority,
       ...(updatesEmailState ? { rownd_email_metadata_version: 1 } : {}),
     } as JSONObject,
     userContext,
@@ -483,6 +499,29 @@ export function isIdentityField(field: string) {
 
 export function isInternalMetadataField(field: string) {
   return INTERNAL_METADATA_FIELDS.has(field);
+}
+
+export function getAuthoritativeProfileFields(metadata: JsonRecord): string[] {
+  return getStringList(metadata.rownd_profile_authoritative_fields)
+    .filter((key) => !isInternalMetadataField(key) && !isIdentityField(key));
+}
+
+export function mergeMissingProfileMetadata(primary: JsonRecord, secondary: JsonRecord): JsonRecord {
+  const authoritativeFields = new Set(getAuthoritativeProfileFields(primary));
+  return mergeMissingValues(primary, Object.fromEntries(Object.entries(secondary).filter(([key]) =>
+    key !== "rownd_profile_authoritative_fields" && !authoritativeFields.has(key))));
+}
+
+export function getRowndProfileData(metadata: RowndMetadata): JsonRecord {
+  const data: JsonRecord = { ...metadata.original_rownd_user?.data };
+  // An absent authoritative value is a Core top-level deletion. Objects are
+  // replaced whole, including nested nulls, rather than recursively merged.
+  for (const key of getAuthoritativeProfileFields(metadata)) {
+    if (!Object.prototype.hasOwnProperty.call(data, key)) continue;
+    if (metadata[key] === undefined) delete data[key];
+    else data[key] = metadata[key];
+  }
+  return data;
 }
 
 export function mapRowndUserToSuperTokens(
@@ -621,7 +660,7 @@ export function buildConfiguredSessionClaims(
   const claims: JsonRecord = {};
 
   for (const [key, field] of Object.entries(schema)) {
-    if (field.include_in_session_claims !== true) {
+    if (field.include_in_session_claims !== true || isInternalMetadataField(key)) {
       continue;
     }
 
@@ -629,7 +668,7 @@ export function buildConfiguredSessionClaims(
     if (RESERVED_SESSION_CLAIMS.has(claimName)) {
       continue;
     }
-    const value = metadata.original_rownd_user?.data?.[key] ?? metadata[key];
+    const value = getRowndProfileData(metadata)[key] ?? metadata[key];
     if (value !== undefined) {
       claims[claimName] = value as JsonValue;
     }
@@ -850,9 +889,7 @@ function buildStandardOAuthClaims(
   metadata: RowndMetadata,
 ) {
   const claims: JsonRecord = {};
-  const rowndData = isJsonRecord(metadata.original_rownd_user?.data)
-    ? metadata.original_rownd_user.data
-    : ({} as JsonRecord);
+  const rowndData = getRowndProfileData(metadata);
   const verifiedData = isJsonRecord(metadata.original_rownd_user?.verified_data)
     ? metadata.original_rownd_user.verified_data
     : ({} as JsonRecord);

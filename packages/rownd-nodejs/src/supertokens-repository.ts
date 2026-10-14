@@ -75,13 +75,15 @@ import {
   getCombinedUserMetadata,
   getRawUserMetadata,
   getPrimaryUserMetadata,
-  mergeMissingValues,
+  mergeMissingProfileMetadata,
   inspectLinkedUserMetadata,
   hasHistoricalEmailEligibility,
   type PasswordlessAuthSnapshot,
   getHistoricalPasswordlessScope,
   validateHistoricalPasswordlessOwner,
   updatePrimaryUserMetadata,
+  getRowndProfileData,
+  getAuthoritativeProfileFields,
 } from "./rownd-compatibility";
 import {
   assertAllowedBypassRedirectPath,
@@ -1240,7 +1242,7 @@ async function reconcileRowndUserOnce(
     const administrativeProfile = isAdministrativeMigration(stUser, tenantId) ? await assertAuthenticatedMigrationSource(stUser, tenantId) : undefined;
     await UserMetadata.updateUserMetadata(primaryUserId, {
       ...(!repairUser ? administrativeProfile ? { original_rownd_user: administrativeProfile } : {
-        ...mergeMissingValues(currentMetadata, stUser.userMetadata),
+        ...mergeMissingProfileMetadata(currentMetadata, stUser.userMetadata),
         original_rownd_user: stUser.userMetadata.original_rownd_user,
       } : {}),
       rownd_migration_complete: true,
@@ -1579,8 +1581,8 @@ export async function getUserById(
     user_id: userId,
   };
 
-  for (const [key, value] of Object.entries(originalRowndUser?.data || {})) {
-    if (!isIdentityField(key)) {
+  for (const [key, value] of Object.entries(getRowndProfileData(metadata))) {
+    if (!isIdentityField(key) && !isInternalMetadataField(key)) {
       data[key] = value;
       dataFieldKeys.add(key);
     }
@@ -1707,7 +1709,8 @@ export async function getUserById(
   );
 
   for (const [key, field] of Object.entries(schema)) {
-    if (data[key] === undefined && field.type === "string") {
+    if (data[key] === undefined && field.type === "string" &&
+      !isInternalMetadataField(key) && !getAuthoritativeProfileFields(metadata).includes(key)) {
       data[key] = "";
     }
   }
@@ -1830,6 +1833,7 @@ export async function updateUserData(
     userId,
     inputData,
     userContext,
+    true,
   );
   return getUserById(sdkUserId, tenantId, userContext);
 }
@@ -3672,6 +3676,7 @@ export async function updateUserMetadata(
     userId,
     inputMeta,
     userContext,
+    true,
   );
   const updatedMetadata = await getCombinedUserMetadata(
     sdkUserId,

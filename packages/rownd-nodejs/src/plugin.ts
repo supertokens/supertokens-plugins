@@ -148,6 +148,7 @@ function getRowndPasswordlessRequestContextValues(
     rowndClientDomain: clientDomain,
     rowndAppVariantId: appVariantId,
     rowndOAuthLoginChallenge: oauthLoginChallenge,
+    rowndReauthenticate: req.getKeyValueFromQuery("rownd_reauthenticate") === "true",
   };
 }
 
@@ -230,6 +231,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
             : {}),
           ...(authIntent === "sign_in" || authIntent === "sign_up"
             ? { rowndAuthIntent: authIntent }
+            : {}),
+          ...(input?.userContext?.rowndReauthenticate === true
+            ? { rowndReauthenticate: "true" }
             : {}),
           ...additionalParams,
         };
