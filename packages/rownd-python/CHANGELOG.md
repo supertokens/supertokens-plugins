@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-python
 
+## 1.0.2
+
+### Patch Changes
+
+- Secure email updates and recover credential retirement
+
 ## Unreleased
 
 - Add typed email-change reauthentication errors, optional owner/tenant retry preconditions, and nullable request-local freshness policy on existing profile PUT routes.
