@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 1.0.4
+
+### Patch Changes
+
+- Guard email change retries
+
 ## 1.0.3
 
 ### Patch Changes
