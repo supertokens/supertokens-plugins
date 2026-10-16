@@ -486,14 +486,23 @@ async def handle_get_user(
     session: Optional[SessionContainer],
     response: BaseResponse,
     user_context: UserContext,
+    request: Optional[BaseRequest] = None,
 ) -> BaseResponse:
     session = require_session(session)
-    user = await repository.get_rownd_compat_user(
-        session.get_user_id(user_context),
-        config,
-        session.get_tenant_id(user_context),
-        user_context=user_context,
+    config = await rownd_config.resolve_plugin_config_snapshot(
+        config, session.get_tenant_id(user_context), request, user_context
     )
+    if request is not None:
+        rownd_config.assert_app_variant_is_configured(
+            config, utils.get_requested_app_variant_id_from_request(request)
+        )
+    with rownd_config.bind_request_config(config):
+        user = await repository.get_rownd_compat_user(
+            session.get_user_id(user_context),
+            config,
+            session.get_tenant_id(user_context),
+            user_context=user_context,
+        )
     return utils.json_response(response, {"status": "OK", **user})
 
 
@@ -519,8 +528,10 @@ async def validate_email_change_session(
         return {"status": "ERROR", "code": 403, "message": "email sign-in is not enabled"}
     if not is_recipe_initialized("passwordless") or not is_recipe_initialized("emailverification"):
         return {"status": "ERROR", "code": 503, "message": "email sign-in is not available"}
-    session_age_ms = time.time() * 1000 - await session.get_time_created(user_context)
     max_session_age = config.email_change.get("max_session_age_seconds", 600)
+    if max_session_age is None:
+        return None
+    session_age_ms = time.time() * 1000 - await session.get_time_created(user_context)
     if session_age_ms > cast(float, max_session_age) * 1000:
         return recent_authentication_required_response()
     return None
@@ -530,6 +541,7 @@ def recent_authentication_required_response() -> JsonDict:
     return {
         "status": "ERROR",
         "code": 403,
+        "error_code": "EMAIL_CHANGE_REAUTHENTICATION_REQUIRED",
         "message": "recent authentication is required to change email",
     }
 
@@ -553,6 +565,43 @@ async def _validate_email_change(
     return True, await validate_email_change_session(config, session, app_variant_id, context)
 
 
+async def validate_expected_profile_owner(
+    request: BaseRequest,
+    session: SessionContainer,
+    context: JsonDict,
+    user_context: UserContext,
+) -> Optional[JsonDict]:
+    tenant_id = session.get_tenant_id(user_context)
+    query_tenant = request.get_query_param("tenantId")
+    mismatch = query_tenant is not None and query_tenant != tenant_id
+    if "rowndExpectedUserId" in context or "rowndExpectedTenantId" in context:
+        expected = context.get("rowndExpectedUserId")
+        expected_tenant = context.get("rowndExpectedTenantId")
+        if not isinstance(expected, str) or not expected.strip():
+            mismatch = True
+        else:
+            owner = await repository.get_internal_primary_user_id(
+                session.get_user_id(user_context), user_context
+            )
+            expected_owner = await repository.get_internal_primary_user_id(expected, user_context)
+            mismatch = mismatch or owner is None or expected_owner != owner
+        if "rowndExpectedTenantId" in context:
+            mismatch = (
+                mismatch
+                or not isinstance(expected_tenant, str)
+                or not expected_tenant
+                or expected_tenant != tenant_id
+            )
+    if mismatch:
+        return {
+            "status": "ERROR",
+            "code": 409,
+            "error_code": "EMAIL_CHANGE_ACCOUNT_MISMATCH",
+            "message": "Sign in to the account where you started this change.",
+        }
+    return None
+
+
 async def handle_update_user(
     config: RowndPluginConfig,
     request: BaseRequest,
@@ -561,9 +610,30 @@ async def handle_update_user(
     user_context: UserContext,
 ) -> BaseResponse:
     session = require_session(session)
+    body = await utils.get_json_body(request)
+    error = await validate_expected_profile_owner(
+        request, session, rownd_config.as_json_dict(body.get("context")), user_context
+    )
+    if error:
+        return utils.json_response(response, error, 409)
+    config = await rownd_config.resolve_plugin_config_snapshot(
+        config, session.get_tenant_id(user_context), request, user_context
+    )
+    with rownd_config.bind_request_config(config):
+        return await _handle_update_user(config, request, response, session, user_context, body)
+
+
+async def _handle_update_user(
+    config: RowndPluginConfig,
+    request: BaseRequest,
+    response: BaseResponse,
+    session: Optional[SessionContainer],
+    user_context: UserContext,
+    body: JsonDict,
+) -> BaseResponse:
+    session = require_session(session)
     app_variant_id = utils.get_requested_app_variant_id_from_request(request)
     rownd_config.assert_app_variant_is_configured(config, app_variant_id)
-    body = await utils.get_json_body(request)
     data = rownd_config.as_json_dict(body.get("data"))
     email = data.get("email")
     if "email" in data and (not isinstance(email, str) or not email.strip()):
@@ -573,9 +643,7 @@ async def handle_update_user(
             400,
         )
     data_without_email = {key: value for key, value in data.items() if key != "email"}
-    permission_error = compatibility.validate_writable_fields(
-        config, list(data_without_email.keys())
-    )
+    permission_error = compatibility.validate_writable_fields(config, list(data.keys()))
     if permission_error:
         code = permission_error.get("code")
         return utils.json_response(
@@ -697,12 +765,19 @@ async def handle_get_user_field(
     field_name = request.get_query_param("field")
     if not field_name:
         return utils.json_response(response, compatibility.missing_field_response(), 400)
-    user = await repository.get_rownd_compat_user(
-        session.get_user_id(user_context),
-        config,
-        session.get_tenant_id(user_context),
-        user_context=user_context,
+    config = await rownd_config.resolve_plugin_config_snapshot(
+        config, session.get_tenant_id(user_context), request, user_context
     )
+    rownd_config.assert_app_variant_is_configured(
+        config, utils.get_requested_app_variant_id_from_request(request)
+    )
+    with rownd_config.bind_request_config(config):
+        user = await repository.get_rownd_compat_user(
+            session.get_user_id(user_context),
+            config,
+            session.get_tenant_id(user_context),
+            user_context=user_context,
+        )
     return utils.json_response(
         response,
         {"status": "OK", "value": rownd_config.as_json_dict(user.get("data")).get(field_name)},
@@ -717,13 +792,42 @@ async def handle_update_user_field(
     user_context: UserContext,
 ) -> BaseResponse:
     session = require_session(session)
+    body = await utils.get_json_body(request)
+    error = await validate_expected_profile_owner(
+        request, session, rownd_config.as_json_dict(body.get("context")), user_context
+    )
+    if error:
+        return utils.json_response(response, error, 409)
+    config = await rownd_config.resolve_plugin_config_snapshot(
+        config, session.get_tenant_id(user_context), request, user_context
+    )
+    with rownd_config.bind_request_config(config):
+        return await _handle_update_user_field(
+            config, request, response, session, user_context, body
+        )
+
+
+async def _handle_update_user_field(
+    config: RowndPluginConfig,
+    request: BaseRequest,
+    response: BaseResponse,
+    session: Optional[SessionContainer],
+    user_context: UserContext,
+    body: JsonDict,
+) -> BaseResponse:
+    session = require_session(session)
     field_name = request.get_query_param("field")
     if not field_name:
         return utils.json_response(response, compatibility.missing_field_response(), 400)
     app_variant_id = utils.get_requested_app_variant_id_from_request(request)
     rownd_config.assert_app_variant_is_configured(config, app_variant_id)
-    body = await utils.get_json_body(request)
     value = body.get("value")
+    permission_error = compatibility.validate_writable_fields(config, [field_name])
+    if permission_error:
+        code = permission_error.get("code")
+        return utils.json_response(
+            response, permission_error, code if isinstance(code, int) else 400
+        )
     if field_name == "email":
         if not isinstance(value, str) or not value.strip():
             return utils.json_response(
@@ -756,12 +860,6 @@ async def handle_update_user_field(
                 {"status": "ERROR", "code": error.http_status, "message": str(error)},
                 error.http_status,
             )
-    permission_error = compatibility.validate_writable_fields(config, [field_name])
-    if permission_error:
-        code = permission_error.get("code")
-        return utils.json_response(
-            response, permission_error, code if isinstance(code, int) else 400
-        )
     user = await repository.update_user_data(
         config,
         session.get_user_id(user_context),

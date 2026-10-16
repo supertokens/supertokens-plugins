@@ -45,6 +45,7 @@ from supertokens_python.recipe.emailverification import (
 )
 from supertokens_python.recipe.multitenancy import asyncio as multitenancy_asyncio
 from supertokens_python.recipe.passwordless import asyncio as passwordless_asyncio
+from supertokens_python.recipe.passwordless.interfaces import RevokeAllCodesOkResult
 from supertokens_python.recipe.session import SessionContainer
 from supertokens_python.recipe.session import asyncio as session_asyncio
 from supertokens_python.recipe.thirdparty import asyncio as thirdparty_asyncio
@@ -88,7 +89,11 @@ from .migration_authority import (
     assert_source_not_superseded,
     has_authenticated_source,
 )
-from .session_authentication import proven_session_authentication
+from .session_authentication import (
+    assert_email_change_session_claims,
+    proven_session_authentication,
+    verified_email_change_destination,
+)
 from . import rownd_compatibility
 from .migration import (
     CanonicalEmailPointerState,
@@ -1120,9 +1125,14 @@ def combine_linked_metadata(
         else None
     )
     metadata_update: JsonDict = {}
+    authoritative_fields = rownd_compatibility.get_authoritative_profile_fields(primary_metadata)
     for _, metadata in ordered:
         for key, value in metadata.items():
-            if key in _LINKED_OPERATIONAL_METADATA_FIELDS or key == "original_rownd_user":
+            if (
+                key in _LINKED_OPERATIONAL_METADATA_FIELDS
+                or key == "original_rownd_user"
+                or key in authoritative_fields
+            ):
                 continue
             current = metadata_update[key] if key in metadata_update else primary_metadata.get(key)
             if key not in metadata_update and key not in primary_metadata:
@@ -1206,6 +1216,15 @@ def combine_linked_metadata(
     }
 
 
+async def get_internal_primary_user_id(user_id: str, user_context: UserContext) -> Optional[str]:
+    clear_supertokens_core_call_cache(user_context)
+    user = await get_user(user_id, user_context)
+    if user is None:
+        return None
+    mapping = await get_primary_user_mapping(user.id, user_context)
+    return mapping.supertokens_user_id if mapping else user.id
+
+
 async def get_primary_user_mapping(
     user_id: str, user_context: Optional[UserContext] = None
 ) -> Optional[GetUserIdMappingOkResult]:
@@ -1215,6 +1234,71 @@ async def get_primary_user_mapping(
         return internal
     external = await get_user_id_mapping(user_id, "EXTERNAL", context)
     return external if isinstance(external, GetUserIdMappingOkResult) else None
+
+
+def get_mapped_email_pointer_fallback(primary: JsonDict, alias: JsonDict, user: User) -> JsonDict:
+    if any(
+        key in primary
+        for key in (
+            "rownd_email_metadata_version",
+            "rownd_email_recipe_user_ids",
+            "rownd_email_recipe_user_id",
+        )
+    ):
+        return {}
+
+    def owns_method(value: object, tenant_id: Optional[str] = None) -> bool:
+        return any(
+            method.recipe_user_id.get_as_string() == value
+            and method.email
+            and not rownd_compatibility.is_supertokens_fake_email(method.email)
+            and (tenant_id is None or tenant_id in method.tenant_ids)
+            for method in user.login_methods
+        )
+
+    if "rownd_email_recipe_user_ids" in alias:
+        scoped = alias["rownd_email_recipe_user_ids"]
+        if not isinstance(scoped, dict):
+            return {}
+        return {
+            "rownd_email_recipe_user_ids": {
+                tenant: value for tenant, value in scoped.items() if owns_method(value, tenant)
+            }
+        }
+    scalar = alias.get("rownd_email_recipe_user_id")
+    return {"rownd_email_recipe_user_id": scalar} if owns_method(scalar) else {}
+
+
+async def get_primary_email_metadata(
+    user: User,
+    user_context: Optional[UserContext],
+    starting_tenant: Optional[str] = None,
+) -> JsonDict:
+    mapping = await get_primary_user_mapping(user.id, user_context)
+    primary = await get_raw_user_metadata(
+        mapping.supertokens_user_id if mapping else user.id, user_context
+    )
+    if mapping is None:
+        return primary
+    alias = await get_raw_user_metadata(mapping.external_user_id, user_context)
+    if starting_tenant is not None and "rownd_email_metadata_version" not in primary:
+        pending = alias.get("rownd_pending_verification", [])
+        if not isinstance(pending, list) or any(
+            isinstance(plan, dict)
+            and plan.get("tenantId", PUBLIC_TENANT_ID) == starting_tenant
+            and (
+                plan.get("status") == "COMMITTING"
+                or "retiredMethods" in plan
+                or "targetCanonicalRecipeUserId" in plan
+            )
+            for plan in pending
+        ):
+            raise RowndEmailChangeError(
+                "CONFLICT",
+                409,
+                "email change cleanup incomplete; account reconciliation is required",
+            )
+    return {**primary, **get_mapped_email_pointer_fallback(primary, alias, user)}
 
 
 async def inspect_linked_user_metadata(
@@ -1254,13 +1338,19 @@ async def inspect_linked_user_metadata(
             for linked_user_id in linked_user_ids
         ),
     )
+    combined = combine_linked_metadata(
+        primary_user_id,
+        metadata_results[0],
+        list(zip(linked_user_ids, metadata_results[1:])),
+        mapping.external_user_id if mapping else None,
+    )
+    if mapping:
+        alias = await get_raw_user_metadata(mapping.external_user_id, user_context)
+        cast(JsonDict, combined["combined_metadata"]).update(
+            get_mapped_email_pointer_fallback(metadata_results[0], alias, user)
+        )
     return {
-        **combine_linked_metadata(
-            primary_user_id,
-            metadata_results[0],
-            list(zip(linked_user_ids, metadata_results[1:])),
-            mapping.external_user_id if mapping else None,
-        ),
+        **combined,
         "user": user,
     }
 
@@ -1274,13 +1364,51 @@ async def update_primary_user_metadata(
     user_id: str,
     metadata_update: JsonDict,
     user_context: Optional[UserContext] = None,
+    profile_update: bool = False,
 ) -> Tuple[str, JsonDict]:
     user = await get_user(user_id, user_context)
     mapping = await get_primary_user_mapping(user.id, user_context) if user else None
     primary_user_id = mapping.supertokens_user_id if mapping else user.id if user else user_id
-    result = await usermetadata_asyncio.update_user_metadata(
-        primary_user_id, metadata_update, user_context
+    updates = {
+        key: value
+        for key, value in metadata_update.items()
+        if key != "rownd_profile_authoritative_fields"
+    }
+    profile_fields = (
+        [
+            key
+            for key in updates
+            if not rownd_compatibility.is_internal_metadata_field(key)
+            and not rownd_compatibility.is_identity_field(key)
+        ]
+        if profile_update
+        else []
     )
+    if profile_fields:
+        current = await get_raw_user_metadata(primary_user_id, user_context)
+        updates["rownd_profile_authoritative_fields"] = [
+            field
+            for field in sorted(
+                set(rownd_compatibility.get_authoritative_profile_fields(current) + profile_fields)
+            )
+        ]
+    if any(
+        key in updates
+        for key in (
+            "rownd_pending_verification",
+            "rownd_email_recipe_user_ids",
+            "rownd_email_recipe_user_id",
+        )
+    ):
+        if mapping and user:
+            fallback = get_mapped_email_pointer_fallback(
+                await get_raw_user_metadata(primary_user_id, user_context),
+                await get_raw_user_metadata(mapping.external_user_id, user_context),
+                user,
+            )
+            updates = {**fallback, **updates}
+        updates["rownd_email_metadata_version"] = 1
+    result = await usermetadata_asyncio.update_user_metadata(primary_user_id, updates, user_context)
     return primary_user_id, result.metadata or {}
 
 
@@ -1299,8 +1427,13 @@ async def replace_primary_user_metadata(
 async def update_user_metadata(
     user_id: str, input_meta: JsonDict, user_context: Optional[UserContext] = None
 ) -> JsonDict:
-    primary_user_id, updated = await update_primary_user_metadata(user_id, input_meta, user_context)
-    return {"id": primary_user_id, "meta": rownd_compatibility.public_metadata(updated)}
+    await update_primary_user_metadata(user_id, input_meta, user_context, profile_update=True)
+    user = await get_user(user_id, user_context)
+    updated = await get_user_metadata(user_id, user_context)
+    return {
+        "id": user.id if user else user_id,
+        "meta": rownd_compatibility.public_metadata(updated),
+    }
 
 
 async def update_user_data(
@@ -1310,10 +1443,8 @@ async def update_user_data(
     tenant_id: str = PUBLIC_TENANT_ID,
     user_context: Optional[UserContext] = None,
 ) -> JsonDict:
-    primary_user_id, _ = await update_primary_user_metadata(user_id, input_data, user_context)
-    return await get_rownd_compat_user(
-        primary_user_id, config, tenant_id, user_context=user_context
-    )
+    await update_primary_user_metadata(user_id, input_data, user_context, profile_update=True)
+    return await get_rownd_compat_user(user_id, config, tenant_id, user_context=user_context)
 
 
 async def get_rownd_compat_user(
@@ -1344,7 +1475,7 @@ async def get_rownd_compat_user(
 
     latest_session_info = await get_latest_session_info(st_user.id, tenant_id, user_context)
     return rownd_compatibility.project_rownd_compat_user(
-        user_id, st_user, metadata, config, tenant_id, latest_session_info
+        st_user.id, st_user, metadata, config, tenant_id, latest_session_info
     )
 
 
@@ -3062,7 +3193,7 @@ async def start_pending_email_verification(
     if user is None:
         raise RowndPluginError("User not found in Rownd")
     metadata_inspection = await inspect_linked_user_metadata(user.id, user_context)
-    metadata = cast(JsonDict, metadata_inspection["primary_metadata"])
+    metadata = await get_primary_email_metadata(user, user_context, tenant_id)
     combined_metadata = cast(JsonDict, metadata_inspection["combined_metadata"])
     normalized_email = normalize_email(email)
     if not normalized_email:
@@ -3262,7 +3393,9 @@ async def resolve_pending_email_verification_token(
     if (
         session_information is None
         or session_information.session_handle != session_handle
-        or session_information.user_id != session_user_id
+        or not await sdk_user_id_matches_internal_target(
+            session_user_id, session_information.user_id, user_context
+        )
         or session_information.tenant_id != session_tenant_id
     ):
         return {"status": "INVALID_PENDING"}
@@ -3286,12 +3419,249 @@ async def resolve_pending_email_verification_token(
     )
     if pending_verification is None:
         return {"status": "INVALID_PENDING"}
+    try:
+        await assert_email_change_session_claims(session_handle, user_context)
+    except RowndEmailChangeError:
+        return {"status": "INVALID_PENDING"}
     return {
         "status": "OK",
         "core_token": token,
         "pending_verification_id": query_pending_verification_id,
         "user_id": session_user_id,
     }
+
+
+async def validate_email_replacement_target(
+    user_id: str,
+    plan: JsonDict,
+    user_context: UserContext,
+) -> User:
+    tenant = cast(str, plan.get("tenantId") or PUBLIC_TENANT_ID)
+    target = cast(str, plan["targetCanonicalRecipeUserId"])
+    owner = await get_user(target, user_context)
+    method = (
+        next(
+            (item for item in owner.login_methods if item.recipe_user_id.get_as_string() == target),
+            None,
+        )
+        if owner
+        else None
+    )
+    if (
+        owner is None
+        or owner.id != user_id
+        or method is None
+        or method.recipe_id != "passwordless"
+        or not method.verified
+        or tenant not in method.tenant_ids
+        or normalize_email(method.email) != normalize_email(plan["value"])
+    ):
+        raise RowndEmailChangeError("CONFLICT", 409, "email reconciliation target changed")
+    return owner
+
+
+async def reconcile_committing_email_verification(
+    user_id: str,
+    expected_plan: JsonDict,
+    user_context: UserContext,
+) -> None:
+    """Resume only a persisted, validated plan; never infer cleanup from an email hint."""
+    clear_supertokens_core_call_cache(user_context)
+    mapping = await get_primary_user_mapping(user_id, user_context)
+    metadata_id = mapping.supertokens_user_id if mapping else user_id
+    metadata = await get_raw_user_metadata(metadata_id, user_context)
+    tenant = cast(str, expected_plan.get("tenantId") or PUBLIC_TENANT_ID)
+    parsed = parse_tenant_pending_email_verifications(metadata, tenant)
+    if isinstance(parsed, EmailCredentialAuthorization):
+        raise RowndEmailChangeError("CONFLICT", 409, "invalid email reconciliation state")
+    plans = [item for item in parsed if isinstance(item, ParsedCommittingEmailVerification)]
+    plan = next(
+        (
+            item
+            for item in get_pending_verifications(metadata)
+            if item.get("id") == expected_plan.get("id")
+        ),
+        None,
+    )
+    if len(plans) != 1 or plan is None or plan != expected_plan:
+        raise RowndEmailChangeError("CONFLICT", 409, "email reconciliation state changed")
+    owner = await validate_email_replacement_target(user_id, plan, user_context)
+    target = cast(str, plan["targetCanonicalRecipeUserId"])
+    retired = dict(plans[0].retired_methods)
+    # Include credentials attached before recovery, but persist the complete set
+    # before removing anything so a crash after disassociation remains recoverable.
+    for method in owner.login_methods:
+        method_id = method.recipe_user_id.get_as_string()
+        if (
+            method.recipe_id == "passwordless"
+            and method.email
+            and tenant in method.tenant_ids
+            and method_id != target
+        ):
+            if method_id in retired and retired[method_id] != normalize_email(method.email):
+                raise email_ownership_conflict()
+            retired[method_id] = normalize_email(method.email)
+    expanded = {
+        **plan,
+        "retiredMethods": [
+            {"recipeUserId": key, "normalizedEmail": value} for key, value in retired.items()
+        ],
+    }
+    if expanded != plan:
+        await update_primary_user_metadata(
+            user_id,
+            {
+                "rownd_pending_verification": [
+                    expanded if item.get("id") == plan["id"] else item
+                    for item in get_pending_verifications(metadata)
+                ],
+            },
+            user_context,
+        )
+        plan = expanded
+    # Validate every extant record, including zero-tenant orphans, before cleanup.
+    for method_id, email in retired.items():
+        old_owner = await get_user(method_id, user_context)
+        if old_owner is None:
+            continue
+        old_method = next(
+            (
+                item
+                for item in old_owner.login_methods
+                if item.recipe_user_id.get_as_string() == method_id
+            ),
+            None,
+        )
+        if old_owner.id == user_id and old_method is None:
+            # Deleting the primary recipe leaves its stable primary identity alive.
+            continue
+        if (
+            old_owner.id != user_id
+            or old_method is None
+            or old_method.recipe_id != "passwordless"
+            or normalize_email(old_method.email) != email
+        ):
+            raise email_ownership_conflict()
+    for email in retired.values():
+        result = await passwordless_asyncio.revoke_all_codes(
+            tenant,
+            email=email,
+            user_context=user_context,
+        )
+        if not isinstance(result, RevokeAllCodesOkResult):
+            raise RowndEmailChangeError("CONFLICT", 409, "could not revoke replaced email codes")
+    for method_id, email in retired.items():
+        clear_supertokens_core_call_cache(user_context)
+        old_owner = await get_user(method_id, user_context)
+        if old_owner is None:
+            continue
+        old_method = next(
+            (
+                item
+                for item in old_owner.login_methods
+                if item.recipe_user_id.get_as_string() == method_id
+            ),
+            None,
+        )
+        if old_owner.id == user_id and old_method is None:
+            continue
+        if (
+            old_owner.id != user_id
+            or old_method is None
+            or old_method.recipe_id != "passwordless"
+            or normalize_email(old_method.email) != email
+        ):
+            raise email_ownership_conflict()
+        if tenant in old_method.tenant_ids:
+            result = await multitenancy_asyncio.disassociate_user_from_tenant(
+                tenant,
+                old_method.recipe_user_id,
+                user_context,
+            )
+            if getattr(result, "status", None) != "OK":
+                raise RowndEmailChangeError("CONFLICT", 409, "could not retire replaced email")
+        clear_supertokens_core_call_cache(user_context)
+        refreshed = await get_user(method_id, user_context)
+        if refreshed is None:
+            continue
+        method = next(
+            (
+                item
+                for item in refreshed.login_methods
+                if item.recipe_user_id.get_as_string() == method_id
+            ),
+            None,
+        )
+        if refreshed.id == user_id and method is None:
+            continue
+        if (
+            refreshed.id != user_id
+            or method is None
+            or method.recipe_id != "passwordless"
+            or normalize_email(method.email) != email
+            or tenant in method.tenant_ids
+        ):
+            raise email_ownership_conflict()
+        if not method.tenant_ids:
+            await delete_user(
+                method_id, remove_all_linked_accounts=False, user_context=user_context
+            )
+    await session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context)
+    clear_supertokens_core_call_cache(user_context)
+    final_metadata = await get_raw_user_metadata(metadata_id, user_context)
+    final_parsed = parse_tenant_pending_email_verifications(final_metadata, tenant)
+    if (
+        isinstance(final_parsed, EmailCredentialAuthorization)
+        or len(
+            [item for item in final_parsed if isinstance(item, ParsedCommittingEmailVerification)]
+        )
+        != 1
+    ):
+        raise RowndEmailChangeError("CONFLICT", 409, "email reconciliation state changed")
+    final_plan = next(
+        (
+            item
+            for item in get_pending_verifications(final_metadata)
+            if item.get("id") == plan["id"]
+        ),
+        None,
+    )
+    if final_plan != plan:
+        raise RowndEmailChangeError("CONFLICT", 409, "email reconciliation state changed")
+    owner = await validate_email_replacement_target(user_id, plan, user_context)
+    if any(
+        method.recipe_id == "passwordless"
+        and method.email
+        and tenant in method.tenant_ids
+        and method.recipe_user_id.get_as_string() != target
+        for method in owner.login_methods
+    ):
+        raise RowndEmailChangeError("CONFLICT", 409, "email retirement is incomplete")
+    inspection = await inspect_linked_user_metadata(user_id, user_context)
+    combined = cast(JsonDict, inspection["combined_metadata"])
+    updated = build_verified_email_metadata(
+        final_metadata,
+        normalize_email(plan["value"]),
+        target,
+        tenant,
+        combined,
+    )
+    updated["rownd_pending_verification"] = [
+        item
+        for item in get_pending_verifications(final_metadata)
+        if not (
+            item.get("field") == "email" and (item.get("tenantId") or PUBLIC_TENANT_ID) == tenant
+        )
+    ]
+    await update_primary_user_metadata(
+        user_id,
+        {
+            key: value
+            for key, value in updated.items()
+            if key not in final_metadata or value != final_metadata[key]
+        },
+        user_context,
+    )
 
 
 async def complete_pending_email_verification(
@@ -3366,6 +3736,10 @@ async def complete_pending_email_verification(
 
     initiating_session_handle = optional_string(pending_verification.get("initiatingSessionHandle"))
     pending_status = pending_verification.get("status")
+    if pending_status == "COMMITTING":
+        raise RowndEmailChangeError(
+            "CONFLICT", 409, "email change cleanup incomplete; retry sign-in with the verified email"
+        )
     if (
         (pending_status if pending_status is not None else "PENDING") != "PENDING"
         or not initiating_session_handle
@@ -3377,28 +3751,36 @@ async def complete_pending_email_verification(
 
     completion_phase = "PENDING"
     rollback_credential_change: Optional[Callable[[], Awaitable[None]]] = None
+    initiating_session = await session_asyncio.get_session_information(
+        cast(str, initiating_session_handle), user_context
+    )
+    if (
+        initiating_session is None
+        or not await sdk_user_id_matches_internal_target(
+            user_id, initiating_session.user_id, user_context
+        )
+        or initiating_session.tenant_id != tenant_id
+    ):
+        await reject_inactive_pending_email_verification(
+            user_id, pending_verification, recipe_user_id, normalized_email, user_context
+        )
+    await assert_email_change_session_claims(cast(str, initiating_session_handle), user_context)
     try:
         await assert_email_available_for_user(normalized_email, user_id, user_context)
-        initiating_session = await session_asyncio.get_session_information(
-            cast(str, initiating_session_handle), user_context
-        )
-        if (
-            initiating_session is None
-            or initiating_session.user_id != user_id
-            or initiating_session.tenant_id != tenant_id
-        ):
-            await reject_inactive_pending_email_verification(
-                user_id, pending_verification, recipe_user_id, normalized_email, user_context
-            )
         current_user = await get_user(user_id, user_context)
         initiating_login_method = (
             next(
-                (
-                    method
-                    for method in current_user.login_methods
-                    if method.recipe_user_id.get_as_string()
-                    == initiating_session.recipe_user_id.get_as_string()
-                    and tenant_id in method.tenant_ids
+                iter(
+                    [
+                        method
+                        for method in current_user.login_methods
+                        if await sdk_user_id_matches_internal_target(
+                            method.recipe_user_id.get_as_string(),
+                            initiating_session.recipe_user_id.get_as_string(),
+                            user_context,
+                        )
+                        and tenant_id in method.tenant_ids
+                    ]
                 ),
                 None,
             )
@@ -3461,10 +3843,7 @@ async def complete_pending_email_verification(
         # Validate the prospective profile before revoking sessions or adding credentials.
         await inspect_verified_email_metadata(recipe_user_id.get_as_string())
 
-        completion_phase = "COMMITTING"
-        await mark_pending_email_verification_status(
-            user_id, cast(str, pending_verification["id"]), "COMMITTING", user_context
-        )
+        completion_phase = "PREPARING"
         if not await session_asyncio.revoke_session(
             cast(str, initiating_session_handle), user_context
         ):
@@ -3485,21 +3864,22 @@ async def complete_pending_email_verification(
         if (
             committing_verification is None
             or committing_verification.get("id") != pending_verification.get("id")
-            or committing_verification.get("status") != "COMMITTING"
+            or committing_verification.get("status", "PENDING") != "PENDING"
         ):
             await reject_inactive_pending_email_verification(
                 user_id, pending_verification, recipe_user_id, normalized_email, user_context
             )
 
-        passwordless_user = await passwordless_asyncio.signinup(
-            tenant_id,
-            normalized_email,
-            None,
-            None,
-            create_derived_user_context(
-                user_context, {"rowndDisableAutomaticAccountLinking": True}
-            ),
-        )
+        with verified_email_change_destination(tenant_id, normalized_email):
+            passwordless_user = await passwordless_asyncio.signinup(
+                tenant_id,
+                normalized_email,
+                None,
+                None,
+                create_derived_user_context(
+                    user_context, {"rowndDisableAutomaticAccountLinking": True}
+                ),
+            )
         reuses_linked_method = (
             not passwordless_user.created_new_recipe_user
             and passwordless_user.user.id == user_id
@@ -3541,6 +3921,67 @@ async def complete_pending_email_verification(
                 raise email_ownership_conflict()
         canonical_email_recipe_user_id = passwordless_user.recipe_user_id.get_as_string()
 
+        if get_active_rownd_config().email_change.get("retirement_mode", "enforce") == "enforce":
+            linked_user = await get_user(user_id, user_context)
+            if linked_user is None:
+                raise email_ownership_conflict()
+            plan = {
+                **pending_verification,
+                "status": "COMMITTING",
+                "schemaVersion": 2,
+                "initiatingRecipeUserId": initiating_recipe_user_id.get_as_string(),
+                "targetCanonicalRecipeUserId": canonical_email_recipe_user_id,
+                "retiredMethods": [
+                    {
+                        "recipeUserId": method.recipe_user_id.get_as_string(),
+                        "normalizedEmail": normalize_email(method.email),
+                    }
+                    for method in linked_user.login_methods
+                    if method.recipe_id == "passwordless"
+                    and method.email
+                    and tenant_id in method.tenant_ids
+                    and method.recipe_user_id.get_as_string() != canonical_email_recipe_user_id
+                ],
+            }
+            await validate_email_replacement_target(user_id, plan, user_context)
+            target_metadata, prepared_metadata = await inspect_verified_email_metadata(
+                canonical_email_recipe_user_id,
+            )
+            # A lost response is not proof that publication failed. Roll back only
+            # when a fresh Core read confirms the unchanged pre-publication state.
+            completion_phase = "COMMITTING"
+            try:
+                await update_primary_user_metadata(
+                    user_id,
+                    {
+                        **{
+                            key: value
+                            for key, value in prepared_metadata.items()
+                            if key not in target_metadata or value != target_metadata[key]
+                        },
+                        "rownd_pending_verification": [
+                            plan if item.get("id") == plan["id"] else item
+                            for item in get_pending_verifications(committing_metadata)
+                        ],
+                    },
+                    user_context,
+                )
+            except Exception:
+                with suppress(Exception):
+                    clear_supertokens_core_call_cache(user_context)
+                    publication_state = await get_raw_user_metadata(
+                        primary_metadata_user_id, user_context
+                    )
+                    if publication_state == target_metadata:
+                        completion_phase = "PREPARING"
+                raise
+            await reconcile_committing_email_verification(user_id, plan, user_context)
+            return {
+                "user_id": user_id,
+                "recipe_user_id": passwordless_user.recipe_user_id,
+                "initiating_session_handle": initiating_session_handle,
+                "replace_session": True,
+            }
         await session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context)
         target_metadata, updated_metadata = await inspect_verified_email_metadata(
             canonical_email_recipe_user_id,
@@ -3549,7 +3990,8 @@ async def complete_pending_email_verification(
         await update_primary_user_metadata(
             user_id,
             {
-                key: value for key, value in updated_metadata.items()
+                key: value
+                for key, value in updated_metadata.items()
                 if key not in target_metadata or value != target_metadata[key]
             },
             user_context,
@@ -3611,6 +4053,18 @@ async def complete_pending_email_verification(
             "rollback_on_session_replacement_failure": (rollback_on_session_replacement_failure),
         }
     except Exception as error:
+        if completion_phase == "COMMITTING":
+            log_warning(
+                get_active_rownd_config(),
+                f"email_change_reconciliation_required error={type(error).__name__}",
+            )
+            await asyncio.gather(
+                session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context),
+                return_exceptions=True,
+            )
+            raise RowndEmailChangeError(
+                "CONFLICT", 409, "email change cleanup incomplete; retry sign-in with the verified email"
+            ) from error
         if completion_phase != "COMPLETED":
             rollback_error: Optional[Exception] = None
             if rollback_credential_change:
@@ -3618,7 +4072,7 @@ async def complete_pending_email_verification(
                     await rollback_credential_change()
                 except Exception as caught_rollback_error:
                     rollback_error = caught_rollback_error
-            if completion_phase == "COMMITTING":
+            if completion_phase == "PREPARING":
                 await asyncio.gather(
                     session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context),
                     return_exceptions=True,
@@ -3633,8 +4087,7 @@ async def complete_pending_email_verification(
                     409,
                     "email change rollback failed; account reconciliation is required",
                 ) from rollback_error
-            cleanup_failed = False
-            try:
+            with suppress(Exception):
                 await cleanup_pending_email_verification(
                     user_id,
                     pending_verification,
@@ -3642,16 +4095,6 @@ async def complete_pending_email_verification(
                     normalized_email,
                     user_context,
                 )
-            except Exception:
-                cleanup_failed = True
-            if completion_phase == "COMMITTING" and cleanup_failed:
-                with suppress(Exception):
-                    await mark_pending_email_verification_status(
-                        user_id,
-                        cast(str, pending_verification["id"]),
-                        "PENDING",
-                        user_context,
-                    )
         raise error
 
 
@@ -4083,6 +4526,7 @@ async def authorize_passwordless_email(
     consumed_recipe_user_id: Optional[str] = None,
     expected_owner_user_id: Optional[str] = None,
 ) -> EmailCredentialAuthorization:
+    clear_supertokens_core_call_cache(user_context)
     normalized_email = normalize_email(email)
     if not normalized_email:
         return EmailCredentialAuthorization(
@@ -4105,6 +4549,20 @@ async def authorize_passwordless_email(
             EmailCredentialState.AMBIGUOUS, EmailCredentialReason.MULTIPLE_OWNERS
         )
     owner = next(iter(owners_by_id.values()))
+    if get_active_rownd_config().email_change.get("retirement_mode", "enforce") == "enforce":
+        recovery_metadata = await get_primary_email_metadata(owner, user_context)
+        for plan in get_pending_verifications(recovery_metadata):
+            if (
+                plan.get("status") == "COMMITTING"
+                and (plan.get("tenantId") or PUBLIC_TENANT_ID) == tenant_id
+                and normalize_email(plan.get("value")) == normalized_email
+            ):
+                await reconcile_committing_email_verification(owner.id, plan, user_context)
+                clear_supertokens_core_call_cache(user_context)
+                refreshed_owner = await get_user(owner.id, user_context)
+                if refreshed_owner is None:
+                    raise email_ownership_conflict()
+                owner = refreshed_owner
     inspection = await inspect_linked_user_metadata(owner.id, user_context, owner)
     inspected_user = cast(Optional[User], inspection["user"])
     primary_user_id = cast(str, inspection["primary_user_id"])
@@ -4122,7 +4580,7 @@ async def authorize_passwordless_email(
         )
     result = classify_email_credential(
         inspected_user,
-        cast(JsonDict, inspection["primary_metadata"]),
+        await get_primary_email_metadata(inspected_user, user_context),
         tenant_id,
         normalized_email,
         consumed_recipe_user_id,

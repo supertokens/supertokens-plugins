@@ -1,5 +1,12 @@
 # @supertokens-plugins/rownd-python
 
+## Unreleased
+
+- Add typed email-change reauthentication errors, optional owner/tenant retry preconditions, and nullable request-local freshness policy on existing profile PUT routes.
+- Enforce email field permissions and application claims during verification; preserve mapped public identity and explicit profile edits/deletions.
+- Default to `retirement_mode="enforce"`: physically retire replaced Passwordless credentials, revoke outstanding codes, preserve provider identities, and recover interrupted cleanup from a durable plan on verified-target sign-in. Replacement-session failure does not restore retired access. Explicit `observe` retains legacy alias access; `guard` still freezes email changes.
+- Keep the declared Python SDK minimum at 0.31.3. No published version is implied by this unreleased entry.
+
 ## 1.0.1
 
 ### Patch Changes

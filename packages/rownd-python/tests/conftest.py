@@ -46,6 +46,7 @@ from supertokens_python.recipe.passwordless.recipe import PasswordlessRecipe
 from supertokens_python.recipe.saml.recipe import SAMLRecipe
 from supertokens_python.recipe.session import SessionRecipe
 from supertokens_python.recipe.thirdparty import ProviderClientConfig, ProviderConfig, ProviderInput, ThirdPartyRecipe
+from supertokens_python.recipe.thirdparty.provider import Provider
 from supertokens_python.recipe.totp import TOTPRecipe
 from supertokens_python.recipe.usermetadata import UserMetadataRecipe
 from supertokens_python.recipe.userroles import UserRolesRecipe
@@ -95,9 +96,33 @@ class CapturingEmailDelivery(EmailDeliveryInterface[Any]):
         self.links = links
 
     async def send_email(self, template_vars: Any, user_context: Dict[str, Any]) -> None:
-        link = getattr(template_vars, "email_verify_link", None)
+        link = getattr(template_vars, "email_verify_link", None) or getattr(
+            template_vars, "url_with_link_code", None
+        )
         if isinstance(link, str):
             self.links.append(link)
+
+
+class PersistentCore:
+    def __init__(self, core: DockerContainer, url: str):
+        self.core = core
+        self.url = url
+
+    def restart(self) -> str:
+        self.core.get_wrapped_container().restart()
+        self.url = "http://%s:%s" % (
+            self.core.get_container_host_ip(),
+            self.core.get_exposed_port(3567),
+        )
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            try:
+                if httpx.get(self.url + "/hello", timeout=2).status_code == 200:
+                    return self.url
+            except httpx.HTTPError:
+                pass
+            time.sleep(0.5)
+        raise RuntimeError("Test-owned Core did not restart")
 
 
 class TestClientWithNoCookieJar(TestClient):
@@ -156,7 +181,7 @@ def start_container(container_factory: Callable[[], DockerContainer]) -> DockerC
 
 
 @pytest.fixture(scope="session")
-def core_url():
+def persistent_core():
     # Shared daemons may exhaust Docker's default pools. Parallel runs need
     # distinct, operator-selected subnets that do not overlap host/VPN routes.
     subnet = environ.get("ROWND_TEST_DOCKER_SUBNET")
@@ -202,11 +227,16 @@ def core_url():
                         timeout=2.0,
                     )
                     license_response.raise_for_status()
-                    yield url
+                    yield PersistentCore(core, url)
                     return
             except Exception:
                 time.sleep(0.5)
         raise RuntimeError("SuperTokens Core container did not become ready")
+
+
+@pytest.fixture
+def core_url(persistent_core: PersistentCore):
+    return persistent_core.url
 
 
 @pytest.fixture(scope="session")
@@ -251,11 +281,14 @@ def make_client(
     email_verification_mode: Literal["OPTIONAL", "REQUIRED"] = "OPTIONAL",
     email_verification_links: Optional[list[str]] = None,
     enable_email_password: bool = False,
+    provider_override: Optional[Callable[[Provider], Provider]] = None,
+    passwordless_links: Optional[list[str]] = None,
+    raise_server_exceptions: bool = False,
+    api_domain: str = "http://testserver",
 ) -> TestClientWithNoCookieJar:
     app = FastAPI()
     app.add_middleware(get_middleware())
 
-    api_domain = "http://testserver"
     effective_plugin_config = dict(plugin_config or {})
     if enable_email_verification and "app_config" not in effective_plugin_config:
         effective_plugin_config["app_config"] = {"signInMethods": [{"method": "email"}]}
@@ -276,6 +309,11 @@ def make_client(
         passwordless.init(
             contact_config=passwordless.ContactEmailOrPhoneConfig(),
             flow_type="MAGIC_LINK",
+            email_delivery=EmailDeliveryConfig(
+                service=CapturingEmailDelivery(
+                    passwordless_links if passwordless_links is not None else []
+                )
+            ),
         ),
         thirdparty.init(
             sign_in_and_up_feature=thirdparty.SignInAndUpFeature(
@@ -284,13 +322,15 @@ def make_client(
                         config=ProviderConfig(
                             third_party_id="google",
                             clients=[ProviderClientConfig(client_id="test", client_secret="test")],
-                        )
+                        ),
+                        override=provider_override,
                     ),
                     ProviderInput(
                         config=ProviderConfig(
                             third_party_id="apple",
                             clients=[ProviderClientConfig(client_id="test", client_secret="test")],
-                        )
+                        ),
+                        override=provider_override,
                     ),
                 ]
             )
@@ -326,7 +366,9 @@ def make_client(
         experimental=SupertokensExperimentalConfig(plugins=[rownd_init(rownd_config)]),
     )
 
-    return TestClientWithNoCookieJar(app, raise_server_exceptions=False)
+    return TestClientWithNoCookieJar(
+        app, raise_server_exceptions=raise_server_exceptions, base_url=api_domain
+    )
 
 
 def auth_headers(access_token: str) -> Dict[str, str]:

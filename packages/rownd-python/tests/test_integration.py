@@ -3889,11 +3889,12 @@ async def test_linked_rownd_metadata_survives_primary_metadata_write(
     assert user_res.json()["meta"]["primary_metadata"] == "preserved"
     assert user_res.json()["meta"]["secondary_metadata"] == "preserved"
     assert update_res.status_code == 200
-    assert update_res.json()["id"] == passwordless.user.id
+    assert update_res.json()["id"] == "rownd-linked-metadata"
     primary_after = await usermetadata_asyncio.get_user_metadata(passwordless.user.id)
     assert primary_after.metadata == {
         "primary_metadata": "preserved",
         "profile_note": "updated",
+        "rownd_profile_authoritative_fields": ["profile_note"],
     }
     assert (
         await usermetadata_asyncio.get_user_metadata(thirdparty.recipe_user_id.get_as_string())
@@ -4046,7 +4047,6 @@ async def test_user_email_update_stores_pending_verification(
         method for method in user.login_methods if method.recipe_id == "passwordless"
     ]
     assert {method.email for method in passwordless_methods} == {
-        "pending-current@example.com",
         "new-email@example.com",
     }
     canonical_method = next(
@@ -4065,7 +4065,7 @@ async def test_user_email_update_stores_pending_verification(
     assert metadata.metadata["rownd_pending_verification"] == []
 
 
-async def test_completed_email_change_guards_old_passwordless_credential(
+async def test_completed_email_change_retires_old_credential_without_reserving_address(
     core_url: str, rownd_client: MockRowndClient
 ):
     client = make_client(
@@ -4105,7 +4105,10 @@ async def test_completed_email_change_guards_old_passwordless_credential(
     assert cast(Any, completion["recipe_user_id"]).get_as_string() == (
         canonical_method.recipe_user_id.get_as_string()
     )
-    rownd_plugin.rownd_config.get_active_rownd_config().email_change["retirement_mode"] = "guard"
+    assert (
+        rownd_plugin.rownd_config.get_active_rownd_config().email_change.get("retirement_mode")
+        == "enforce"
+    )
 
     old_create = client.post(
         "/auth/signinup/code",
@@ -4154,7 +4157,9 @@ async def test_completed_email_change_guards_old_passwordless_credential(
         },
     )
 
-    assert old_create.json()["status"] == "GENERAL_ERROR"
+    # The combined sign-in/up endpoint can register a new account at a freed
+    # address; it must never authenticate the original identity through old codes.
+    assert old_create.json()["status"] == "OK"
     assert new_create.json()["status"] == "OK"
     assert old_resend.json()["status"] == "RESTART_FLOW_ERROR"
     assert old_consume.json() == {"status": "RESTART_FLOW_ERROR"}
@@ -4163,10 +4168,14 @@ async def test_completed_email_change_guards_old_passwordless_credential(
     assert canonical_consume.headers.get("st-access-token")
     assert first_time_consume.json()["status"] == "OK"
     assert first_time_consume.headers.get("st-access-token")
-    with pytest.raises(RowndPluginError, match="could not be completed"):
-        await create_magic_link_with_confirmation_bypass(
-            email=old_email, redirect_to_path="/profile"
-        )
+    fresh_code = await passwordless_asyncio.create_code("public", email=old_email)
+    fresh_signup = client.post(
+        "/auth/signinup/code/consume",
+        headers={"rid": "passwordless", "Content-Type": "application/json"},
+        json={"preAuthSessionId": fresh_code.pre_auth_session_id, "linkCode": fresh_code.link_code},
+    )
+    assert fresh_signup.json()["status"] == "OK"
+    assert fresh_signup.json()["user"]["id"] != sign_in.user.id
 
 
 async def test_guard_mode_blocks_email_change_start(
@@ -4687,14 +4696,12 @@ async def test_email_change_uses_recorded_canonical_among_multiple_passwordless_
     user = await get_user(first.user.id)
     assert user is not None
     assert {method.email for method in user.login_methods if method.recipe_id == "passwordless"} == {
-        "recorded-canonical-first@example.com",
-        "recorded-canonical-second@example.com",
         "recorded-canonical-target@example.com",
     }
 
 
 @pytest.mark.parametrize("native_variant", [False, True])
-async def test_email_change_finalization_uses_linked_rownd_metadata_without_copying_it(
+async def test_email_change_finalization_preserves_profile_before_retiring_linked_method(
     memory_core_url: str, rownd_client: MockRowndClient, native_variant: bool,
 ):
     delivery_links: list[str] = []
@@ -4830,8 +4837,7 @@ async def test_email_change_finalization_uses_linked_rownd_metadata_without_copy
     linked_metadata = (
         await usermetadata_asyncio.get_user_metadata(linked_recipe_user_id)
     ).metadata
-    assert linked_metadata["original_rownd_user"] == linked_snapshot
-    assert linked_metadata["linked_only"] == "do-not-copy"
+    assert linked_metadata == {}
 
 
 @pytest.mark.parametrize("profile", ["valid-stale-primary", "malformed-primary", "conflicting-linked"])
@@ -4925,9 +4931,8 @@ async def test_mapped_profile_email_completion_uses_authoritative_linked_snapsho
     metadata = (await usermetadata_asyncio.get_user_metadata(native_id)).metadata
     assert metadata["rownd_pending_verification"] == [], completion.text
     assert metadata["ordinary"] == {"keep": None}
-    assert (await usermetadata_asyncio.get_user_metadata(linked_id)).metadata == {
-        "original_rownd_user": linked_snapshot,
-    }
+    expected_linked = {} if profile == "valid-stale-primary" else {"original_rownd_user": linked_snapshot}
+    assert (await usermetadata_asyncio.get_user_metadata(linked_id)).metadata == expected_linked
     if profile != "valid-stale-primary":
         assert completion.json() == {
             "status": "GENERAL_ERROR",
@@ -4964,8 +4969,11 @@ async def test_mapped_profile_email_completion_uses_authoritative_linked_snapsho
         call.args[1] for call in writer.await_args_list if "original_rownd_user" in call.args[1]
     )
     assert set(final_patch) == {
-        "original_rownd_user", "rownd_email_recipe_user_id",
-        "rownd_email_recipe_user_ids", "rownd_pending_verification",
+        "original_rownd_user",
+        "rownd_email_recipe_user_id",
+        "rownd_email_recipe_user_ids",
+        "rownd_pending_verification",
+        "rownd_email_metadata_version",
     }
     assert all("unrelated_top_null" not in call.args[1] for call in writer.await_args_list)
 
@@ -5417,7 +5425,7 @@ async def test_unmarked_email_verification_is_session_optional_and_does_not_chan
     assert len(metadata.metadata["rownd_pending_verification"]) == 1
 
 
-async def test_route_replacement_session_failure_rolls_back_email_change(
+async def test_route_replacement_session_failure_keeps_verified_email_change(
     core_url: str,
     rownd_client: MockRowndClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -5469,16 +5477,15 @@ async def test_route_replacement_session_failure_rolls_back_email_change(
     user = await get_user(sign_in.user.id)
     assert user is not None
     assert {method.email for method in user.login_methods if method.recipe_id == "passwordless"} == {
-        current_email
+        target_email
     }
     metadata = await usermetadata_asyncio.get_user_metadata(user.id)
     assert metadata.metadata.get("rownd_pending_verification") == []
-    assert "rownd_email_recipe_user_id" not in metadata.metadata
-    assert "rownd_email_recipe_user_ids" not in metadata.metadata
+    target = next(method for method in user.login_methods if method.email == target_email)
+    assert metadata.metadata["rownd_email_recipe_user_ids"]["public"] == target.recipe_user_id.get_as_string()
     assert "original_rownd_user" not in metadata.metadata
-    assert not await emailverification_asyncio.is_email_verified(
-        sign_in.recipe_user_id, target_email
-    )
+    assert target.verified
+    assert await session_asyncio.get_all_session_handles_for_user(user.id) == []
 
 
 async def test_marked_email_change_fails_closed_when_target_becomes_owned_before_completion(
@@ -5719,7 +5726,7 @@ async def test_marked_verification_rejects_invalid_callback_session_before_token
     assert retry_res.json() == {"status": "OK"}
 
 
-async def test_completion_failure_after_committing_cleans_pending_and_sessions(
+async def test_completion_session_lookup_failure_preserves_pending_and_session(
     core_url: str,
     rownd_client: MockRowndClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -5733,16 +5740,16 @@ async def test_completion_failure_after_committing_cleans_pending_and_sessions(
     status_at_failure: Optional[str] = None
     original_get_session_information = impl.session_asyncio.get_session_information
 
-    async def fail_after_committing(*_args: Any, **_kwargs: Any):
+    async def fail_session_lookup(*_args: Any, **_kwargs: Any):
         nonlocal status_at_failure
         metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
         status_at_failure = metadata.metadata["rownd_pending_verification"][0]["status"]
-        raise RuntimeError("session lookup failed after COMMITTING")
+        raise RuntimeError("session lookup unavailable")
 
     monkeypatch.setattr(
-        impl.session_asyncio, "get_session_information", fail_after_committing
+        impl.session_asyncio, "get_session_information", fail_session_lookup
     )
-    with pytest.raises(RuntimeError, match="session lookup failed after COMMITTING"):
+    with pytest.raises(RuntimeError, match="session lookup unavailable"):
         await complete_pending_email_verification(
             sign_in.recipe_user_id,
             target_email,
@@ -5756,14 +5763,14 @@ async def test_completion_failure_after_committing_cleans_pending_and_sessions(
     assert user is not None
     assert user.login_methods[0].email == current_email
     metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
-    assert metadata.metadata["rownd_pending_verification"] == []
+    assert metadata.metadata["rownd_pending_verification"][0]["status"] == "PENDING"
     monkeypatch.setattr(
         impl.session_asyncio, "get_session_information", original_get_session_information
     )
     assert await session_asyncio.get_session_information(st_session.get_handle()) is not None
 
 
-async def test_later_completion_failure_rolls_back_changed_credential(
+async def test_later_completion_failure_retains_plan_for_forward_recovery(
     core_url: str,
     rownd_client: MockRowndClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -5791,7 +5798,7 @@ async def test_later_completion_failure_rolls_back_changed_credential(
     monkeypatch.setattr(
         impl.session_asyncio, "revoke_all_sessions_for_user", fail_second_revocation
     )
-    with pytest.raises(RuntimeError, match="second account revocation failed"):
+    with pytest.raises(RowndEmailChangeError, match="cleanup incomplete"):
         await complete_pending_email_verification(
             sign_in.recipe_user_id,
             target_email,
@@ -5801,17 +5808,25 @@ async def test_later_completion_failure_rolls_back_changed_credential(
         )
 
     assert revoke_count == 3
-    assert email_at_failure == current_email
+    assert email_at_failure == target_email
     user = await get_user(sign_in.user.id)
     assert user is not None
     assert {method.email for method in user.login_methods if method.recipe_id == "passwordless"} == {
-        current_email
+        target_email
     }
     metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
-    assert metadata.metadata["rownd_pending_verification"] == []
+    plan = metadata.metadata["rownd_pending_verification"][0]
+    assert plan["status"] == "COMMITTING"
     assert await session_asyncio.get_all_session_handles_for_user(
         sign_in.user.id, True, None, {}
     ) == []
+    with pytest.raises(RowndEmailChangeError, match="cleanup incomplete"):
+        await complete_pending_email_verification(
+            sign_in.recipe_user_id, target_email, {}, "public", st_session.get_handle(),
+        )
+    assert (await usermetadata_asyncio.get_user_metadata(user.id)).metadata["rownd_pending_verification"] == [plan]
+    await impl.reconcile_committing_email_verification(user.id, plan, {})
+    assert (await usermetadata_asyncio.get_user_metadata(user.id)).metadata["rownd_pending_verification"] == []
 
 
 async def test_completion_revokes_session_raced_between_account_revocations(
@@ -5834,11 +5849,9 @@ async def test_completion_revokes_session_raced_between_account_revocations(
         result = await original_revoke_all(*args, **kwargs)
         revoke_count += 1
         if revoke_count == 1:
-            raced_sign_in = await passwordless_asyncio.signinup(
-                "public", current_email, None, None, {}
-            )
+            # Credential consumption may have completed before the commit fence.
             raced_session = await session_asyncio.create_new_session_without_request_response(
-                "public", raced_sign_in.recipe_user_id, {}, {}, True
+                "public", sign_in.recipe_user_id, {}, {}, True
             )
             raced_session_handle = raced_session.get_handle()
         return result
@@ -5861,7 +5874,6 @@ async def test_completion_revokes_session_raced_between_account_revocations(
     user = await get_user(sign_in.user.id)
     assert user is not None
     assert {method.email for method in user.login_methods if method.recipe_id == "passwordless"} == {
-        current_email,
         target_email,
     }
 
@@ -6185,7 +6197,6 @@ async def test_email_verification_completes_valid_legacy_pending_record_without_
     user = await get_user(sign_in.user.id)
     assert user is not None
     assert {method.email for method in user.login_methods if method.recipe_id == "passwordless"} == {
-        "legacy-completion-current@example.com",
         target_email,
     }
     canonical_method = next(method for method in user.login_methods if method.email == target_email)
@@ -6468,19 +6479,23 @@ async def test_guard_authenticates_linked_alias_until_explicitly_retired(
     assert "st-access-token" not in retired.headers
 
 
-async def test_email_verification_preserves_existing_passwordless_method_as_alias(
-    core_url: str, rownd_client: MockRowndClient
+@pytest.mark.parametrize("retirement_mode", ["observe", "enforce"])
+async def test_email_verification_roundtrip_obeys_retirement_mode(
+    core_url: str, rownd_client: MockRowndClient, retirement_mode: str,
 ):
-    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    client = make_client(core_url, rownd_client, enable_email_verification=True,
+                         plugin_config={"email_change": {"retirement_mode": retirement_mode}})
+    old_email = f"{retirement_mode}-old-passwordless@example.com"
+    new_email = f"{retirement_mode}-new-passwordless@example.com"
     sign_in = await passwordless_asyncio.signinup(
-        "public", "old-passwordless@example.com", None, None, {}
+        "public", old_email, None, None, {}
     )
     await usermetadata_asyncio.update_user_metadata(
         sign_in.user.id,
         {
             "original_rownd_user": {
-                "data": {"user_id": sign_in.user.id, "email": "old-passwordless@example.com"},
-                "verified_data": {"email": "old-passwordless@example.com"},
+                "data": {"user_id": sign_in.user.id, "email": old_email},
+                "verified_data": {"email": old_email},
             },
             "rownd_email_recipe_user_ids": {"tenant-b": "tenant-b-canonical"},
         },
@@ -6494,13 +6509,13 @@ async def test_email_verification_preserves_existing_passwordless_method_as_alia
             **auth_headers(st_session.get_access_token()),
             "Content-Type": "application/json",
         },
-        json={"data": {"email": "new-passwordless@example.com"}},
+        json={"data": {"email": new_email}},
     )
     assert update_res.status_code == 200
 
     await complete_pending_email_verification(
         sign_in.recipe_user_id,
-        "new-passwordless@example.com",
+        new_email,
         {},
         "public",
         st_session.get_handle(),
@@ -6511,16 +6526,16 @@ async def test_email_verification_preserves_existing_passwordless_method_as_alia
     passwordless_methods = [
         method for method in user.login_methods if method.recipe_id == "passwordless"
     ]
-    assert {method.email for method in passwordless_methods} == {
-        "old-passwordless@example.com",
-        "new-passwordless@example.com",
-    }
+    assert {method.email for method in passwordless_methods} == (
+        {old_email, new_email}
+        if retirement_mode == "observe" else {new_email}
+    )
     canonical_method = next(
-        method for method in passwordless_methods if method.email == "new-passwordless@example.com"
+        method for method in passwordless_methods if method.email == new_email
     )
     metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
     assert metadata.metadata["rownd_pending_verification"] == []
-    assert metadata.metadata["original_rownd_user"]["data"]["email"] == "new-passwordless@example.com"
+    assert metadata.metadata["original_rownd_user"]["data"]["email"] == new_email
     assert metadata.metadata["rownd_email_recipe_user_ids"] == {
         "tenant-b": "tenant-b-canonical",
         "public": canonical_method.recipe_user_id.get_as_string(),
@@ -6535,12 +6550,12 @@ async def test_email_verification_preserves_existing_passwordless_method_as_alia
             **auth_headers(replacement_session.get_access_token()),
             "Content-Type": "application/json",
         },
-        json={"data": {"email": "old-passwordless@example.com"}},
+        json={"data": {"email": old_email}},
     )
     assert restore_res.status_code == 200
     restore_completion = await complete_pending_email_verification(
         canonical_method.recipe_user_id,
-        "old-passwordless@example.com",
+        old_email,
         {},
         "public",
         replacement_session.get_handle(),
@@ -6550,8 +6565,15 @@ async def test_email_verification_preserves_existing_passwordless_method_as_alia
     restored_methods = [
         method for method in restored_user.login_methods if method.recipe_id == "passwordless"
     ]
-    assert len(restored_methods) == 2
+    assert len(restored_methods) == (2 if retirement_mode == "observe" else 1)
     restored_metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
+    if retirement_mode == "enforce":
+        assert restored_methods[0].email == old_email
+        assert restored_methods[0].recipe_user_id.get_as_string() != sign_in.recipe_user_id.get_as_string()
+        assert restored_metadata.metadata["rownd_email_recipe_user_ids"]["public"] == restored_methods[0].recipe_user_id.get_as_string()
+        assert restore_completion is not None
+        assert "rollback_on_session_replacement_failure" not in restore_completion
+        return
     assert restored_metadata.metadata["rownd_email_recipe_user_ids"]["public"] == (
         sign_in.recipe_user_id.get_as_string()
     )
@@ -6561,16 +6583,16 @@ async def test_email_verification_preserves_existing_passwordless_method_as_alia
     rolled_back_user = await get_user(sign_in.user.id)
     assert rolled_back_user is not None
     assert {method.email for method in rolled_back_user.login_methods} == {
-        "old-passwordless@example.com",
-        "new-passwordless@example.com",
+        old_email,
+        new_email,
     }
     rolled_back_metadata = await usermetadata_asyncio.get_user_metadata(sign_in.user.id)
     assert rolled_back_metadata.metadata["original_rownd_user"]["data"]["email"] == (
-        "new-passwordless@example.com"
+        new_email
     )
     assert rolled_back_metadata.metadata["original_rownd_user"]["verified_data"][
         "email"
-    ] == "new-passwordless@example.com"
+    ] == new_email
     assert rolled_back_metadata.metadata["rownd_email_recipe_user_id"] == (
         canonical_method.recipe_user_id.get_as_string()
     )
@@ -6777,10 +6799,11 @@ async def test_email_verification_links_email_without_mutating_phone_only_method
     assert email_method.recipe_user_id.get_as_string() != phone_method.recipe_user_id.get_as_string()
 
 
-async def test_thirdparty_email_addition_rolls_back_if_replacement_session_fails(
+async def test_observe_thirdparty_email_addition_rolls_back_if_replacement_session_fails(
     core_url: str, rownd_client: MockRowndClient
 ):
-    client = make_client(core_url, rownd_client, enable_email_verification=True)
+    client = make_client(core_url, rownd_client, enable_email_verification=True,
+                         plugin_config={"email_change": {"retirement_mode": "observe"}})
     target_email = "thirdparty-rollback-target@example.com"
     third_party = cast(
         Any,
@@ -6971,6 +6994,7 @@ async def test_user_meta_gets_and_updates_public_metadata(
 
     assert update_res.status_code == 200
     assert update_res.json()["meta"] == {
+        "created": "2026-01-01T00:00:00.000Z",
         "last_passkey_registration_prompt": "2026-04-23T00:00:00.000Z",
     }
     assert get_res.status_code == 200
@@ -7116,6 +7140,7 @@ async def test_metadata_structure_preserved_after_user_and_meta_updates(
     assert primary_metadata.metadata == {
         "first_name": "John",
         "custom_field": "custom_value",
+        "rownd_profile_authoritative_fields": ["custom_field", "first_name"],
         "rownd_email_recipe_user_id": "py-metadata-structure-user",
         "rownd_email_recipe_user_ids": {"public": "py-metadata-structure-user"},
         "rownd_migration_complete": True,

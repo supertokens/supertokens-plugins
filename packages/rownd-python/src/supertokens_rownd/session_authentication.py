@@ -5,16 +5,50 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Awaitable, Callable, Iterator, Optional, cast
 
+from supertokens_python.recipe.emailverification import EmailVerificationClaim
+from supertokens_python.recipe.session import asyncio as session_asyncio
+from supertokens_python.recipe.session.interfaces import ClaimsValidationResult
 from supertokens_python.types import User
 from supertokens_python.types.base import UserContext
 
-from .errors import RowndPluginError
+from .errors import RowndEmailChangeError, RowndPluginError
 from .types import JsonDict
 
 SESSION_AUTHENTICATION_KEY = "rownd_session_authentication"
 _proven_authentication: ContextVar[bool] = ContextVar("rownd_proven_authentication", default=False)
 _owner_plan_validator: Optional[Callable[[JsonDict, UserContext], Awaitable[None]]] = None
 _owner_plan_reader: Optional[Callable[[JsonDict], Optional[JsonDict]]] = None
+_verified_email_destination: ContextVar[Optional[tuple[str, str]]] = ContextVar(
+    "rownd_verified_email_destination", default=None
+)
+
+
+@contextmanager
+def verified_email_change_destination(tenant_id: str, email: str) -> Iterator[None]:
+    # Only the verified completion path may bypass sign-in retirement to prepare its target.
+    token = _verified_email_destination.set((tenant_id, email.strip().lower()))
+    try:
+        yield
+    finally:
+        _verified_email_destination.reset(token)
+
+
+def is_verified_email_change_destination(tenant_id: str, email: str) -> bool:
+    return _verified_email_destination.get() == (tenant_id, email.strip().lower())
+
+
+async def assert_email_change_session_claims(handle: str, context: UserContext) -> None:
+    result = await session_asyncio.validate_claims_for_session_handle(
+        handle,
+        lambda validators, _session, _context: [
+            validator
+            for validator in validators
+            if getattr(getattr(validator, "claim", None), "key", None) != EmailVerificationClaim.key
+        ],
+        context,
+    )
+    if not isinstance(result, ClaimsValidationResult) or result.invalid_claims:
+        raise RowndEmailChangeError("CONFLICT", 409, "email change session claims are invalid")
 
 
 def register_owner_plan_reader(

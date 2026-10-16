@@ -299,7 +299,7 @@ init(
                 app_name="My App",
                 email_change={
                     "max_session_age_seconds": 600,
-                    "retirement_mode": "observe",
+                    "retirement_mode": "enforce",
                 },
                 app_config={
                     "auth": {
@@ -686,16 +686,22 @@ user-context flag for upgrading authentication.
 
 ### Email Changes
 
-Email credential retirement has two rollout modes:
+Email credential retirement has three startup-static modes:
 
-- `observe` is the default. It classifies Passwordless email state but preserves legacy authentication and profile email-change behavior. Legacy completion creates or reuses a Passwordless target and retains previous Passwordless email methods as login aliases. This flow is not distributed-safe: metadata publication has no compare-and-swap or fencing support.
-- `guard` rejects retired or malformed Passwordless email create, resend, helper, and consume attempts. Phone credentials are not classified for email retirement; consume session binding still applies as described below. Because safe completion requires metadata compare-and-swap, guard mode also disables starting and completing profile email changes.
+- `enforce` is the default. Verified changes durably checkpoint the canonical Passwordless target and retirement plan, revoke outstanding old-email codes, remove replaced Passwordless tenant memberships, and delete zero-tenant credentials. Noncanonical email create/resend/consume/helper requests are rejected. Authorization is checked again after consume session creation. Existing provider identities and emails are preserved.
+- `observe` explicitly preserves legacy authentication: old Passwordless aliases remain usable. It does **not** provide old-email retirement.
+- `guard` enforces Passwordless authorization and additionally freezes initiation/completion of email changes. Its existing freeze behavior is unchanged.
 
-Guard enforcement covers the plugin-owned Passwordless HTTP APIs and exported helpers. Calls made directly to the SuperTokens SDK outside those paths are not guarded.
+Enforcement covers plugin-owned Passwordless HTTP APIs and exported helpers. Trusted application code calling SDK `signinup` or session creation directly is outside that boundary. Interrupted `COMMITTING` cleanup resumes when the verified target email is used for Passwordless authentication. Recovery revalidates target ownership/verification and every surviving retired credential before cleanup, including zero-tenant orphans. Provider identities are never retirement candidates. Metadata publication has no compare-and-swap; arbitrary concurrent administrative metadata changes are not supported by this protocol.
 
-In guard mode, Passwordless consume requires a fresh internal postcheck marker
+Retirement does not reserve a freed address. If no remaining account method uses old A, the combined sign-in/up endpoint may register a separate new identity at A; old codes cannot authenticate the original account. If A remains a linked provider email, canonical-email enforcement blocks Passwordless A while preserving that provider login.
+
+In enforce/guard mode, Passwordless consume requires a fresh internal postcheck marker
 binding the checked owner and recipe user to the request tenant. The returned
-session's recipe user and tenant must match that marker. Both the consume result's
+session's recipe user and tenant must match that marker. In `enforce`, a successful
+consume may instead retain the request's existing same-owner session handle (for
+example, upgrading an instant session); the consumed credential is still rechecked.
+Both the consume result's
 user ID and `returned_session.get_user_id()` must independently match the checked
 owner through mapping-aware comparison; native/external aliases are not compared
 as raw strings alone. Stale, missing, malformed, or mismatched evidence
@@ -724,7 +730,7 @@ rejections include `operation`, `code=classification_rejected`, `state`, and
 result), and `account_revoke_unavailable`. These warnings are independent of
 `enable_debug_logs`; none asserts that revocation completed.
 
-When email sign-in is configured in observe mode, changing the profile email starts a
+When email sign-in is configured in enforce or observe mode, changing the profile email starts a
 verified Passwordless email change for the initiating tenant. For accounts containing
 only real third-party methods, the plugin creates and links the first Passwordless
 method after verification. Guest/instant-only accounts and unsupported mixed-account
@@ -737,7 +743,7 @@ RowndMigrationPlugin(
     app_config={"signInMethods": [{"method": "email"}]},
     email_change={
         "max_session_age_seconds": 600,
-        "retirement_mode": "observe",
+        "retirement_mode": "enforce",
     },
 )
 ```
@@ -748,21 +754,40 @@ state that an operator has reviewed; the plugin does not guess or automatically 
 security metadata. Inspect metadata on the primary user, specifically
 `rownd_pending_verification`, `rownd_email_recipe_user_id`, and
 `rownd_email_recipe_user_ids`, to locate pending operations and canonical security
-state. Upgrade every worker before changing the mode; mixed observe/guard workers do
-not provide a safe rollout boundary. Guard mode protects retirement state published by
-prior completed changes, but new email changes must remain disabled until Core and the
-Python SDK expose metadata compare-and-swap/revision fencing.
+state. Upgrade every worker before enabling retry recovery or enforcement; mixed old/new
+workers do not provide a safe boundary. Drain retained continuations before rolling back.
+
+Both existing PUT routes accept optional refusal preconditions in `context`:
+`rowndExpectedUserId` and `rowndExpectedTenantId`. IDs are resolved to the live primary
+owner; they never select an account. A tenant hint requires a valid owner hint.
+An explicit query `tenantId` must match the session, including `public` and empty values.
+Mismatch returns HTTP 409 with `error_code: EMAIL_CHANGE_ACCOUNT_MISMATCH` before
+dynamic configuration or writes. Old clients without hints retain the existing routes.
+
+`max_session_age_seconds` defaults to 600 and measures session creation, not token
+refresh. Explicit `None` disables only that age check. Dynamic omission inherits the
+static value; nested explicit `None` overrides it. Both PUT routes resolve request-local
+configuration using the authenticated tenant. Age failure returns HTTP 403 with
+`error_code: EMAIL_CHANGE_REAUTHENTICATION_REQUIRED`. Unchanged normalized email skips
+the age check. A fresh migrated session satisfies this policy; it is not proof of fresh
+interactive credential entry. Email schema read-only/managed permissions and mandatory
+non-email-verification claims remain enforced even with `None`.
+
+Pending PUT responses retain the old canonical email. Existing verification promotes
+the destination and replaces the session through SDK headers/cookies. Separate profile
+saves are not rolled back if the subsequent email change is cancelled or fails.
 
 The flow requires Passwordless, EmailVerification, and AccountLinking. It rejects
 stale sessions, checks target ownership across all tenants, and binds pending
 verification metadata to the initiating user, session, tenant, purpose, and status
-before consuming the Core token. In observe mode, completion revokes all account
+before consuming the Core token. Completion validates application claims before token
+consumption and promotion, revokes all account
 sessions and returns a replacement session for the new canonical method, but concurrent
 completion claims are local compatibility behavior rather than a distributed guarantee.
 The tenant's canonical email method is tracked separately from its login aliases.
 Existing metadata using `rownd_email_recipe_user_id` remains
 supported; new updates also maintain the tenant-scoped `rownd_email_recipe_user_ids`
-map. Guard mode permits the verified canonical Passwordless email, or an unverified
+map. Enforce/guard mode permits the verified canonical Passwordless email, or an unverified
 canonical email with valid migration-completion metadata and a matching tenant canonical
 pointer. This permits a Passwordless challenge, not an EV bypass. Explicit canonical
 pointers and retirement metadata block excluded aliases during create, resend, and
@@ -795,9 +820,13 @@ Unmarked verification remains ordinary SuperTokens verification and is
 session-optional; removing the marker can therefore consume the raw token without
 completing the credential change. Concurrent duplicate consumption allows at most
 one completion within the behavior covered by the current Core calls; without metadata
-compare-and-swap this is not a cross-process guarantee. Failed completion and
-replacement-session creation are compensated; rollback failures require account
-reconciliation.
+compare-and-swap this is not a cross-process guarantee. Before durable retirement
+publication, failed completion rolls back the prepared credential. After a failed
+publication request, rollback requires a fresh Core read confirming the unchanged
+pre-publication state. Persisted or uncertain publication is forward-only: errors
+retain recovery state instead of restoring old access. If replacement-session creation fails after cleanup, the new
+verified email remains canonical; sign in with it to obtain a fresh session. Observe
+mode retains legacy replacement-session rollback.
 
 ### Passwordless Confirmation Bypass
 
@@ -839,7 +868,7 @@ magic_link = await create_magic_link_with_confirmation_bypass(
 
 `client_domain` must be a configured `client_domains` key, not a raw domain. Omit it to use `website_domain`.
 
-Pass exactly one of `email` or `phone_number`. The helper returns the rewritten magic link with `bypassDeviceConfirmation=true`. In retirement guard mode, email helper calls enforce canonical credential state; phone helper calls remain unchanged.
+Pass exactly one of `email` or `phone_number`. The helper returns the rewritten magic link with `bypassDeviceConfirmation=true`. In retirement enforce/guard mode, email helper calls enforce canonical credential state; phone helper calls remain unchanged.
 
 Before skipping the cross-device confirmation prompt, the frontend should validate the callback against the plugin:
 

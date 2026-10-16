@@ -1166,6 +1166,11 @@ async def test_email_authorization_enforces_expected_primary_owner(
     monkeypatch.setattr(impl, "inspect_linked_user_metadata", inspect)
     monkeypatch.setattr(impl, "get_primary_user_mapping", mapping)
 
+    async def email_metadata(*_args: Any, **_kwargs: Any):
+        return {}
+
+    monkeypatch.setattr(impl, "get_primary_email_metadata", email_metadata)
+
     matching = await impl.authorize_passwordless_email(
         "public", "owner@example.com", {}, expected_owner_user_id="owner-primary"
     )

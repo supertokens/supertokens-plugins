@@ -39,11 +39,11 @@ def is_internal_metadata_field(field_name: str) -> bool:
 
 
 def can_update_user_data_field(config: RowndPluginConfig, field_name: str) -> bool:
-    if field_name == "rownd_session_authentication":
+    if is_internal_metadata_field(field_name):
         return False
     schema_field = config.schema.get(field_name)
     if schema_field is None:
-        return False
+        return field_name == "email"
     owned_by = (
         "app" if field_name in {"google_id", "apple_id"} else schema_field.get("owned_by", "user")
     )
@@ -200,6 +200,29 @@ def get_canonical_email_recipe_user_id(metadata: JsonDict, tenant_id: str) -> Op
     return canonical if isinstance(canonical, str) else None
 
 
+def get_authoritative_profile_fields(metadata: JsonDict) -> List[str]:
+    fields = metadata.get("rownd_profile_authoritative_fields")
+    if not isinstance(fields, list):
+        return []
+    return [
+        field
+        for field in fields
+        if isinstance(field, str)
+        and not is_internal_metadata_field(field)
+        and not is_identity_field(field)
+    ]
+
+
+def get_rownd_profile_data(metadata: JsonDict) -> JsonDict:
+    data = dict(as_json_dict(as_json_dict(metadata.get("original_rownd_user")).get("data")))
+    for field in get_authoritative_profile_fields(metadata):
+        if field in metadata:
+            data[field] = metadata[field]
+        else:
+            data.pop(field, None)
+    return data
+
+
 def project_rownd_compat_user(
     user_id: str,
     st_user: User,
@@ -209,7 +232,7 @@ def project_rownd_compat_user(
     latest_session_info: Optional[Any],
 ) -> JsonDict:
     original = as_json_dict(metadata.get("original_rownd_user"))
-    original_data = as_json_dict(original.get("data"))
+    original_data = get_rownd_profile_data(metadata)
     verified_data = {
         key: value
         for key, value in as_json_dict(original.get("verified_data")).items()
@@ -299,7 +322,12 @@ def project_rownd_compat_user(
         data.setdefault("anonymous_id", anonymous_id)
 
     for key, schema_field in schema.items():
-        if not is_internal_metadata_field(key) and data.get(key) is None and schema_field.get("type") == "string":
+        if (
+            not is_internal_metadata_field(key)
+            and key not in get_authoritative_profile_fields(metadata)
+            and data.get(key) is None
+            and schema_field.get("type") == "string"
+        ):
             data[key] = ""
 
     sorted_by_joined = sorted(tenant_login_methods, key=lambda method: method.time_joined)
@@ -420,14 +448,15 @@ def build_configured_session_claims(
     metadata: JsonDict,
     reserved_claims: AbstractSet[str] = RESERVED_SESSION_CLAIMS,
 ) -> JsonDict:
-    original = as_json_dict(metadata.get("original_rownd_user"))
-    original_data = as_json_dict(original.get("data"))
+    original_data = get_rownd_profile_data(metadata)
     claims = {}
     for key, field_config in config.schema.items():
-        if field_config.get("include_in_session_claims") is not True:
+        if field_config.get("include_in_session_claims") is not True or is_internal_metadata_field(
+            key
+        ):
             continue
         claim_name = resolve_session_claim_name(key, field_config)
-        if claim_name in reserved_claims:
+        if claim_name in reserved_claims or is_internal_metadata_field(claim_name):
             continue
         value = original_data.get(key, metadata.get(key))
         if value is not None:
@@ -504,7 +533,7 @@ def build_standard_oauth_claims(
 ) -> JsonDict:
     claims: JsonDict = {}
     original = as_json_dict(metadata.get("original_rownd_user"))
-    rownd_data = as_json_dict(original.get("data"))
+    rownd_data = get_rownd_profile_data(metadata)
     verified_data = as_json_dict(original.get("verified_data"))
     tenant_methods = [method for method in user.login_methods if tenant_id in method.tenant_ids]
 

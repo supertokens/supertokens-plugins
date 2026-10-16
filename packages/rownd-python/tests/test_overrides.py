@@ -97,7 +97,12 @@ class RefreshSession:
 
 
 def make_config() -> RowndPluginConfig:
-    return RowndPluginConfig(rownd_app_key="app-key", rownd_app_secret="secret")
+    # Legacy override-only tests intentionally omit Core authorization fixtures.
+    return RowndPluginConfig(
+        rownd_app_key="app-key",
+        rownd_app_secret="secret",
+        email_change={"retirement_mode": "observe"},
+    )
 
 
 def make_guard_config() -> RowndPluginConfig:
@@ -1358,7 +1363,8 @@ async def test_passwordless_consume_api_binds_returned_session_to_request_tenant
 
     assert caller_context["rowndPasswordlessConsumePostcheck"] == "stale-marker"
     assert all(call.args[0] == "public" for call in authorize.await_args_list)
-    assert authorize.await_count == ((2 if guard_mode else 1) if stored_email else 0)
+    expected_checks = 2 + (session_tenant == "public") if guard_mode else 1
+    assert authorize.await_count == (expected_checks if stored_email else 0)
     if guard_mode and session_tenant != "public":
         assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
         revoke.assert_awaited_once_with("sensitive-session-handle", contexts[0])
@@ -1459,10 +1465,62 @@ async def test_passwordless_consume_binds_returned_session_primary_owner(
         ]
 
 
-@pytest.mark.parametrize("outcome", [
-    "removed", "absent", "present", "lookup_error", "false_info",
-    "invalid_none", "invalid_zero", "invalid_one", "invalid_empty", "invalid_mock",
-])
+async def test_enforce_rechecks_email_retirement_after_session_creation(monkeypatch):
+    revoke = AsyncMock(return_value=True)
+    monkeypatch.setattr(plugin.session_asyncio, "revoke_session", revoke)
+    returned_session = make_passwordless_returned_session(revoke)
+    clear = Mock()
+    monkeypatch.setattr(plugin, "clear_session_response_mutator", Mock(return_value=clear))
+    authorization = AsyncMock(
+        return_value=EmailCredentialAuthorization(
+            EmailCredentialState.RETIRED, EmailCredentialReason.NONCANONICAL, "owner", "canonical"
+        )
+    )
+    monkeypatch.setattr(supertokens_repository, "authorize_passwordless_email", authorization)
+
+    async def consume(*args):
+        args[-1]["rowndPasswordlessConsumePostcheck"] = plugin._PasswordlessConsumePostcheck(
+            "owner", "canonical", "public", "old@example.com"
+        )
+        return SimpleNamespace(
+            status="OK", user=SimpleNamespace(id="owner"), session=returned_session
+        )
+
+    overridden = plugin._passwordless_api_override(RowndPluginConfig())(
+        cast(Any, SimpleNamespace(create_code_post=None, consume_code_post=consume))
+    )
+    result = await overridden.consume_code_post(
+        "pre",
+        None,
+        None,
+        "link",
+        None,
+        None,
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest())),
+        {},
+    )
+    assert isinstance(result, plugin.ConsumeCodePostRestartFlowError)
+    authorization.assert_awaited_once()
+    revoke.assert_awaited_once()
+    assert clear in returned_session.response_mutators
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "removed",
+        "absent",
+        "present",
+        "lookup_error",
+        "false_info",
+        "invalid_none",
+        "invalid_zero",
+        "invalid_one",
+        "invalid_empty",
+        "invalid_mock",
+    ],
+)
 @pytest.mark.parametrize("clear_succeeds", [True, False])
 async def test_passwordless_cleanup_confirms_absence_before_preserving_sibling_session(
     monkeypatch: pytest.MonkeyPatch, outcome: str, clear_succeeds: bool
@@ -2319,7 +2377,11 @@ async def test_update_user_field_route_uses_post_import_writable_policy_patch(
     response = FakeResponse()
 
     await impl.handle_update_user_field(
-        make_config(), cast(Any, request), cast(Any, response), cast(Any, object()), {}
+        make_config(),
+        cast(Any, request),
+        cast(Any, response),
+        cast(Any, SimpleNamespace(get_tenant_id=lambda _context: "public")),
+        {},
     )
 
     assert calls == [["first_name"]]
@@ -2682,7 +2744,7 @@ async def test_init_rejects_non_positive_email_change_session_age():
 
 async def test_init_validates_email_retirement_mode():
     with pytest.raises(
-        ValueError, match="email_change.retirement_mode must be 'observe' or 'guard'"
+        ValueError, match="email_change.retirement_mode must be 'observe', 'guard', or 'enforce'"
     ):
         plugin.init(
             RowndPluginConfig(
@@ -2693,8 +2755,9 @@ async def test_init_validates_email_retirement_mode():
         )
 
     config = make_config()
+    config.email_change = {}
     plugin.init(config)
-    assert config.email_change.get("retirement_mode") == "observe"
+    assert config.email_change.get("retirement_mode") == "enforce"
 
 
 async def test_disabled_migration_omits_migration_routes():
@@ -3665,6 +3728,11 @@ async def test_pending_verification_binding_is_checked_before_token_use(
     }
     if invalid_binding == "session_user":
         session_information.user_id = "other-user"
+        monkeypatch.setattr(
+            supertokens_repository,
+            "freshly_resolve_sdk_user_id_to_internal",
+            AsyncMock(return_value="user-id"),
+        )
     elif invalid_binding == "session_tenant":
         session_information.tenant_id = "other-tenant"
     elif invalid_binding == "pending_session":

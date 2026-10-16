@@ -91,6 +91,8 @@ DEFAULT_ROWND_SCHEMA = {
 
 IDENTITY_USER_DATA_FIELDS = {"user_id", "email", "phone_number", "google_id", "apple_id"}
 INTERNAL_METADATA_FIELDS = {
+    "rownd_email_metadata_version",
+    "rownd_profile_authoritative_fields",
     "rownd_session_authentication",
     "rownd_migration_owner_consolidation",
     "original_rownd_user",

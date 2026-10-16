@@ -83,11 +83,13 @@ class RowndCrossDeviceConfirmationBypassConfig(TypedDict):
 
 
 class RowndEmailChangeConfig(TypedDict, total=False):
-    max_session_age_seconds: float
-    retirement_mode: Literal["observe", "guard"]
+    max_session_age_seconds: Optional[float]
+    retirement_mode: Literal["observe", "guard", "enforce"]
 
 
 class RowndEmailChangeRequestContext(TypedDict):
+    rowndExpectedUserId: NotRequired[str]
+    rowndExpectedTenantId: NotRequired[str]
     rowndDisplayContext: NotRequired[Literal["browser", "mobile_app", "customer_web_view"]]
     rowndClientDomain: NotRequired[str]
     rowndNativeEmailVerification: NotRequired[bool]
@@ -179,7 +181,7 @@ class RowndPluginConfig:
     cross_device_confirmation_bypass: Optional[RowndCrossDeviceConfirmationBypassConfig] = None
     rownd_client: Optional[RowndClientProtocol] = None
     email_change: RowndEmailChangeConfig = field(
-        default_factory=lambda: {"max_session_age_seconds": 600, "retirement_mode": "observe"}
+        default_factory=lambda: {"max_session_age_seconds": 600, "retirement_mode": "enforce"}
     )
     rownd_app_id: Optional[str] = None
     resolve_config: Optional[Callable[[Dict[str, Any]], Awaitable[JsonDict]]] = None

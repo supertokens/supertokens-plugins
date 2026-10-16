@@ -134,7 +134,7 @@ def test_network_subnet_configuration_and_cleanup_after_start_failure(monkeypatc
     monkeypatch.setattr(conftest, "start_container", start)
 
     with pytest.raises(RuntimeError) as raised:
-        next(unwrap(conftest.core_url)())
+        next(unwrap(conftest.persistent_core)())
 
     assert raised.value is error
     options = network_double.call_args.kwargs["docker_network_kw"]
@@ -162,7 +162,7 @@ def test_network_creation_error_closes_client_without_retry(monkeypatch, network
     monkeypatch.setattr(conftest, "start_container", start)
 
     with pytest.raises(APIError) as raised:
-        next(unwrap(conftest.core_url)())
+        next(unwrap(conftest.persistent_core)())
 
     assert raised.value is error
     network.create.assert_called_once_with()
@@ -175,7 +175,7 @@ def test_invalid_subnet_is_rejected_before_allocating_resources(monkeypatch, net
     monkeypatch.setenv("ROWND_TEST_DOCKER_SUBNET", "not-a-subnet")
 
     with pytest.raises(ValueError):
-        next(unwrap(conftest.core_url)())
+        next(unwrap(conftest.persistent_core)())
 
     network_double.assert_not_called()
 
@@ -186,7 +186,7 @@ def test_core_startup_failure_stops_postgres_and_removes_network(monkeypatch, ne
     monkeypatch.setattr(conftest, "start_container", Mock(side_effect=[postgres, error]))
 
     with pytest.raises(RuntimeError) as raised:
-        next(unwrap(conftest.core_url)())
+        next(unwrap(conftest.persistent_core)())
 
     assert raised.value is error
     postgres.stop.assert_called_once_with()
@@ -201,7 +201,7 @@ def test_failed_core_teardown_still_cleans_postgres_network_and_client(monkeypat
     monkeypatch.setattr(conftest.httpx, "put", Mock())
     error = APIError("core remove failed")
     core.stop.side_effect = error
-    fixture = unwrap(conftest.core_url)()
+    fixture = unwrap(conftest.persistent_core)()
     next(fixture)
 
     with pytest.raises(APIError) as raised:
@@ -221,7 +221,7 @@ def test_core_readiness_timeout_cleans_all_resources_without_retry(monkeypatch, 
     monkeypatch.setattr(conftest.time, "time", Mock(side_effect=[0, 61]))
 
     with pytest.raises(RuntimeError, match="Core container did not become ready"):
-        next(unwrap(conftest.core_url)())
+        next(unwrap(conftest.persistent_core)())
 
     assert start.call_count == 2
     core.stop.assert_called_once_with()

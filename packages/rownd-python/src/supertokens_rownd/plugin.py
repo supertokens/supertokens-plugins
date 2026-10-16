@@ -118,7 +118,11 @@ from .rownd_compatibility import (
     resolve_session_claim_name,
 )
 from .rownd_repository import RowndClient
-from .session_authentication import proven_session_authentication, session_authentication_origin
+from .session_authentication import (
+    is_verified_email_change_destination,
+    proven_session_authentication,
+    session_authentication_origin,
+)
 from .supertokens_repository import (
     build_rownd_oauth_payload,
     build_rownd_oauth_user_info,
@@ -149,6 +153,7 @@ class _PasswordlessConsumePostcheck(NamedTuple):
     owner_user_id: str
     recipe_user_id: str
     tenant_id: str
+    email: Optional[str] = None
 
 
 class _PasswordlessSessionCleanup(NamedTuple):
@@ -230,7 +235,7 @@ async def create_magic_link_with_confirmation_bypass(
             )
         else:
             _log_passwordless_authorization_diagnostic(config, "create", authorization)
-        if config.email_change.get("retirement_mode", "observe") == "guard" and (
+        if config.email_change.get("retirement_mode", "enforce") in {"guard", "enforce"} and (
             authorization is None or not authorization.allowed
         ):
             raise RowndPluginError("Passwordless request could not be completed")
@@ -552,7 +557,7 @@ def init(
         session: Optional[SessionContainer],
         user_context: UserContext,
     ) -> BaseResponse:
-        return await handle_get_user(config, session, response, user_context)
+        return await handle_get_user(config, session, response, user_context, request)
 
     async def update_user_handler(
         request: BaseRequest,
@@ -1015,9 +1020,10 @@ def _passwordless_api_override(config: RowndPluginConfig):
                     )
                 else:
                     _log_passwordless_authorization_diagnostic(config, "create", authorization)
-                if config.email_change.get("retirement_mode", "observe") == "guard" and (
-                    authorization is None or not authorization.allowed
-                ):
+                if config.email_change.get("retirement_mode", "enforce") in {
+                    "guard",
+                    "enforce",
+                } and (authorization is None or not authorization.allowed):
                     return GeneralErrorResponse("Passwordless request could not be completed")
             return await original_create_code_post(
                 email,
@@ -1055,7 +1061,10 @@ def _passwordless_api_override(config: RowndPluginConfig):
                     _log_passwordless_authorization_diagnostic(
                         config, "resend", failure_code="email_resolution_failed"
                     )
-            guard_mode = config.email_change.get("retirement_mode", "observe") == "guard"
+            guard_mode = config.email_change.get("retirement_mode", "enforce") in {
+                "guard",
+                "enforce",
+            }
             if guard_mode and stored_email is None:
                 return ResendCodePostRestartFlowError()
             if stored_email:
@@ -1125,7 +1134,7 @@ def _passwordless_api_override(config: RowndPluginConfig):
             if getattr(result, "status", None) == "OK":
                 user_id = getattr(getattr(result, "user", None), "id", None)
                 returned_session = getattr(result, "session", None)
-                if config.email_change.get("retirement_mode", "observe") == "guard":
+                if config.email_change.get("retirement_mode", "enforce") in {"guard", "enforce"}:
                     marker = context.get("rowndPasswordlessConsumePostcheck")
                     marker_valid = (
                         isinstance(user_id, str)
@@ -1144,10 +1153,19 @@ def _passwordless_api_override(config: RowndPluginConfig):
                         checked_session = cast(SessionContainer, returned_session)
                         checked_user_id = cast(str, user_id)
                         try:
+                            retains_session = (
+                                config.email_change.get("retirement_mode", "enforce") == "enforce"
+                                and session is not None
+                                and checked_session.get_handle(context)
+                                == session.get_handle(context)
+                            )
                             marker_valid = (
                                 checked_session.get_tenant_id(context) == checked_marker.tenant_id
-                                and checked_session.get_recipe_user_id(context).get_as_string()
-                                == checked_marker.recipe_user_id
+                                and (
+                                    checked_session.get_recipe_user_id(context).get_as_string()
+                                    == checked_marker.recipe_user_id
+                                    or retains_session
+                                )
                                 and await supertokens_repository.sdk_user_id_matches_internal_target(
                                     checked_user_id, checked_marker.owner_user_id, context
                                 )
@@ -1161,6 +1179,19 @@ def _passwordless_api_override(config: RowndPluginConfig):
                                         session_user_id, checked_marker.owner_user_id, context
                                     )
                                 )
+                            if marker_valid and checked_marker.email is not None:
+                                # Recheck after session creation: a concurrent promotion may
+                                # have committed between the recipe check and token minting.
+                                authorization = (
+                                    await supertokens_repository.authorize_passwordless_email(
+                                        tenant_id,
+                                        checked_marker.email,
+                                        context,
+                                        checked_marker.recipe_user_id,
+                                        checked_marker.owner_user_id,
+                                    )
+                                )
+                                marker_valid = authorization.allowed
                         except Exception:
                             marker_valid = False
                     if not marker_valid:
@@ -1243,7 +1274,10 @@ def _passwordless_function_override(config: RowndPluginConfig):
             tenant_id: str,
             user_context: UserContext,
         ):
-            guard_mode = config.email_change.get("retirement_mode", "observe") == "guard"
+            guard_mode = config.email_change.get("retirement_mode", "enforce") in {
+                "guard",
+                "enforce",
+            }
             user_context.pop("rowndPasswordlessConsumePostcheck", None)
             try:
                 stored_email = await supertokens_repository.resolve_passwordless_device_email(
@@ -1295,6 +1329,21 @@ def _passwordless_function_override(config: RowndPluginConfig):
                 )
             if stored_email is None:
                 return ConsumeCodeRestartFlowError()
+            if (
+                stored_email
+                and session is None
+                and is_verified_email_change_destination(tenant_id, stored_email)
+            ):
+                return await original_consume_code(
+                    pre_auth_session_id,
+                    user_input_code,
+                    device_id,
+                    link_code,
+                    session,
+                    should_try_linking_with_session_user,
+                    tenant_id,
+                    user_context,
+                )
             if not stored_email:
                 result = await original_consume_code(
                     pre_auth_session_id,
@@ -1349,7 +1398,10 @@ def _passwordless_function_override(config: RowndPluginConfig):
             if not after.allowed:
                 return ConsumeCodeRestartFlowError()
             user_context["rowndPasswordlessConsumePostcheck"] = _PasswordlessConsumePostcheck(
-                cast(str, after.owner_user_id), result.recipe_user_id.get_as_string(), tenant_id
+                cast(str, after.owner_user_id),
+                result.recipe_user_id.get_as_string(),
+                tenant_id,
+                stored_email,
             )
             return result
 
@@ -1598,6 +1650,8 @@ def _emailverification_api_override():
                             cast(str, pending_token["user_id"]),
                         )
                     except RowndEmailChangeError as error:
+                        if session is not None:
+                            _append_clear_session_response_mutator(session)
                         return GeneralErrorResponse(str(error))
                     if session is not None and verification_result is not None:
                         should_replace_session = (
@@ -1609,16 +1663,26 @@ def _emailverification_api_override():
                             verified_recipe_user_id = cast(
                                 RecipeUserId, verification_result["recipe_user_id"]
                             )
-                            try:
-                                await supertokens_repository.authorize_passwordless_email(
-                                    tenant_id,
-                                    email,
-                                    user_context,
-                                    verified_recipe_user_id.get_as_string(),
-                                    cast(str, verification_result["user_id"]),
+                            if (
+                                rownd_config.get_active_rownd_config().email_change.get(
+                                    "retirement_mode", "enforce"
                                 )
-                            except Exception:
-                                pass
+                                == "enforce"
+                            ):
+                                authorization = (
+                                    await supertokens_repository.authorize_passwordless_email(
+                                        tenant_id,
+                                        email,
+                                        user_context,
+                                        verified_recipe_user_id.get_as_string(),
+                                        cast(str, verification_result["user_id"]),
+                                    )
+                                )
+                                if not authorization.allowed:
+                                    _append_clear_session_response_mutator(session)
+                                    return GeneralErrorResponse(
+                                        "verified email is no longer authorized"
+                                    )
                             try:
                                 cast(
                                     Any, result
@@ -1631,11 +1695,18 @@ def _emailverification_api_override():
                                     user_context,
                                 )
                             except Exception:
-                                rollback = cast(
-                                    Callable[[], Any],
-                                    verification_result["rollback_on_session_replacement_failure"],
+                                rollback = verification_result.get(
+                                    "rollback_on_session_replacement_failure"
                                 )
-                                await rollback()
+                                if rollback is not None:
+                                    await cast(Callable[[], Any], rollback)()
+                                else:
+                                    await session_asyncio.revoke_all_sessions_for_user(
+                                        cast(str, verification_result["user_id"]),
+                                        True,
+                                        None,
+                                        user_context,
+                                    )
                                 raise
             return result
 
@@ -1735,17 +1806,17 @@ def _validate_config(config: RowndPluginConfig) -> None:
             raise ValueError("Missing telemetry custom factory function in plugin config")
 
     max_session_age = config.email_change.get("max_session_age_seconds", 600)
-    if (
+    if max_session_age is not None and (
         not isinstance(max_session_age, (int, float))
         or isinstance(max_session_age, bool)
         or not math.isfinite(max_session_age)
         or max_session_age <= 0
     ):
-        raise ValueError("email_change.max_session_age_seconds must be a positive number")
+        raise ValueError("email_change.max_session_age_seconds must be a positive number or None")
     config.email_change["max_session_age_seconds"] = max_session_age
-    retirement_mode = config.email_change.get("retirement_mode", "observe")
-    if retirement_mode not in {"observe", "guard"}:
-        raise ValueError("email_change.retirement_mode must be 'observe' or 'guard'")
+    retirement_mode = config.email_change.get("retirement_mode", "enforce")
+    if retirement_mode not in {"observe", "guard", "enforce"}:
+        raise ValueError("email_change.retirement_mode must be 'observe', 'guard', or 'enforce'")
     config.email_change["retirement_mode"] = retirement_mode
 
     for key, value in config.client_domains.items():
