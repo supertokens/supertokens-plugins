@@ -48,14 +48,14 @@ SuperTokens.init({
 
 ## Configuration Options
 
-| Option                                | Type      | Default | Description                                                            |
-| ------------------------------------- | --------- | ------- | ---------------------------------------------------------------------- |
-| `requireNonPublicTenantAssociation`   | `boolean` | `false` | Require users to be associated with at least one non-public tenant    |
-| `requireTenantCreationRequestApproval`| `boolean` | `true`  | Whether tenant creation requires approval from an admin                |
-| `enableTenantListAPI`                 | `boolean` | `false` | Enable the API to list all available tenants                           |
-| `createRolesOnInit`                   | `boolean` | `true`  | Automatically create required roles (TENANT_ADMIN, TENANT_MEMBER) on initialization |
-| `allowPublicTenantAccess`                       | `boolean` | `false` | Whether public tenant access should be allowed without an assigned role |
-| `emailDelivery`                       | `object`  | -       | Configure email delivery service and overrides                         |
+| Option                                 | Type      | Default | Description                                                                         |
+| -------------------------------------- | --------- | ------- | ----------------------------------------------------------------------------------- |
+| `requireNonPublicTenantAssociation`    | `boolean` | `false` | Require users to be associated with at least one non-public tenant                  |
+| `requireTenantCreationRequestApproval` | `boolean` | `true`  | Whether tenant creation requires approval from an admin                             |
+| `enableTenantListAPI`                  | `boolean` | `false` | Enable the API to list all available tenants                                        |
+| `createRolesOnInit`                    | `boolean` | `true`  | Automatically create required roles (TENANT_ADMIN, TENANT_MEMBER) on initialization |
+| `allowPublicTenantAccess`              | `boolean` | `false` | Whether public tenant access should be allowed without an assigned role             |
+| `emailDelivery`                        | `object`  | -       | Configure email delivery service and overrides                                      |
 
 ## API Endpoints
 
@@ -64,6 +64,7 @@ The plugin automatically exposes these endpoints:
 ### Tenant Management
 
 #### List Tenants
+
 - **GET** `/plugin/supertokens-plugin-tenants/list`
 - **Authentication**: Session required
 - **Note**: Only available when `enableTenantListAPI: true`
@@ -82,6 +83,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### Create Tenant
+
 - **POST** `/plugin/supertokens-plugin-tenants/create-tenant`
 - **Authentication**: Session required
 - **Body**:
@@ -101,6 +103,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### Switch Tenant
+
 - **POST** `/plugin/supertokens-plugin-tenants/switch-tenant`
 - **Authentication**: Session required
 - **Body**:
@@ -118,6 +121,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### Join Tenant
+
 - **POST** `/plugin/supertokens-plugin-tenants/join-tenant`
 - **Authentication**: Session required
 - **Body**:
@@ -135,6 +139,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### Leave Tenant
+
 - **POST** `/plugin/supertokens-plugin-tenants/leave-tenant`
 - **Authentication**: Session required
 - **Response**:
@@ -148,6 +153,7 @@ The plugin automatically exposes these endpoints:
 ### User Management
 
 #### List Users in Tenant
+
 - **POST** `/plugin/supertokens-plugin-tenants/users`
 - **Authentication**: Session required
 - **Permissions**: `LIST_USERS`
@@ -166,6 +172,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### Remove User from Tenant
+
 - **POST** `/plugin/supertokens-plugin-tenants/remove`
 - **Authentication**: Session required
 - **Permissions**: `REMOVE_USERS`
@@ -183,6 +190,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### Change User Role
+
 - **POST** `/plugin/supertokens-plugin-tenants/role/change`
 - **Authentication**: Session required
 - **Permissions**: `CHANGE_USER_ROLES`
@@ -204,6 +212,7 @@ The plugin automatically exposes these endpoints:
 ### Invitations
 
 #### Add Invitation
+
 - **POST** `/plugin/supertokens-plugin-tenants/invite/add`
 - **Authentication**: Session required
 - **Permissions**: `MANAGE_INVITATIONS`
@@ -223,6 +232,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### List Invitations
+
 - **POST** `/plugin/supertokens-plugin-tenants/invite/list`
 - **Authentication**: Session required
 - **Permissions**: `MANAGE_INVITATIONS`
@@ -241,6 +251,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### Accept Invitation
+
 - **POST** `/plugin/supertokens-plugin-tenants/invite/accept`
 - **Authentication**: Session required
 - **Body**:
@@ -258,6 +269,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### Remove Invitation
+
 - **POST** `/plugin/supertokens-plugin-tenants/invite/remove`
 - **Authentication**: Session required
 - **Permissions**: `MANAGE_INVITATIONS`
@@ -277,6 +289,7 @@ The plugin automatically exposes these endpoints:
 ### Join Requests
 
 #### Request to Join Tenant
+
 - **POST** `/plugin/supertokens-plugin-tenants/request/add`
 - **Authentication**: Session required
 - **Body**:
@@ -294,6 +307,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### List Join Requests
+
 - **POST** `/plugin/supertokens-plugin-tenants/request/list`
 - **Authentication**: Session required
 - **Permissions**: `MANAGE_JOIN_REQUESTS`
@@ -311,6 +325,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### Accept Join Request
+
 - **POST** `/plugin/supertokens-plugin-tenants/request/accept`
 - **Authentication**: Session required
 - **Permissions**: `MANAGE_JOIN_REQUESTS`
@@ -329,6 +344,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### Reject Join Request
+
 - **POST** `/plugin/supertokens-plugin-tenants/request/reject`
 - **Authentication**: Session required
 - **Permissions**: `MANAGE_JOIN_REQUESTS`
@@ -348,6 +364,7 @@ The plugin automatically exposes these endpoints:
 ### Tenant Creation Requests
 
 #### List Tenant Creation Requests
+
 - **POST** `/plugin/supertokens-plugin-tenants/tenant-requests/list`
 - **Authentication**: Session required
 - **Permissions**: `MANAGE_CREATE_REQUESTS`
@@ -366,6 +383,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### Accept Tenant Creation Request
+
 - **POST** `/plugin/supertokens-plugin-tenants/tenant-requests/accept`
 - **Authentication**: Session required
 - **Permissions**: `MANAGE_CREATE_REQUESTS`
@@ -383,6 +401,7 @@ The plugin automatically exposes these endpoints:
   ```
 
 #### Reject Tenant Creation Request
+
 - **POST** `/plugin/supertokens-plugin-tenants/tenant-requests/reject`
 - **Authentication**: Session required
 - **Permissions**: `MANAGE_CREATE_REQUESTS`
@@ -405,23 +424,23 @@ The plugin automatically creates the following roles:
 
 ### Tenant Roles
 
-| Role            | Description                                    | Permissions                                                                                     |
-| --------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `tenant-admin`  | Full administrative access within the tenant   | `tenant-access`, `list-users`, `manage-invitations`, `manage-join-requests`, `change-user-roles`, `remove-users` |
-| `tenant-member` | Basic member access within the tenant          | `tenant-access`                                                                                 |
-| `app-admin`     | Global application administrator               | All permissions across all tenants                                                              |
+| Role            | Description                                  | Permissions                                                                                                      |
+| --------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `tenant-admin`  | Full administrative access within the tenant | `tenant-access`, `list-users`, `manage-invitations`, `manage-join-requests`, `change-user-roles`, `remove-users` |
+| `tenant-member` | Basic member access within the tenant        | `tenant-access`                                                                                                  |
+| `app-admin`     | Global application administrator             | All permissions across all tenants                                                                               |
 
 ### Permissions
 
-| Permission              | Description                                    |
-| ----------------------- | ---------------------------------------------- |
-| `tenant-access`         | Basic access to tenant                         |
-| `list-users`            | View list of users in tenant                   |
-| `manage-invitations`    | Create and manage tenant invitations           |
-| `manage-join-requests`  | Approve or reject join requests                |
-| `change-user-roles`     | Modify user roles within tenant                |
-| `remove-users`          | Remove users from tenant                       |
-| `manage-create-requests`| Approve or reject tenant creation requests     |
+| Permission               | Description                                |
+| ------------------------ | ------------------------------------------ |
+| `tenant-access`          | Basic access to tenant                     |
+| `list-users`             | View list of users in tenant               |
+| `manage-invitations`     | Create and manage tenant invitations       |
+| `manage-join-requests`   | Approve or reject join requests            |
+| `change-user-roles`      | Modify user roles within tenant            |
+| `remove-users`           | Remove users from tenant                   |
+| `manage-create-requests` | Approve or reject tenant creation requests |
 
 ## Email Delivery Configuration
 
@@ -516,10 +535,6 @@ The plugin includes comprehensive test coverage. Run tests with:
 ```bash
 npm test
 ```
-
-Tests require a running SuperTokens core instance. Configure using environment variables:
-- `CORE_BASE_URL`: SuperTokens core URL (default: `http://localhost:3567`)
-- `CORE_API_KEY`: API key for core authentication
 
 ## License
 
