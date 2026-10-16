@@ -1,4 +1,7 @@
 import SuperTokens from "supertokens-node";
+import Session from "supertokens-node/recipe/session";
+import { EmailVerificationClaim } from "supertokens-node/recipe/emailverification";
+import { RowndEmailChangeError } from "./errors";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { User } from "supertokens-node/types";
 import type { JsonRecord } from "./utils";
@@ -7,6 +10,14 @@ import { readOwnerPlanCheckpoint, ambiguousOwnerSessionAliases } from "./migrati
 import { assertCompletedPlan } from "./migration-consolidation";
 
 export const SESSION_AUTHENTICATION_KEY = "rownd_session_authentication";
+
+export async function assertEmailChangeSessionClaims(handle: string, userContext: JsonRecord) {
+  const result = await Session.validateClaimsForSessionHandle(handle, (validators) => validators.filter((validator) =>
+    !("claim" in validator) || validator.claim.key !== EmailVerificationClaim.key), userContext);
+  if (result.status !== "OK" || result.invalidClaims.length) {
+    throw new RowndEmailChangeError("CONFLICT", 403, "Session requirements are not satisfied.");
+  }
+}
 const provenAuthentication = new AsyncLocalStorage<boolean>();
 
 // Credential-success paths can attest authentication when account linking keeps

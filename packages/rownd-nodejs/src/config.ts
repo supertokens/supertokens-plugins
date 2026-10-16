@@ -328,11 +328,12 @@ export function validateDynamicConfig(
   requireRecord(config, "result");
   if (
     config.emailChange?.maxSessionAgeSeconds !== undefined &&
+    config.emailChange.maxSessionAgeSeconds !== null &&
     (!Number.isFinite(config.emailChange.maxSessionAgeSeconds) ||
       config.emailChange.maxSessionAgeSeconds <= 0)
   ) {
     throw new Error(
-      "emailChange.maxSessionAgeSeconds must be a positive number",
+      "emailChange.maxSessionAgeSeconds must be a positive finite number or null",
     );
   }
   for (const [key, value] of Object.entries(config.clientDomains ?? {})) {
@@ -409,7 +410,8 @@ function dynamicConfigFrom(
     appConfig: config.appConfig,
     subBrands: config.subBrands,
     emailChange: {
-      maxSessionAgeSeconds: config.emailChange?.maxSessionAgeSeconds ?? 600,
+      maxSessionAgeSeconds: config.emailChange?.maxSessionAgeSeconds === undefined
+        ? 600 : config.emailChange.maxSessionAgeSeconds,
     },
   };
 }
@@ -477,9 +479,10 @@ export async function resolvePluginConfigSnapshot<
     subBrands: dynamicConfig.subBrands ?? config.subBrands,
     emailChange: {
       maxSessionAgeSeconds:
-        dynamicConfig.emailChange?.maxSessionAgeSeconds ??
-        config.emailChange?.maxSessionAgeSeconds ??
-        600,
+        dynamicConfig.emailChange?.maxSessionAgeSeconds !== undefined
+          ? dynamicConfig.emailChange.maxSessionAgeSeconds
+          : config.emailChange?.maxSessionAgeSeconds !== undefined
+            ? config.emailChange.maxSessionAgeSeconds : 600,
     },
   };
   const userContext = createDerivedUserContext(context.userContext, {});

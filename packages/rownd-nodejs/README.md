@@ -180,6 +180,62 @@ email updates are rejected rather than creating a hidden authentication method.
 when email changes are enabled, and Passwordless must use `EMAIL` or
 `EMAIL_OR_PHONE` as its contact method.
 
+`emailChange.maxSessionAgeSeconds` has three supported states:
+
+- Omitted: inherit the static setting, or 600 seconds by default.
+- Positive finite number: enforce session creation age at initiation. Refresh does not reset it.
+- `null`: disable only the initiation age limit. A live, database-checked initiating
+  session and verification of the destination mailbox are still required. Dynamic
+  null overrides a static number; an omitted dynamic value inherits static null.
+
+An aged email PUT returns HTTP 403 with the existing message and additive
+`error_code: "EMAIL_CHANGE_REAUTHENTICATION_REQUIRED"`, before creating pending
+verification or applying accompanying profile fields. A client can retain the
+confirmed form locally, sign out/sign in normally to the same account, and retry
+the existing PUT. No separate email-change operation endpoint or authentication
+receipt is required. This is session-creation age, not proof of a fresh interactive
+credential challenge (including at an external identity provider).
+
+Both profile PUT routes accept optional `context.rowndExpectedUserId`. It is only
+a refusal precondition: the supplied primary/mapped ID and current authenticated
+owner resolve to the same internal primary, or the request returns HTTP 409 with
+`EMAIL_CHANGE_ACCOUNT_MISMATCH` before writes. Authenticated tenant mismatch is
+also refused. The authenticated session always selects the account being updated.
+
+Protected continuation PUTs also send `context.rowndExpectedTenantId`, including
+the literal `"public"`. Both routes compare it with the live session tenant before
+writes, so a same-owner session switching tenants after a client-side check is
+refused with the same 409. Legacy requests without this optional precondition
+retain their existing tenant-default behavior.
+
+For example, `emailChange: { maxSessionAgeSeconds: null }` permits an older live
+session to start a change. This intentionally authorizes changes using session
+possession plus destination-mailbox possession. It does not extend session expiry
+or the Core verification-token TTL, or relax owner, tenant or session-handle binding.
+
+Keep the initiating session until verification. Closing the waiting screen does
+not cancel the server draft. Re-entering the destination sends a new challenge and
+supersedes the old one; explicitly submitting the current canonical email cancels
+an existing draft. Unrelated profile edits leave it intact. An add-email draft
+without a canonical address can be abandoned or superseded, not cancelled by an
+empty email. Pending UI is not restored automatically after reopening.
+
+Open the link in the same app/session that started the change. If that session is
+gone, sign in normally and start a new change. If completion succeeded but its
+replacement-session response was lost, sign in using the verified new email;
+replaying the one-time link is not recovery. Core controls challenge expiry;
+`created_at` is not an additional draft TTL. Expired drafts can remain inert until
+superseded or cancelled.
+
+Released Rownd iOS 0.2.8 / Android 0.1.17 use native authenticated verification
+and install the replacement session from its HTTP response. Their verification
+request uses the default public-tenant route; non-public tenant native completion
+is not supported by this configuration alone. Android's published upstream 0.5.4
+does not fence stale concurrent token-writing responses; functional replacement
+is not an atomic concurrency guarantee. Rownd Android 0.1.17 also does not reload
+the cached profile after verification; replacement-session installation alone
+does not guarantee that the app immediately displays the new canonical email.
+
 Previous Passwordless emails stop being login aliases in the initiating tenant
 after verification. The replacement session uses the surviving canonical
 Passwordless method. A pending change remains usable only while its underlying

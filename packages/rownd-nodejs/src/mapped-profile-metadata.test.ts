@@ -56,6 +56,7 @@ describe("mapped profile metadata", () => {
     });
     vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([]);
     vi.spyOn(Session, "getAllSessionHandlesForUser").mockResolvedValue([]);
+    vi.spyOn(Session, "validateClaimsForSessionHandle").mockResolvedValue({ status: "OK", invalidClaims: [] });
     vi.spyOn(MultiTenancy, "listAllTenants").mockResolvedValue({ status: "OK", tenants: [{ tenantId: "public" }, { tenantId: "other" }] } as any);
     vi.spyOn(EmailVerification, "revokeEmailVerificationTokens").mockResolvedValue({ status: "OK" });
     vi.spyOn(EmailVerification, "unverifyEmail").mockResolvedValue({ status: "OK" });
@@ -208,11 +209,15 @@ describe("mapped profile metadata", () => {
 
   it("starts, resolves and cancels pending changes while preserving another tenant's canonical plan", async () => {
     records.set(ownerId, { ...records.get(ownerId), rownd_pending_verification: [pending("other-plan", "other")] });
+    records.set(externalId, { rownd_pending_verification: [pending("stale")] });
     await startPendingEmailVerification({ userId: externalId, recipeUserId, email: "next@example.com",
       tenantId: "public", pendingVerificationId: "new-plan", initiatingSessionHandle: "session" });
+    expect((await getUserById(externalId)).data.email).toBe("old@example.com");
     expect(records.get(ownerId)?.rownd_pending_verification).toEqual([
       expect.objectContaining({ id: "other-plan", tenantId: "other" }), expect.objectContaining({ id: "new-plan" }),
     ]);
+    await updateUserData(externalId, { first_name: "Unrelated edit" });
+    expect((records.get(ownerId)?.rownd_pending_verification as unknown[]).length).toBe(2);
     vi.spyOn(Session, "getSessionInformation").mockResolvedValue({
       sessionHandle: "session", userId: externalId, tenantId: "public",
     } as any);
@@ -227,11 +232,16 @@ describe("mapped profile metadata", () => {
   it("removes a failed send's canonical pending entry without resurrecting legacy plans", async () => {
     records.set(externalId, { rownd_pending_verification: [pending("old-plan"), pending("other-plan", "other")] });
     records.set(ownerId, { ...records.get(ownerId), rownd_pending_verification: [pending("other-plan", "other")] });
-    vi.mocked(EmailVerification.sendEmailVerificationEmail).mockRejectedValue(new Error("delivery failed"));
+    vi.mocked(EmailVerification.sendEmailVerificationEmail).mockRejectedValueOnce(new Error("delivery failed"));
     await expect(startPendingEmailVerification({ userId: externalId, recipeUserId, email: "next@example.com",
       tenantId: "public", pendingVerificationId: "new-plan", initiatingSessionHandle: "session" })).rejects.toThrow("delivery failed");
     expect(records.get(ownerId)?.rownd_pending_verification).toEqual([expect.objectContaining({ id: "other-plan" })]);
     expect((await getCombinedUserMetadata(externalId)).rownd_pending_verification).toEqual([expect.objectContaining({ id: "other-plan" })]);
+    await startPendingEmailVerification({ userId: externalId, recipeUserId, email: "next@example.com",
+      tenantId: "public", pendingVerificationId: "retry", initiatingSessionHandle: "session" });
+    expect(records.get(ownerId)?.rownd_pending_verification).toEqual([
+      expect.objectContaining({ id: "other-plan" }), expect.objectContaining({ id: "retry" }),
+    ]);
   });
 
   it("preserves internal pointer and name authority when both rows are populated", async () => {

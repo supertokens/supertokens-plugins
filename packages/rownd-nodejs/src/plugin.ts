@@ -1452,7 +1452,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         appConfig: config.appConfig,
         subBrands: config.subBrands,
         emailChange: {
-          maxSessionAgeSeconds: config.emailChange?.maxSessionAgeSeconds ?? 600,
+          maxSessionAgeSeconds: config.emailChange?.maxSessionAgeSeconds === undefined
+            ? 600 : config.emailChange.maxSessionAgeSeconds,
         },
         resolveConfig: config.resolveConfig,
       };

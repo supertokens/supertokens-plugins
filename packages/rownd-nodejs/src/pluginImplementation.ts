@@ -38,6 +38,7 @@ import {
 import {
   buildRowndAudience,
   canUpdateUserDataField,
+  getInternalPrimaryUserId,
   isInternalMetadataField,
 } from "./rownd-compatibility";
 import {
@@ -748,6 +749,9 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
     userContext: SuperTokensUserContext,
   ) => {
     const tenantId = session!.getTenantId(userContext);
+    const payload = parseUpdateUserBody(await getJsonBody(req));
+    const ownerError = await validateExpectedProfileOwner(req, session!, payload.context, userContext);
+    if (ownerError) return ownerError;
     const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
       tenantId,
       request: req,
@@ -755,7 +759,6 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
     });
     const appVariantId = getRequestedAppVariantIdFromRequest(req);
     assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
-    const payload = parseUpdateUserBody(await getJsonBody(req));
     const inputData = payload.data ?? {};
     const operationContext = createDerivedUserContext(resolved.userContext, {
       ...getEmailChangeUserContextValues(payload.context),
@@ -776,7 +779,7 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
       }
       const hasEmailUpdate = hasEmailField && typeof email === "string";
       const permissionError = validateWritableFields(
-        Object.keys(dataWithoutEmail),
+        Object.keys(inputData),
         resolved.config,
       );
 
@@ -998,6 +1001,9 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
     userContext: SuperTokensUserContext,
   ) => {
     const tenantId = session!.getTenantId(userContext);
+    const payload = parseUpdateFieldBody(await getJsonBody(req));
+    const ownerError = await validateExpectedProfileOwner(req, session!, payload.context, userContext);
+    if (ownerError) return ownerError;
     const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
       tenantId,
       request: req,
@@ -1010,13 +1016,14 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
       return missingFieldResponse();
     }
 
-    const payload = parseUpdateFieldBody(await getJsonBody(req));
     const operationContext = createDerivedUserContext(resolved.userContext, {
       ...getEmailChangeUserContextValues(payload.context),
       rowndAppVariantId: appVariantId,
     });
     {
       if (field === "email") {
+        const permissionError = validateWritableFields([field], resolved.config);
+        if (permissionError) return permissionError;
         if (
           typeof payload.value !== "string" ||
           payload.value.trim().length === 0
@@ -1124,22 +1131,44 @@ async function validateEmailChangeSession(
     };
   }
 
-  const authenticationTime = await session.getTimeCreated(userContext);
-  const sessionAgeMs = Date.now() - authenticationTime;
-  if (
-    sessionAgeMs >
-    deps.pluginConfig.emailChange.maxSessionAgeSeconds * 1000
-  ) {
-    return recentAuthenticationRequiredResponse();
+  const maxSessionAgeSeconds = deps.pluginConfig.emailChange.maxSessionAgeSeconds;
+  if (maxSessionAgeSeconds !== null) {
+    const authenticationTime = await session.getTimeCreated(userContext);
+    if (Date.now() - authenticationTime > maxSessionAgeSeconds * 1000) {
+      return recentAuthenticationRequiredResponse();
+    }
   }
 
   return undefined;
+}
+
+async function validateExpectedProfileOwner(
+  req: SuperTokensRequest,
+  session: NonNullable<SuperTokensSession>,
+  context: Record<string, unknown> | undefined,
+  userContext: SuperTokensUserContext,
+) {
+  const expected = context?.rowndExpectedUserId;
+  const expectedTenant = context?.rowndExpectedTenantId;
+  const requestedTenant = req.getKeyValueFromQuery("tenantId");
+  const tenant = session.getTenantId(userContext);
+  const tenantMismatch = (requestedTenant !== undefined && requestedTenant !== tenant) ||
+    (expectedTenant !== undefined && (typeof expectedTenant !== "string" || !expectedTenant || expectedTenant !== tenant));
+  if (expected === undefined && expectedTenant === undefined && !tenantMismatch) return;
+  const owner = await getInternalPrimaryUserId(session.getUserId(userContext), userContext);
+  const expectedOwner = typeof expected === "string" && expected.length > 0
+    ? await getInternalPrimaryUserId(expected, userContext) : undefined;
+  if (tenantMismatch || !owner || owner !== expectedOwner) {
+    return { status: "ERROR" as const, code: 409, error_code: "EMAIL_CHANGE_ACCOUNT_MISMATCH",
+      message: "Sign in to the account where you started this change." };
+  }
 }
 
 function recentAuthenticationRequiredResponse() {
   return {
     status: "ERROR" as const,
     code: 403,
+    error_code: "EMAIL_CHANGE_REAUTHENTICATION_REQUIRED",
     message: "recent authentication is required to change email",
   };
 }
@@ -1149,7 +1178,8 @@ function validateWritableFields(
   pluginConfig?: RowndPluginNormalisedConfig,
 ) {
   const readOnlyField = fields.find(
-    (field) => !canUpdateUserDataField(field, pluginConfig),
+    // Email is an identity field, absent from the default custom-profile schema.
+    (field) => !(field === "email" && !pluginConfig?.schema?.email) && !canUpdateUserDataField(field, pluginConfig),
   );
 
   if (!readOnlyField) {

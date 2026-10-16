@@ -6,7 +6,7 @@ import { migrationPhoneAccountInfos, sameCorePhoneNumber } from "./migration-pho
 import { backfillAdministrativeMetadata } from "./migration-admin-metadata";
 import { getAdministrativeRepairMetadata, prepareAdministrativeCanonicalEmail } from "./migration-admin-email";
 import { RowndMigrationPolicyError } from "./errors";
-import { sessionAuthenticationOrigin } from "./session-authentication";
+import { sessionAuthenticationOrigin, assertEmailChangeSessionClaims } from "./session-authentication";
 import { assertMigrationPostconditions, assertMigrationOwnerGraph, reconcileAdministrativeEmailVerification } from "./migration-postconditions";
 import { assertCurrentRowndProviders, checkpointProviderIntroduction, finishProviderIntroductions, prepareRowndProviderRetirement, recoverProviderRevocations, type ProviderIntroduction } from "./migration-provider";
 import { finishAdministrativeProviderIntroductions, inspectAdministrativeProviderIntroductions } from "./migration-admin-provider";
@@ -1902,6 +1902,12 @@ export async function resolvePendingEmailVerificationToken(input: {
     return { status: "INVALID_PENDING" } as const;
   }
 
+  try {
+    await assertEmailChangeSessionClaims(sessionHandle, input.userContext ?? {});
+  } catch {
+    return { status: "INVALID_PENDING" } as const;
+  }
+
   return {
     status: "OK" as const,
     coreToken: input.token,
@@ -2294,6 +2300,7 @@ export async function completePendingEmailVerification(input: {
         input.userContext,
       );
     }
+    await assertEmailChangeSessionClaims(initiatingSessionHandle, userContext);
     const currentUser = await SuperTokens.getUser(userId, input.userContext);
     // Session information contains literal Core IDs; the SDK user graph exposes
     // mapped recipe IDs. Compare the same namespace without accepting another owner.

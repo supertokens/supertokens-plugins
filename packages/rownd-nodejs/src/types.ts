@@ -702,11 +702,12 @@ export type RowndPluginDynamicConfig = {
   subBrands?: Record<string, RowndSubBrandConfigInput>;
   emailChange?: {
     /**
-     * Positive, finite maximum age in seconds for a native SuperTokens session
-     * to initiate a verified sign-in email change.
+     * Positive, finite session creation-age limit for initiating an email change.
+     * Omitted inherits the static setting (default 600). Null disables only this
+     * age limit, not session expiry, challenge TTL or same-session binding.
      * @default 600
      */
-    maxSessionAgeSeconds?: number;
+    maxSessionAgeSeconds?: number | null;
   };
 };
 
@@ -745,6 +746,9 @@ export interface RowndPluginConfig extends RowndPluginDynamicConfig {
  * change or verify an email address.
  */
 export interface RowndEmailChangeRequestContext {
+  // Optional owner precondition; never selects the account to update.
+  rowndExpectedUserId?: string;
+  rowndExpectedTenantId?: string;
   rowndDisplayContext?: "browser" | "mobile_app" | "customer_web_view";
   rowndClientDomain?: string;
   /** Indicates that the native container can complete email verification. */
@@ -911,7 +915,7 @@ export interface RowndPluginNormalisedConfig {
   appConfig?: RowndAppConfigInput;
   subBrands?: Record<string, RowndSubBrandConfigInput>;
   emailChange: {
-    maxSessionAgeSeconds: number;
+    maxSessionAgeSeconds: number | null;
   };
   resolveConfig?: RowndPluginConfig["resolveConfig"];
 }

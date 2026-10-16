@@ -284,6 +284,13 @@ async function getPrimaryUserMapping(
   return externalMapping.status === "OK" ? externalMapping : undefined;
 }
 
+export async function getInternalPrimaryUserId(userId: string, userContext?: Record<string, any>) {
+  const user = await SuperTokens.getUser(userId, userContext);
+  if (!user) return undefined;
+  const mapping = await getPrimaryUserMapping(user.id, userContext);
+  return mapping?.superTokensUserId ?? user.id;
+}
+
 function getMappedEmailPointerFallback(
   primary: RowndMetadata,
   alias: RowndMetadata | undefined,

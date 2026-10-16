@@ -73,6 +73,7 @@ import {
   DEFAULT_PRIMARY_COLOR,
   getPluginConfig,
   resolvePluginConfigSnapshot,
+  validateDynamicConfig,
 } from "./config";
 import {
   RowndIsAnonymousClaim,
@@ -146,6 +147,10 @@ vi.mock("./rownd-token-validator", async (importOriginal) => {
 });
 
 describe("rownd-nodejs plugin", () => {
+  it.each([0, -1, NaN, Infinity, "600", false, true])("rejects invalid email freshness policy %s", (value) => {
+    expect(() => validateDynamicConfig({ emailChange: { maxSessionAgeSeconds: value as number } })).toThrow("positive finite number or null");
+    expect(() => init({ rowndAppKey: "test-key", rowndAppSecret: "test-secret", emailChange: { maxSessionAgeSeconds: value as number } })).toThrow();
+  });
   let server: Server | undefined;
   let container: StartedTestContainer;
   let importContainer: StartedTestContainer;
@@ -9917,6 +9922,34 @@ describe("rownd-nodejs plugin", () => {
         expect((await res.json()).status).toBe("OK");
       });
 
+      it("existing PUT is the only email initiation API and completion preserves mandatory claims", async () => {
+        const links: string[] = [];
+        const { server: s, port } = await setup(coreConnectionURI, undefined,
+          { enableEmailVerification: true, emailVerificationLinks: links });
+        server = s;
+        testPORT = port;
+        const current = await createPasswordlessSessionForUser(`${randomUUID()}@example.com`);
+        const absent = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user/email-change`, {
+          method: "POST", headers: { ...getAuthedHeaders(current.accessToken), "Content-Type": "application/json" },
+          body: JSON.stringify({ version: 1, action: "prepare", email: "unused@example.com" }),
+        });
+        expect(absent.status).toBe(404);
+        expect(links).toEqual([]);
+        const destination = `${randomUUID()}@example.com`;
+        expect((await requestEmailChange(current.accessToken, destination)).status).toBe(200);
+        const link = new URL(links[0]);
+        const claims = vi.spyOn(Session, "validateClaimsForSessionHandle").mockResolvedValue({
+          status: "OK", invalidClaims: [{ id: "mandatory", reason: {} }],
+        });
+        const rejected = await verifyEmailToken(link.searchParams.get("token")!, current.accessToken, link.searchParams.get("rowndPendingVerificationId")!);
+        expect(await rejected.json()).not.toMatchObject({ status: "OK" });
+        expect((await getUserById(current.userId)).data.email).not.toBe(destination);
+        claims.mockRestore();
+        const verified = await verifyEmailToken(link.searchParams.get("token")!, current.accessToken, link.searchParams.get("rowndPendingVerificationId")!);
+        expect(await verified.json()).toMatchObject({ status: "OK" });
+        expect((await getUserById(current.userId)).data.email).toBe(destination);
+      });
+
       it.each([
         {
           endpoint: "/user",
@@ -10006,12 +10039,218 @@ describe("rownd-nodejs plugin", () => {
         await expect(res.json()).resolves.toEqual({
           status: "ERROR",
           code: 403,
+          error_code: "EMAIL_CHANGE_REAUTHENTICATION_REQUIRED",
           message: "recent authentication is required to change email",
         });
         const metadata = await UserMetadata.getUserMetadata(userId);
         expect(
           (metadata.metadata as any).rownd_pending_verification,
         ).toBeUndefined();
+      });
+
+      describe.each(["/user", "/user/field?field=email"])("email freshness policy on %s", (endpoint) => {
+        it.each(["public", "other"])("binds protected retries to expected tenant %s even if the live session switches tenants", async (expectedTenant) => {
+          const links: string[] = [];
+          const { server: s, port } = await setup(coreConnectionURI, undefined,
+            { enableEmailVerification: true, emailVerificationLinks: links });
+          server = s;
+          testPORT = port;
+          const current = await createPasswordlessSessionForUser(`${randomUUID()}@example.com`);
+          await MultiTenancy.createOrUpdateTenant("other");
+          await MultiTenancy.associateUserToTenant("other", current.recipeUserId);
+          const actualTenant = expectedTenant === "public" ? "other" : "public";
+          const switched = await Session.createNewSessionWithoutRequestResponse(actualTenant, current.recipeUserId, {}, {}, true);
+          expect(switched.getUserId()).toBe(current.userId);
+          const before = await UserMetadata.getUserMetadata(current.userId);
+          const response = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd${endpoint}`, {
+            method: "PUT", headers: { ...getAuthedHeaders(switched.getAccessToken()), "Content-Type": "application/json" },
+            body: JSON.stringify({ ...(endpoint === "/user" ? { data: { email: `${randomUUID()}@example.com` } } : { value: `${randomUUID()}@example.com` }),
+              context: { rowndExpectedUserId: current.userId, rowndExpectedTenantId: expectedTenant } }),
+          });
+          expect(response.status).toBe(409);
+          expect(await response.json()).toMatchObject({ error_code: "EMAIL_CHANGE_ACCOUNT_MISMATCH" });
+          expect(links).toEqual([]);
+          expect(await UserMetadata.getUserMetadata(current.userId)).toEqual(before);
+        });
+
+        it.each(["owner", "tenant", "read-only"])("rejects %s mismatch before issuing mail or writing metadata", async (mismatch) => {
+          const links: string[] = [];
+          const { server: s, port } = await setup(coreConnectionURI,
+            mismatch === "read-only" ? { schema: { email: { display_name: "Email", type: "string", read_only: true } } } : undefined,
+            { enableEmailVerification: true, emailVerificationLinks: links });
+          server = s;
+          testPORT = port;
+          const current = await createPasswordlessSessionForUser(`${randomUUID()}@example.com`);
+          const stranger = await createPasswordlessSessionForUser(`${randomUUID()}@example.com`);
+          const before = await UserMetadata.getUserMetadata(current.userId);
+          const query = mismatch === "tenant" ? `${endpoint.includes("?") ? "&" : "?"}tenantId=other` : "";
+          const response = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd${endpoint}${query}`, {
+            method: "PUT", headers: { ...getAuthedHeaders(current.accessToken), "Content-Type": "application/json" },
+            body: JSON.stringify({ ...(endpoint === "/user" ? { data: { email: `${randomUUID()}@example.com`, first_name: "must not save" } } : { value: `${randomUUID()}@example.com` }),
+              context: { rowndExpectedUserId: mismatch === "owner" ? stranger.userId : current.userId } }),
+          });
+          expect(response.status).toBe(mismatch === "read-only" ? 403 : 409);
+          if (mismatch !== "read-only") expect(await response.json()).toMatchObject({ error_code: "EMAIL_CHANGE_ACCOUNT_MISMATCH" });
+          expect(links).toEqual([]);
+          expect(await UserMetadata.getUserMetadata(current.userId)).toEqual(before);
+        });
+
+        it("rejects aged PUT without pending work, then accepts same-owner fresh PUT", async () => {
+          const links: string[] = [];
+          const { server: s, port } = await setup(coreConnectionURI, undefined,
+            { enableEmailVerification: true, emailVerificationLinks: links });
+          server = s;
+          testPORT = port;
+          const current = await createPasswordlessSessionForUser(`${randomUUID()}@example.com`);
+          const destination = `${randomUUID()}@example.com`;
+          const put = (token: string) => fetch(`http://localhost:${testPORT}/auth/plugin/rownd${endpoint}`, {
+            method: "PUT", headers: { ...getAuthedHeaders(token), "Content-Type": "application/json" },
+            body: JSON.stringify({ ...(endpoint === "/user" ? { data: { email: destination } } : { value: destination }),
+              context: { rowndExpectedUserId: current.userId } }),
+          });
+          const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 601000);
+          try {
+            const rejected = await put(current.accessToken);
+            expect(rejected.status).toBe(403);
+            expect(await rejected.json()).toMatchObject({ error_code: "EMAIL_CHANGE_REAUTHENTICATION_REQUIRED" });
+          } finally { clock.mockRestore(); }
+          expect(links).toEqual([]);
+          expect((await UserMetadata.getUserMetadata(current.userId)).metadata.rownd_pending_verification).toBeUndefined();
+          await Session.revokeSession(current.sessionHandle);
+          const replacement = await Session.createNewSessionWithoutRequestResponse("public", current.recipeUserId, {}, {}, true);
+          expect(replacement.getHandle()).not.toBe(current.sessionHandle);
+          const saved = await put(replacement.getAccessToken());
+          expect(saved.status).toBe(200);
+          expect(await saved.json()).toMatchObject({ email_verification_pending: true });
+          expect(links).toHaveLength(1);
+          expect((await UserMetadata.getUserMetadata(current.userId)).metadata.rownd_pending_verification).toEqual([
+            expect.objectContaining({ initiatingSessionHandle: replacement.getHandle(), value: destination }),
+          ]);
+        });
+
+        it.each([undefined, 600, null])("enforces policy %s for aged native and migrated sessions", async (maximum) => {
+          const links: string[] = [];
+          const { server: s, port } = await setup(importCoreConnectionURI,
+            { emailChange: { maxSessionAgeSeconds: maximum } },
+            { enableEmailVerification: true, emailVerificationLinks: links });
+          server = s;
+          testPORT = port;
+          for (const migrated of [false, true]) {
+            const oldEmail = `${randomUUID()}@example.com`;
+            const newEmail = `${randomUUID()}@example.com`;
+            const accessToken = migrated
+              ? await createSessionForUser(`aged-mapped-${randomUUID()}`, oldEmail)
+              : (await createPasswordlessSessionForUser(oldEmail)).accessToken;
+            // Advance only the policy clock; Core still validates the actual live session.
+            const now = Date.now();
+            const clock = vi.spyOn(Date, "now").mockReturnValue(now + 601_000);
+            let response: Response;
+            try {
+              response = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd${endpoint}`, {
+                method: "PUT", headers: { ...getAuthedHeaders(accessToken), "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  ...(endpoint === "/user" ? { data: { email: newEmail } } : { value: newEmail }),
+                  context: { rowndDisplayContext: "mobile_app", rowndNativeEmailVerification: true },
+                }),
+              });
+            } finally {
+              clock.mockRestore();
+            }
+            expect(response.status).toBe(maximum === null ? 200 : 403);
+            const profile = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, { headers: getAuthedHeaders(accessToken) });
+            expect(profile.status).toBe(200);
+            const body = await profile.json();
+            expect(body.data.email).toBe(oldEmail);
+            if (maximum === null) {
+              const pending = (await getCombinedUserMetadata(body.data.user_id)).rownd_pending_verification;
+              expect(pending).toEqual([expect.objectContaining({ value: newEmail, status: "PENDING", tenantId: "public" })]);
+            }
+          }
+          expect(links).toHaveLength(maximum === null ? 2 : 0);
+        });
+      });
+
+      it("rejects the released native default route for non-public sessions without consuming the legitimate token", async () => {
+        const links: string[] = [];
+        const { server: s, port } = await setup(coreConnectionURI,
+          { emailChange: { maxSessionAgeSeconds: null } }, { enableEmailVerification: true, emailVerificationLinks: links });
+        server = s;
+        testPORT = port;
+        const tenantId = `email-${randomUUID()}`;
+        await MultiTenancy.createOrUpdateTenant(tenantId, { firstFactors: ["otp-email"] });
+        const oldEmail = `${randomUUID()}@example.com`;
+        const destination = `${randomUUID()}@example.com`;
+        const user = await Passwordless.signInUp({ tenantId, email: oldEmail });
+        const session = await Session.createNewSessionWithoutRequestResponse(tenantId, user.recipeUserId, {}, {}, true);
+        const save = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user?tenantId=${tenantId}`, {
+          method: "PUT", headers: { ...getAuthedHeaders(session.getAccessToken()), "Content-Type": "application/json" },
+          body: JSON.stringify({ data: { email: destination }, context: { rowndDisplayContext: "mobile_app", rowndNativeEmailVerification: true } }),
+        });
+        expect(save.status).toBe(200);
+        const link = new URL(links[0]);
+        const token = link.searchParams.get("token")!;
+        const pending = link.searchParams.get("rowndPendingVerificationId")!;
+        const wrongRoute = await verifyEmailToken(token, session.getAccessToken(), pending);
+        expect(await wrongRoute.json()).not.toMatchObject({ status: "OK" });
+        expect((await getUserById(user.user.id, tenantId)).data.email).toBe(oldEmail);
+        expect(await Session.getSessionInformation(session.getHandle())).toBeDefined();
+        const correctRoute = await fetch(`http://localhost:${testPORT}/auth/${tenantId}/user/email/verify?rowndPendingVerificationId=${pending}`, {
+          method: "POST", headers: { ...getAuthedHeaders(session.getAccessToken()), "Content-Type": "application/json" },
+          body: JSON.stringify({ method: "token", token }),
+        });
+        expect(await correctRoute.json()).toMatchObject({ status: "OK" });
+        expect((await getUserById(user.user.id, tenantId)).data.email).toBe(destination);
+      });
+
+      it("enforces real Core token expiry without promoting the pending email", async () => {
+        const links: string[] = [];
+        const { server: s, port } = await setup(coreConnectionURI,
+          { emailChange: { maxSessionAgeSeconds: null } }, { enableEmailVerification: true, emailVerificationLinks: links });
+        server = s;
+        testPORT = port;
+        const tenantId = `expiry-${randomUUID()}`;
+        await MultiTenancy.createOrUpdateTenant(tenantId, {
+          firstFactors: ["otp-email"], coreConfig: { email_verification_token_lifetime: 100 },
+        });
+        const oldEmail = `${randomUUID()}@example.com`;
+        const user = await Passwordless.signInUp({ tenantId, email: oldEmail });
+        const session = await Session.createNewSessionWithoutRequestResponse(tenantId, user.recipeUserId, {}, {}, true);
+        await startPendingEmailVerification({ userId: user.user.id, recipeUserId: user.recipeUserId,
+          email: `${randomUUID()}@example.com`, tenantId, pendingVerificationId: randomUUID(), initiatingSessionHandle: session.getHandle() });
+        const link = new URL(links[0]);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        const response = await fetch(`http://localhost:${testPORT}/auth/${tenantId}/user/email/verify?rowndPendingVerificationId=${link.searchParams.get("rowndPendingVerificationId")}`, {
+          method: "POST", headers: { ...getAuthedHeaders(session.getAccessToken()), "Content-Type": "application/json" },
+          body: JSON.stringify({ method: "token", token: link.searchParams.get("token") }),
+        });
+        expect(await response.json()).toMatchObject({ status: "EMAIL_VERIFICATION_INVALID_TOKEN_ERROR" });
+        expect((await getUserById(user.user.id, tenantId)).data.email).toBe(oldEmail);
+        expect(await Session.getSessionInformation(session.getHandle())).toBeDefined();
+        expect((await getCombinedUserMetadata(user.user.id)).rownd_pending_verification).toHaveLength(1);
+      });
+
+      it("preserves null through initialization, tenant resolution and request snapshots", async () => {
+        const resolveConfig = vi.fn(async ({ tenantId }: { tenantId?: string }): Promise<RowndPluginDynamicConfig> =>
+          tenantId === "relaxed" ? { emailChange: { maxSessionAgeSeconds: null } }
+            : tenantId === "strict" ? { emailChange: { maxSessionAgeSeconds: 30 } } : {});
+        const { server: s, port } = await setup(coreConnectionURI, {
+          emailChange: { maxSessionAgeSeconds: null }, resolveConfig,
+        });
+        server = s;
+        testPORT = port;
+        const config = getPluginConfig();
+        expect(config.emailChange.maxSessionAgeSeconds).toBeNull();
+        for (const [tenantId, expected] of [["public", null], ["strict", 30], ["relaxed", null]] as const) {
+          const snapshot = await resolvePluginConfigSnapshot(config, { tenantId, userContext: {} });
+          expect(snapshot.config.emailChange.maxSessionAgeSeconds).toBe(expected);
+          const calls = resolveConfig.mock.calls.length;
+          const cached = await resolvePluginConfigSnapshot(config, { tenantId, userContext: snapshot.userContext });
+          expect(cached.config.emailChange.maxSessionAgeSeconds).toBe(expected);
+          expect(resolveConfig.mock.calls).toHaveLength(calls);
+        }
+        const numeric = { ...config, emailChange: { maxSessionAgeSeconds: 600 } };
+        expect((await resolvePluginConfigSnapshot(numeric, { tenantId: "relaxed", userContext: {} })).config.emailChange.maxSessionAgeSeconds).toBeNull();
+        expect((await resolvePluginConfigSnapshot(numeric, { tenantId: "public", userContext: {} })).config.emailChange.maxSessionAgeSeconds).toBe(600);
       });
 
       it("allows a freshly migrated session to change email", async () => {
@@ -10075,6 +10314,7 @@ describe("rownd-nodejs plugin", () => {
         await expect(res.json()).resolves.toEqual({
           status: "ERROR",
           code: 403,
+          error_code: "EMAIL_CHANGE_REAUTHENTICATION_REQUIRED",
           message: "recent authentication is required to change email",
         });
       });
@@ -13750,29 +13990,66 @@ describe("rownd-nodejs plugin", () => {
         );
       });
 
-      it("returns the verified new email and edited name for a migrated mapped Google/passwordless owner", async () => {
+      it.each([
+        { providerId: "google", maxSessionAgeSeconds: null },
+        { providerId: "google", maxSessionAgeSeconds: 600 },
+        { providerId: "apple", maxSessionAgeSeconds: null },
+        { providerId: "apple", maxSessionAgeSeconds: 600 },
+      ])("preserves canonical email for a mapped $providerId/passwordless owner under $maxSessionAgeSeconds policy through provider relogin and Core restart", async ({ providerId, maxSessionAgeSeconds }) => {
         const emailVerificationLinks: string[] = [];
-        const { server: s, port } = await setup(importCoreConnectionURI, undefined, {
-          enableEmailVerification: true, emailVerificationLinks,
+        const passwordlessLinks: string[] = [];
+        const providerUserId = randomUUID();
+        const oldEmail = `${randomUUID()}@example.com`;
+        const providerCode = `fixture-${randomUUID()}`;
+        const exchangeAuthCodeForOAuthTokens = vi.fn(async (input) => {
+          expect(input.redirectURIInfo.redirectURIQueryParams.code).toBe(providerCode);
+          return { thirdPartyUserId: providerUserId, email: oldEmail, emailVerified: true };
         });
+        const options = { enableEmailVerification: true, emailVerificationLinks, passwordlessLinks,
+          exchangeAuthCodeForOAuthTokens, exchangeAuthCodeProviderId: providerId };
+        const config = {
+          emailChange: { maxSessionAgeSeconds },
+          appConfig: { auth: { useExplicitSignUpFlow: true }, signInMethods: [{ method: "email" }] },
+        };
+        const { server: s, port } = await setup(importCoreConnectionURI, config, options);
         server = s;
         testPORT = port;
         const rowndId = `mapped-profile-${randomUUID()}`;
-        const oldEmail = `${randomUUID()}@example.com`;
         const newEmail = `${randomUUID()}@example.com`;
         const imported = await importUser({
           externalUserId: rowndId,
           userMetadata: { first_name: "Old name", original_rownd_user: { data: { user_id: rowndId, first_name: "Old name", email: oldEmail } } },
           loginMethods: [
-            { recipeId: "thirdparty", thirdPartyId: "google", thirdPartyUserId: randomUUID(), email: oldEmail, isVerified: true, isPrimary: true },
+            { recipeId: "thirdparty", thirdPartyId: providerId, thirdPartyUserId: providerUserId, email: oldEmail, isVerified: true, isPrimary: true },
             { recipeId: "passwordless", email: oldEmail, isVerified: true },
           ],
         }, { connectionURI: importCoreConnectionURI });
-        const session = await Session.createNewSessionWithoutRequestResponse("public",
-          SuperTokens.convertToRecipeUserId(imported.loginMethods[0].recipeUserId), {}, {}, true);
+        const mapping = await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL" });
+        expect(mapping).toMatchObject({ status: "OK", externalUserId: rowndId });
+        const originalProviderMethod = (await SuperTokens.getUser(rowndId))!.loginMethods
+          .find((method) => method.recipeId === "thirdparty")!;
+        expect(imported.loginMethods).toHaveLength(2);
+        expect(imported.loginMethods).toContainEqual(expect.objectContaining({
+          recipeUserId: originalProviderMethod.recipeUserId.getAsString(),
+        }));
+        expect(await (await requestPasswordlessCode(oldEmail, "sign_in")).json()).toMatchObject({ status: "OK" });
+        const initialLogin = await consumePasswordlessLink(passwordlessLinks[0], "sign_in");
+        expect(await initialLogin.json()).toMatchObject({ status: "OK", createdNewRecipeUser: false, user: { id: rowndId } });
+        const session = await Session.getSessionWithoutRequestResponse(initialLogin.headers.get("st-access-token")!);
         expect(session.getUserId()).toBe(rowndId);
         const accessToken = session.getAccessToken();
-        expect((await requestEmailChange(accessToken, newEmail)).status).toBe(200);
+        expect(await (await requestPasswordlessCode(oldEmail, "sign_in")).json()).toMatchObject({ status: "OK" });
+        expect(passwordlessLinks).toHaveLength(2);
+        const stalePasswordlessLink = passwordlessLinks[1];
+        const update = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
+          method: "PUT", headers: { ...getAuthedHeaders(accessToken), "Content-Type": "application/json" },
+          body: JSON.stringify({ data: { email: newEmail }, context: { rowndExpectedUserId: rowndId, rowndExpectedTenantId: "public" } }),
+        });
+        expect(update.status).toBe(200);
+        expect(await update.json()).toMatchObject({ email_verification_pending: true, data: { email: oldEmail } });
+        expect((await getUserById(rowndId)).data.email).toBe(oldEmail);
+        expect(await Session.getSessionInformation(session.getHandle())).toBeDefined();
+        expect(emailVerificationLinks).toHaveLength(1);
         const link = new URL(emailVerificationLinks[0]);
         expect((await getCombinedUserMetadata(rowndId)).rownd_pending_verification).toEqual([
           expect.objectContaining({ id: link.searchParams.get("rowndPendingVerificationId"), initiatingSessionHandle: session.getHandle() }),
@@ -13780,10 +14057,9 @@ describe("rownd-nodejs plugin", () => {
         const verified = await verifyEmailToken(link.searchParams.get("token")!, accessToken,
           link.searchParams.get("rowndPendingVerificationId")!);
         expect(await verified.json()).toEqual({ status: "OK" });
+        expect(await Session.getSessionInformation(session.getHandle())).toBeUndefined();
         const replacementToken = verified.headers.get("st-access-token")!;
-        const read = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
-          headers: getAuthedHeaders(replacementToken),
-        });
+        const read = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, { headers: getAuthedHeaders(replacementToken) });
         expect(await read.json()).toMatchObject({ data: { user_id: rowndId, email: newEmail } });
         const edit = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
           method: "PUT", headers: { ...getAuthedHeaders(replacementToken), "Content-Type": "application/json" },
@@ -13791,7 +14067,100 @@ describe("rownd-nodejs plugin", () => {
         });
         expect(await edit.json()).toMatchObject({ data: { user_id: rowndId, first_name: "New name", email: newEmail } });
         expect((await getUserById(rowndId)).data).toMatchObject({ first_name: "New name", email: newEmail });
-      });
+        const canonicalMetadata = await getCombinedUserMetadata(rowndId);
+        expect(canonicalMetadata.rownd_email_recipe_user_ids).toMatchObject({ public: expect.any(String) });
+        const recipeIds = (await SuperTokens.getUser(rowndId))!.loginMethods
+          .map((method) => method.recipeUserId.getAsString()).sort();
+
+        const signOut = async (token: string) => {
+          const response = await fetch(`http://localhost:${testPORT}/auth/signout`, {
+            method: "POST", headers: { ...getAuthedHeaders(token), "Content-Type": "application/json" },
+            body: "{}",
+          });
+          expect(await response.json()).toEqual({ status: "OK" });
+        };
+        const assertCanonicalProfile = async (token: string) => {
+          const response = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
+            headers: getAuthedHeaders(token),
+          });
+          expect(response.status).toBe(200);
+          expect(await response.json()).toMatchObject({
+            data: { user_id: rowndId, email: newEmail, first_name: "New name" },
+          });
+          const user = (await SuperTokens.getUser(rowndId))!;
+          expect(user.id).toBe(rowndId);
+          expect(await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL" })).toEqual(mapping);
+          expect(user.loginMethods.map((method) => method.recipeUserId.getAsString()).sort()).toEqual(recipeIds);
+          const providerMethods = user.loginMethods.filter((method) => method.recipeId === "thirdparty");
+          expect(providerMethods).toEqual([
+            expect.objectContaining({ email: oldEmail, verified: true, thirdParty: { id: providerId, userId: providerUserId } }),
+          ]);
+          expect(providerMethods[0].recipeUserId.getAsString()).toBe(originalProviderMethod.recipeUserId.getAsString());
+          expect(user.loginMethods.filter((method) => method.recipeId === "passwordless")).toEqual([
+            expect.objectContaining({ email: newEmail, verified: true, tenantIds: ["public"] }),
+          ]);
+          const metadata = await getCombinedUserMetadata(rowndId);
+          expect(metadata.rownd_email_recipe_user_id).toBe(canonicalMetadata.rownd_email_recipe_user_id);
+          expect(metadata.rownd_email_recipe_user_ids).toEqual(canonicalMetadata.rownd_email_recipe_user_ids);
+          expect((await getUserById(rowndId)).data.email).toBe(newEmail);
+        };
+        const providerSignIn = async () => {
+          const response = await fetch(`http://localhost:${testPORT}/auth/signinup`, {
+            method: "POST",
+            headers: { rid: "thirdparty", "content-type": "application/json", "fdi-version": "3.1", "st-auth-mode": "header" },
+            body: JSON.stringify({ thirdPartyId: providerId, redirectURIInfo: {
+              redirectURIOnProviderDashboard: `http://localhost/auth/callback/${providerId}`,
+              redirectURIQueryParams: { code: providerCode },
+            } }),
+          });
+          const responseText = await response.text();
+          expect(response.status, responseText).toBe(200);
+          expect(JSON.parse(responseText)).toMatchObject({ status: "OK", createdNewRecipeUser: false, user: { id: rowndId } });
+          const token = response.headers.get("st-access-token")!;
+          expect(token).toBeTruthy();
+          await assertCanonicalProfile(token);
+          return token;
+        };
+
+        await assertCanonicalProfile(replacementToken);
+        const staleLogin = await consumePasswordlessLink(stalePasswordlessLink, "sign_in");
+        expect(await staleLogin.json()).toEqual({ status: "RESTART_FLOW_ERROR" });
+        expect(staleLogin.headers.get("st-access-token")).toBeNull();
+        const assertOldPasswordlessDenied = async () => {
+          const linkCount = passwordlessLinks.length;
+          const response = await requestPasswordlessCode(oldEmail, "sign_in");
+          expect(await response.json()).toEqual({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "No existing account found" });
+          expect(response.headers.get("st-access-token")).toBeNull();
+          expect(passwordlessLinks).toHaveLength(linkCount);
+        };
+        await assertOldPasswordlessDenied();
+        await signOut(replacementToken);
+        const providerToken = await providerSignIn();
+        await signOut(providerToken);
+        await new Promise<void>((resolve) => server!.close(() => resolve()));
+        server = undefined;
+        resetST();
+        await importContainer.restart();
+        importCoreConnectionURI = `http://${importContainer.getHost()}:${importContainer.getMappedPort(3567)}`;
+        await vi.waitFor(async () => {
+          expect((await fetch(`${importCoreConnectionURI}/hello`)).ok).toBe(true);
+        }, { timeout: 30000, interval: 250 });
+        const restarted = await setup(importCoreConnectionURI, config, options);
+        server = restarted.server;
+        testPORT = restarted.port;
+        const restartedToken = await providerSignIn();
+        expect(exchangeAuthCodeForOAuthTokens).toHaveBeenCalledTimes(2);
+        expect(exchangeAuthCodeForOAuthTokens).toHaveBeenLastCalledWith(expect.objectContaining({
+          redirectURIInfo: expect.objectContaining({ redirectURIQueryParams: { code: providerCode } }),
+        }));
+        await signOut(restartedToken);
+        await assertOldPasswordlessDenied();
+        expect(await (await requestPasswordlessCode(newEmail, "sign_in")).json()).toMatchObject({ status: "OK" });
+        expect(passwordlessLinks).toHaveLength(3);
+        const passwordlessLogin = await consumePasswordlessLink(passwordlessLinks[2], "sign_in");
+        expect(await passwordlessLogin.json()).toMatchObject({ status: "OK", createdNewRecipeUser: false, user: { id: rowndId } });
+        await assertCanonicalProfile(passwordlessLogin.headers.get("st-access-token")!);
+      }, 60000);
 
       it("removes only the completed pending email verification", async () => {
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
@@ -15052,6 +15421,8 @@ async function setup(
     passwordlessCodes?: string[];
     passwordlessFlowType?: "MAGIC_LINK" | "USER_INPUT_CODE_AND_MAGIC_LINK";
     passwordlessContactMethod?: "EMAIL" | "PHONE" | "EMAIL_OR_PHONE";
+    exchangeAuthCodeForOAuthTokens?: (...args: any[]) => Promise<any>;
+    exchangeAuthCodeProviderId?: string;
   },
 ): Promise<{ server: Server; port: number }> {
   const app = express();
@@ -15122,14 +15493,24 @@ async function setup(
                     thirdPartyId: "google",
                     clients: [{ clientId: "test", clientSecret: "test" }],
                   },
-                  override: overrideTestProviderUserInfo,
+                  override: (originalImplementation) => ({
+                    ...overrideTestProviderUserInfo(originalImplementation),
+                    ...(options?.exchangeAuthCodeForOAuthTokens && (options.exchangeAuthCodeProviderId ?? "google") === "google"
+                      ? { exchangeAuthCodeForOAuthTokens: options.exchangeAuthCodeForOAuthTokens }
+                      : {}),
+                  }),
                 },
                 {
                   config: {
                     thirdPartyId: "apple",
                     clients: [{ clientId: "test", clientSecret: "test" }],
                   },
-                  override: overrideTestProviderUserInfo,
+                  override: (originalImplementation) => ({
+                    ...overrideTestProviderUserInfo(originalImplementation),
+                    ...(options?.exchangeAuthCodeForOAuthTokens && options.exchangeAuthCodeProviderId === "apple"
+                      ? { exchangeAuthCodeForOAuthTokens: options.exchangeAuthCodeForOAuthTokens }
+                      : {}),
+                  }),
                 },
               ],
             },
