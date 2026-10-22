@@ -766,6 +766,12 @@ export type RowndClientDomains = {
 } & Record<string, string>;
 
 export interface RowndMigrationTelemetryDetails {
+  operation?: "profile_read";
+  profileMode?: "legacy" | "lightweight-v1";
+  profileConfig?: "static" | "dynamic";
+  profileFallbackReason?: "legacy_contract" | "activity_unavailable";
+  // SDK boundary attempts, not wire-level Core request counts.
+  sdkCalls?: { user: number; mapping: number; metadata: number; sessionList: number; sessionDetail: number };
   canonicalRowndUserId?: string;
   conflictingRowndUserId?: string;
   requestId?: string;

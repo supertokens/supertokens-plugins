@@ -733,6 +733,10 @@ export function handleGetUser(deps: RowndRouteHandlerDeps) {
       session!.getUserId(resolved.userContext),
       session!.getTenantId(resolved.userContext),
       resolved.userContext,
+      {
+        mode: req.getKeyValueFromQuery("profile") === "lightweight-v1" ? "lightweight-v1" : "legacy",
+        recordEvent: (event) => deps.telemetryClient.recordEvent(event),
+      },
     );
     return {
       status: "OK" as const,

@@ -30,11 +30,13 @@ import { clearSuperTokensCoreCallCache, getStringList, isJsonRecord } from "./ut
 import { invalidateReconciliationReads } from "./reconciliation-reads";
 import { readOwnerPlanCheckpoint } from "./migration-owner-plan";
 import { RowndEmailChangeError, RowndMigrationPolicyError } from "./errors";
+import type { ProfileReader } from "./profile-read";
 
 export type RowndMetadata = RowndUserMetadata & JsonRecord;
 
 export type LinkedUserMetadataInspection = {
   user?: SuperTokensUser;
+  mapping?: { superTokensUserId: string; externalUserId: string };
   primaryUserId: string;
   linkedUserIds: string[];
   linkedMetadata: Array<{ userId: string; metadata: RowndMetadata }>;
@@ -266,21 +268,22 @@ export function combineLinkedMetadata(input: {
 async function getPrimaryUserMapping(
   userId: string,
   userContext?: Record<string, any>,
+  read: ProfileReader = (_kind, _key, load) => load(),
 ) {
-  const internalMapping = await SuperTokens.getUserIdMapping({
+  const internalMapping = await read("mapping", JSON.stringify(["SUPERTOKENS", userId]), () => SuperTokens.getUserIdMapping({
     userId,
     userIdType: "SUPERTOKENS",
     userContext,
-  });
+  }));
   if (internalMapping.status === "OK") {
     return internalMapping;
   }
 
-  const externalMapping = await SuperTokens.getUserIdMapping({
+  const externalMapping = await read("mapping", JSON.stringify(["EXTERNAL", userId]), () => SuperTokens.getUserIdMapping({
     userId,
     userIdType: "EXTERNAL",
     userContext,
-  });
+  }));
   return externalMapping.status === "OK" ? externalMapping : undefined;
 }
 
@@ -342,22 +345,25 @@ export async function inspectLinkedUserMetadata(
   userId: string,
   userContext?: Record<string, any>,
   userSnapshot?: SuperTokensUser,
+  read: ProfileReader = (_kind, _key, load) => load(),
 ): Promise<LinkedUserMetadataInspection> {
-  let user = userSnapshot ?? (await SuperTokens.getUser(userId, userContext));
+  const readUser = (id: string) => read("user", id, () => SuperTokens.getUser(id, userContext));
+  const readMetadata = (id: string) => read("metadata", id, () => getRawUserMetadata(id, userContext));
+  let user = userSnapshot ?? (await readUser(userId));
   const references = new Set<string>([userId]);
   let referenceId = userId;
   // Retired aliases are literal metadata records, not SDK users. Resolve their
   // profile references here only; migration checkpoints must keep using raw reads.
   while (!user) {
-    const metadata = await getRawUserMetadata(referenceId, userContext);
+    const metadata = await readMetadata(referenceId);
     const target = metadata.rownd_migration_canonical_target ?? metadata.rownd_migration_target;
     if (typeof target !== "string" || !target || references.has(target)) break;
     references.add(target);
     referenceId = target;
-    user = await SuperTokens.getUser(target, userContext);
+    user = await readUser(target);
   }
   if (!user) {
-    const metadata = await getRawUserMetadata(userId, userContext);
+    const metadata = await readMetadata(userId);
     return {
       user: undefined,
       primaryUserId: userId,
@@ -373,7 +379,7 @@ export async function inspectLinkedUserMetadata(
     };
   }
 
-  const mapping = await getPrimaryUserMapping(user.id, userContext);
+  const mapping = await getPrimaryUserMapping(user.id, userContext, read);
   const primaryUserId = mapping?.superTokensUserId ?? user.id;
   const linkedUserIds = [
     ...new Set(
@@ -383,11 +389,11 @@ export async function inspectLinkedUserMetadata(
     ),
   ];
   const [primaryMetadata, linkedMetadata] = await Promise.all([
-    getRawUserMetadata(primaryUserId, userContext),
+    readMetadata(primaryUserId),
     Promise.all(
       linkedUserIds.map(async (linkedUserId) => ({
         userId: linkedUserId,
-        metadata: await getRawUserMetadata(linkedUserId, userContext),
+        metadata: await readMetadata(linkedUserId),
       })),
     ),
   ]);
@@ -406,7 +412,7 @@ export async function inspectLinkedUserMetadata(
   if (plan?.target === primaryUserId)
     for (const alias of plan.retiredAliases ?? []) {
       if (linkedUserIds.includes(alias.id)) continue;
-      const metadata = await getRawUserMetadata(alias.id, userContext);
+      const metadata = await readMetadata(alias.id);
       const retirement = metadata.rownd_migration_superseded;
       if (!isJsonRecord(retirement) || retirement.rowndUserId !== plan.sourceId ||
         retirement.targetUserId !== primaryUserId) continue;
@@ -429,6 +435,7 @@ export async function inspectLinkedUserMetadata(
         user),
     } as RowndMetadata,
     user,
+    mapping,
   };
 }
 

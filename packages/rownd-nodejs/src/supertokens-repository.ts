@@ -11,6 +11,8 @@ import { assertMigrationPostconditions, assertMigrationOwnerGraph, reconcileAdmi
 import { assertCurrentRowndProviders, checkpointProviderIntroduction, finishProviderIntroductions, prepareRowndProviderRetirement, recoverProviderRevocations, type ProviderIntroduction } from "./migration-provider";
 import { finishAdministrativeProviderIntroductions, inspectAdministrativeProviderIntroductions } from "./migration-admin-provider";
 import { migrationTelemetry } from "./telemetry/migrationTelemetry";
+import { ProfileReadOperation, type ProfileReadMode, type ProfileReader } from "./profile-read";
+import type { RowndTelemetryClient } from "./types";
 import {
   assertAuthenticatedMigrationSource,
   getAuthenticatedMigrationEmail,
@@ -1563,14 +1565,37 @@ export async function getUserById(
   userId: string,
   tenantId: string = PUBLIC_TENANT_ID,
   userContext?: JsonRecord,
+  options: { mode?: ProfileReadMode; recordEvent?: RowndTelemetryClient["recordEvent"] } = {},
 ): Promise<RowndCompatUserResponse> {
-  const inspection = await inspectLinkedUserMetadata(userId, userContext);
-  const metadata = inspection.combinedMetadata;
-  const stUser = inspection.user;
-
-  if (!stUser) {
-    throw new RowndPluginError("ROWND_USER_NOT_FOUND");
+  const operation = new ProfileReadOperation();
+  const mode = options.mode ?? "legacy";
+  const context = createDerivedUserContext(userContext ?? {}, { rowndProfileOperationId: operation.id });
+  const pluginConfig = getConfigForUserContext(context);
+  let failed = true;
+  try {
+    const inspection = await inspectLinkedUserMetadata(userId, context, undefined, operation.read);
+    if (!inspection.user) throw new RowndPluginError("ROWND_USER_NOT_FOUND");
+    const activity = mode === "legacy"
+      ? await getLatestSessionInfo(inspection.user.id, tenantId, context, operation.read)
+      : undefined;
+    const profile = assembleUserProfile(userId, tenantId, inspection.user, inspection.combinedMetadata, pluginConfig, mode, activity);
+    failed = false;
+    return profile;
+  } finally {
+    operation.finish(mode, Boolean(pluginConfig?.resolveConfig), options.recordEvent, failed);
   }
+}
+
+// Presentation only: callers supply authoritative identity/metadata and resolved config.
+export function assembleUserProfile(
+  userId: string,
+  tenantId: string,
+  stUser: SuperTokensUser,
+  metadata: RowndMetadata,
+  pluginConfig: ReturnType<typeof getConfigForUserContext>,
+  mode: ProfileReadMode,
+  latestSessionInfo?: Awaited<ReturnType<typeof Session.getSessionInformation>>,
+): RowndCompatUserResponse {
 
   const originalRowndUser = metadata.original_rownd_user;
   const rowndUser = originalRowndUser?.data?.user_id || userId;
@@ -1588,8 +1613,7 @@ export async function getUserById(
     }
   }
 
-  const schema =
-    getConfigForUserContext(userContext)?.schema || DEFAULT_ROWND_SCHEMA;
+  const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;
   for (const key of Object.keys(schema)) {
     dataFieldKeys.add(key);
     if (
@@ -1718,11 +1742,6 @@ export async function getUserById(
   const sortedByJoined = [...tenantLoginMethods].sort(
     (a, b) => a.timeJoined - b.timeJoined,
   );
-  const latestSessionInfo = await getLatestSessionInfo(
-    stUser.id,
-    tenantId,
-    userContext,
-  );
   const firstMethod = sortedByJoined[0];
   const latestSessionRecipeUserId =
     latestSessionInfo?.recipeUserId.getAsString();
@@ -1740,7 +1759,7 @@ export async function getUserById(
     ),
   );
 
-  const meta = {
+  const meta: JsonRecord = {
     ...metadataMeta,
     created: new Date(stUser.timeJoined).toISOString(),
     first_sign_in: new Date(stUser.timeJoined).toISOString(),
@@ -1749,10 +1768,15 @@ export async function getUserById(
     first_sign_in_method: firstMethod ? mapMethod(firstMethod) : "email",
     last_sign_in_method: lastMethod ? mapMethod(lastMethod) : "email",
   };
+  if (mode === "lightweight-v1") {
+    // Metadata may contain historical legacy values; unknown means absent even then.
+    delete meta.last_sign_in;
+    delete meta.last_active;
+    delete meta.last_sign_in_method;
+  }
   const attributes = {
     ...((originalRowndUser?.attributes || {}) as JsonRecord),
   };
-  const pluginConfig = getConfigForUserContext(userContext);
   const variantsByTenant = isRecord(attributes["rownd:app_variants_by_tenant"])
     ? attributes["rownd:app_variants_by_tenant"]
     : {};
@@ -1796,18 +1820,30 @@ async function getLatestSessionInfo(
   userId: string,
   tenantId: string,
   userContext?: JsonRecord,
+  read: ProfileReader = (_kind, _key, load) => load(),
 ) {
-  const sessionHandles = await Session.getAllSessionHandlesForUser(
+  const sessionHandles = await read("sessionList", JSON.stringify([userId, tenantId]), () => Session.getAllSessionHandlesForUser(
     userId,
     true,
     tenantId,
     userContext,
-  );
-  const sessionInfos = await Promise.all(
-    sessionHandles.map((sessionHandle) =>
-      Session.getSessionInformation(sessionHandle, userContext),
-    ),
-  );
+  ));
+  const sessionInfos: Awaited<ReturnType<typeof Session.getSessionInformation>>[] = new Array(sessionHandles.length);
+  let nextIndex = 0;
+  let failure: { error: unknown } | undefined;
+  // Preserve handle ordering for ties while containing per-request Core bursts.
+  await Promise.all(Array.from({ length: Math.min(4, sessionHandles.length) }, async () => {
+    while (!failure && nextIndex < sessionHandles.length) {
+      const index = nextIndex++;
+      const handle = sessionHandles[index]!;
+      try {
+        sessionInfos[index] = await read("sessionDetail", handle, () => Session.getSessionInformation(handle, userContext));
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  }));
+  if (failure) throw failure.error;
 
   let latestSessionInfo: (typeof sessionInfos)[number];
   for (const sessionInfo of sessionInfos) {

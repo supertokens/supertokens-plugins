@@ -493,6 +493,16 @@ Unauthenticated migration and guest routes accept an optional `tenantId` query p
 - **Non-public tenant**: `POST /auth/plugin/rownd/guest?tenantId=tenant-a`
 - **Description**: Creates a guest or instant user and session in the requested tenant.
 
+### User profile reads
+
+`GET {apiBasePath}/plugin/rownd/user` retains legacy activity behavior by default.
+The in-progress P1/P2 implementation supports explicit lightweight negotiation
+with `?profile=lightweight-v1`, omitting unavailable activity fields without
+enumerating sessions. Client decoder compatibility remains a release gate.
+
+See [Profile reads](./PROFILE_READS.md) for the current working-tree contract,
+SDK-boundary counter scope, deferred prerequisites, and rollout requirements.
+
 ## Debug Logging
 
 Set `enableDebugLogs: true` in the plugin config to enable debug logging.
@@ -502,6 +512,11 @@ Set `enableDebugLogs: true` in the plugin config to enable debug logging.
 Telemetry is optional. If `telemetry` is omitted from the plugin config, no telemetry is emitted.
 
 The plugin emits exactly one telemetry event per `/migrate` call result.
+
+The in-progress profile-read implementation also emits assembly events through
+the configured telemetry client. Their fields and measurement boundaries are
+documented in [Profile read instrumentation](./PROFILE_READS.md#instrumentation-and-interpretation).
+The event shape below describes migration events.
 
 ### Event shape
 
