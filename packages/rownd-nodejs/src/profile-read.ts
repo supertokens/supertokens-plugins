@@ -4,7 +4,7 @@ import { PLUGIN_VERSION } from "./constants";
 import { logDebugMessage } from "./logger";
 import type { RowndTelemetryClient, RowndTelemetryEvent } from "./types";
 
-export type ProfileReadMode = "legacy" | "lightweight-v1";
+export type ProfileReadMode = "profile" | "active-sessions";
 export type ProfileReadKind = "user" | "mapping" | "metadata" | "sessionList" | "sessionDetail";
 export type ProfileReader = <T>(kind: ProfileReadKind, key: string, load: () => Promise<T>) => Promise<T>;
 
@@ -31,7 +31,7 @@ export class ProfileReadOperation {
       operation: "profile_read", requestId: this.id, pluginVersion: PLUGIN_VERSION,
       durationMs: performance.now() - this.startedAt, stage: "profile_assembly", eventType: "terminal",
       profileMode: mode, profileConfig: dynamicConfig ? "dynamic" : "static",
-      profileFallbackReason: mode === "legacy" ? "legacy_contract" : "activity_unavailable",
+      profileFallbackReason: mode === "active-sessions" ? "none" : "activity_not_requested",
       sdkCalls: { ...this.counts },
       ...(failed ? { outcome: "error" as const, result: "error" as const, error: { message: "Profile read failed" } }
         : { outcome: "success" as const, result: "success" as const }),

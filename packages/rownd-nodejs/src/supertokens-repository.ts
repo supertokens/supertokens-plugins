@@ -1565,17 +1565,17 @@ export async function getUserById(
   userId: string,
   tenantId: string = PUBLIC_TENANT_ID,
   userContext?: JsonRecord,
-  options: { mode?: ProfileReadMode; recordEvent?: RowndTelemetryClient["recordEvent"] } = {},
+  options: { includeActivity?: boolean; recordEvent?: RowndTelemetryClient["recordEvent"] } = {},
 ): Promise<RowndCompatUserResponse> {
   const operation = new ProfileReadOperation();
-  const mode = options.mode ?? "legacy";
+  const mode: ProfileReadMode = options.includeActivity === true ? "active-sessions" : "profile";
   const context = createDerivedUserContext(userContext ?? {}, { rowndProfileOperationId: operation.id });
   const pluginConfig = getConfigForUserContext(context);
   let failed = true;
   try {
     const inspection = await inspectLinkedUserMetadata(userId, context, undefined, operation.read);
     if (!inspection.user) throw new RowndPluginError("ROWND_USER_NOT_FOUND");
-    const activity = mode === "legacy"
+    const activity = mode === "active-sessions"
       ? await getLatestSessionInfo(inspection.user.id, tenantId, context, operation.read)
       : undefined;
     const profile = assembleUserProfile(userId, tenantId, inspection.user, inspection.combinedMetadata, pluginConfig, mode, activity);
@@ -1768,11 +1768,11 @@ export function assembleUserProfile(
     first_sign_in_method: firstMethod ? mapMethod(firstMethod) : "email",
     last_sign_in_method: lastMethod ? mapMethod(lastMethod) : "email",
   };
-  if (mode === "lightweight-v1") {
-    // Metadata may contain historical legacy values; unknown means absent even then.
-    delete meta.last_sign_in;
-    delete meta.last_active;
-    delete meta.last_sign_in_method;
+  if (mode === "profile") {
+    // Stored historical values do not establish current active-session activity.
+    meta.last_sign_in = null;
+    meta.last_active = null;
+    meta.last_sign_in_method = null;
   }
   const attributes = {
     ...((originalRowndUser?.attributes || {}) as JsonRecord),
@@ -3715,9 +3715,14 @@ export async function updateUserMetadata(
   inputMeta: JsonRecord,
   userContext?: JsonRecord,
 ) {
+  // Hub clients can echo the entire presentation meta object. Its derived activity
+  // (including unknown/null placeholders) must never overwrite stored activity.
+  const writableMeta = Object.fromEntries(Object.entries(inputMeta).filter(
+    ([key]) => !["last_sign_in", "last_active", "last_sign_in_method"].includes(key),
+  ));
   const { sdkUserId } = await updatePrimaryUserMetadata(
     userId,
-    inputMeta,
+    writableMeta,
     userContext,
     true,
   );

@@ -495,10 +495,16 @@ Unauthenticated migration and guest routes accept an optional `tenantId` query p
 
 ### User profile reads
 
-`GET {apiBasePath}/plugin/rownd/user` retains legacy activity behavior by default.
-The in-progress P1/P2 implementation supports explicit lightweight negotiation
-with `?profile=lightweight-v1`, omitting unavailable activity fields without
-enumerating sessions. Client decoder compatibility remains a release gate.
+`GET {apiBasePath}/plugin/rownd/user` returns a session-free profile by default:
+`meta.last_sign_in`, `meta.last_active`, and `meta.last_sign_in_method` are `null`.
+Only `?include_activity=true` opts into active-session enrichment, adding one
+session-list call plus one detail call per session. Missing, false, or unknown
+values (including the former `profile=lightweight-v1` selector) stay session-free.
+Ordinary internal reads and mutation-returned profiles use this same default.
+This changes activity values for existing clients and can change automation
+equality/EXISTS conditions. The metadata update API ignores writes to these three
+derived activity keys, protecting stored values from wholesale profile echo.
+Database-backed authentication and revocation checks remain required.
 
 See [Profile reads](./PROFILE_READS.md) for the current working-tree contract,
 SDK-boundary counter scope, deferred prerequisites, and rollout requirements.

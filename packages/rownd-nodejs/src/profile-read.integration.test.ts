@@ -123,7 +123,7 @@ describe("profile reads through authenticated middleware", { timeout: 30_000 }, 
     }
     const latest = await Session.getSessionInformation(sessions[sessions.length - 1].getHandle());
     if (!latest) throw new Error("Seeded session is missing from Core");
-    return { userId, email, sessions, latestCreated: new Date(latest.timeCreated).toISOString() };
+    return { userId, internalId: result.user.id, email, sessions, latestCreated: new Date(latest.timeCreated).toISOString() };
   }
 
   function getProfile(accessToken: string, query = "") {
@@ -137,7 +137,7 @@ describe("profile reads through authenticated middleware", { timeout: 30_000 }, 
     const list = vi.spyOn(Session, "getAllSessionHandlesForUser");
     const detail = vi.spyOn(Session, "getSessionInformation");
 
-    const response = await getProfile(fixture.sessions[0].getAccessToken());
+    const response = await getProfile(fixture.sessions[0].getAccessToken(), "?include_activity=true");
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
@@ -153,16 +153,16 @@ describe("profile reads through authenticated middleware", { timeout: 30_000 }, 
   it.each([false, true].flatMap((mapped) => [1, 5, 20].map((count) => ({ mapped, count }))))(
     "preserves profile parity without session scans (mapped=$mapped, sessions=$count)", async ({ mapped, count }) => {
     const fixture = await seed(count, mapped);
-    const legacy = await getProfile(fixture.sessions[0].getAccessToken());
+    const legacy = await getProfile(fixture.sessions[0].getAccessToken(), "?include_activity=true");
     expect(legacy.status).toBe(200);
     const expected = await legacy.json();
-    delete expected.meta.last_sign_in;
-    delete expected.meta.last_active;
-    delete expected.meta.last_sign_in_method;
+    expected.meta.last_sign_in = null;
+    expected.meta.last_active = null;
+    expected.meta.last_sign_in_method = null;
     const list = vi.spyOn(Session, "getAllSessionHandlesForUser");
     const detail = vi.spyOn(Session, "getSessionInformation");
 
-    const response = await getProfile(fixture.sessions[0].getAccessToken(), "?profile=lightweight-v1");
+    const response = await getProfile(fixture.sessions[0].getAccessToken());
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(expected);
@@ -170,18 +170,21 @@ describe("profile reads through authenticated middleware", { timeout: 30_000 }, 
     expect(detail).not.toHaveBeenCalled();
   });
 
-  it.each(["", "?profile=unknown", "?profile=lightweight-v2", "?profile=Lightweight-v1", "?profile="])(
-    "retains legacy activity unless the exact capability is requested (%s)", async (query) => {
-      const fixture = await seed(1);
+  it.each(["", "?include_activity=false", "?include_activity=unknown", "?include_activity=True", "?include_activity=1", "?profile=lightweight-v1", "?profile=legacy"]
+    .flatMap((query) => [1, 5, 20].map((count) => ({ query, count }))))(
+    "returns null activity without scans unless explicitly requested (query=$query, sessions=$count)", async ({ query, count }) => {
+      const fixture = await seed(count);
       const list = vi.spyOn(Session, "getAllSessionHandlesForUser");
+      const detail = vi.spyOn(Session, "getSessionInformation");
 
       const response = await getProfile(fixture.sessions[0].getAccessToken(), query);
 
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ meta: {
-        last_sign_in: fixture.latestCreated, last_active: fixture.latestCreated, last_sign_in_method: "email",
+        last_sign_in: null, last_active: null, last_sign_in_method: null,
       } });
-      expect(list).toHaveBeenCalledTimes(1);
+      expect(list).not.toHaveBeenCalled();
+      expect(detail).not.toHaveBeenCalled();
     },
   );
 
@@ -189,20 +192,20 @@ describe("profile reads through authenticated middleware", { timeout: 30_000 }, 
     const tenantId = `tenant-${randomUUID()}`;
     const fixture = await seed(2, mapped, tenantId);
     const token = fixture.sessions[0].getAccessToken();
-    const legacy = await getProfile(token);
+    const legacy = await getProfile(token, "?include_activity=true");
     expect(legacy.status).toBe(200);
     const expected = await legacy.json();
     expect(expected).toMatchObject({
       rownd_user: fixture.userId, data: { user_id: fixture.userId, email: fixture.email },
       verified_data: { email: fixture.email },
     });
-    delete expected.meta.last_sign_in;
-    delete expected.meta.last_active;
-    delete expected.meta.last_sign_in_method;
+    expected.meta.last_sign_in = null;
+    expected.meta.last_active = null;
+    expected.meta.last_sign_in_method = null;
     const list = vi.spyOn(Session, "getAllSessionHandlesForUser");
     const detail = vi.spyOn(Session, "getSessionInformation");
 
-    const response = await getProfile(token, "?profile=lightweight-v1");
+    const response = await getProfile(token);
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(expected);
@@ -210,7 +213,7 @@ describe("profile reads through authenticated middleware", { timeout: 30_000 }, 
     expect(detail).not.toHaveBeenCalled();
   });
 
-  it.each(["", "?profile=lightweight-v1"])("rejects a revoked token after a successful read (%s)", async (query) => {
+  it.each(["", "?include_activity=true"])("rejects a revoked token after a successful read (%s)", async (query) => {
     const fixture = await seed(2);
     const token = fixture.sessions[0].getAccessToken();
     expect((await getProfile(token, query)).status).toBe(200);
@@ -225,5 +228,64 @@ describe("profile reads through authenticated middleware", { timeout: 30_000 }, 
     expect(list).not.toHaveBeenCalled();
     expect(assemble).not.toHaveBeenCalled();
     expect((await getProfile(fixture.sessions[1].getAccessToken(), query)).status).toBe(200);
+  });
+
+  function putProfile(accessToken: string, suffix: string, body: object) {
+    return fetch(`${baseUrl}/auth/plugin/rownd/user${suffix}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${accessToken}`, rid: "session", "fdi-version": "1.18", "st-auth-mode": "header", "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it.each([false, true])("returns null activity after profile mutation without scans (mapped=%s)", async (mapped) => {
+    const fixture = await seed(5, mapped);
+    const list = vi.spyOn(Session, "getAllSessionHandlesForUser");
+    const detail = vi.spyOn(Session, "getSessionInformation");
+
+    const response = await putProfile(fixture.sessions[0].getAccessToken(), "", { data: { first_name: "Updated" } });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: "OK", data: { user_id: fixture.userId, first_name: "Updated" },
+      meta: { last_sign_in: null, last_active: null, last_sign_in_method: null },
+    });
+    expect(list).not.toHaveBeenCalled();
+    expect(detail).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("ignores Hub null activity placeholders without deleting stored activity (mapped=%s)", async (mapped) => {
+    const fixture = await seed(5, mapped);
+    const token = fixture.sessions[0].getAccessToken();
+    const profile = await getProfile(token);
+    expect(profile.status).toBe(200);
+    const { meta } = await profile.json();
+    expect(meta).toMatchObject({ last_sign_in: null, last_active: null, last_sign_in_method: null });
+    const before = await UserMetadata.getUserMetadata(fixture.internalId);
+    const aliasBefore = mapped ? await UserMetadata.getUserMetadata(fixture.userId) : undefined;
+    const list = vi.spyOn(Session, "getAllSessionHandlesForUser");
+    const detail = vi.spyOn(Session, "getSessionInformation");
+
+    const response = await putProfile(token, "/meta", { meta: { ...meta, preference: "updated" } });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: "OK", meta: { preference: "updated" } });
+    expect(list).not.toHaveBeenCalled();
+    expect(detail).not.toHaveBeenCalled();
+    const after = await UserMetadata.getUserMetadata(fixture.internalId);
+    for (const key of ["last_sign_in", "last_active", "last_sign_in_method"]) {
+      expect(after.metadata[key]).toEqual(before.metadata[key]);
+    }
+    if (aliasBefore) {
+      const aliasAfter = await UserMetadata.getUserMetadata(fixture.userId);
+      for (const key of ["last_sign_in", "last_active", "last_sign_in_method"]) {
+        expect(aliasAfter.metadata[key]).toEqual(aliasBefore.metadata[key]);
+      }
+    }
+    const enriched = await getProfile(token, "?include_activity=true");
+    expect(enriched.status).toBe(200);
+    expect(await enriched.json()).toMatchObject({ meta: {
+      preference: "updated", last_sign_in: fixture.latestCreated, last_active: fixture.latestCreated, last_sign_in_method: "email",
+    } });
   });
 });

@@ -25,7 +25,7 @@ describe("OpenTelemetry profile timing", () => {
     span.setAttributes.mockImplementation(() => { vi.setSystemTime(5000); });
     new OpenTelemetryClient().recordEvent({
       operation: "profile_read", durationMs: 125.5,
-      profileMode: "lightweight-v1", profileConfig: "static",
+      profileMode: "profile", profileConfig: "static",
       sdkCalls: { user: 1, mapping: 2, metadata: 1, sessionList: 0, sessionDetail: 0 },
       ...(failed ? { outcome: "error" as const, error: { message: "Profile read failed" } }
         : { outcome: "success" as const }),

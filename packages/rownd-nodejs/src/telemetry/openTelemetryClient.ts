@@ -33,7 +33,7 @@ export class OpenTelemetryClient implements RowndTelemetryClient {
     });
     if (event.operation === "profile_read") {
       span.setAttributes({
-        "rownd.profile.mode": event.profileMode ?? "legacy",
+        "rownd.profile.mode": event.profileMode ?? "profile",
         "rownd.profile.config": event.profileConfig ?? "static",
         "rownd.profile.fallback_reason": event.profileFallbackReason ?? "",
       });

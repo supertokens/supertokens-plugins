@@ -1,7 +1,7 @@
 # Profile reads: contract, measurements, and release gates
 
-Status: P1/P2 implementation complete with qualified local validation. This
-describes the current working-tree contract, not a released-version guarantee.
+Status: P1/P2 default contract revised to session-free profiles with null activity.
+This describes the current working-tree contract, not a released-version guarantee.
 Production canary and executed mobile decoder validation remain outstanding.
 Historical activity summaries, canonical
 projections (P3), and cross-request sharing (P4) are deferred.
@@ -11,43 +11,64 @@ projections (P3), and cross-request sharing (P4) are deferred.
 Routes are relative to the configured SuperTokens `apiBasePath` (default `/auth`).
 Use the normal authenticated SuperTokens request mechanism:
 
-- `GET /auth/plugin/rownd/user` retains the legacy profile contract.
-- `GET /auth/plugin/rownd/user?profile=lightweight-v1` selects lightweight reads.
-- Only the exact `profile=lightweight-v1` value selects the new contract. Missing
-  or other values select legacy behavior; they do not produce a version error.
+- `GET /auth/plugin/rownd/user` returns a session-free profile with null activity.
+- `GET /auth/plugin/rownd/user?include_activity=true` requests active-session enrichment.
+- Only the exact `include_activity=true` value enables enumeration. Missing,
+  `false`, empty, differently cased, or unknown values remain session-free.
+- The former `profile=lightweight-v1` selector is ignored, as are other `profile`
+  values. It cannot trigger enumeration. There is no header-based opt-in.
 
 The response retains `status: "OK"` and the existing profile envelope. The
 authenticated session selects the user and tenant. Negotiation does not relax
 authentication, database-checked session verification, or revocation checks.
-This query option applies to the GET user handler; it does not opt mutation
-responses or other profile-producing operations into lightweight behavior.
-There is no deployment-wide default switch in this implementation.
+Ordinary internal `getUserById` calls and mutation-returned profiles are also
+session-free by default. Internal callers must explicitly pass the fourth
+argument `{ includeActivity: true }` when active-session activity is needed.
+The GET query does not cause mutation-returned profiles to enumerate sessions.
 
 ### Activity semantics
 
-Legacy reads enumerate sessions for the tenant and select the newest available
+Explicit activity reads enumerate sessions for the tenant and select the newest available
 session creation time. `meta.last_sign_in` and `meta.last_active` both reflect
 that time; `last_active` is not a general app-activity timestamp. With no selected
 session, the existing implementation falls back to account creation time and a
 login-method fallback. These values are not reliable historical sign-in records.
 
-Lightweight reads omit all three properties from `meta`:
+Default reads return all three properties in `meta` with JSON `null` values:
 
 - `last_sign_in`
 - `last_active`
 - `last_sign_in_method`
 
-Omission means **unknown/unavailable**, not null, never signed in, signed out, or
+Null means **not requested/unknown**, not never signed in, signed out, or
 an email sign-in. Historical values in stored metadata do not populate these
 properties. Other profile fields retain their existing assembly behavior,
 including `created`, `first_sign_in`, and `first_sign_in_method`; those fields
-must not be used to reconstruct the omitted activity values.
+must not be used to reconstruct the unknown activity values.
 
-Lightweight reads perform zero session-list and session-detail calls, including
+Default reads perform zero session-list and session-detail calls, including
 when activity is unavailable. They do not scan sessions as a fallback. No
 historical activity summary is read or persisted by this change. A future
 historical summary would have different expiry/revocation semantics from the
-legacy newest-active-session result and needs a separately reviewed contract.
+opt-in newest-active-session result and needs a separately reviewed contract.
+
+### Compatibility and metadata write-back
+
+This is an intentional behavior change for existing clients: the default now
+returns null instead of computed activity. The Hub profile-view audit found
+`Profile.tsx` uses `user.data`, not these activity fields. iOS decodes `meta` as an
+arbitrary dictionary that accepts null; Android's network user model does not
+decode `meta`. These source inspections are not executed mobile decoder tests.
+Dynamic automation equality and `EXISTS` conditions can behave differently for
+null versus omitted or previously populated values; audit such rules before rollout.
+
+The metadata update API ignores the exact top-level keys `last_sign_in`,
+`last_active`, and `last_sign_in_method`, for both null and non-null input. Hub
+clients may send back the whole `meta` object without erasing stored server-owned
+activity or writing stale computed activity. Other customer metadata, including
+null deletions and nested keys, retains its existing behavior. Profile `data`
+writes and schema fields are not filtered by this metadata-only rule. Raw
+administrative/SDK metadata writers are unchanged.
 
 ## P1/P2 implementation scope
 
@@ -56,7 +77,7 @@ user, mapping, and metadata reads within that operation. Distinct records remain
 distinct work. Its lifetime ends with assembly; it is not a cross-request cache
 or a snapshot transaction against Core. Mutation responses start fresh reads.
 
-P2 skips session enrichment only for the negotiated lightweight mode. Linked
+P2 skips session enrichment by default and permits explicit opt-in. Linked
 metadata still uses the compatibility resolver: neither a fixed linked-record
 read budget nor removal of alias/linked-record fan-out is claimed.
 
@@ -76,10 +97,10 @@ Profile events include:
 - `operation: "profile_read"`, `stage: "profile_assembly"`, and `eventType: "terminal"`.
 - `requestId` (the assembly operation ID), `pluginVersion`, `durationMs`, and
   success/error `outcome` and `result`.
-- `profileMode`: `legacy` or `lightweight-v1`.
+- `profileMode`: `profile` (default) or `active-sessions` (explicit opt-in).
 - `profileConfig`: `static` or `dynamic`.
-- `profileFallbackReason`: `legacy_contract` for legacy reads or
-  `activity_unavailable` for lightweight reads. These describe mode/activity
+- `profileFallbackReason`: `activity_not_requested` for default reads or
+  `none` for opt-in reads. These describe mode/activity
   selection, not a projection fallback or an online scan.
 - `sdkCalls`: `user`, `mapping`, `metadata`, `sessionList`, and `sessionDetail`.
 
@@ -94,10 +115,11 @@ Measure Core wire attempts separately, including failures and retries. Normalize
 route paths; do not use user IDs, full URLs, or operation IDs as metric labels.
 Report database work and endpoint latency separately from both count types.
 
-The planning probe's `6/10/25` SDK calls for 1/5/20 sessions concerned one unmapped
-user with one login method. Removing enumeration alone predicts four calls for
-that fixture, excluding route verification and any added summary work. This is
-not a universal endpoint budget or an independently validated release result.
+The unmapped single-login-method unit fixture uses four SDK calls by default.
+Explicit activity adds `1 + N` calls (list plus N details), giving `6/10/25` SDK
+calls for 1/5/20 sessions. Detail concurrency is bounded to four per request;
+this limits bursts, not total work. These are not universal endpoint budgets:
+route verification, refresh, and additional linked metadata are separate work.
 Incident route shares are addressable work, not measured savings.
 
 ## Deferred prerequisites
@@ -113,7 +135,7 @@ Also define tenant scope, schema version, supported sign-in paths, treatment of
 migration/adoption and replacement sessions, and failure/repair behavior.
 Refresh must not count as sign-in. A summary failure must not turn successful
 authentication into a reported authentication failure. Unknown activity permits
-shipping lightweight reads independently of these prerequisites.
+shipping session-free reads independently of these prerequisites.
 
 ### P3: canonical compatibility projection
 
@@ -146,43 +168,32 @@ invalidation contract plus measured justification.
 
 ### Current validation status
 
-Independent validation of the in-progress implementation:
+The earlier opt-in lightweight implementation passed focused and real-Core
+checks, but those results do not validate this revised null-by-default contract.
+Current focused validation: **66/66 tests passed** across `profile-read.test.ts`,
+`telemetry/openTelemetryClient.test.ts`, `mapped-profile-metadata.test.ts`,
+`metadata-references.test.ts`, and `local-core-read-boundaries.test.ts`.
+Coverage checks default/opt-in budgets, activity write-back protection, mutation
+responses, fresh reads, bounded concurrency and failures, and exported span
+duration. `npm run build` passed, including declarations.
+Real-Core route tests are independently maintained.
+Record their revised-contract results separately; do not reuse prior negotiation
+or omission assertions as evidence for this contract.
 
-- `profile-read.integration.test.ts`: **18/18 real-Core tests passed**, covering
-  exact query negotiation, unknown-selector legacy default, revocation before
-  assembly, mapped/unmapped users in public/non-public tenants, legacy/lightweight
-  parity outside the changed activity fields, omission despite stale stored
-  activity, and zero lightweight session SDK calls with 1/5/20 sessions.
-- Earlier focused validation reported 64 passing tests. That run and the 18-test
-  real-Core run above are separate, overlapping runs; their counts are not additive.
-- Final span-timing fix: 21 focused profile/telemetry tests passed. The full-suite
-  run below may predate the last telemetry test addition and does not establish
-  full-suite coverage of the final telemetry change.
-- `npm run build`: passed, including bundles and declarations, before the final
-  span-timing tweak; no post-tweak build pass is claimed.
-- `npm run typecheck`: not clean; only reported baseline `logger.ts` `o`/`O` errors.
-- `npm run lint`: not clean; only reported baseline `_reserved` issue.
-- Full `npm test`: 43 files, 1,520 tests; 1,513 passed and seven hit the five-second
-  timeout, in 149.08 seconds. The full parallel suite is not clean.
-- Exactly those seven failures were rerun with `--no-file-parallelism`, retaining
-  the original five-second timeout: seven passed, 606 skipped, across five files
-  in 34.13 seconds. This is strong evidence of load contention, not proof that the
-  failures predate this implementation. No further broad reruns were performed.
-
-These backend tests do not establish mobile decoder compatibility. Source
-inspection suggesting omitted fields are accepted is distinct from executing
-iOS/Android decoding tests. Actual mobile decode results and tested versions
-remain pending confirmation from the implementer.
+Known package-check baselines are shared `logger.ts` `o`/`O` type errors and the
+`_reserved` lint issue. Earlier full parallel tests had seven five-second
+timeouts that passed isolated reruns; this is not a clean full-suite result.
+Executed mobile decode results and tested client versions remain release gates.
 
 ### Release gates
 
 Before release:
 
-1. Verify iOS and Android decoders accept omission of all three activity fields;
-   record tested client versions. Do not enable negotiation for incompatible clients.
-2. Test legacy/new client and backend combinations, unsupported negotiation,
+1. Verify iOS and Android decoders accept null for all three activity fields;
+   record tested client versions and audit automation equality/EXISTS rules.
+2. Test old/new client and backend combinations, unsupported query values,
    tenant isolation, linked identities, authoritative deletions, missing activity,
-   revoked sessions, and mutation responses. Verify zero lightweight session
+   revoked sessions, metadata echo, and mutation responses. Verify zero default session
    calls with 1/5/20 sessions.
 3. Run package typecheck, lint, tests, build, and real-Core integration suites.
    Record plugin, Node SDK, Core, and fixture versions with results.
@@ -190,11 +201,13 @@ Before release:
    failed requests and all endpoint Core work; measure latency and authentication
    success against a matched control. Do not infer capacity from warm reads alone.
 
-Canary negotiated requests first. Existing clients remain legacy and must not be
-promised session-scan removal. Stop expansion on increased authentication failures
-or meaningful latency/load regression; roll back immediately on identity,
-revocation, or output mismatches. Clients can stop sending the negotiation query
-to return to legacy behavior; test this rollback before expansion.
+Canary the backend change by deployment: existing clients receive null activity
+and session-scan removal without an upgrade. Stop expansion on increased
+authentication failures or meaningful latency/load regression; roll back on
+identity, revocation, or unexpected output mismatches. Clients needing the prior
+computed activity can explicitly request `include_activity=true`, accepting its
+extra work. Removing that query returns to null-by-default behavior. Restoring
+the previous default for unmodified clients requires a backend rollback.
 
 Release notes must distinguish P1/P2 from deferred summaries/P3/P4 and include
 tested compatibility and observed measurements. If later releases introduce
