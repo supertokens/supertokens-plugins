@@ -171,7 +171,12 @@ export function convertRowndConfigToPluginConfig(
         }
         : undefined,
       profileModal: isRecord(customContent.profile_modal)
-        ? { title: getString(customContent.profile_modal.title) }
+        ? {
+          title: getString(customContent.profile_modal.title),
+          emailConflictMessage: getString(
+            customContent.profile_modal.email_conflict_message,
+          ),
+        }
         : undefined,
       verificationModal: isRecord(customContent.verification_modal)
         ? {

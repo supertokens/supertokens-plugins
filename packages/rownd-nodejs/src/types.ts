@@ -560,6 +560,11 @@ export type RowndCustomContent = {
      * @default "Your profile"
      */
     title?: string;
+    /**
+     * Plain-text error when a profile email change conflicts with another account.
+     * @default Rownd hub built-in localized email conflict message.
+     */
+    emailConflictMessage?: string;
   };
   /**
    * Verification modal text overrides.

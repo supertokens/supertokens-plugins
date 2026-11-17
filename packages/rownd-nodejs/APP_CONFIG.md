@@ -573,9 +573,14 @@ The request that opens sign-in can override the main title.
 customContent: {
   profileModal: {
     title: 'Your profile',
+    emailConflictMessage: 'Please use a different email address or contact support.',
   },
 }
 ```
+
+`emailConflictMessage` replaces only the Hub's duplicate-email field error. It
+is plain text, not HTML or a translation key. Omit it or use an empty string to
+retain the Hub's localized default message.
 
 ### Verification modal
 
