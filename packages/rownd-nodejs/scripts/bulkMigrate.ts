@@ -1,294 +1,65 @@
-import fs from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
-import { parse as parseYaml } from "yaml";
+import * as fs from "node:fs/promises";
 import { z } from "zod";
 
 import { type RowndUser, type SuperTokensUserImport } from "../src/types";
-import { mapRowndUserToSuperTokens } from "../src/pluginImplementation";
+import { mapRowndUserToSuperTokens } from "../src/rownd-compatibility";
+import {
+  loadConfig,
+  formatZodError,
+  fetchRowndUsersPage,
+  fetchWithRetry,
+  hasHelpArg,
+  parseRequiredConfigArg,
+  type BulkMigrateConfig,
+  type RetryConfig,
+  type SuperTokensTargetConfig,
+} from "./scriptUtils";
+import { countStagedUsers } from "./bulkImportApi";
+import {
+  addManifestIds,
+  assertManifestMatchesConfig,
+  createManifest,
+  defaultManifestPath,
+  loadManifest,
+  saveManifest,
+  type BulkImportManifest,
+} from "./bulkImportManifest";
 
-const DEFAULT_CONFIG_FILE_NAME = "config.yaml";
-const SCRIPT_DIR = __dirname;
-const DEFAULT_CONFIG_FILE_PATH = resolve(SCRIPT_DIR, DEFAULT_CONFIG_FILE_NAME);
+function printHelp() {
+  console.log(`Usage: rownd-nodejs bulk-migrate --config <path>
 
-export type RetryConfig = {
-  maxAttempts: number;
-  initialDelayMs: number;
-};
-
-export type CheckpointConfig = {
-  file: string;
-  resume: boolean;
-};
-
-export type RowndSourceConfig = {
-  appId: string;
-  appKey: string;
-  appSecret: string;
-  pageSize: number;
-};
-
-export type SuperTokensTargetConfig = {
-  connectionURI: string;
-  apiKey?: string;
-  batchSize: number;
-};
-
-export type BulkMigrateConfig = {
-  limit: number;
-  checkpoint: CheckpointConfig;
-  retry: RetryConfig;
-  rownd: RowndSourceConfig;
-  supertokens: SuperTokensTargetConfig;
-};
+Options:
+  -c, --config <path>  Path to the bulk migration config file
+  -h, --help           Show this help message`);
+}
 
 type Checkpoint = {
   cursor?: string;
   importedCount?: number;
+  tenantId?: string;
   updatedAt: string;
 };
 
-const ConfigSchema = z.object({
-  limit: z.preprocess(
-    (value) => (value === undefined ? Number.POSITIVE_INFINITY : value),
-    z.union([z.literal(Number.POSITIVE_INFINITY), z.number().int().positive()]),
-  ),
-  checkpoint: z.object({
-    file: z.string(),
-    resume: z.boolean().default(false),
-  }),
-  retry: z.object({
-    maxAttempts: z.number().int().positive(),
-    initialDelayMs: z.number().int().positive(),
-  }),
-  rownd: z.object({
-    appId: z.string(),
-    appKey: z.string(),
-    appSecret: z.string(),
-    pageSize: z.number().int().positive(),
-  }),
-  supertokens: z.object({
-    connectionURI: z.string(),
-    apiKey: z.string().optional(),
-    batchSize: z.number().int().positive(),
-  }),
-});
-
-const RowndUserSchema = z.looseObject({
-  state: z.string().optional(),
-  auth_level: z.string().optional(),
-  data: z.looseObject({
-    user_id: z.string(),
-    email: z.string().optional(),
-    phone_number: z.string().optional(),
-    google_id: z.string().optional(),
-    apple_id: z.string().optional(),
-    first_name: z.string().optional(),
-    last_name: z.string().optional(),
-  }),
-  verified_data: z.record(z.string(), z.unknown()).optional(),
-  attributes: z.record(z.string(), z.unknown()).optional(),
-  groups: z.array(z.string()).optional(),
-  meta: z.record(z.string(), z.unknown()).optional(),
-});
-
-const RowndUsersPageSchema = z
-  .object({
-    results: z.array(RowndUserSchema).optional(),
-    data: z.array(RowndUserSchema).optional(),
-  })
-  .superRefine((value, context) => {
-    if (!value.results && !value.data) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Rownd API response is missing a results/data array.",
-      });
-    }
-  });
+type FailedMapping = {
+  user: RowndUser;
+  error: string;
+};
 
 const CheckpointSchema = z.object({
   cursor: z.string().optional(),
   importedCount: z.number().int().nonnegative().optional(),
+  tenantId: z.string().optional(),
   updatedAt: z.string(),
 });
 
-function formatIssuePath(path: Array<string | number>) {
-  if (path.length === 0) {
-    return "<root>";
-  }
-
-  return path
-    .map((segment, index) => {
-      if (typeof segment === "number") {
-        return `[${segment}]`;
-      }
-
-      return index === 0 ? segment : `.${segment}`;
-    })
-    .join("");
-}
-
-export function formatZodError(error: z.ZodError) {
-  return error.issues
-    .map(
-      (issue) =>
-        `${formatIssuePath(issue.path.filter((segment): segment is string | number => typeof segment === "string" || typeof segment === "number"))}: ${issue.message}`,
-    )
-    .join("\n");
-}
-
-export function parseConfig(
-  rawConfig: unknown,
-  configDir: string = SCRIPT_DIR,
-): BulkMigrateConfig {
-  const parsed = ConfigSchema.parse(rawConfig);
-  const checkpointFile = isAbsolute(parsed.checkpoint.file)
-    ? parsed.checkpoint.file
-    : resolve(configDir, parsed.checkpoint.file);
-
-  return {
-    limit: parsed.limit,
-    checkpoint: {
-      file: checkpointFile,
-      resume: parsed.checkpoint.resume,
-    },
-    retry: parsed.retry,
-    rownd: parsed.rownd,
-    supertokens: parsed.supertokens,
-  };
-}
-
-export async function loadConfig(
-  configFilePath: string = DEFAULT_CONFIG_FILE_PATH,
-) {
-  const configFile = await fs.readFile(configFilePath, "utf8");
-
-  return parseConfig(parseYaml(configFile), dirname(configFilePath));
-}
-
-function isRetryableStatus(status: number) {
-  return status === 429 || status >= 500;
-}
-
-async function fetchWithRetry({
-  url,
-  requestInit,
-  retryConfig,
-  operation,
-}: {
-  url: string;
-  requestInit?: RequestInit;
-  retryConfig: RetryConfig;
-  operation: string;
-}) {
-  let lastError: Error | undefined;
-
-  for (let attempt = 1; attempt <= retryConfig.maxAttempts; attempt += 1) {
-    try {
-      const response = await fetch(url, requestInit);
-      if (
-        response.ok ||
-        !isRetryableStatus(response.status) ||
-        attempt === retryConfig.maxAttempts
-      ) {
-        return response;
-      }
-
-      const responseText = await response.text();
-      lastError = new Error(
-        `${operation} failed with ${response.status}${responseText ? ` ${responseText}` : ""}`,
-      );
-    } catch (error) {
-      if (attempt === retryConfig.maxAttempts) {
-        throw error;
-      }
-
-      lastError =
-        error instanceof Error ? error : new Error(`${operation} failed`);
-    }
-
-    const delayMs = Math.round(
-      retryConfig.initialDelayMs * 2 ** (attempt - 1) * (1 + Math.random() * 0.2),
-    );
-    console.log(
-      `${operation} attempt ${attempt} failed. Retrying in ${delayMs}ms.`,
-    );
-
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
-
-  throw lastError ?? new Error(`${operation} failed`);
-}
-
-function parseRowndUser(rawUser: unknown) {
-  const parsed = RowndUserSchema.parse(rawUser);
-  const rowndUserId = (parsed.data.user_id ||
-    parsed.user_id ||
-    parsed.app_user_id) as string | undefined;
-
-  if (!rowndUserId) {
-    throw new Error(
-      "Rownd user is missing a stable user id. Cannot continue pagination safely.",
-    );
-  }
-
-  const rowndUser: RowndUser = {
-    state: parsed.state ?? "",
-    auth_level: parsed.auth_level ?? "",
-    data: parsed.data as RowndUser["data"],
-    verified_data: (parsed.verified_data ?? {}) as RowndUser["verified_data"],
-    attributes: parsed.attributes as RowndUser["attributes"],
-    groups: parsed.groups,
-    meta: parsed.meta as RowndUser["meta"],
-  };
-
-  return { rowndUser, rowndUserId };
-}
-
-async function fetchRowndUsersPage(
-  config: BulkMigrateConfig,
-  cursor?: string,
-  pageSize?: number,
-) {
-  const url = new URL(
-    `/applications/${config.rownd.appId}/users/data`,
-    "https://api.rownd.io",
-  );
-
-  if (cursor) {
-    url.searchParams.set("after", cursor);
-  }
-
-  url.searchParams.set("include_duplicates", "true");
-  url.searchParams.set("page_size", String(pageSize ?? config.rownd.pageSize));
-
-  const response = await fetchWithRetry({
-    url: url.toString(),
-    requestInit: {
-      headers: {
-        "x-rownd-app-key": config.rownd.appKey,
-        "x-rownd-app-secret": config.rownd.appSecret,
-      },
-    },
-    retryConfig: config.retry,
-    operation: "Fetching Rownd users",
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `Rownd API error: ${response.status} ${await response.text()}`,
-    );
-  }
-
-  const page = RowndUsersPageSchema.parse(await response.json());
-  return (page.results ?? page.data ?? []).map(parseRowndUser);
-}
+const StageUsersResponseSchema = z.object({ status: z.literal("OK") });
 
 async function loadCheckpoint(checkpointFile: string) {
   try {
     const checkpoint = await fs.readFile(checkpointFile, "utf8");
     return CheckpointSchema.parse(JSON.parse(checkpoint));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    if ((error as { code?: string }).code === "ENOENT") {
       return null;
     }
 
@@ -298,8 +69,52 @@ async function loadCheckpoint(checkpointFile: string) {
 
 async function saveCheckpoint(checkpointFile: string, checkpoint: Checkpoint) {
   const tempFile = `${checkpointFile}.tmp`;
-  await fs.writeFile(tempFile, JSON.stringify(checkpoint, null, 2), "utf8");
+  await fs.writeFile(tempFile, JSON.stringify(checkpoint, null, 2), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
   await fs.rename(tempFile, checkpointFile);
+}
+
+function getFailedMappingsFilePath(checkpointFile: string) {
+  return `${checkpointFile}.failed-mappings.json`;
+}
+
+async function loadFailedMappings(filePath: string): Promise<FailedMapping[]> {
+  try {
+    const contents = await fs.readFile(filePath, "utf8");
+    const parsed = JSON.parse(contents) as unknown;
+
+    if (!Array.isArray(parsed)) {
+      throw new Error("Failed mappings file must contain a JSON array.");
+    }
+
+    return parsed as FailedMapping[];
+  } catch (error) {
+    if ((error as { code?: string }).code === "ENOENT") {
+      return [];
+    }
+
+    throw error;
+  }
+}
+
+async function appendFailedMappings(
+  filePath: string,
+  failedMappings: FailedMapping[],
+) {
+  if (failedMappings.length === 0) {
+    return;
+  }
+
+  const existingMappings = await loadFailedMappings(filePath);
+  const tempFile = `${filePath}.tmp`;
+  await fs.writeFile(
+    tempFile,
+    JSON.stringify([...existingMappings, ...failedMappings], null, 2),
+    { encoding: "utf8", mode: 0o600 },
+  );
+  await fs.rename(tempFile, filePath);
 }
 
 export async function stageUsersForImport(config: {
@@ -330,16 +145,21 @@ export async function stageUsersForImport(config: {
   });
 
   if (!response.ok) {
+    const responseText = await response.text();
     throw new Error(
-      `SuperTokens bulk import error: ${response.status} ${await response.text()}`,
+      `SuperTokens bulk import error: ${response.status}${responseText ? ` ${responseText}` : ""}`,
     );
   }
+
+  return StageUsersResponseSchema.parse(await response.json());
 }
 
 async function importUsersBatch(
   config: BulkMigrateConfig,
   users: Array<{ rowndUserId: string; user: SuperTokensUserImport }>,
-  totalImportedBeforeBatch: number,
+  totalStagedBeforeBatch: number,
+  manifest: BulkImportManifest,
+  manifestFile: string,
 ) {
   for (
     let index = 0;
@@ -348,25 +168,62 @@ async function importUsersBatch(
   ) {
     const batch = users.slice(index, index + config.supertokens.batchSize);
     console.log(
-      `Importing batch ${Math.floor(totalImportedBeforeBatch / config.supertokens.batchSize) + 1} (${batch.length} users)`,
+      `Staging batch ${Math.floor((totalStagedBeforeBatch + index) / config.supertokens.batchSize) + 1} (${batch.length} users)`,
     );
     await stageUsersForImport({
       users: batch.map((entry) => entry.user),
       supertokens: config.supertokens,
       retry: config.retry,
     });
+    addManifestIds(
+      manifest,
+      "stagedExternalUserIdHashes",
+      batch.map((entry) => entry.rowndUserId),
+    );
+    await saveManifest(manifestFile, manifest);
   }
 }
 
 export async function migrateRowndUsersToSuperTokens(
   config: BulkMigrateConfig,
 ) {
+  const manifestFile = defaultManifestPath(config.checkpoint.file);
   const checkpoint = config.checkpoint.resume
     ? await loadCheckpoint(config.checkpoint.file)
     : null;
+  if (
+    checkpoint &&
+    (checkpoint.tenantId ?? "public") !== config.supertokens.tenantId
+  ) {
+    throw new Error(
+      `Checkpoint tenant ${checkpoint.tenantId ?? "public"} does not match configured tenant ${config.supertokens.tenantId}`,
+    );
+  }
+  let manifest: BulkImportManifest;
+  if (checkpoint) {
+    manifest = await loadManifest(manifestFile);
+    assertManifestMatchesConfig(manifest, config);
+  } else {
+    const existingStagedUsers = await countStagedUsers(config);
+    if (existingStagedUsers !== 0) {
+      throw new Error(
+        `SuperTokens has ${existingStagedUsers} staged bulk-import users. Wait for or resolve them before starting a new migration.`,
+      );
+    }
+    manifest = createManifest(config);
+    await saveManifest(manifestFile, manifest);
+  }
+  const failedMappingsFile = getFailedMappingsFilePath(config.checkpoint.file);
   let cursor = checkpoint?.cursor;
-  let totalProcessed = 0;
-  let totalImported = checkpoint?.importedCount ?? 0;
+  let totalProcessed = manifest.sourceUsersRead;
+  let totalStaged = manifest.stagedExternalUserIdHashes.length;
+  let totalSkipped = manifest.mappingFailureExternalUserIdHashes.length;
+
+  if (manifest.completedStagingAt && totalProcessed < config.limit) {
+    delete manifest.completedStagingAt;
+    manifest.updatedAt = new Date().toISOString();
+    await saveManifest(manifestFile, manifest);
+  }
 
   if (config.checkpoint.resume) {
     console.log(
@@ -401,50 +258,116 @@ export async function migrateRowndUsersToSuperTokens(
       break;
     }
 
-    const mappedUsers = pageUsers.map(({ rowndUser, rowndUserId }) => ({
-      rowndUserId,
-      user: mapRowndUserToSuperTokens(rowndUser),
-    }));
+    const mappedUsers: Array<{
+      rowndUserId: string;
+      user: SuperTokensUserImport;
+    }> = [];
+    const failedMappings: FailedMapping[] = [];
 
-    await importUsersBatch(config, mappedUsers, totalImported);
+    for (const { rowndUser, rowndUserId } of pageUsers) {
+      try {
+        mappedUsers.push({
+          rowndUserId,
+          user: mapRowndUserToSuperTokens(
+            rowndUser,
+            config.supertokens.tenantId === "public"
+              ? undefined
+              : config.supertokens.tenantId,
+          ),
+        });
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : "Unknown mapping error";
+        failedMappings.push({
+          user: rowndUser,
+          error: errorMessage,
+        });
+        console.warn(
+          `Skipping Rownd user ${rowndUserId}: ${errorMessage}. Saved to ${failedMappingsFile}`,
+        );
+      }
+    }
+
+    await appendFailedMappings(failedMappingsFile, failedMappings);
+    addManifestIds(
+      manifest,
+      "mappingFailureExternalUserIdHashes",
+      failedMappings.map((entry) => entry.user.data.user_id),
+    );
+    await saveManifest(manifestFile, manifest);
+    totalSkipped += failedMappings.length;
+
+    // await importUsersBatch(
+    //   config,
+    //   mappedUsers,
+    //   totalStaged,
+    //   manifest,
+    //   manifestFile,
+    // );
 
     totalProcessed += pageUsers.length;
-    totalImported += mappedUsers.length;
+    totalStaged += mappedUsers.length;
+    manifest.sourceUsersRead += pageUsers.length;
+    manifest.updatedAt = new Date().toISOString();
     cursor = pageUsers[pageUsers.length - 1]?.rowndUserId;
+    await saveManifest(manifestFile, manifest);
 
     await saveCheckpoint(config.checkpoint.file, {
       cursor,
-      importedCount: totalImported,
+      importedCount: totalStaged,
+      tenantId: config.supertokens.tenantId,
       updatedAt: new Date().toISOString(),
     });
 
     console.log(`Processed ${totalProcessed} users so far`);
-    console.log(`Imported ${totalImported} users so far`);
+    console.log(`Staged ${totalStaged} users so far`);
 
     if (pageUsers.length < requestedPageSize) {
       break;
     }
   }
 
+  manifest.completedStagingAt = new Date().toISOString();
+  manifest.updatedAt = manifest.completedStagingAt;
+  await saveManifest(manifestFile, manifest);
+
   return {
     totalProcessed,
-    totalImported,
+    totalStaged,
+    totalSkipped,
     cursor,
+    manifestFile,
   };
 }
 
 export async function runCli() {
-  const result = await migrateRowndUsersToSuperTokens(await loadConfig());
-  console.log(`Migrated ${result.totalImported} users`);
+  const args = process.argv.slice(2);
+  if (hasHelpArg(args)) {
+    printHelp();
+    return;
+  }
+
+  const config = await loadConfig(parseRequiredConfigArg(args));
+  const result = await migrateRowndUsersToSuperTokens(config);
+  console.log(`Staged ${result.totalStaged} users for import`);
+  console.log(`Wrote migration manifest to ${result.manifestFile}`);
+  if (result.totalSkipped > 0) {
+    console.warn(
+      `Skipped ${result.totalSkipped} users. Details saved to ${getFailedMappingsFilePath(config.checkpoint.file)}`,
+    );
+    process.exitCode = 2;
+  }
 }
 
-runCli().catch((error: unknown) => {
-  if (error instanceof z.ZodError) {
-    console.error(formatZodError(error));
-  } else {
-    console.error(
-      error instanceof Error ? error.message : "Bulk migration failed",
-    );
-  }
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  runCli().catch((error: unknown) => {
+    if (error instanceof z.ZodError) {
+      console.error(formatZodError(error));
+    } else {
+      console.error(
+        error instanceof Error ? error.message : "Bulk migration failed",
+      );
+    }
+    process.exitCode = 1;
+  });
+}
