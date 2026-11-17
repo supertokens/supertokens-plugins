@@ -1396,7 +1396,7 @@ async def test_jwks_diagnostics_are_globally_limited_and_do_not_consume_terminal
     assert response.status_code == 200
     assert terminal_delivered.is_set()
     await asyncio.wait_for(diagnostic_cancelled.wait(), 1)
-    await asyncio.sleep(0)
+    await asyncio.wait_for(asyncio.gather(*diagnostic_tasks._tasks), 1)
     assert not diagnostic_tasks._tasks
 
     now += 1.0
@@ -1407,6 +1407,8 @@ async def test_jwks_diagnostics_are_globally_limited_and_do_not_consume_terminal
     )
     await asyncio.wait_for(diagnostic_started.wait(), 1)
     await asyncio.wait_for(diagnostic_cancelled.wait(), 1)
+    await asyncio.wait_for(asyncio.gather(*diagnostic_tasks._tasks), 1)
+    assert not diagnostic_tasks._tasks
 
 
 @pytest.mark.asyncio

@@ -207,7 +207,9 @@ async def test_alias_resolution_errors_keep_transport_classification_and_cleanup
     client = SimpleNamespace(validate_token=AsyncMock(return_value="alias"), fetch_optional_user_info=fetch_profile)
     request, response, telemetry = FakeRequest(), FakeResponse(), CapturingTelemetry()
     await plugin_implementation.handle_migrate(
-        RowndPluginConfig(), cast(Any, client), telemetry, SupertokensConfig("http://localhost:3567"),
+        RowndPluginConfig(rownd_app_secret="secret", rownd_client=cast(Any, client)),
+        cast(Any, client), telemetry,
+        SupertokensConfig("http://localhost:3567"),
         cast(Any, request), cast(Any, response), context,
     )
     expected = {

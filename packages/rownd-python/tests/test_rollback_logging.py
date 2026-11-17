@@ -64,13 +64,16 @@ async def test_email_change_rollback_logs_safe_warning(
     async def update_metadata(_user_id: str, update: JsonDict, _context: JsonDict) -> None:
         metadata.update(update)
 
-    config = RowndPluginConfig(enable_debug_logs=enable_debug_logs)
+    config = RowndPluginConfig(
+        enable_debug_logs=enable_debug_logs, email_change={"retirement_mode": "observe"}
+    )
     monkeypatch.setattr(impl, "get_active_rownd_config", lambda: config)
     monkeypatch.setattr(impl, "get_user", AsyncMock(return_value=user))
     monkeypatch.setattr(impl, "get_primary_user_mapping", AsyncMock(return_value=None))
     monkeypatch.setattr(impl, "get_raw_user_metadata", AsyncMock(return_value=metadata))
     monkeypatch.setattr(impl, "update_primary_user_metadata", update_metadata)
     monkeypatch.setattr(impl, "assert_email_available_for_user", AsyncMock())
+    monkeypatch.setattr(impl, "assert_email_change_session_claims", AsyncMock())
     monkeypatch.setattr(
         impl.session_asyncio,
         "get_session_information",
