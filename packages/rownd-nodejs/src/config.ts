@@ -1046,7 +1046,19 @@ export function buildRowndAppConfig(
               }
               : {}),
             ...(app.customContent?.profileModal
-              ? { profile_modal: app.customContent.profileModal }
+              ? {
+                profile_modal: {
+                  ...(app.customContent.profileModal.title !== undefined
+                    ? { title: app.customContent.profileModal.title }
+                    : {}),
+                  ...(app.customContent.profileModal.emailConflictMessage
+                    ? {
+                      email_conflict_message:
+                            app.customContent.profileModal.emailConflictMessage,
+                    }
+                    : {}),
+                },
+              }
               : {}),
             ...(app.customContent?.verificationModal
               ? {

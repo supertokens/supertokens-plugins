@@ -167,12 +167,23 @@ RowndMigrationPlugin.init({
   rowndAppSecret: process.env.ROWND_APP_SECRET,
   appConfig: {
     signInMethods: [{ method: "email" }],
+    customContent: {
+      profileModal: {
+        emailConflictMessage: "Please use a different email address or contact support.",
+      },
+    },
   },
   emailChange: {
     maxSessionAgeSeconds: 600,
   },
 });
 ```
+
+`appConfig.customContent.profileModal.emailConflictMessage` optionally replaces
+the Hub's duplicate-email field error with plain text. Omit it or use an empty
+string to retain the Hub's localized default: "This email address can't be used.
+Please try a different one." Custom strings pass through unchanged; they are not
+HTML or translation keys. Other profile errors are unaffected.
 
 If the active app or sub-brand `signInMethods` does not enable email, profile
 email updates are rejected rather than creating a hidden authentication method.
