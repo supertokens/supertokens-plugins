@@ -460,7 +460,8 @@ export async function updatePrimaryUserMetadata(
       ...profileFields,
     ])],
   } : {};
-  const { rownd_profile_authoritative_fields: _reserved, ...updates } = metadataUpdate;
+  const updates = { ...metadataUpdate };
+  delete updates.rownd_profile_authoritative_fields;
   const updatesEmailState = ["rownd_pending_verification", "rownd_email_recipe_user_ids", "rownd_email_recipe_user_id"]
     .some((key) => Object.prototype.hasOwnProperty.call(metadataUpdate, key));
   let pointerFallback: JsonRecord = {};
