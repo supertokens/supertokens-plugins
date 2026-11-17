@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/squadup-nodejs",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "SquadUp ticketing plugin for SuperTokens",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
