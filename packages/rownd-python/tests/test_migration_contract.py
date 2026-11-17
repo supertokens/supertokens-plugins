@@ -246,11 +246,13 @@ async def invoke_migration(
         )
     response = response or FakeResponse()
     telemetry = telemetry_client or CapturingTelemetry()
+    client = client or FakeRowndClient()
     await handle_migrate(
         RowndPluginConfig(
-            rownd_app_key="key", rownd_app_secret="secret", enable_debug_logs=enable_debug_logs
+            rownd_app_key="key", rownd_app_secret="secret", enable_debug_logs=enable_debug_logs,
+            rownd_client=client,
         ),
-        client or FakeRowndClient(),
+        client,
         telemetry,
         SupertokensConfig("http://localhost:3567"),
         cast(Any, FakeRequest(authorization)),
@@ -878,11 +880,15 @@ async def test_cancellation_during_migration_emits_one_cancelled_event(
     task = asyncio.create_task(
         invoke_migration(monkeypatch, client=client, telemetry_client=telemetry_client)
     )
-    await client.started.wait()
-    task.cancel()
+    try:
+        await asyncio.wait_for(client.started.wait(), timeout=1)
+        task.cancel()
 
-    with pytest.raises(asyncio.CancelledError):
-        await task
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert len(telemetry_client.events) == 1
     assert telemetry_client.events[0]["outcome"] == "cancelled"
