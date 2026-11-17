@@ -1,7 +1,7 @@
-import { RowndSchema } from "./types";
+import type { RowndSchema } from "./types";
 
 export const PLUGIN_ID = "supertokens-plugin-rownd";
-export const PLUGIN_VERSION = "0.3.0";
+export const PLUGIN_VERSION = "0.7.4";
 
 export const PLUGIN_SDK_VERSION = ["23.0.0", "23.0.1", ">=23.0.1"];
 export const HANDLE_BASE_PATH = "/plugin/rownd";
@@ -9,8 +9,8 @@ export const PUBLIC_TENANT_ID = "public";
 
 // When a user explicitly chooses to log in as a guest
 export const GUEST_AUTH_METHOD_ID = "guest";
-// When a user is automatically logged in as anonymous when they open the app
-export const ANONYMOUS_AUTH_METHOD_ID = "anonymous";
+// When a user is automatically logged in when they open the app
+export const INSTANT_AUTH_METHOD_ID = "instant";
 
 export const ROWND_JWT_CLAIMS = {
   AppUserId: "https://auth.rownd.io/app_user_id",
@@ -21,6 +21,37 @@ export const ROWND_JWT_CLAIMS = {
   PlatformJwt: "https://auth.rownd.io/platform_jwt",
   AuthLevel: "https://auth.rownd.io/auth_level",
 } as const;
+
+export const JWT_REGISTERED_CLAIMS = [
+  "iss",
+  "sub",
+  "aud",
+  "exp",
+  "nbf",
+  "iat",
+  "jti",
+] as const;
+
+export const RESERVED_SESSION_CLAIMS = new Set<string>([
+  ...JWT_REGISTERED_CLAIMS,
+  "app_user_id",
+  "auth_level",
+  "is_verified_user",
+  "rownd_session_authentication",
+  "is_anonymous",
+  "anonymous_id",
+  "sessionHandle",
+  "refreshTokenHash1",
+  "parentRefreshTokenHash1",
+  "antiCsrfToken",
+  "expiryTime",
+  "timeCreated",
+  "recipeUserId",
+  "tenantId",
+  "tId",
+  "rsub",
+  ...Object.values(ROWND_JWT_CLAIMS),
+]);
 
 export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
   zip_code: {
@@ -47,3 +78,9 @@ export const DEFAULT_ROWND_SCHEMA: RowndSchema = {
 
 export const HUB_LOGIN_PAGE_PATH = "/account/login";
 export const HUB_VERIFY_EMAIL_PAGE_PATH = "/account/verify-email";
+export const PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM =
+  "bypassDeviceConfirmation";
+export const PENDING_EMAIL_VERIFICATION_QUERY_PARAM =
+  "rowndPendingVerificationId";
+export const NATIVE_EMAIL_VERIFICATION_UPGRADE_REQUIRED_MESSAGE =
+  "native email verification requires a Rownd SDK upgrade";

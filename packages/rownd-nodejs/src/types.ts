@@ -1,4 +1,4 @@
-import type { JSONObject } from "supertokens-node/types";
+import type { JSONObject, PluginRouteHandler } from "supertokens-node/types";
 
 export type RowndSignInMethod =
   | {
@@ -26,6 +26,18 @@ export type RowndSignInMethod =
        * @default ""
        */
       clientId?: string;
+      /**
+       * SuperTokens provider clientType used for browser Apple redirect flows.
+       */
+      webClientType?: string;
+      /**
+       * SuperTokens provider clientType used for native iOS Apple auth code exchange.
+       */
+      iosClientType?: string;
+      /**
+       * SuperTokens provider clientType used for native Android Apple auth code exchange.
+       */
+      androidClientType?: string;
     }
   | {
       /**
@@ -281,6 +293,11 @@ export type RowndLegal = {
 };
 
 export type RowndAuthConfig = {
+  /**
+   * Requires passwordless sign-in to complete on the originating device for supported Hub UI flows.
+   * @default false
+   */
+  enforceSameDevicePasswordlessSignIn?: boolean;
   /**
    * Whether the hub should preselect the user's previous sign-in method.
    * @default true
@@ -543,6 +560,11 @@ export type RowndCustomContent = {
      * @default "Your profile"
      */
     title?: string;
+    /**
+     * Plain-text error when a profile email change conflicts with another account.
+     * @default Rownd hub built-in localized email conflict message.
+     */
+    emailConflictMessage?: string;
   };
   /**
    * Verification modal text overrides.
@@ -672,18 +694,70 @@ export type RowndSubBrandConfigInput = RowndAppConfigInput & {
   };
 };
 
-export interface RowndPluginConfig {
-  rowndAppKey: string;
-  rowndAppSecret: string;
-  enableDebugLogs?: boolean;
+export type RowndPluginDynamicConfig = {
   clientDomains?: RowndClientDomains;
-  telemetry?: RowndTelemetryConfig;
-  // Optional field schema override. If omitted, DEFAULT_ROWND_SCHEMA is used.
+  crossDeviceConfirmationBypass?: {
+    allowedRedirectPaths: string[];
+  };
+  /** Optional field schema override. If omitted, DEFAULT_ROWND_SCHEMA is used. */
   schema?: RowndSchema;
-  // Optional app configuration served by GET /plugin/rownd/app-config.
+  /** Optional app configuration served by GET /plugin/rownd/app-config. */
   appConfig?: RowndAppConfigInput;
-  // Optional sub-brand/app-variant app configs keyed by Rownd application variant ID.
+  /** Optional app configs keyed by Rownd application variant ID. */
   subBrands?: Record<string, RowndSubBrandConfigInput>;
+  emailChange?: {
+    /**
+     * Positive, finite session creation-age limit for initiating an email change.
+     * Omitted inherits the static setting (default 600). Null disables only this
+     * age limit, not session expiry, challenge TTL or same-session binding.
+     * @default 600
+     */
+    maxSessionAgeSeconds?: number | null;
+  };
+};
+
+export type RowndConfigResolverContext = {
+  tenantId?: string;
+  request?: Parameters<PluginRouteHandler["handler"]>[0];
+  userContext: Record<string, unknown>;
+};
+
+export interface RowndPluginConfig extends RowndPluginDynamicConfig {
+  rowndAppKey?: string;
+  /** App scope for administrative email discovery and uncached profile reads. */
+  rowndAppId?: string;
+  rowndAppSecret?: string;
+  /** Expected app:<id> audience for migration JWTs, without Rownd credentials. */
+  rowndJwtAudience?: string;
+  /** Trusted Rownd JWKS endpoint for credential-free migration token verification. */
+  jwksUrl?: string;
+  /**
+    * Disables Rownd user and session migration. Without app credentials,
+    * migration accepts only already completed, mapped users.
+   * @default false
+   */
+  disableRowndUserMigration?: boolean;
+  enableDebugLogs?: boolean;
+  telemetry?: RowndTelemetryConfig;
+  /** Resolves request/tenant-specific fields. Returned fields override static dynamic fields. */
+  resolveConfig?: (
+    context: RowndConfigResolverContext,
+  ) => RowndPluginDynamicConfig | Promise<RowndPluginDynamicConfig>;
+}
+
+/**
+ * Compatibility metadata accepted in profile update request bodies.
+ * These values select client routing behavior; they do not grant permission to
+ * change or verify an email address.
+ */
+export interface RowndEmailChangeRequestContext {
+  // Optional owner precondition; never selects the account to update.
+  rowndExpectedUserId?: string;
+  rowndExpectedTenantId?: string;
+  rowndDisplayContext?: "browser" | "mobile_app" | "customer_web_view";
+  rowndClientDomain?: string;
+  /** Indicates that the native container can complete email verification. */
+  rowndNativeEmailVerification?: boolean;
 }
 
 export type RowndClientDomains = {
@@ -691,7 +765,22 @@ export type RowndClientDomains = {
   browser?: string;
 } & Record<string, string>;
 
-export type RowndTelemetryEvent =
+export interface RowndMigrationTelemetryDetails {
+  canonicalRowndUserId?: string;
+  conflictingRowndUserId?: string;
+  requestId?: string;
+  eventType?: "terminal" | "transition";
+  result?: "success" | "skipped" | "error";
+  stage?: string;
+  stageDurationMs?: number;
+  reason?: string;
+  pluginVersion?: string;
+  recipeId?: string;
+  recipeUserId?: string;
+  sessionCreated?: boolean;
+}
+
+export type RowndTelemetryEvent = RowndMigrationTelemetryDetails & (
   | {
       outcome: "success";
       durationMs: number;
@@ -709,7 +798,7 @@ export type RowndTelemetryEvent =
         message: string;
         name?: string;
       };
-    };
+    });
 
 export interface RowndTelemetryClient {
   recordEvent: (event: RowndTelemetryEvent) => Promise<void> | void;
@@ -753,14 +842,59 @@ export type RowndUser = JSONObject & {
   meta?: JSONObject;
 };
 
+export type RowndMigrationEmailRetirement = {
+  version: 1;
+  planId: string;
+  tenantId: string;
+  targetRecipeUserId: string;
+  targetEmail: string;
+  source: {
+    rowndUserId: string;
+    providerId: string;
+    providerUserId: string;
+    providerRecipeUserId: string;
+    previousEmail: string;
+  };
+  retiredMethods: Array<{ recipeUserId: string; email: string }>;
+};
+
 export type RowndUserMetadata = {
+  /** Preserves the Rownd profile shape used by compatibility endpoints and claims. */
   original_rownd_user?: RowndUser;
+  /** Legacy account-wide pointer to the canonical Passwordless email recipe user. */
+  rownd_email_recipe_user_id?: string;
+  /** Selects the canonical Passwordless email recipe user independently for each tenant. */
+  rownd_email_recipe_user_ids?: Record<string, string>;
+  /** Prevents a successfully imported Rownd user from being migrated again. */
+  rownd_migration_complete?: boolean;
+  /** Primary-only retirement evidence retained independently of mutable cleanup plans. */
+  rownd_migration_email_retirements?: Record<string, RowndMigrationEmailRetirement>;
+  /** Tracks verified profile changes until they commit or are safely reconciled. */
   rownd_pending_verification?: Array<{
+    /** Correlates the pending operation with the verification link that completes it. */
     id: string;
+    /** Identifies the profile field being verified; currently only email is supported. */
     field: string;
+    /** Stores the proposed field value that must match the verified value. */
     value: string;
+    /** Records when the operation started for diagnostics and lifecycle checks. */
     created_at: string;
+    /** Scopes verification and credential changes to the initiating tenant. */
+    tenantId?: string;
+    /** Distinguishes replacing an email method from adding the account's first one. */
+    purpose?: "UPDATE_PASSWORDLESS" | "ADD_PASSWORDLESS";
+    /** Binds completion to the exact session that initiated the profile change. */
+    initiatingSessionHandle?: string;
+    /** Identifies the existing recipe user used as the EmailVerification subject. */
+    verificationRecipeUserId?: string;
+    /** Separates an awaiting-verification operation from durable credential cleanup. */
+    status?: "PENDING" | "COMMITTING";
+    /** Identifies the verified Passwordless method that cleanup must make canonical. */
+    targetCanonicalRecipeUserId?: string;
+    /** Temporarily records superseded methods until their codes and tenant associations are removed. */
+    retiredMethods?: Array<{ recipeUserId: string; email: string }>;
   }>;
+  /** Allows application metadata to coexist with the plugin's reserved Rownd fields. */
   [key: string]: unknown;
 };
 
@@ -771,13 +905,24 @@ export interface MigrationResponse {
 
 export interface RowndPluginNormalisedConfig {
   rowndAppKey: string;
-  rowndAppSecret: string;
+  rowndAppId?: string;
+  rowndAppSecret?: string;
+  rowndJwtAudience?: string;
+  jwksUrl?: string;
+  disableRowndUserMigration: boolean;
   enableDebugLogs?: boolean;
   clientDomains?: RowndClientDomains;
+  crossDeviceConfirmationBypass?: {
+    allowedRedirectPaths: string[];
+  };
   telemetry?: RowndTelemetryConfig;
   schema?: RowndSchema;
   appConfig?: RowndAppConfigInput;
   subBrands?: Record<string, RowndSubBrandConfigInput>;
+  emailChange: {
+    maxSessionAgeSeconds: number | null;
+  };
+  resolveConfig?: RowndPluginConfig["resolveConfig"];
 }
 
 export interface SuperTokensUserImport {
@@ -790,6 +935,7 @@ export interface SuperTokensUserImport {
         email: string;
         passwordHash: string;
         isVerified: boolean;
+        isPrimary?: boolean;
         tenantIds?: string[];
       }
     | {
@@ -798,6 +944,7 @@ export interface SuperTokensUserImport {
         thirdPartyUserId: string;
         email: string;
         isVerified: boolean;
+        isPrimary?: boolean;
         tenantIds?: string[];
       }
     | {
@@ -805,19 +952,26 @@ export interface SuperTokensUserImport {
         email?: string;
         phoneNumber?: string;
         isVerified: boolean;
+        isPrimary?: boolean;
         tenantIds?: string[];
       }
   )[];
 }
 
 export interface IRowndClient {
+  /** Returns all matching IDs across every page. Each ID is independently fetched and validated before reconciliation. */
+  findUserIdsByEmail?: (opts: { email: string }) => Promise<string[]>;
   validateToken: (token: string) => Promise<{
     user_id: string;
+    /** Verified JWT issued-at time in seconds; required when a profile has a token cutoff. */
+    iat?: number;
   }>;
   fetchUserInfo: (opts: {
     user_id: string;
     app_id?: string;
   }) => Promise<RowndUser | undefined>;
+  /** Administrative reads must bypass profile caches when this method is supplied. */
+  fetchFreshUserInfo?: IRowndClient["fetchUserInfo"];
 }
 
 export type RowndSchemaField = {

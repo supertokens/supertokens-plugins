@@ -1,8 +1,8 @@
 import * as fs from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-const BULK_MIGRATE_CONFIG_TEMPLATE = `# Maximum number of users to process. Remove this field to process everything.
-limit: 100
+const BULK_MIGRATE_CONFIG_TEMPLATE = `# Optional maximum number of users to process. Leave unset to process everything.
+# limit: 100
 
 checkpoint:
   # File used to persist migration progress so a later run can resume.
@@ -24,10 +24,22 @@ rownd:
   # bearerToken: <ROWND_API_BEARER_TOKEN>
   # Number of Rownd users to request per page.
   pageSize: 100
+  # Rownd stores existing OIDC credential secrets hashed. Provide plaintext
+  # values here when migrating OIDC clients. Keys can be credential client IDs
+  # (key_...) and OIDC client configuration IDs (oc_...).
+  oidcClientSecrets: {}
+  # oidcClientSecrets:
+  #   key_123: ras_plaintext_secret
+  #   oc_123: ras_plaintext_secret_for_oidc_client_id_alias
+  # Rownd accepts the OIDC client configuration ID (oc_...) as a client_id in
+  # addition to each linked credential client_id (key_...).
+  provisionOidcClientIdAliases: true
 
 supertokens:
   connectionURI: <CONNECTION_URI>
   apiKey: <API_KEY>
+  # Tenant that receives every imported login method.
+  tenantId: public
   # Number of users to send to SuperTokens per bulk import request.
   batchSize: 500
 `;
@@ -113,13 +125,16 @@ async function run() {
 
   const outputPath = resolve(options.output);
   if (!options.force && (await fileExists(outputPath))) {
-    throw new Error(`${outputPath} already exists. Use --force to overwrite it.`);
+    throw new Error(
+      `${outputPath} already exists. Use --force to overwrite it.`,
+    );
   }
 
   await fs.mkdir(dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, BULK_MIGRATE_CONFIG_TEMPLATE, {
     encoding: "utf8",
     flag: options.force ? "w" : "wx",
+    mode: 0o600,
   });
 
   console.log(`Wrote bulk migration config template to ${outputPath}`);

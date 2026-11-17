@@ -23,12 +23,15 @@ export type RowndSourceConfig = {
   appSecret: string;
   bearerToken?: string;
   pageSize: number;
+  oidcClientSecrets?: Record<string, string>;
+  provisionOidcClientIdAliases: boolean;
 };
 
 export type SuperTokensTargetConfig = {
   connectionURI: string;
   apiKey?: string;
   batchSize: number;
+  tenantId: string;
 };
 
 export type ThirdPartyProviderConfig = {
@@ -70,11 +73,14 @@ const ConfigSchema = z.object({
     appSecret: z.string(),
     bearerToken: z.string().optional(),
     pageSize: z.number().int().positive(),
+    oidcClientSecrets: z.record(z.string(), z.string()).optional(),
+    provisionOidcClientIdAliases: z.boolean().default(true),
   }),
   supertokens: z.object({
     connectionURI: z.string(),
     apiKey: z.string().optional(),
     batchSize: z.number().int().positive(),
+    tenantId: z.string().min(1).default("public"),
   }),
   thirdPartyProviders: z
     .array(
@@ -222,7 +228,7 @@ function parseRowndUser(parsed: RowndUserRecord) {
     },
     verified_data: (parsed.verified_data ?? {}) as RowndUser["verified_data"],
     attributes: parsed.attributes as RowndUser["attributes"],
-    groups: parsed.groups,
+    groups: parsed.groups as RowndUser["groups"],
     meta: parsed.meta as RowndUser["meta"],
   };
 
