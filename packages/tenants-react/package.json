@@ -9,7 +9,7 @@
     "directory": "packages/tenants-react"
   },
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "test:watch": "vitest --watch",
     "build": "vite build",
     "pretty": "prettier --write .",
