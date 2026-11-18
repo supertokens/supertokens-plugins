@@ -23,6 +23,7 @@ import {
 } from "./constants";
 import { RowndEmailChangeError, RowndLegacyUserNotFoundError, RowndPluginError, RowndSignInMethodError } from "./errors";
 import { assertConnectedSignInMethodsEnabled, connectedSignInMethodsAreAvailable, disconnectConnectedSignInMethod, listConnectedSignInMethods } from "./connected-sign-in-methods";
+import { startPhoneEnrollment, verifyPhoneEnrollment } from "./connected-phone-sign-in";
 import { assertNoDisconnectedSignInMethods, DisconnectedSignInMethodError } from "./disconnected-sign-in-identities";
 import { logDebugMessage } from "./logger";
 import type {
@@ -132,7 +133,7 @@ export function handleGetAppConfig(deps: RowndRouteHandlerDeps) {
   };
 }
 
-export function handleConnectedSignInMethods(deps: RowndRouteHandlerDeps, disconnect = false) {
+export function handleConnectedSignInMethods(deps: RowndRouteHandlerDeps, operation: "list" | "disconnect" | "phone-start" | "phone-verify" = "list") {
   return async (req: SuperTokensRequest, res: SuperTokensResponse, session: SuperTokensSession, userContext: SuperTokensUserContext) => {
     res.setHeader("Cache-Control", "no-store", false);
     try {
@@ -146,9 +147,12 @@ export function handleConnectedSignInMethods(deps: RowndRouteHandlerDeps, discon
       const appVariantId = getRequestedAppVariantIdFromRequest(req);
       assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
       const input = { session: session!, config: resolved.config, appVariantId, userContext: resolved.userContext };
-      return disconnect
-        ? await disconnectConnectedSignInMethod({ ...input, body: await getJsonBody(req) })
-        : await listConnectedSignInMethods(input);
+      switch (operation) {
+        case "disconnect": return await disconnectConnectedSignInMethod({ ...input, body: await getJsonBody(req) });
+        case "phone-start": return await startPhoneEnrollment(input, await getJsonBody(req));
+        case "phone-verify": return await verifyPhoneEnrollment(input, await getJsonBody(req));
+        case "list": return await listConnectedSignInMethods(input);
+      }
     } catch (error) {
       if (error instanceof DisconnectedSignInMethodError) {
         return { status: "ERROR" as const, code: 409, error_code: error.code, message: error.message };
@@ -159,7 +163,9 @@ export function handleConnectedSignInMethods(deps: RowndRouteHandlerDeps, discon
       if (!(error instanceof RowndSignInMethodError)) {
         logDebugMessage(`Connected sign-in method operation failed: ${getErrorMessage(error)}`);
         return { status: "ERROR" as const, code: 409, error_code: "SIGN_IN_METHOD_OPERATION_INCOMPLETE",
-          message: "The operation did not complete. Reload your sign-in methods and retry after signing in with email." };
+          message: operation.startsWith("phone-")
+            ? "The phone sign-in request did not complete. Check your sign-in methods before trying again."
+            : "The operation did not complete. Reload your sign-in methods and retry after signing in with email." };
       }
       return { status: "ERROR" as const, code: error.httpStatus, error_code: error.errorCode, message: error.message,
         ...(error.reauthentication ? { reauthentication: error.reauthentication } : {}) };

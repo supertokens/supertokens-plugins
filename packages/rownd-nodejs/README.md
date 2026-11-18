@@ -45,10 +45,26 @@ Authenticated endpoints (relative to `apiBasePath`):
   authenticated account. Success is `{"status":"OK","signed_out":true}` only
   after credential removal and revocation of **all account sessions across tenants**.
 
-V1 removes only real single-tenant SSO identities. Passwordless methods are
-read-only; guest/instant identities are not listed as usable factors. A retained,
+V1 removes only real single-tenant SSO identities. Email and phone cannot be
+disconnected; guest/instant identities are not listed as usable factors. A retained,
 verified canonical passwordless email must be enabled. Pending email changes,
 ambiguous canonical methods and multi-tenant SSO identities block removal.
+
+The list also includes `phone_enrollment: { version: 1 }` when the signed-in
+email account can add a phone in this tenant and app variant. This requires
+enabled connected methods, phone sign-in, and a Passwordless recipe configured
+for SMS codes. The Hub only offers it in its web account chooser.
+
+- `POST /plugin/rownd/user/sign-in-methods/phone/start`: accepts
+  `phone_number` (international format), `expected_user_id`, and
+  `expected_tenant_id`. Returns `{"status":"OK","challenge_id":"…"}` and sends
+  the code via the configured Passwordless SMS delivery service.
+- `POST /plugin/rownd/user/sign-in-methods/phone/verify`: accepts the same
+  expected IDs, `challenge_id`, and `code`. Success returns
+  `{"status":"OK","user_id":"…","tenant_id":"…"}` without replacing the session.
+  The code is scoped to the initiating session, tenant, account, and variant.
+  Already-associated numbers cannot be enrolled. Editing profile contact data
+  neither proves a number nor changes the phone sign-in credential.
 
 Disconnect requires a server-side session-data receipt created by successful
 canonical-email passwordless code consumption within 600 seconds. The current

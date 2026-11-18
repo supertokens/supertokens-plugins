@@ -12,6 +12,7 @@ import { assertRetainedPasswordlessAuthentication, assertRetainedPasswordlessAut
 import { RowndSignInMethodError } from "./errors";
 import type { RowndPluginNormalisedConfig } from "./types";
 import { clearSuperTokensCoreCallCache, isRecord, type JsonRecord } from "./utils";
+import { phoneEnrollmentIsAvailable } from "./connected-phone-sign-in";
 
 export type ConnectedSignInMethod = {
   id: string;
@@ -151,7 +152,8 @@ export async function listConnectedSignInMethods(input: Input) {
       ...(reason ? { disconnect_block_reason: reason } : {}) });
   }
   return { status: "OK" as const, user_id: state.user.id, tenant_id: state.tenantId, methods,
-    reauthentication: reauthentication(state) };
+     reauthentication: reauthentication(state),
+     ...(await phoneEnrollmentIsAvailable(input, state.user) ? { phone_enrollment: { version: 1 as const } } : {}) };
 }
 
 export async function disconnectConnectedSignInMethod(input: Input & { body: unknown }) {

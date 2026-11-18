@@ -20,6 +20,7 @@ import { configureConnectedSignInMethodsTestLicense, startConnectedSignInMethods
 describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
   let coreFixture: Awaited<ReturnType<typeof startConnectedSignInMethodsCore>> | undefined;
   let recordedCoreGets: string[] | undefined;
+  const sms = new Map<string, string>();
   const origin = "http://localhost:3001/auth";
 
   beforeAll(async () => {
@@ -36,7 +37,10 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
       appInfo: { appName: "Connected methods", apiDomain: "http://localhost:3001", websiteDomain: "http://localhost:3000" },
       recipeList: [AccountLinking.init({ shouldDoAutomaticAccountLinking: async () => ({ shouldAutomaticallyLink: false }) }),
         Session.init(), UserMetadata.init(), UserRoles.init(), EmailVerification.init({ mode: "OPTIONAL" }),
-        Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" }), ThirdParty.init({ signInAndUpFeature: { providers: [{
+        Passwordless.init({ contactMethod: "EMAIL_OR_PHONE", flowType: "USER_INPUT_CODE_AND_MAGIC_LINK",
+          smsDelivery: { service: { sendSms: async (input) => {
+            if (input.userInputCode) sms.set(input.phoneNumber, input.userInputCode);
+          } } } }), ThirdParty.init({ signInAndUpFeature: { providers: [{
           config: { thirdPartyId: "budget-sso", authorizationEndpoint: "https://provider.invalid/authorize",
             tokenEndpoint: "https://provider.invalid/token", userInfoEndpoint: "https://provider.invalid/user",
             clients: [{ clientId: "test", clientSecret: "test" }] },
@@ -48,7 +52,8 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
           },
         }] } })],
       experimental: { plugins: [init({ disableRowndUserMigration: true, connectedSignInMethods: { enabled: true },
-        appConfig: { signInMethods: [{ method: "email" }, { method: "google" }] } })] },
+        schema: { phone_number: { display_name: "Phone number", type: "string", user_visible: true } },
+        appConfig: { signInMethods: [{ method: "email" }, { method: "google" }, { method: "phone" }] } })] },
     });
   }, 120000);
 
@@ -59,7 +64,7 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
   async function request(url: string, options: RequestInit = {}) {
     const parsed = new URL(url);
     const req = new PreParsedRequest({
-      url, method: options.method === "POST" ? "post" : "get", headers: new Headers(options.headers), cookies: {},
+      url, method: options.method === "POST" ? "post" : options.method === "PUT" ? "put" : "get", headers: new Headers(options.headers), cookies: {},
       query: Object.fromEntries(parsed.searchParams),
       getJSONBody: async () => typeof options.body === "string" ? JSON.parse(options.body) : {},
       getFormBody: async () => ({}),
@@ -107,6 +112,144 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     const ssoSession = await Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(rowndId));
     return { rowndId, internalId, subject, oldEmail, email, ssoSession, passwordless };
   }
+
+  async function phoneEnrollment(action: "start" | "verify", token: string | undefined, body: Record<string, unknown>) {
+    return request(`${origin}/plugin/rownd/user/sign-in-methods/phone/${action}`, {
+      method: "POST", body: JSON.stringify(body),
+      headers: { "st-auth-mode": "header", "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    });
+  }
+
+  it("adds a verified phone to the same signed-in email account only after SMS proof", async () => {
+    const phoneNumber = "+12025550147";
+    const email = "add-phone@example.test";
+    const signedIn = await emailSignIn(email);
+    const owner = signedIn.session.getUserId();
+    const headers = { authorization: `Bearer ${signedIn.token}`, "st-auth-mode": "header", "content-type": "application/json" };
+    const inventory = async () => await (await request(`${origin}/plugin/rownd/user/sign-in-methods`, { headers })).json() as {
+      methods: { kind: string; identifier?: string }[];
+    };
+    const snapshot = await inventory();
+    expect(snapshot).toMatchObject({ user_id: owner, phone_enrollment: { version: 1 } });
+    const scope = { expected_user_id: owner, expected_tenant_id: "public" };
+    const contactNumber = "+12025550148";
+    const profile = await request(`${origin}/plugin/rownd/user`, { method: "PUT", headers,
+      body: JSON.stringify({ data: { phone_number: contactNumber } }) });
+    expect(await profile.json()).toMatchObject({ status: "OK", data: { phone_number: contactNumber } });
+    expect(await inventory()).toMatchObject({ methods: snapshot.methods });
+
+    const started = await phoneEnrollment("start", signedIn.token, { ...scope, phone_number: phoneNumber });
+    const challenge = await started.json() as { challenge_id: string };
+    expect(challenge).toMatchObject({ status: "OK", challenge_id: expect.any(String) });
+    expect(await inventory()).toMatchObject({ methods: snapshot.methods });
+    const submitted = { ...scope, challenge_id: challenge.challenge_id, code: sms.get(phoneNumber) };
+    expect(submitted.code).toMatch(/^\d+$/);
+    const wrongCode = submitted.code!.replace(/^\d/, (first) => first === "0" ? "1" : "0");
+    expect(await (await phoneEnrollment("verify", signedIn.token, { ...submitted, code: wrongCode })).json()).toMatchObject({
+      status: "ERROR", error_code: "PHONE_ENROLLMENT_INCORRECT_CODE",
+    });
+    expect(await inventory()).toMatchObject({ methods: snapshot.methods });
+    const second = await emailSignIn(email);
+    expect(await (await phoneEnrollment("verify", second.token, submitted)).json()).toMatchObject({
+      status: "ERROR", error_code: "PHONE_ENROLLMENT_RESTART",
+    });
+    expect(await inventory()).toMatchObject({ methods: snapshot.methods });
+
+    const finished = await phoneEnrollment("verify", signedIn.token, submitted);
+    expect(await finished.json()).toMatchObject({ status: "OK", user_id: owner, tenant_id: "public" });
+    expect(finished.headers.get("st-access-token")).toBeNull();
+    expect(await inventory()).toMatchObject({ user_id: owner, methods: [
+      expect.objectContaining({ kind: "email", identifier: email }),
+      expect.objectContaining({ kind: "phone", identifier: phoneNumber, verified: true, can_disconnect: false }),
+    ] });
+    expect(await inventory()).not.toHaveProperty("phone_enrollment");
+    const profileAfter = await (await request(`${origin}/plugin/rownd/user`, { headers })).json();
+    expect(profileAfter).toMatchObject({
+      data: { phone_number: contactNumber },
+    });
+    expect(profileAfter).not.toHaveProperty("verified_data.phone_number");
+
+    const signInCode = await Passwordless.createCode({ tenantId: "public", phoneNumber });
+    const signIn = await request(`${origin}/signinup/code/consume`, {
+      method: "POST",
+      headers: { rid: "passwordless", "content-type": "application/json", "fdi-version": "1.18", "st-auth-mode": "header" },
+      body: JSON.stringify({ preAuthSessionId: signInCode.preAuthSessionId, deviceId: signInCode.deviceId, userInputCode: signInCode.userInputCode }),
+    });
+    expect(await signIn.json()).toMatchObject({ status: "OK" });
+    const phoneSession = await Session.getSessionWithoutRequestResponse(signIn.headers.get("st-access-token")!, undefined, { checkDatabase: true });
+    expect(phoneSession.getUserId()).toBe(owner);
+  });
+
+  it("does not send enrollment SMS for a number already belonging to another account", async () => {
+    const phoneNumber = "+12025550149";
+    const claimed = await Passwordless.signInUp({ tenantId: "public", phoneNumber });
+    expect(claimed.status).toBe("OK");
+    const { session, token } = await emailSignIn("number-conflict@example.test");
+    const owner = session.getUserId();
+    expect(await (await phoneEnrollment("start", token, {
+      phone_number: phoneNumber, expected_user_id: owner, expected_tenant_id: "public",
+    })).json()).toMatchObject({ status: "ERROR", error_code: "PHONE_ENROLLMENT_NUMBER_UNAVAILABLE" });
+    expect(sms.has(phoneNumber)).toBe(false);
+    expect((await SuperTokens.listUsersByAccountInfo("public", { phoneNumber })).map((user) => user.id)).toEqual([claimed.user.id]);
+    expect(await (await request(`${origin}/plugin/rownd/user/sign-in-methods`, {
+      headers: { authorization: `Bearer ${token}`, "st-auth-mode": "header" },
+    })).json()).toMatchObject({ user_id: owner, methods: [expect.objectContaining({ kind: "email" })] });
+  });
+
+  it("rejects phone enrollment without a session or for a different tenant", async () => {
+    const phoneNumber = "+12025550150";
+    const signedIn = await emailSignIn("phone-enrollment-session@example.test");
+    const body = { phone_number: phoneNumber, expected_user_id: signedIn.session.getUserId(), expected_tenant_id: "public" };
+    expect((await phoneEnrollment("start", undefined, body)).status).toBe(401);
+    expect(await (await phoneEnrollment("start", signedIn.token, { ...body, expected_tenant_id: "another-tenant" })).json())
+      .toMatchObject({ status: "ERROR", error_code: "PHONE_ENROLLMENT_RESTART" });
+    expect(sms.has(phoneNumber)).toBe(false);
+  });
+
+  it("only advertises enrollment when phone sign-in and sign-in method management are enabled", async () => {
+    const signedIn = await emailSignIn("phone-enrollment-opt-in@example.test");
+    const config = getPluginConfig()!;
+    const methods = config.appConfig!.signInMethods;
+    const phoneNumber = "+12025550151";
+    const body = { phone_number: phoneNumber, expected_user_id: signedIn.session.getUserId(), expected_tenant_id: "public" };
+    const headers = { authorization: `Bearer ${signedIn.token}`, "st-auth-mode": "header" };
+    try {
+      config.appConfig!.signInMethods = [{ method: "email" }];
+      expect(await (await request(`${origin}/plugin/rownd/user/sign-in-methods`, { headers })).json())
+        .not.toHaveProperty("phone_enrollment");
+      expect(await (await phoneEnrollment("start", signedIn.token, body)).json()).toMatchObject({
+        status: "ERROR", error_code: "PHONE_ENROLLMENT_UNAVAILABLE",
+      });
+      config.appConfig!.signInMethods = methods;
+      config.connectedSignInMethods = { enabled: false };
+      expect((await phoneEnrollment("start", signedIn.token, body)).status).toBe(404);
+      expect(sms.has(phoneNumber)).toBe(false);
+    } finally {
+      config.connectedSignInMethods = { enabled: true };
+      config.appConfig!.signInMethods = methods;
+    }
+  });
+
+  it("retains a mapped email owner and limits the new credential to the initiating tenant", async () => {
+    const f = await fixture();
+    const tenantId = "phone-enrollment";
+    await Multitenancy.createOrUpdateTenant(tenantId, { firstFactors: ["otp-email", "otp-phone"] });
+    expect(await Multitenancy.associateUserToTenant(tenantId, f.passwordless.recipeUserId)).toMatchObject({ status: "OK" });
+    const tenantSession = await Session.createNewSessionWithoutRequestResponse(tenantId, f.passwordless.recipeUserId);
+    const token = tenantSession.getAccessToken();
+    const phoneNumber = "+12025550152";
+    const scope = { expected_user_id: f.rowndId, expected_tenant_id: tenantId };
+    const started = await (await phoneEnrollment("start", token, { ...scope, phone_number: phoneNumber }))
+      .json() as { status: string; challenge_id: string };
+    expect(started.status).toBe("OK");
+    expect(await (await phoneEnrollment("verify", token, { ...scope, challenge_id: started.challenge_id, code: sms.get(phoneNumber) }))
+      .json()).toMatchObject({ status: "OK", user_id: f.rowndId, tenant_id: tenantId });
+    const user = await SuperTokens.getUser(f.rowndId);
+    expect(user?.id).toBe(f.rowndId);
+    expect(user?.loginMethods).toHaveLength(3);
+    expect(user?.loginMethods.find((method) => method.phoneNumber === phoneNumber)?.tenantIds).toEqual([tenantId]);
+    expect(user?.loginMethods.find((method) => method.email === f.email)?.tenantIds).toEqual(expect.arrayContaining(["public", tenantId]));
+  });
 
   it("removes a mapped PRIMARY SSO anchor without changing the surviving account or canonical email", async () => {
     const f = await fixture();
