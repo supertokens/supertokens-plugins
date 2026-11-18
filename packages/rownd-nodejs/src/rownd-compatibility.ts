@@ -30,6 +30,7 @@ import { clearSuperTokensCoreCallCache, getStringList, isJsonRecord } from "./ut
 import { invalidateReconciliationReads } from "./reconciliation-reads";
 import { readOwnerPlanCheckpoint } from "./migration-owner-plan";
 import { RowndEmailChangeError, RowndMigrationPolicyError } from "./errors";
+import { isDisconnectedSignInMethodMetadataKey } from "./disconnected-sign-in-identities";
 
 export type RowndMetadata = RowndUserMetadata & JsonRecord;
 
@@ -200,7 +201,7 @@ export function combineLinkedMetadata(input: {
     : {};
   for (const { metadata } of linkedMetadata) {
     for (const [key, value] of Object.entries(metadata)) {
-      if (LINKED_OPERATIONAL_METADATA_FIELDS.has(key) || authoritativeFields.has(key)) {
+      if (LINKED_OPERATIONAL_METADATA_FIELDS.has(key) || isDisconnectedSignInMethodMetadataKey(key) || authoritativeFields.has(key)) {
         continue;
       }
       if (
@@ -460,8 +461,8 @@ export async function updatePrimaryUserMetadata(
       ...profileFields,
     ])],
   } : {};
-  const updates = { ...metadataUpdate };
-  delete updates.rownd_profile_authoritative_fields;
+  const updates = Object.fromEntries(Object.entries(metadataUpdate).filter(([key]) =>
+    key !== "rownd_profile_authoritative_fields" && !isDisconnectedSignInMethodMetadataKey(key)));
   const updatesEmailState = ["rownd_pending_verification", "rownd_email_recipe_user_ids", "rownd_email_recipe_user_id"]
     .some((key) => Object.prototype.hasOwnProperty.call(metadataUpdate, key));
   let pointerFallback: JsonRecord = {};
@@ -506,7 +507,7 @@ export function isIdentityField(field: string) {
 }
 
 export function isInternalMetadataField(field: string) {
-  return INTERNAL_METADATA_FIELDS.has(field);
+  return INTERNAL_METADATA_FIELDS.has(field) || isDisconnectedSignInMethodMetadataKey(field);
 }
 
 export function getAuthoritativeProfileFields(metadata: JsonRecord): string[] {
@@ -517,7 +518,7 @@ export function getAuthoritativeProfileFields(metadata: JsonRecord): string[] {
 export function mergeMissingProfileMetadata(primary: JsonRecord, secondary: JsonRecord): JsonRecord {
   const authoritativeFields = new Set(getAuthoritativeProfileFields(primary));
   return mergeMissingValues(primary, Object.fromEntries(Object.entries(secondary).filter(([key]) =>
-    key !== "rownd_profile_authoritative_fields" && !authoritativeFields.has(key))));
+    key !== "rownd_profile_authoritative_fields" && !isDisconnectedSignInMethodMetadataKey(key) && !authoritativeFields.has(key))));
 }
 
 export function getRowndProfileData(metadata: RowndMetadata): JsonRecord {
@@ -621,10 +622,17 @@ export function mapRowndUserToSuperTokens(
 }
 
 export function buildRowndUserMetadata(rowndUser: RowndUser): JSONObject {
+  const withoutPolicy = (value: object | undefined) => Object.fromEntries(
+    Object.entries(value ?? {}).filter(([key]) => !isDisconnectedSignInMethodMetadataKey(key)),
+  );
   const metadata: JsonRecord = {
     ...Object.fromEntries(Object.entries((rowndUser.meta || {}) as JsonRecord)
       .filter(([key]) => !isInternalMetadataField(key))),
-    original_rownd_user: rowndUser as unknown as JsonValue,
+    original_rownd_user: {
+      ...rowndUser,
+      ...(isJsonRecord(rowndUser.data) ? { data: withoutPolicy(rowndUser.data) } : {}),
+      ...(isJsonRecord(rowndUser.meta) ? { meta: withoutPolicy(rowndUser.meta) } : {}),
+    } as unknown as JsonValue,
     rownd_migration_complete: true,
   };
 

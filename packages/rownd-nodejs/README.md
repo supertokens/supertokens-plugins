@@ -2,6 +2,126 @@
 
 This plugin facilitates the migration of users and sessions from Rownd to SuperTokens.
 
+## Connected sign-in methods (opt-in)
+
+Deploy the supporting plugin to **every backend instance before enabling**
+`connectedSignInMethods: { enabled: true }`. The default is disabled. A mixed-version
+fleet is unsafe: older instances do not enforce persisted disconnect policy.
+`resolveConfig` can override this setting per tenant. Disabling management later
+hides the capability and makes its endpoints return 404; **existing disconnect
+policy remains enforced**, independently of this setting or app variant.
+
+**After any disconnect policy is recorded, rollback or downgrade to a plugin
+without durable-policy support is unsafe.** Old code ignores these checkpoints
+and may restore legacy identities. Do not mix supporting and older instances after
+activation. The safe operational rollback is to disable management on a supporting
+plugin while leaving its enforcement active—not to roll back the binary. Full-fleet
+support is an operator prerequisite: new code cannot enforce a version floor in an
+old binary.
+
+Capability disappearance or a management endpoint returning 404 only hides the
+Hub UI. It does not attest to an older backend's enforcement or protect the user's
+disconnected identities from restoration.
+
+When enabled and the Session, UserMetadata, Passwordless, AccountLinking and
+Multitenancy recipes are initialized, `GET /plugin/rownd/app-config` adds this
+top-level field. The same readiness check gates both management endpoints:
+
+```json
+{"plugin_capabilities":{"connected_sign_in_methods":{"version":1}}}
+```
+
+This is implementation-owned metadata, not `app.capabilities`. Older Hubs ignore
+it; newer Hubs must not call management endpoints when it is absent or unsupported.
+
+Authenticated endpoints (relative to `apiBasePath`):
+
+- `GET /plugin/rownd/user/sign-in-methods`: returns `status`, `user_id`, `tenant_id`,
+  `methods` and `reauthentication`. Each method has opaque `id`, `kind`
+  (`email`, `phone`, `sso`), optional `provider`/`identifier`, `verified`,
+  `can_disconnect`, and optional `disconnect_block_reason`.
+- `POST /plugin/rownd/user/sign-in-methods/disconnect`: accepts `method_id`,
+  `expected_user_id` and `expected_tenant_id`. Preconditions never select the
+  authenticated account. Success is `{"status":"OK","signed_out":true}` only
+  after credential removal and revocation of **all account sessions across tenants**.
+
+V1 removes only real single-tenant SSO identities. Passwordless methods are
+read-only; guest/instant identities are not listed as usable factors. A retained,
+verified canonical passwordless email must be enabled. Pending email changes,
+ambiguous canonical methods and multi-tenant SSO identities block removal.
+
+Disconnect requires a server-side session-data receipt created by successful
+canonical-email passwordless code consumption within 600 seconds. The current
+session recipe must match that actual consumed method. Recent session creation,
+migration, refresh, historical profile verification and SSO authentication cannot
+create this proof. Older sessions, and code consumption that retains an existing
+SSO-bound session, require explicit sign-out followed by canonical-email sign-in.
+The response's `reauthentication` is `{ "method": "email", "identifier": "..." }`
+when a retained email is available, otherwise `null` on list responses.
+The initiating receipt and live database session are checked again immediately
+before durable intent is committed. After intentional account-session revocation,
+the validated receipt's original freshness and expiry still bound credential cleanup.
+SSO authentication separately rechecks the actual consumed provider identity after
+SDK post-authentication; credential response writes remain buffered until those
+checks finish, including when the SDK reuses a retained-email session.
+
+Errors are `{status:"ERROR",code,error_code,message,reauthentication?}`. A missing
+or disabled feature returns 404. `SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED` returns
+403. Missing/foreign methods and account/tenant changes return 409, never a
+method-specific 404. Other 409 reasons include `SIGN_IN_METHOD_READ_ONLY`,
+`SIGN_IN_METHOD_MULTIPLE_TENANTS`, `SIGN_IN_METHOD_EMAIL_CHANGE_PENDING`,
+`SIGN_IN_METHOD_RETAINED_EMAIL_REQUIRED` and `SIGN_IN_METHOD_OPERATION_INCOMPLETE`.
+
+Intent is permanent and recorded by provider plus subject before destructive
+writes. Failures never roll it back. After fresh email sign-in, retry the same
+method ID and expected owner/tenant to finish interrupted cleanup, even when the
+recipe was already deleted. Unfinished cleanup appears as a retryable SSO row
+after canonical-email reauthentication. A durable completion marker removes that
+recovery row only after removal, account-session revocation and final checks;
+it never removes suppression. Completed absent methods return
+`SIGN_IN_METHOD_ALREADY_DISCONNECTED` (409) without signing out new sessions.
+Completion is monotonic. If Core later shows a live credential for a completed
+identity, it remains suppressed and blocked from a new V1 cleanup operation;
+an operator must investigate that unsupported restoration.
+Explicit reconnection is not supported. V1 blocks
+legacy Rownd session migration and administrative reconciliation for owners with
+disconnect policy; use native retained-email authentication instead.
+
+Primary ID, external Rownd mapping, canonical email and app-scoped profile metadata
+are preserved. Secondary recipes are disassociated before recipe-only deletion.
+For the primary anchor, recipe-only deletion avoids disassociation's deletion of
+the surviving account's tenant roles and TOTP; the canonical passwordless method
+is checked immediately before and after removal.
+Session revocation is enforced by the plugin's database-backed checks. Applications
+that independently accept stateless JWTs may continue accepting issued tokens until
+expiry; there is no promise of immediate JWT invalidation outside those checks.
+
+Release gate: execute the MFA/TOTP-free real-Core security and recovery suite in
+`connected-sign-in-methods.integration.test.ts`. Rownd SDKs do not support MFA;
+`connected-sign-in-methods-security-preservation.integration.test.ts` is optional
+backend TOTP-preservation coverage, not a supported-Rownd release prerequisite.
+Use `CONNECTED_METHODS_TEST_CORE_STORAGE=memory` for genuine Core in-memory tests;
+the fixture verifies Account Linking through `/ee/featureflag` without license
+activation. Postgres remains the default and requires valid license activation;
+in-memory results do not establish Postgres behavior. An already-running disposable
+fixture may be selected with `CONNECTED_METHODS_TEST_CORE_URI`, restricted to an
+HTTP loopback origin.
+
+The whole returning one-method SSO flow is budgeted at 64
+public SDK read calls and 32 Core GET attempts, with management both enabled and
+disabled and no mocked policy scans. These are invocation budgets, not wire-level
+request counts. A budget failure is a release blocker; do not bypass policy scans
+or raise the budget to hide repeated reads. Compilation alone does not validate
+either the runtime security invariants or this performance gate.
+Session policy checks remain active on every `getSession` call, including
+stateless (`checkDatabase: false`) calls and management opt-out. This also protects
+optional credential enrollment and application callbacks; it is not a UI-only
+check. Validated-empty policy scans avoid repeated ownership validation, but
+helper-only fake-SDK read counts are not Core or latency benchmarks. Measure the
+complete authentication and ordinary session-request Core reads and latency,
+including claims and SDK work, before release. Residual whole-request overhead
+remains a release gate; do not skip stateless policy checks to hide it.
+
 ## Installation
 
 ```bash

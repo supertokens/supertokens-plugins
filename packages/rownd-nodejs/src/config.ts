@@ -27,6 +27,7 @@ type ResolvedDynamicConfig = Pick<
   | "appConfig"
   | "subBrands"
   | "emailChange"
+  | "connectedSignInMethods"
 >;
 
 type ResolvedConfigSnapshot = {
@@ -326,6 +327,12 @@ export function validateDynamicConfig(
   options: { rejectReservedSessionClaims?: boolean } = {},
 ) {
   requireRecord(config, "result");
+  if (config.connectedSignInMethods !== undefined) {
+    requireRecord(config.connectedSignInMethods, "connectedSignInMethods");
+    if (typeof config.connectedSignInMethods.enabled !== "boolean") {
+      throw new Error("connectedSignInMethods.enabled must be a boolean");
+    }
+  }
   if (
     config.emailChange?.maxSessionAgeSeconds !== undefined &&
     config.emailChange.maxSessionAgeSeconds !== null &&
@@ -409,6 +416,7 @@ function dynamicConfigFrom(
     schema: config.schema,
     appConfig: config.appConfig,
     subBrands: config.subBrands,
+    connectedSignInMethods: { enabled: config.connectedSignInMethods?.enabled === true },
     emailChange: {
       maxSessionAgeSeconds: config.emailChange?.maxSessionAgeSeconds === undefined
         ? 600 : config.emailChange.maxSessionAgeSeconds,
@@ -477,6 +485,7 @@ export async function resolvePluginConfigSnapshot<
     schema: dynamicConfig.schema ?? config.schema,
     appConfig: dynamicConfig.appConfig ?? config.appConfig,
     subBrands: dynamicConfig.subBrands ?? config.subBrands,
+    connectedSignInMethods: dynamicConfig.connectedSignInMethods ?? config.connectedSignInMethods ?? { enabled: false },
     emailChange: {
       maxSessionAgeSeconds:
         dynamicConfig.emailChange?.maxSessionAgeSeconds !== undefined

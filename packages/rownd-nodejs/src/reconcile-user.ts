@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { reconciliationSuperTokens as SuperTokens } from "./reconciliation-sdk";
-import { invalidateReconciliationReads, reconciliationProgress, withReconciliationReads, type ReconciliationProgress } from "./reconciliation-reads";
+import { invalidateReconciliationReads, reconciliationProgress, withReadOnlyReconciliationReads, withReconciliationReads, type ReconciliationProgress } from "./reconciliation-reads";
 import { getPluginConfig, getSuperTokensConfig, resolvePluginConfigSnapshot } from "./config";
 import { assertAuthenticatedMigrationSource, assertRowndSourcePayload, fetchAdministrativeMigrationSource, getAuthenticatedMigrationEmail, getMigrationContactEmail } from "./migration-email";
 import { assertMigrationPostconditions, assertMigrationOwnerGraph, reconcileAdministrativeEmailVerification } from "./migration-postconditions";
@@ -24,6 +24,7 @@ import type { MethodPlan } from "./migration-method-plan";
 import { resolveRowndProviderSubject } from "./provider-identity";
 import { recoverOrphanMapping } from "./migration-orphan-mapping";
 import { archivePlaceholderProvenance, completePlaceholderProvenanceOverride, inspectPlaceholderProvenanceOverride, isInternalIdPlaceholder } from "./migration-placeholder-provenance";
+import { assertNoDisconnectedSignInMethods, DisconnectedSignInMethodError } from "./disconnected-sign-in-identities";
 
 export type ReconcileUserInput = (
   | { rownd_user_id: string; email?: never; supertokens_user_id?: never }
@@ -82,6 +83,7 @@ async function discover(users: User[], userContext: JsonRecord, provenRecovery?:
   const requiredMembers = new Map<string, ActivityCandidate>();
   const unprovenAliases = new Set<string>();
   for (const [id, user] of owners) {
+    await assertNoDisconnectedSignInMethods(id, userContext);
     const sources = new Set<string>();
     const aliases = new Set<string>();
     const ids = new Set([id, user.id, ...user.loginMethods.map((method) => method.recipeUserId.getAsString())]);
@@ -434,7 +436,8 @@ async function publishPinnedMapping(id: string, source: Source, tenantId: string
 
 /** Reconcile one live Rownd identity using the initialized server configuration. */
 export function reconcileUser(input: ReconcileUserInput): Promise<ReconcileUserResult> {
-  return withReconciliationReads(() => withFreshRowndReads(() => reconcileUserWithFreshSources(input)), input?.onProgress);
+  const run = () => withFreshRowndReads(() => reconcileUserWithFreshSources(input));
+  return withReconciliationReads(() => input?.dryRun ? withReadOnlyReconciliationReads(run) : run(), input?.onProgress);
 }
 
 async function discoverEmailSources(email: string, userContext: JsonRecord): Promise<ActivityCandidate[]> {
@@ -470,6 +473,9 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
     const tenantId = input.tenantId ?? "public";
     const { userContext } = await resolvePluginConfigSnapshot(config, { tenantId, userContext: input.userContext ?? {} });
     clearSuperTokensCoreCallCache(userContext);
+    if (input.rownd_user_id) await assertNoDisconnectedSignInMethods(input.rownd_user_id, userContext);
+    if (input.supertokens_user_id) await assertNoDisconnectedSignInMethods(input.supertokens_user_id, userContext);
+    if (orphanHandoff) await assertNoDisconnectedSignInMethods(orphanHandoff.target, userContext);
     if (input.rownd_user_id && !orphanHandoff) {
       const recovered = await recoverOrphanMapping({ sourceId: input.rownd_user_id, tenantId, userContext, dryRun: input.dryRun,
         onMutation: () => { mutationStarted = true; result.changed = null; },
@@ -550,6 +556,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
     }
     if (sourcePlan) sourceOwner = await SuperTokens.getUser(sourcePlan.target, userContext);
     sourceOwner ??= await findRecoveryOwner(source, tenantId, userContext, true);
+    if (sourceOwner) await assertNoDisconnectedSignInMethods(sourceOwner.id, userContext);
     const initialSourceOwner = sourceOwner ? await internalOwner(sourceOwner, userContext) : undefined;
     const initialSourceMapping = await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL", userContext });
     const inspection = await inspectSourceElection(source, sourceOwner, tenantId, userContext, resolvedElection?.candidates, discoveredEmail, input.overridePlaceholderProvenance);
@@ -587,6 +594,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
         throw new RowndMigrationPolicyError("The survivor canonical mapping changed during election");
       }
       if (selectedOwner) {
+        await assertNoDisconnectedSignInMethods(selectedOwner, userContext);
         await inspectMappingPublication(selectedOwner, source, tenantId, userContext);
         const metadata = await getRawUserMetadata(selectedOwner, userContext);
         const mapping = await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL", userContext });
@@ -613,6 +621,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
     }
     selected ??= await findRecoveryOwner(source, tenantId, userContext);
     const beforeId = selectedOwner ?? (selected ? await internalOwner(selected, userContext) : undefined);
+    if (beforeId) await assertNoDisconnectedSignInMethods(beforeId, userContext);
     const publication = beforeId ? await inspectMappingPublication(beforeId, source, tenantId, userContext) : undefined;
     if (!beforeId) await assertFreshAliasVerification(source, tenantId, userContext);
     const canonicalTarget = getMigrationTarget(await assertMigrationSourceActive(rowndId, userContext));
@@ -804,9 +813,10 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
       election: { candidates: error.candidates, basis: "latest_valid_activity" }, message: error.message };
     if (error instanceof AmbiguousReconciliationSource) return { ...result, status: "AMBIGUOUS", candidates: error.candidates.filter((candidate): candidate is ReconcileCandidate => candidate.supertokens_user_id !== undefined) };
     const message = error instanceof Error ? error.message : "Reconciliation failed";
-    return { ...result, status: error instanceof RowndMigrationPolicyError ? "BLOCKED" : "ERROR",
+    const policyBlocked = error instanceof RowndMigrationPolicyError || error instanceof DisconnectedSignInMethodError;
+    return { ...result, status: policyBlocked ? "BLOCKED" : "ERROR",
       ...(result.election ? { unresolved_owners: result.election.candidates } : {}),
-      ...(result.dryRun ? { blockers: [{ code: message === "CANONICAL_EMAIL_POLICY" ? message : error instanceof RowndMigrationPolicyError ? "POLICY_BLOCKED" : "OBSERVATION_FAILED" }] } : {}),
+      ...(result.dryRun ? { blockers: [{ code: error instanceof DisconnectedSignInMethodError ? error.code : message === "CANONICAL_EMAIL_POLICY" ? message : policyBlocked ? "POLICY_BLOCKED" : "OBSERVATION_FAILED" }] } : {}),
       message, partialProgress: mutationStarted };
   }
 }

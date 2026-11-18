@@ -62,6 +62,7 @@ import {
 import type { RowndUser, SuperTokensUserImport } from "./types";
 import type { ReconcilePreviewAction } from "./reconcile-preview";
 import { hasReconciliationReads, invalidateReconciliationReads, reconciliationReadRevision, withReadOnlyReconciliationReads } from "./reconciliation-reads";
+import { assertNoDisconnectedSignInMethods, assertNoDisconnectedSignInMethodsAtInternalOwner } from "./disconnected-sign-in-identities";
 
 type User = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
 type Method = User["loginMethods"][number];
@@ -778,6 +779,15 @@ export async function prepareOwnerConsolidation(input: {
 }) {
   const { source, candidates, target, tenantId, userContext: context } = input;
   if (!isAdministrativeMigration(source, tenantId)) return undefined;
+  const pinnedOwnerIds = new Set([target, ...(input.ownerIds ?? []), ...candidates.flatMap((candidate) =>
+    candidate.supertokens_user_id ? [candidate.supertokens_user_id] : [])]);
+  const assertDisconnectPolicies = async () => {
+    for (const id of pinnedOwnerIds) {
+      await assertNoDisconnectedSignInMethodsAtInternalOwner(id, context, target);
+    }
+    await assertNoDisconnectedSignInMethods(target, context);
+  };
+  await assertDisconnectPolicies();
   const fail: (reason: string) => never = (reason) => {
     throw new UnresolvedConsolidationOwners(candidates, reason);
   };
@@ -786,13 +796,16 @@ export async function prepareOwnerConsolidation(input: {
   const sourceId = source.externalUserId!;
   const initialMetadata = await getRawUserMetadata(target, context);
   let existing = readOwnerPlanCheckpoint(initialMetadata);
+  for (const member of existing?.initial.graph ?? []) pinnedOwnerIds.add(member.owner);
   let previous: OwnerPlanCheckpoint | undefined;
   const legacy = readConsolidationCheckpoint(initialMetadata);
   if (legacy) {
+    for (const member of legacy.members) pinnedOwnerIds.add(member.supertokens_user_id);
     if (legacy.winner !== sourceId || legacy.target !== target)
       fail("the v1 checkpoint target changed");
     const assertOwners = async () => {
       clearSuperTokensCoreCallCache(context);
+      await assertDisconnectPolicies();
       await assertV1(legacy, context);
     };
     await assertOwners();
@@ -916,6 +929,7 @@ export async function prepareOwnerConsolidation(input: {
       if (id === target && owner !== target)
         fail("the target is not an immutable primary owner");
       owners.set(owner, user);
+      pinnedOwnerIds.add(owner);
     }
     const canonical = await SuperTokens.getUserIdMapping({
       userId: sourceId,
@@ -1302,8 +1316,10 @@ export async function prepareOwnerConsolidation(input: {
       reservations.set(marker.id, saved);
     }
   let instantProfileRevision: object | undefined;
+  for (const member of plan.initial.graph) pinnedOwnerIds.add(member.owner);
   const assertOwners = async (complete = false) => {
     clearSuperTokensCoreCallCache(context);
+    await assertDisconnectPolicies();
     if (complete) {
       const instant = hasAdministrativeInstantProof(source);
       // Adjacent completion checks share fresh evidence only until a cache
@@ -1582,6 +1598,7 @@ export async function prepareOwnerConsolidation(input: {
     return observed;
   };
   const assertFresh = async () => {
+    await assertDisconnectPolicies();
     if (
       plan.candidates.some(
         (candidate) =>
@@ -1750,6 +1767,7 @@ export async function prepareOwnerConsolidation(input: {
       supertokens_user_id: target,
     });
   const assertCheckpoint = async () => {
+    await assertDisconnectPolicies();
     invalidateReconciliationReads("metadata", target);
     clearSuperTokensCoreCallCache(context);
     if (

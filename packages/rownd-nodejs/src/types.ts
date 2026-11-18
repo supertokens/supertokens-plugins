@@ -695,6 +695,8 @@ export type RowndSubBrandConfigInput = RowndAppConfigInput & {
 };
 
 export type RowndPluginDynamicConfig = {
+  /** Enable only after every backend instance supports durable disconnect policy. */
+  connectedSignInMethods?: { enabled: boolean };
   clientDomains?: RowndClientDomains;
   crossDeviceConfirmationBypass?: {
     allowedRedirectPaths: string[];
@@ -904,6 +906,7 @@ export interface MigrationResponse {
 }
 
 export interface RowndPluginNormalisedConfig {
+  connectedSignInMethods?: { enabled: boolean };
   rowndAppKey: string;
   rowndAppId?: string;
   rowndAppSecret?: string;
