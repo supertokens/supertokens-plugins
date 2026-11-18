@@ -1,5 +1,11 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 1.1.0
+
+### Minor Changes
+
+- 2d60e6e: Add `appConfig.customContent.profileModal.emailConflictMessage` to customize the Hub's duplicate-email field error, including import support in generated plugin configurations. Omitted or empty overrides retain the Hub's localized default copy.
+
 ## 1.0.4
 
 ### Patch Changes
