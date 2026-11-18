@@ -1639,6 +1639,11 @@ export async function getUserById(
 
   const schema =
     getConfigForUserContext(userContext)?.schema || DEFAULT_ROWND_SCHEMA;
+  // An explicit profile contact overrides the display fallback, not the
+  // credential. Only a matching verified method can verify that contact.
+  const storedPhone = inspection.primaryMetadata.phone_number;
+  const profilePhone = schema.phone_number && typeof storedPhone === "string" ? storedPhone : undefined;
+  if (profilePhone !== undefined) data.phone_number = profilePhone;
   for (const key of Object.keys(schema)) {
     dataFieldKeys.add(key);
     if (
@@ -1653,7 +1658,8 @@ export async function getUserById(
   const originalVerifiedData = (originalRowndUser?.verified_data ||
     {}) as JsonRecord;
   const verifiedData: JsonRecord = Object.fromEntries(
-    Object.entries(originalVerifiedData).filter(([key]) => key !== "email"),
+    Object.entries(originalVerifiedData).filter(([key]) => key !== "email" &&
+      (profilePhone === undefined || key !== "phone_number")),
   );
 
   const tenantLoginMethods = stUser.loginMethods
@@ -1691,7 +1697,9 @@ export async function getUserById(
         if (data.email === undefined) data.email = method.email;
       }
       if (method.phoneNumber) {
-        verifiedData.phone_number = method.phoneNumber;
+        if (method.verified && (profilePhone === undefined || profilePhone === method.phoneNumber)) {
+          verifiedData.phone_number = method.phoneNumber;
+        }
         if (data.phone_number === undefined)
           data.phone_number = method.phoneNumber;
       }

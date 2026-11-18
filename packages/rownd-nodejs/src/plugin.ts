@@ -50,6 +50,7 @@ import {
   getDisconnectedSignInMethods,
   DisconnectedSignInMethodError,
 } from "./disconnected-sign-in-identities";
+import { checkPhoneEnrollmentLink } from "./connected-phone-sign-in";
 import {
   applyRowndOAuthResourceParams,
   buildRowndOAuthPayload,
@@ -419,8 +420,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user/sign-in-methods/disconnect`,
                 method: "post" as const,
                 verifySessionOptions: verifyRowndUserWriteSessionOptions,
-                handler: withRequestHandler(handleConnectedSignInMethods(routeHandlerDeps, true)),
+                handler: withRequestHandler(handleConnectedSignInMethods(routeHandlerDeps, "disconnect")),
               },
+              ...(["start", "verify"] as const).map((action) => ({
+                path: `${apiBasePath}${HANDLE_BASE_PATH}/user/sign-in-methods/phone/${action}`,
+                method: "post" as const,
+                verifySessionOptions: verifyRowndUserWriteSessionOptions,
+                handler: withRequestHandler(handleConnectedSignInMethods(routeHandlerDeps, `phone-${action}`)),
+              })),
               {
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/user`,
                 method: "put" as const,
@@ -1280,6 +1287,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               ...originalImplementation,
               linkAccounts: async (input) => {
                 await assertSignInMethodLinkAllowed(input.primaryUserId, input.recipeUserId, input.userContext);
+                const checkEnrollment = checkPhoneEnrollmentLink(input.userContext, input.primaryUserId, input.recipeUserId.getAsString());
+                if (checkEnrollment) await checkEnrollment;
                 const result = await originalImplementation.linkAccounts(input);
                 if (result.status === "OK") {
                   await assertSignInMethodLinkAllowed(input.primaryUserId, input.recipeUserId, input.userContext);
