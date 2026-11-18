@@ -1,0 +1,12 @@
+[project]
+name = "rownd-supertokens-python-backend-example"
+version = "0.1.0"
+description = "Example Python backend using the Rownd migration plugin with SuperTokens"
+requires-python = ">=3.9"
+dependencies = [
+  "fastapi",
+  "python-dotenv",
+  "supertokens-rownd",
+  "supertokens_python[fastapi]>=0.31.3",
+  "uvicorn",
+]
