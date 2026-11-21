@@ -667,7 +667,10 @@ an optional `variant.name`, and optional raw `variant.config` compatibility data
 These `RowndMigrationPlugin.init` options are related to the Hub but live outside
 `appConfig`:
 
-- `schema`: defines user profile fields and their visibility.
+- `schema`: defines user profile fields and their visibility. When phone sign-in
+  is enabled and the schema has no `phone_number` field, the Hub receives a
+  read-only `phone_number` field because the plugin does not support phone
+  changes.
 - `clientDomains`: maps browser, mobile, and custom client names to link origins.
 - `crossDeviceConfirmationBypass`: allows selected server-created magic links to
   bypass cross-device confirmation after frontend validation.

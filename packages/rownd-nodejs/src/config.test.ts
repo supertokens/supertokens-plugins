@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SuperTokensPublicConfig } from "supertokens-node/types";
 import { buildRowndAppConfig } from "./config";
+import { canUpdateUserDataField } from "./rownd-compatibility";
 import type { RowndCustomContent, RowndPluginNormalisedConfig } from "./types";
 
 const superTokensConfig: SuperTokensPublicConfig = {
@@ -59,5 +60,35 @@ describe("profile modal custom content", () => {
     expect(buildCustomContent({
       profileModal: { title: "My profile", emailConflictMessage: "" },
     }).profile_modal).toEqual({ title: "My profile" });
+  });
+});
+
+describe("synthesized sign-in schema fields", () => {
+  function buildConfig(schema?: RowndPluginNormalisedConfig["schema"]): RowndPluginNormalisedConfig {
+    return {
+      rowndAppKey: "app-key",
+      disableRowndUserMigration: true,
+      emailChange: { maxSessionAgeSeconds: 600 },
+      schema,
+      appConfig: { signInMethods: [{ method: "phone" }] },
+    };
+  }
+
+  it("marks a synthesized phone_number read-only because the plugin rejects writes to it", () => {
+    const config = buildConfig();
+    const phoneField = buildRowndAppConfig(config, superTokensConfig)!.app.schema.phone_number;
+
+    expect(phoneField).toMatchObject({ user_visible: true, read_only: true });
+    expect(canUpdateUserDataField("phone_number", config)).toBe(false);
+  });
+
+  it("serializes an explicitly configured phone_number field unchanged", () => {
+    const config = buildConfig({
+      phone_number: { display_name: "Mobile", type: "string", user_visible: true },
+    });
+
+    expect(buildRowndAppConfig(config, superTokensConfig)!.app.schema.phone_number)
+      .toMatchObject({ display_name: "Mobile", read_only: false });
+    expect(canUpdateUserDataField("phone_number", config)).toBe(true);
   });
 });

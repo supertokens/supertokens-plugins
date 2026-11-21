@@ -843,11 +843,7 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
           };
         } catch (error) {
           if (error instanceof RowndEmailChangeError) {
-            return {
-              status: "ERROR" as const,
-              code: error.httpStatus,
-              message: error.message,
-            };
+            return emailChangeErrorResponse(error);
           }
           throw error;
         }
@@ -1078,11 +1074,7 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
           };
         } catch (error) {
           if (error instanceof RowndEmailChangeError) {
-            return {
-              status: "ERROR" as const,
-              code: error.httpStatus,
-              message: error.message,
-            };
+            return emailChangeErrorResponse(error);
           }
           throw error;
         }
@@ -1162,6 +1154,15 @@ async function validateExpectedProfileOwner(
     return { status: "ERROR" as const, code: 409, error_code: "EMAIL_CHANGE_ACCOUNT_MISMATCH",
       message: "Sign in to the account where you started this change." };
   }
+}
+
+function emailChangeErrorResponse(error: RowndEmailChangeError) {
+  return {
+    status: "ERROR" as const,
+    code: error.httpStatus,
+    ...(error.errorCode ? { error_code: error.errorCode } : {}),
+    message: error.message,
+  };
 }
 
 function recentAuthenticationRequiredResponse() {
