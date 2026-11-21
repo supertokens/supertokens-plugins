@@ -77,6 +77,17 @@ export function clearSuperTokensCoreCallCache(
   }
 }
 
+// Reads through the returned context reach Core without discarding the
+// parent's Core-call cache. Its SDK state is detached from the parent.
+export function createUncachedUserContext<T extends Record<PropertyKey, any>>(userContext: T): T {
+  const context = createDerivedUserContext(userContext, {});
+  const defaults = { ...(userContext as SuperTokensUserContextWithCache)._default };
+  delete defaults.coreCallCache;
+  delete defaults.core_call_cache;
+  Object.defineProperty(context, "_default", { configurable: true, enumerable: true, writable: true, value: defaults });
+  return context;
+}
+
 export function resolveTenantId(
   req: Pick<SuperTokensRequest, "getKeyValueFromQuery">,
 ) {
