@@ -847,10 +847,13 @@ export function buildRowndAppConfig(
     };
   }
   if (signInMethods.phone.enabled && !finalSchema.phone_number) {
+    // canUpdateUserDataField only allows fields from the configured schema, and
+    // the plugin has no phone-change flow, so the Hub must not offer editing.
     finalSchema.phone_number = {
       display_name: "Phone number",
       type: "string",
       user_visible: true,
+      read_only: true,
     };
   }
   if (signInMethods.google.enabled && !finalSchema.google_id) {

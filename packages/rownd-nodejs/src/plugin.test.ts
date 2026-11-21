@@ -13079,6 +13079,37 @@ describe("rownd-nodejs plugin", () => {
         await expect(validRes.json()).resolves.toEqual({ status: "OK" });
       });
 
+      it.each(["/user", "/user/field?field=email"])(
+        "returns a stable error code when %s targets an email owned by another account",
+        async (endpoint) => {
+          const links: string[] = [];
+          const { server: s, port } = await setup(coreConnectionURI, undefined, {
+            enableEmailVerification: true,
+            emailVerificationLinks: links,
+          });
+          server = s;
+          testPORT = port;
+          const current = await createPasswordlessSessionForUser(`${randomUUID()}@example.com`);
+          const ownedEmail = `${randomUUID()}@example.com`;
+          await Passwordless.signInUp({ tenantId: "public", email: ownedEmail });
+
+          const response = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd${endpoint}`, {
+            method: "PUT",
+            headers: { ...getAuthedHeaders(current.accessToken), "Content-Type": "application/json" },
+            body: JSON.stringify(endpoint === "/user" ? { data: { email: ownedEmail } } : { value: ownedEmail }),
+          });
+
+          expect(response.status).toBe(409);
+          await expect(response.json()).resolves.toEqual({
+            status: "ERROR",
+            code: 409,
+            error_code: "EMAIL_CHANGE_EMAIL_UNAVAILABLE",
+            message: "email cannot be used for this account",
+          });
+          expect(links).toEqual([]);
+        },
+      );
+
       it("cleans up verification when email ownership changes before completion", async () => {
         const emailVerificationLinks: string[] = [];
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
@@ -13118,6 +13149,7 @@ describe("rownd-nodejs plugin", () => {
         expect(verifyRes.status).toBe(200);
         await expect(verifyRes.json()).resolves.toEqual({
           status: "GENERAL_ERROR",
+          error_code: "EMAIL_CHANGE_EMAIL_UNAVAILABLE",
           message: "email cannot be used for this account",
         });
         await expect(

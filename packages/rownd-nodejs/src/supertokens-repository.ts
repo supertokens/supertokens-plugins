@@ -2813,6 +2813,7 @@ function emailOwnershipConflict() {
     "CONFLICT",
     409,
     "email cannot be used for this account",
+    "EMAIL_CHANGE_EMAIL_UNAVAILABLE",
   );
 }
 

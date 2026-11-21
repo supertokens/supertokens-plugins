@@ -1338,9 +1338,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     );
                   } catch (error) {
                     if (error instanceof RowndEmailChangeError) {
+                      // The SDK sends non-OK verifyEmailPOST results as-is, so the extra field reaches the client.
                       return {
                         status: "GENERAL_ERROR" as const,
                         message: error.message,
+                        ...(error.errorCode ? { error_code: error.errorCode } : {}),
                       };
                     }
                     throw error;

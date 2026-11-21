@@ -213,6 +213,11 @@ owner resolve to the same internal primary, or the request returns HTTP 409 with
 `EMAIL_CHANGE_ACCOUNT_MISMATCH` before writes. Authenticated tenant mismatch is
 also refused. The authenticated session always selects the account being updated.
 
+When the new email belongs to another account, both profile PUT routes return
+HTTP 409 and the email verification consume route returns `GENERAL_ERROR`. Both
+keep the existing message and add `error_code: "EMAIL_CHANGE_EMAIL_UNAVAILABLE"`;
+clients should match on the code rather than the message.
+
 Protected continuation PUTs also send `context.rowndExpectedTenantId`, including
 the literal `"public"`. Both routes compare it with the live session tenant before
 writes, so a same-owner session switching tenants after a client-side check is
