@@ -79,13 +79,16 @@ import {
   getPrimaryUserMetadata,
   mergeMissingProfileMetadata,
   inspectLinkedUserMetadata,
+  inspectUserPresentationMetadata,
   hasHistoricalEmailEligibility,
   type PasswordlessAuthSnapshot,
   getHistoricalPasswordlessScope,
   validateHistoricalPasswordlessOwner,
   updatePrimaryUserMetadata,
+  updateUserPresentationMetadata,
   getRowndProfileData,
   getAuthoritativeProfileFields,
+  ROWND_APP_VARIANTS_KEY,
 } from "./rownd-compatibility";
 import {
   assertAllowedBypassRedirectPath,
@@ -95,6 +98,7 @@ import {
   getAppInfoString,
   getMagicLinkBootstrapParams,
   getWebsiteDomain,
+  hasOwn,
   isJsonRecord,
   isRecord,
   normalizeRedirectToPathForClientDomain,
@@ -1274,10 +1278,18 @@ export async function recordRowndAppVariantForUser(
   assertRowndAppVariantIsConfigured(pluginConfig, appVariantId);
 
   const operationContext = userContext ?? {};
-  const inspection = await inspectLinkedUserMetadata(userId, operationContext);
-  const metadataUserId =
-    inspection.rowndMetadataSourceUserId ?? inspection.primaryUserId;
-  clearSuperTokensCoreCallCache(operationContext);
+  const canonical = pluginConfig.metadataMode === "canonical";
+  let metadataUserId: string;
+  if (canonical) {
+    clearSuperTokensCoreCallCache(operationContext);
+    const user = await SuperTokens.getUser(userId, operationContext);
+    if (!user) throw new RowndPluginError("ROWND_USER_NOT_FOUND");
+    metadataUserId = user.id;
+  } else {
+    const inspection = await inspectLinkedUserMetadata(userId, operationContext);
+    metadataUserId = inspection.rowndMetadataSourceUserId ?? inspection.primaryUserId;
+    clearSuperTokensCoreCallCache(operationContext);
+  }
   const metadata = await getRawUserMetadata(metadataUserId, operationContext);
   const originalRowndUser: JsonRecord = isJsonRecord(
     metadata.original_rownd_user,
@@ -1287,7 +1299,7 @@ export async function recordRowndAppVariantForUser(
   const attributes: JsonRecord = isJsonRecord(originalRowndUser.attributes)
     ? originalRowndUser.attributes
     : {};
-  // Keep the shipped account-wide array for public/tenantless callers; explicit tenants must never reinterpret it.
+  // Only static tenant configs can fall back to the legacy account-wide list.
   const tenantKey =
     tenantId !== undefined && tenantId !== PUBLIC_TENANT_ID
       ? tenantId
@@ -1298,21 +1310,21 @@ export async function recordRowndAppVariantForUser(
   const hasTenantVariants =
     tenantKey !== undefined &&
     Object.prototype.hasOwnProperty.call(variantsByTenant, tenantKey);
-  const appVariants = getStringList(
-    tenantKey !== undefined
-      ? hasTenantVariants || pluginConfig.resolveConfig
-        ? variantsByTenant[tenantKey]
-        : attributes["rownd:app_variants"]
-      : attributes["rownd:app_variants"],
-  );
+  const overlay = canonical ? getAppVariantOverlay(metadata) : {};
+  const scope = tenantKey ?? PUBLIC_TENANT_ID;
+  const legacyVariants = tenantKey !== undefined && (hasTenantVariants || pluginConfig.resolveConfig)
+    ? variantsByTenant[tenantKey]
+    : attributes["rownd:app_variants"];
+  const appVariants = getStringList(hasOwn(overlay, scope) ? overlay[scope] : legacyVariants);
 
   if (appVariants.includes(appVariantId)) {
     return;
   }
+  const updatedVariants = [...appVariants, appVariantId];
 
   await UserMetadata.updateUserMetadata(
     metadataUserId,
-    {
+    canonical ? { [ROWND_APP_VARIANTS_KEY]: { ...overlay, [scope]: updatedVariants } } : {
       original_rownd_user: {
         ...originalRowndUser,
         data: isJsonRecord(originalRowndUser.data)
@@ -1327,11 +1339,11 @@ export async function recordRowndAppVariantForUser(
             ? {
               "rownd:app_variants_by_tenant": {
                 ...variantsByTenant,
-                [tenantKey]: [...appVariants, appVariantId],
+                [tenantKey]: updatedVariants,
               },
             }
             : {
-              "rownd:app_variants": [...appVariants, appVariantId],
+              "rownd:app_variants": updatedVariants,
             }),
         },
       },
@@ -1342,6 +1354,11 @@ export async function recordRowndAppVariantForUser(
     "transition",
     "app_variant_metadata_written",
   );
+}
+
+function getAppVariantOverlay(metadata: RowndMetadata): JsonRecord {
+  const variants = metadata[ROWND_APP_VARIANTS_KEY];
+  return isJsonRecord(variants) ? variants : {};
 }
 
 export const RowndIsAnonymousClaim = new BooleanClaim({
@@ -1368,7 +1385,7 @@ export async function buildRowndSessionClaims(
   appVariantId?: string,
   userContext?: JsonRecord,
 ) {
-  const inspection = await inspectLinkedUserMetadata(userId, userContext);
+  const inspection = await inspectUserPresentationMetadata(userId, userContext);
   const user = inspection.user;
   const metadata = user ? inspection.combinedMetadata : undefined;
 
@@ -1390,7 +1407,7 @@ export async function buildRowndSessionAndAnonymousClaims(
   recipeUserId?: string,
   creating = false,
 ) {
-  const inspection = await inspectLinkedUserMetadata(userId, userContext);
+  const inspection = await inspectUserPresentationMetadata(userId, userContext);
   const user = inspection.user;
   const rowndSessionClaims = buildRowndSessionClaimPayload({
     userId,
@@ -1573,7 +1590,7 @@ export async function getUserById(
   const pluginConfig = getConfigForUserContext(context);
   let failed = true;
   try {
-    const inspection = await inspectLinkedUserMetadata(userId, context, undefined, operation.read);
+    const inspection = await inspectUserPresentationMetadata(userId, context, undefined, operation.read);
     if (!inspection.user) throw new RowndPluginError("ROWND_USER_NOT_FOUND");
     const activity = mode === "active-sessions"
       ? await getLatestSessionInfo(inspection.user.id, tenantId, context, operation.read)
@@ -1781,6 +1798,11 @@ export function assembleUserProfile(
     ? attributes["rownd:app_variants_by_tenant"]
     : {};
   delete attributes["rownd:app_variants_by_tenant"];
+  const overlay = pluginConfig?.metadataMode === "canonical" ? getAppVariantOverlay(metadata) : {};
+  const hasOverlay = hasOwn(overlay, tenantId);
+  if (hasOverlay && tenantId === PUBLIC_TENANT_ID) {
+    attributes["rownd:app_variants"] = getStringList(overlay[tenantId]);
+  }
   if (tenantId !== PUBLIC_TENANT_ID) {
     const configuredVariants = new Set(
       Object.keys(pluginConfig?.subBrands ?? {}),
@@ -1789,9 +1811,9 @@ export function assembleUserProfile(
       variantsByTenant,
       tenantId,
     );
-    if (hasTenantVariants || pluginConfig?.resolveConfig) {
+    if (hasOverlay || hasTenantVariants || pluginConfig?.resolveConfig) {
       attributes["rownd:app_variants"] = getStringList(
-        variantsByTenant[tenantId],
+        hasOverlay ? overlay[tenantId] : variantsByTenant[tenantId],
       ).filter((variantId) => configuredVariants.has(variantId));
     }
   } else if (pluginConfig?.resolveConfig) {
@@ -1864,14 +1886,14 @@ export async function updateUserData(
   inputData: JsonRecord,
   tenantId: string = PUBLIC_TENANT_ID,
   userContext?: JsonRecord,
+  { preserveResponseSelector }: { preserveResponseSelector?: boolean } = {},
 ) {
-  const { sdkUserId } = await updatePrimaryUserMetadata(
+  const { sdkUserId } = await updateUserPresentationMetadata(
     userId,
     inputData,
     userContext,
-    true,
   );
-  return getUserById(sdkUserId, tenantId, userContext);
+  return getUserById(preserveResponseSelector ? userId : sdkUserId, tenantId, userContext);
 }
 
 export function addPendingEmailVerificationMarker(input: {
@@ -2078,29 +2100,35 @@ export async function startPendingEmailVerification(input: {
         method.email &&
         normalizeEmail(method.email) === normalizedEmail,
     );
-    const updatedMetadata = currentPasswordlessMethod
-      ? buildVerifiedEmailMetadata(
-        metadata,
-        input.userId,
-        normalizedEmail,
-        currentPasswordlessMethod.recipeUserId.getAsString(),
-        input.tenantId,
-      )
-      : {
-        ...metadata,
-        rownd_pending_verification: pendingVerifications.filter(
-          (pendingVerification) =>
-            pendingVerification.field !== "email" ||
-              (pendingVerification.tenantId ?? PUBLIC_TENANT_ID) !==
-                input.tenantId,
-        ),
-      };
     if (pendingEmailVerifications.length > 0 || currentPasswordlessMethod) {
-      await updatePrimaryUserMetadata(
-        input.userId,
-        updatedMetadata,
-        input.userContext,
-      );
+      const canonical = getConfigForUserContext(input.userContext)?.metadataMode === "canonical";
+      if (canonical && currentPasswordlessMethod) {
+        await publishVerifiedEmailPresentationMetadata(
+          user.id,
+          normalizedEmail,
+          currentPasswordlessMethod.recipeUserId.getAsString(),
+          input.tenantId,
+          input.userContext,
+        );
+      }
+      const updatedMetadata = !canonical && currentPasswordlessMethod
+        ? buildVerifiedEmailMetadata(
+          metadata,
+          input.userId,
+          normalizedEmail,
+          currentPasswordlessMethod.recipeUserId.getAsString(),
+          input.tenantId,
+        )
+        : {
+          ...(canonical ? {} : metadata),
+          rownd_pending_verification: pendingVerifications.filter(
+            (pendingVerification) =>
+              pendingVerification.field !== "email" ||
+                (pendingVerification.tenantId ?? PUBLIC_TENANT_ID) !==
+                  input.tenantId,
+          ),
+        };
+      await updatePrimaryUserMetadata(input.userId, updatedMetadata, input.userContext);
     }
 
     return getUserById(input.userId, input.tenantId, input.userContext);
@@ -2141,7 +2169,7 @@ export async function startPendingEmailVerification(input: {
   await updatePrimaryUserMetadata(
     input.userId,
     {
-      ...metadata,
+      ...(getConfigForUserContext(input.userContext)?.metadataMode === "canonical" ? {} : metadata),
       rownd_pending_verification: [
         ...pendingVerifications.filter(
           (pendingVerification) =>
@@ -2953,6 +2981,11 @@ async function publishEmailReplacementPlan(
   plan: RowndPendingVerification,
   userContext?: Record<string, any>,
 ) {
+  const canonical =
+    getConfigForUserContext(userContext)?.metadataMode === "canonical";
+  if (canonical) {
+    clearSuperTokensCoreCallCache(userContext ?? {});
+  }
   const metadata = await getPrimaryUserMetadata(userId, userContext);
   let found = false;
   const pendingVerifications = getPendingVerifications(metadata).map(
@@ -2972,18 +3005,25 @@ async function publishEmailReplacementPlan(
     throw new Error("pending email reconciliation state is missing");
   }
 
+  const tenantId = plan.tenantId ?? PUBLIC_TENANT_ID;
+  const emailMetadata = canonical
+    ? {
+      rownd_email_recipe_user_id: plan.targetCanonicalRecipeUserId,
+      rownd_email_recipe_user_ids: {
+        ...metadata.rownd_email_recipe_user_ids,
+        [tenantId]: plan.targetCanonicalRecipeUserId,
+      },
+    }
+    : buildVerifiedEmailMetadata(
+      metadata,
+      userId,
+      normalizeEmail(plan.value),
+      plan.targetCanonicalRecipeUserId,
+      tenantId,
+    );
   await updatePrimaryUserMetadata(
     userId,
-    {
-      ...buildVerifiedEmailMetadata(
-        metadata,
-        userId,
-        normalizeEmail(plan.value),
-        plan.targetCanonicalRecipeUserId,
-        plan.tenantId ?? PUBLIC_TENANT_ID,
-      ),
-      rownd_pending_verification: pendingVerifications,
-    },
+    { ...emailMetadata, rownd_pending_verification: pendingVerifications },
     userContext,
   );
 }
@@ -3220,6 +3260,19 @@ async function reconcileCommittingEmailVerification(input: {
     retiredMethods = completeRetiredMethods;
   }
 
+  const canonical =
+    getConfigForUserContext(input.userContext)?.metadataMode === "canonical";
+  // OAuth prefers the stored verified email even after its method is retired.
+  if (canonical) {
+    await publishVerifiedEmailPresentationMetadata(
+      input.userId,
+      normalizedEmail,
+      targetRecipeUserId,
+      tenantId,
+      input.userContext,
+    );
+  }
+
   for (const { email } of retiredMethods) {
     const revocation = await Passwordless.revokeAllCodes({
       email,
@@ -3303,15 +3356,24 @@ async function reconcileCommittingEmailVerification(input: {
 
   await updatePrimaryUserMetadata(
     input.userId,
-    buildVerifiedEmailMetadata(
-      finalMetadata,
-      input.userId,
-      normalizedEmail,
-      targetRecipeUserId,
-      tenantId,
-      undefined,
-      pendingVerification.id,
-    ),
+    canonical
+      ? {
+        rownd_pending_verification: getPendingVerifications(finalMetadata).filter(
+          (verification) =>
+            verification.field !== "email" ||
+            verification.id !== pendingVerification.id ||
+            (verification.tenantId ?? PUBLIC_TENANT_ID) !== tenantId,
+        ),
+      }
+      : buildVerifiedEmailMetadata(
+        finalMetadata,
+        input.userId,
+        normalizedEmail,
+        targetRecipeUserId,
+        tenantId,
+        undefined,
+        pendingVerification.id,
+      ),
     input.userContext,
   );
 }
@@ -3658,6 +3720,31 @@ async function cleanupPendingEmailVerification(
   );
 }
 
+async function publishVerifiedEmailPresentationMetadata(
+  userId: string,
+  email: string,
+  recipeUserId: string,
+  tenantId: string,
+  userContext?: JsonRecord,
+) {
+  clearSuperTokensCoreCallCache(userContext ?? {});
+  const user = await SuperTokens.getUser(userId, userContext);
+  if (!user) throw new RowndPluginError("ROWND_USER_NOT_FOUND");
+  const method = user.loginMethods.find((candidate) => candidate.recipeUserId.getAsString() === recipeUserId);
+  if (user.id !== userId || !method || method.recipeId !== "passwordless" ||
+    !method.verified || !method.tenantIds.includes(tenantId) || normalizeEmail(method.email ?? "") !== email) {
+    throw new Error("verified email presentation target changed");
+  }
+  const metadata = await getRawUserMetadata(user.id, userContext);
+  const updated = buildVerifiedEmailMetadata(metadata, user.id, email, recipeUserId, tenantId);
+  await UserMetadata.updateUserMetadata(user.id, {
+    original_rownd_user: updated.original_rownd_user,
+    rownd_email_recipe_user_id: updated.rownd_email_recipe_user_id,
+    rownd_email_recipe_user_ids: updated.rownd_email_recipe_user_ids,
+    rownd_email_metadata_version: 1,
+  } as JSONObject, userContext);
+}
+
 function buildVerifiedEmailMetadata(
   metadata: RowndMetadata,
   userId: string,
@@ -3720,16 +3807,26 @@ export async function updateUserMetadata(
   const writableMeta = Object.fromEntries(Object.entries(inputMeta).filter(
     ([key]) => !["last_sign_in", "last_active", "last_sign_in_method"].includes(key),
   ));
-  const { sdkUserId } = await updatePrimaryUserMetadata(
-    userId,
-    writableMeta,
-    userContext,
-    true,
-  );
-  const updatedMetadata = await getCombinedUserMetadata(
-    sdkUserId,
-    userContext,
-  );
+  let sdkUserId: string;
+  let updatedMetadata: RowndMetadata;
+  if (Object.keys(writableMeta).length === 0) {
+    const operation = new ProfileReadOperation();
+    const user = await operation.read("user", userId, () => SuperTokens.getUser(userId, userContext));
+    sdkUserId = user?.id ?? userId;
+    updatedMetadata = (await inspectUserPresentationMetadata(
+      sdkUserId,
+      userContext,
+      user,
+      operation.read,
+    )).combinedMetadata;
+  } else {
+    ({ sdkUserId } = await updateUserPresentationMetadata(
+      userId,
+      writableMeta,
+      userContext,
+    ));
+    updatedMetadata = (await inspectUserPresentationMetadata(sdkUserId, userContext)).combinedMetadata;
+  }
 
   return {
     id: sdkUserId,

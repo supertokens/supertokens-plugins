@@ -1163,6 +1163,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               return {
                 ...config,
                 shouldDoAutomaticAccountLinking: accountLinkingDecision = async (...input) => {
+                  if (pluginConfig.metadataMode === "canonical") {
+                    return { shouldAutomaticallyLink: false };
+                  }
+
                   if (input[4]?.rowndDisableAutomaticAccountLinking === true) {
                     return {
                       shouldAutomaticallyLink: false,
@@ -1385,6 +1389,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
     },
     () => ({}),
     (config: RowndPluginConfig) => {
+      if (config.metadataMode !== undefined &&
+          config.metadataMode !== "compatibility" && config.metadataMode !== "canonical") {
+        throw new Error("metadataMode must be compatibility or canonical in plugin config");
+      }
+      if (config.metadataMode === "canonical" && config.disableRowndUserMigration !== true) {
+        throw new Error("canonical metadata mode requires Rownd user migration to be disabled");
+      }
       const telemetryProvider = (
         config.telemetry as { provider?: unknown } | undefined
       )?.provider;
@@ -1438,6 +1449,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         throw new Error("jwksUrl must be a non-empty URL in plugin config");
       }
       return {
+        metadataMode: config.metadataMode ?? "compatibility",
         rowndAppKey: config.rowndAppKey ?? DISABLED_MIGRATION_ROWND_APP_KEY,
         rowndAppId: config.rowndAppId,
         rowndAppSecret: config.rowndAppSecret,

@@ -723,6 +723,8 @@ export type RowndConfigResolverContext = {
 };
 
 export interface RowndPluginConfig extends RowndPluginDynamicConfig {
+  /** Enable only after offline publication and deployment of compatible presentation writers. */
+  metadataMode?: "compatibility" | "canonical";
   rowndAppKey?: string;
   /** App scope for administrative email discovery and uncached profile reads. */
   rowndAppId?: string;
@@ -910,6 +912,7 @@ export interface MigrationResponse {
 }
 
 export interface RowndPluginNormalisedConfig {
+  metadataMode?: "compatibility" | "canonical";
   rowndAppKey: string;
   rowndAppId?: string;
   rowndAppSecret?: string;

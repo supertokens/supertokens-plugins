@@ -39,6 +39,7 @@ import {
   buildRowndAudience,
   canUpdateUserDataField,
   getInternalPrimaryUserId,
+  inspectUserPresentationMetadata,
   isInternalMetadataField,
 } from "./rownd-compatibility";
 import {
@@ -857,20 +858,19 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
         }
       }
 
-      if (Object.keys(dataWithoutEmail).length > 0) {
-        await updateUserData(
-          session!.getUserId(operationContext),
-          dataWithoutEmail,
-          session!.getTenantId(operationContext),
-          operationContext,
+      const user = Object.keys(dataWithoutEmail).length > 0
+        ? await updateUserData(
+            session!.getUserId(operationContext),
+            dataWithoutEmail,
+            session!.getTenantId(operationContext),
+            operationContext,
+            { preserveResponseSelector: true },
+        )
+        : await getUserById(
+            session!.getUserId(operationContext),
+            session!.getTenantId(operationContext),
+            operationContext,
         );
-      }
-
-      const user = await getUserById(
-        session!.getUserId(operationContext),
-        session!.getTenantId(operationContext),
-        operationContext,
-      );
       return {
         status: "OK" as const,
         ...user,
@@ -920,7 +920,7 @@ export function handleGetUserMeta() {
     session: SuperTokensSession,
     userContext: SuperTokensUserContext,
   ) => {
-    const metadata = await getUserMetadata(
+    const { combinedMetadata: metadata } = await inspectUserPresentationMetadata(
       session!.getUserId(userContext),
       userContext,
     );
@@ -1186,7 +1186,7 @@ function validateWritableFields(
     (field) => !(field === "email" && !pluginConfig?.schema?.email) && !canUpdateUserDataField(field, pluginConfig),
   );
 
-  if (!readOnlyField) {
+  if (readOnlyField === undefined) {
     return undefined;
   }
 

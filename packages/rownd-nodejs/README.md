@@ -123,7 +123,7 @@ RowndMigrationPlugin.init({
 ```
 
 `rowndAppKey`, `rowndAppSecret`, `rowndAppId`, `rowndJwtAudience`, `jwksUrl`,
-`disableRowndUserMigration`, debug logging,
+`disableRowndUserMigration`, `metadataMode`, debug logging,
 and telemetry remain startup-static. Resolver failures and malformed results
 fail the operation instead of falling back to another tenant. The plugin keeps
 the resolved snapshot tenant-bound and does not place static credentials in the
@@ -137,6 +137,47 @@ operation. Omitted fields fall back to the corresponding top-level static
 value; objects are not deep-merged with that static value. Setting
 `disableRowndUserMigration` in resolver output is unsupported: when it is true
 at startup, migration routes and credentials remain disabled for every tenant.
+
+### Canonical metadata mode
+
+`metadataMode` is startup-static and defaults to `"compatibility"`, which keeps
+the existing mapping discovery and alias merging. Opt in to `"canonical"` only
+after the deployment's complete presentation metadata has been reconciled at the
+**current SDK-visible `user.id`**, including mapped users.
+
+Canonical mode requires `disableRowndUserMigration: true`. Built-in Rownd
+migration/import publication is not a canonical writer; initialization rejects
+that combination instead of leaving converted records stale.
+
+Canonical presentation reads use that literal address without mapping discovery
+or alias merging. Empty records/absent fields stay empty/absent; errors propagate
+instead of triggering legacy discovery. The mode applies to the whole initialized
+deployment, not to users selected from metadata or a `resolveConfig` result.
+
+In canonical mode only, the plugin reserves two kinds of top-level metadata
+keys:
+
+- `rownd_profile_authority:<field>` markers, written with each profile
+  edit/deletion so independent edits do not replace a shared authority list.
+- `rownd_app_variants`, which stores app variant membership per scope (`public`
+  or a tenant ID) separately from `original_rownd_user`. A scope entry, even an
+  empty list, replaces the original variants for that scope.
+
+Profile, field and metadata updates that use these keys or other internal
+plugin fields (such as `original_rownd_user`) are rejected in canonical mode,
+even if the schema marks them writable. In compatibility mode they remain ordinary public keys.
+
+Canonical mode also disables SuperTokens automatic account linking through the
+plugin's `shouldDoAutomaticAccountLinking` override, because a linked donor's
+metadata would not be read. The plugin's explicit verified-email linking still
+runs. Direct application calls to `linkAccounts` or `createPrimaryUser` are not
+covered.
+
+Session verification, tenant/auth-origin checks and operational checkpoint
+handling are unchanged. Before reverting to compatibility, resynchronize legacy
+records if canonical writes have made them stale, including folding authority
+markers into `rownd_profile_authoritative_fields` and `rownd_app_variants` into
+`original_rownd_user` attributes.
 
 ### Email Changes
 
