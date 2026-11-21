@@ -723,6 +723,8 @@ export type RowndConfigResolverContext = {
 };
 
 export interface RowndPluginConfig extends RowndPluginDynamicConfig {
+  /** Enable only after offline publication and deployment of compatible presentation writers. */
+  metadataMode?: "compatibility" | "canonical";
   rowndAppKey?: string;
   /** App scope for administrative email discovery and uncached profile reads. */
   rowndAppId?: string;
@@ -766,6 +768,12 @@ export type RowndClientDomains = {
 } & Record<string, string>;
 
 export interface RowndMigrationTelemetryDetails {
+  operation?: "profile_read";
+  profileMode?: "profile" | "active-sessions";
+  profileConfig?: "static" | "dynamic";
+  profileFallbackReason?: "none" | "activity_not_requested";
+  // SDK boundary attempts, not wire-level Core request counts.
+  sdkCalls?: { user: number; mapping: number; metadata: number; sessionList: number; sessionDetail: number };
   canonicalRowndUserId?: string;
   conflictingRowndUserId?: string;
   requestId?: string;
@@ -904,6 +912,7 @@ export interface MigrationResponse {
 }
 
 export interface RowndPluginNormalisedConfig {
+  metadataMode?: "compatibility" | "canonical";
   rowndAppKey: string;
   rowndAppId?: string;
   rowndAppSecret?: string;

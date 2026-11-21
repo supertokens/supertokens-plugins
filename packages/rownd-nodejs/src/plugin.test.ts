@@ -9093,10 +9093,10 @@ describe("rownd-nodejs plugin", () => {
           meta: {
             created: expect.any(String),
             first_sign_in: expect.any(String),
-            last_sign_in: expect.any(String),
-            last_active: expect.any(String),
+            last_sign_in: null,
+            last_active: null,
             first_sign_in_method: "email",
-            last_sign_in_method: "email",
+            last_sign_in_method: null,
           },
           verified_data: {
             email: "compat-user-1@example.com",
@@ -9625,10 +9625,10 @@ describe("rownd-nodejs plugin", () => {
           meta: {
             created: expect.any(String),
             first_sign_in: expect.any(String),
-            last_sign_in: expect.any(String),
-            last_active: expect.any(String),
+            last_sign_in: null,
+            last_active: null,
             first_sign_in_method: "email",
-            last_sign_in_method: "email",
+            last_sign_in_method: null,
           },
           verified_data: {
             email: "non-migrated@example.com",
@@ -9670,7 +9670,7 @@ describe("rownd-nodejs plugin", () => {
         expect(latestSessionInfo).toBeDefined();
 
         const res = await fetch(
-          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          `http://localhost:${testPORT}/auth/plugin/rownd/user?include_activity=true`,
           {
             headers: getAuthedHeaders(latestSession.getAccessToken()),
           },
@@ -9747,7 +9747,7 @@ describe("rownd-nodejs plugin", () => {
           );
 
         const res = await fetch(
-          `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+          `http://localhost:${testPORT}/auth/plugin/rownd/user?include_activity=true`,
           {
             headers: getAuthedHeaders(latestSession.getAccessToken()),
           },
@@ -13991,11 +13991,13 @@ describe("rownd-nodejs plugin", () => {
       });
 
       it.each([
-        { providerId: "google", maxSessionAgeSeconds: null },
-        { providerId: "google", maxSessionAgeSeconds: 600 },
-        { providerId: "apple", maxSessionAgeSeconds: null },
-        { providerId: "apple", maxSessionAgeSeconds: 600 },
-      ])("preserves canonical email for a mapped $providerId/passwordless owner under $maxSessionAgeSeconds policy through provider relogin and Core restart", async ({ providerId, maxSessionAgeSeconds }) => {
+        { providerId: "google", maxSessionAgeSeconds: null, primaryRecipe: "thirdparty", initiatingRecipe: "passwordless" },
+        { providerId: "google", maxSessionAgeSeconds: 600, primaryRecipe: "thirdparty", initiatingRecipe: "passwordless" },
+        { providerId: "apple", maxSessionAgeSeconds: null, primaryRecipe: "thirdparty", initiatingRecipe: "passwordless" },
+        { providerId: "apple", maxSessionAgeSeconds: 600, primaryRecipe: "thirdparty", initiatingRecipe: "passwordless" },
+        { providerId: "google", maxSessionAgeSeconds: 600, primaryRecipe: "passwordless", initiatingRecipe: "passwordless" },
+        { providerId: "google", maxSessionAgeSeconds: 600, primaryRecipe: "thirdparty", initiatingRecipe: "thirdparty" },
+      ])("preserves canonical email for a mapped $providerId/passwordless owner with $primaryRecipe primary and $initiatingRecipe initiating recipe under $maxSessionAgeSeconds policy through provider relogin and Core restart", async ({ providerId, maxSessionAgeSeconds, primaryRecipe, initiatingRecipe }) => {
         const emailVerificationLinks: string[] = [];
         const passwordlessLinks: string[] = [];
         const providerUserId = randomUUID();
@@ -14020,8 +14022,8 @@ describe("rownd-nodejs plugin", () => {
           externalUserId: rowndId,
           userMetadata: { first_name: "Old name", original_rownd_user: { data: { user_id: rowndId, first_name: "Old name", email: oldEmail } } },
           loginMethods: [
-            { recipeId: "thirdparty", thirdPartyId: providerId, thirdPartyUserId: providerUserId, email: oldEmail, isVerified: true, isPrimary: true },
-            { recipeId: "passwordless", email: oldEmail, isVerified: true },
+            { recipeId: "thirdparty", thirdPartyId: providerId, thirdPartyUserId: providerUserId, email: oldEmail, isVerified: true, isPrimary: primaryRecipe === "thirdparty" },
+            { recipeId: "passwordless", email: oldEmail, isVerified: true, isPrimary: primaryRecipe === "passwordless" },
           ],
         }, { connectionURI: importCoreConnectionURI });
         const mapping = await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL" });
@@ -14032,15 +14034,32 @@ describe("rownd-nodejs plugin", () => {
         expect(imported.loginMethods).toContainEqual(expect.objectContaining({
           recipeUserId: originalProviderMethod.recipeUserId.getAsString(),
         }));
-        expect(await (await requestPasswordlessCode(oldEmail, "sign_in")).json()).toMatchObject({ status: "OK" });
-        const initialLogin = await consumePasswordlessLink(passwordlessLinks[0], "sign_in");
+        const signInWithProvider = () => fetch(`http://localhost:${testPORT}/auth/signinup`, {
+          method: "POST",
+          headers: { rid: "thirdparty", "content-type": "application/json", "fdi-version": "3.1", "st-auth-mode": "header" },
+          body: JSON.stringify({ thirdPartyId: providerId, redirectURIInfo: {
+            redirectURIOnProviderDashboard: `http://localhost/auth/callback/${providerId}`,
+            redirectURIQueryParams: { code: providerCode },
+          } }),
+        });
+        if (initiatingRecipe === "passwordless") {
+          expect(await (await requestPasswordlessCode(oldEmail, "sign_in")).json()).toMatchObject({ status: "OK" });
+        }
+        const initialLogin = initiatingRecipe === "thirdparty"
+          ? await signInWithProvider()
+          : await consumePasswordlessLink(passwordlessLinks[0], "sign_in");
+        expect(initialLogin.status).toBe(200);
         expect(await initialLogin.json()).toMatchObject({ status: "OK", createdNewRecipeUser: false, user: { id: rowndId } });
         const session = await Session.getSessionWithoutRequestResponse(initialLogin.headers.get("st-access-token")!);
         expect(session.getUserId()).toBe(rowndId);
+        if (initiatingRecipe === "thirdparty") {
+          expect(session.getRecipeUserId().getAsString()).toBe(originalProviderMethod.recipeUserId.getAsString());
+        }
         const accessToken = session.getAccessToken();
         expect(await (await requestPasswordlessCode(oldEmail, "sign_in")).json()).toMatchObject({ status: "OK" });
-        expect(passwordlessLinks).toHaveLength(2);
-        const stalePasswordlessLink = passwordlessLinks[1];
+        const initialPasswordlessLinkCount = initiatingRecipe === "thirdparty" ? 1 : 2;
+        expect(passwordlessLinks).toHaveLength(initialPasswordlessLinkCount);
+        const stalePasswordlessLink = passwordlessLinks[initialPasswordlessLinkCount - 1];
         const update = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
           method: "PUT", headers: { ...getAuthedHeaders(accessToken), "Content-Type": "application/json" },
           body: JSON.stringify({ data: { email: newEmail }, context: { rowndExpectedUserId: rowndId, rowndExpectedTenantId: "public" } }),
@@ -14059,6 +14078,13 @@ describe("rownd-nodejs plugin", () => {
         expect(await verified.json()).toEqual({ status: "OK" });
         expect(await Session.getSessionInformation(session.getHandle())).toBeUndefined();
         const replacementToken = verified.headers.get("st-access-token")!;
+        const replacementSession = await Session.getSessionWithoutRequestResponse(replacementToken);
+        const replacementMethod = (await SuperTokens.getUser(rowndId))!.loginMethods.find(
+          (method) => method.recipeUserId.getAsString() === replacementSession.getRecipeUserId().getAsString(),
+        );
+        expect(replacementMethod).toMatchObject({ recipeId: "passwordless", email: newEmail, verified: true });
+        expect(replacementSession.getHandle()).not.toBe(session.getHandle());
+        expect(replacementSession.getUserId()).toBe(rowndId);
         const read = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, { headers: getAuthedHeaders(replacementToken) });
         expect(await read.json()).toMatchObject({ data: { user_id: rowndId, email: newEmail } });
         const edit = await fetch(`http://localhost:${testPORT}/auth/plugin/rownd/user`, {
@@ -14105,14 +14131,7 @@ describe("rownd-nodejs plugin", () => {
           expect((await getUserById(rowndId)).data.email).toBe(newEmail);
         };
         const providerSignIn = async () => {
-          const response = await fetch(`http://localhost:${testPORT}/auth/signinup`, {
-            method: "POST",
-            headers: { rid: "thirdparty", "content-type": "application/json", "fdi-version": "3.1", "st-auth-mode": "header" },
-            body: JSON.stringify({ thirdPartyId: providerId, redirectURIInfo: {
-              redirectURIOnProviderDashboard: `http://localhost/auth/callback/${providerId}`,
-              redirectURIQueryParams: { code: providerCode },
-            } }),
-          });
+          const response = await signInWithProvider();
           const responseText = await response.text();
           expect(response.status, responseText).toBe(200);
           expect(JSON.parse(responseText)).toMatchObject({ status: "OK", createdNewRecipeUser: false, user: { id: rowndId } });
@@ -14123,6 +14142,13 @@ describe("rownd-nodejs plugin", () => {
         };
 
         await assertCanonicalProfile(replacementToken);
+        const replacementRefreshToken = verified.headers.get("st-refresh-token");
+        expect(replacementRefreshToken).toBeTruthy();
+        const refreshedSession = await Session.refreshSessionWithoutRequestResponse(replacementRefreshToken!, true);
+        expect(refreshedSession.getHandle()).toBe(replacementSession.getHandle());
+        expect(refreshedSession.getRecipeUserId().getAsString()).toBe(replacementSession.getRecipeUserId().getAsString());
+        expect(await Session.getSessionInformation(refreshedSession.getHandle())).toBeDefined();
+        await assertCanonicalProfile(refreshedSession.getAccessToken());
         const staleLogin = await consumePasswordlessLink(stalePasswordlessLink, "sign_in");
         expect(await staleLogin.json()).toEqual({ status: "RESTART_FLOW_ERROR" });
         expect(staleLogin.headers.get("st-access-token")).toBeNull();
@@ -14149,15 +14175,15 @@ describe("rownd-nodejs plugin", () => {
         server = restarted.server;
         testPORT = restarted.port;
         const restartedToken = await providerSignIn();
-        expect(exchangeAuthCodeForOAuthTokens).toHaveBeenCalledTimes(2);
+        expect(exchangeAuthCodeForOAuthTokens).toHaveBeenCalledTimes(initiatingRecipe === "thirdparty" ? 3 : 2);
         expect(exchangeAuthCodeForOAuthTokens).toHaveBeenLastCalledWith(expect.objectContaining({
           redirectURIInfo: expect.objectContaining({ redirectURIQueryParams: { code: providerCode } }),
         }));
         await signOut(restartedToken);
         await assertOldPasswordlessDenied();
         expect(await (await requestPasswordlessCode(newEmail, "sign_in")).json()).toMatchObject({ status: "OK" });
-        expect(passwordlessLinks).toHaveLength(3);
-        const passwordlessLogin = await consumePasswordlessLink(passwordlessLinks[2], "sign_in");
+        expect(passwordlessLinks).toHaveLength(initialPasswordlessLinkCount + 1);
+        const passwordlessLogin = await consumePasswordlessLink(passwordlessLinks[initialPasswordlessLinkCount], "sign_in");
         expect(await passwordlessLogin.json()).toMatchObject({ status: "OK", createdNewRecipeUser: false, user: { id: rowndId } });
         await assertCanonicalProfile(passwordlessLogin.headers.get("st-access-token")!);
       }, 60000);

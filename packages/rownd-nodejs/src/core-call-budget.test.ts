@@ -1,0 +1,696 @@
+import express from "express";
+import { createServer, type Server } from "node:http";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import SuperTokens from "supertokens-node";
+import Session from "supertokens-node/recipe/session";
+import Passwordless from "supertokens-node/recipe/passwordless";
+import UserMetadata from "supertokens-node/recipe/usermetadata";
+import EmailVerification from "supertokens-node/recipe/emailverification";
+import { middleware, errorHandler } from "supertokens-node/framework/express";
+import { ProcessState } from "supertokens-node/lib/build/processState";
+import { Querier } from "supertokens-node/lib/build/querier";
+import SuperTokensRaw from "supertokens-node/lib/build/supertokens";
+import SessionRaw from "supertokens-node/lib/build/recipe/session/recipe";
+import PasswordlessRaw from "supertokens-node/lib/build/recipe/passwordless/recipe";
+import UserMetadataRaw from "supertokens-node/lib/build/recipe/usermetadata/recipe";
+import UserRolesRaw from "supertokens-node/lib/build/recipe/userroles/recipe";
+import AccountLinkingRaw from "supertokens-node/lib/build/recipe/accountlinking/recipe";
+import EmailVerificationRaw from "supertokens-node/lib/build/recipe/emailverification/recipe";
+import MultitenancyRaw from "supertokens-node/lib/build/recipe/multitenancy/recipe";
+import { init } from "./plugin";
+import { updateUserMetadata } from "./supertokens-repository";
+import { buildConfiguredSessionClaims, getAuthoritativeProfileFields, getCanonicalPresentationMetadata,
+  ROWND_PROFILE_AUTHORITY_PREFIX, type RowndCompatUserResponse, type RowndMetadata } from "./rownd-compatibility";
+import { getPluginConfig, setPluginConfig } from "./config";
+import type { JsonRecord } from "./utils";
+
+type Json = Record<string, unknown>;
+type Attempt = { method: string; path: string; params: URLSearchParams; body: Json };
+type ProfileResponse = RowndCompatUserResponse & { status: "OK" };
+type MetadataResponse = { status: "OK"; id: string; meta: JsonRecord };
+
+async function profileJson(response: Response): Promise<ProfileResponse> {
+  return await response.json() as ProfileResponse;
+}
+
+async function metadataJson(response: Response): Promise<MetadataResponse> {
+  return await response.json() as MetadataResponse;
+}
+
+function resetSDK() {
+  ProcessState.getInstance().reset();
+  SessionRaw.reset();
+  PasswordlessRaw.reset();
+  UserMetadataRaw.reset();
+  UserRolesRaw.reset();
+  AccountLinkingRaw.reset();
+  EmailVerificationRaw.reset();
+  MultitenancyRaw.reset();
+  SuperTokensRaw.reset();
+  Querier.reset();
+}
+
+async function listen(server: Server) {
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing loopback address");
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function close(server: Server | undefined) {
+  if (!server) return;
+  server.closeIdleConnections();
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+// CDI 5.4 fixture for the installed SDK, not a Core/database integration test or
+// supported-SDK matrix. Only HTTP is faked; handlers, verification and caches run normally.
+describe("complete protected route Core budgets (installed SDK)", () => {
+  let keys: Awaited<ReturnType<typeof generateKeyPair>>;
+  let jwk: Awaited<ReturnType<typeof exportJWK>>;
+  let coreServer: Server | undefined;
+  let appServer: Server | undefined;
+  let coreUrl: string;
+  let appUrl: string;
+  let mapped: boolean;
+  let revoked: boolean;
+  let attempts: Attempt[];
+  let unexpected: string[];
+  let metadata: Map<string, RowndMetadata>;
+  let metadataFailure: boolean;
+  let beforeMetadataWrite: (() => Promise<void>) | undefined;
+  let sessionSelector: string | undefined;
+  const internalId = "core-owner";
+  const externalId = "rownd-owner";
+  const sdkId = () => mapped ? externalId : internalId;
+  const storedActivity = {
+    last_sign_in: "2000-01-01T00:00:00.000Z",
+    last_active: "2000-01-02T00:00:00.000Z",
+    last_sign_in_method: "stored-method",
+  };
+
+  beforeAll(async () => {
+    keys = await generateKeyPair("RS256");
+    jwk = { ...await exportJWK(keys.publicKey), kid: "d-budget-test", alg: "RS256", use: "sig" };
+  });
+
+  function initSDK(disableCoreCallCache = false, metadataMode?: "compatibility" | "canonical") {
+    resetSDK();
+    SuperTokens.init({
+      telemetry: false,
+      supertokens: {
+        connectionURI: coreUrl,
+        disableCoreCallCache,
+        networkInterceptor: (request) => {
+          if (new URL(request.url).origin !== coreUrl) {
+            unexpected.push(`External SDK traffic: ${request.url}`);
+            throw new Error(`External SDK traffic: ${request.url}`);
+          }
+          return request;
+        },
+      },
+      appInfo: { appName: "Core call budgets", apiDomain: appUrl, websiteDomain: "http://localhost:3000" },
+      recipeList: [Session.init(), UserMetadata.init(), EmailVerification.init({ mode: "OPTIONAL" }),
+        Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" })],
+      experimental: { plugins: [init({ disableRowndUserMigration: true, ...(metadataMode ? { metadataMode } : {}) })] },
+    });
+  }
+
+  beforeEach(async () => {
+    resetSDK();
+    mapped = false;
+    revoked = false;
+    metadataFailure = false;
+    beforeMetadataWrite = undefined;
+    sessionSelector = undefined;
+    attempts = [];
+    unexpected = [];
+    metadata = new Map([
+      [internalId, { first_name: "Profile", preference: "preserved", ...storedActivity }],
+      [externalId, { first_name: "Alias", alias_only: "fallback" }],
+    ]);
+    coreServer = createServer(async (req, res) => {
+      const url = new URL(req.url!, coreUrl);
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) as Json : {};
+      const attempt = { method: req.method!, path: url.pathname, params: url.searchParams, body };
+      attempts.push(attempt);
+      res.setHeader("content-type", "application/json");
+      const reply = (value: unknown) => res.end(JSON.stringify(value));
+      const reject = () => {
+        unexpected.push(`${attempt.method} ${url.pathname}${url.search}`);
+        res.statusCode = 500;
+        reply({ message: "Unexpected fake Core request" });
+      };
+      switch (`${attempt.method} ${url.pathname}`) {
+        case "GET /apiversion":
+          return reply({ versions: ["5.4"] });
+        case "GET /.well-known/jwks.json":
+          return reply({ keys: [jwk] });
+        case "POST /recipe/session/verify":
+          if (body.checkDatabase !== true || typeof body.accessToken !== "string") return reject();
+          return reply(revoked ? { status: "UNAUTHORISED", message: "Session revoked" } : {
+            status: "OK",
+            session: { handle: "budget-session", userId: sessionSelector ?? sdkId(), recipeUserId: internalId,
+              tenantId: "public", userDataInJWT: {} },
+          });
+        case "GET /user/id":
+          if (![internalId, sdkId()].includes(url.searchParams.get("userId")!)) return reject();
+          return reply({ status: "OK", user: {
+            id: sdkId(), isPrimaryUser: false, timeJoined: 1000, tenantIds: ["public"],
+            emails: ["owner@example.com"], phoneNumbers: [], thirdParty: [],
+            loginMethods: [{ recipeUserId: internalId, recipeId: "passwordless", email: "owner@example.com",
+              verified: true, timeJoined: 1000, tenantIds: ["public"] }],
+          } });
+        case "GET /recipe/userid/map": {
+          const id = url.searchParams.get("userId");
+          const type = url.searchParams.get("userIdType");
+          if (![internalId, sdkId()].includes(id!) || !["SUPERTOKENS", "EXTERNAL"].includes(type!)) return reject();
+          return reply(mapped && ((id === internalId && type === "SUPERTOKENS") ||
+            (id === externalId && type === "EXTERNAL"))
+            ? { status: "OK", superTokensUserId: internalId, externalUserId: externalId }
+            : { status: "UNKNOWN_MAPPING_ERROR" });
+        }
+        case "GET /recipe/user/metadata": {
+          const id = url.searchParams.get("userId")!;
+          if (![internalId, externalId].includes(id)) return reject();
+          if (metadataFailure) {
+            res.statusCode = 500;
+            return reply({ message: "Metadata unavailable" });
+          }
+          return reply({ status: "OK", metadata: metadata.get(id) ?? {} });
+        }
+        case "PUT /recipe/user/metadata": {
+          if (body.userId !== (getPluginConfig()?.metadataMode === "canonical" ? sdkId() : internalId) ||
+            typeof body.metadataUpdate !== "object" || !body.metadataUpdate) return reject();
+          await beforeMetadataWrite?.();
+          const next = { ...metadata.get(body.userId as string) };
+          for (const [key, value] of Object.entries(body.metadataUpdate as JsonRecord)) {
+            if (value === null) delete next[key];
+            else next[key] = value;
+          }
+          metadata.set(body.userId as string, next);
+          return reply({ status: "OK", metadata: next });
+        }
+        default:
+          return reject();
+      }
+    });
+    coreUrl = await listen(coreServer);
+    const app = express();
+    appServer = createServer(app);
+    appUrl = await listen(appServer);
+    const originalFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, options) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (![appUrl, coreUrl].includes(url.origin)) {
+        unexpected.push(`External fetch: ${url}`);
+        throw new Error(`External fetch: ${url}`);
+      }
+      return originalFetch(input, options);
+    });
+    initSDK();
+    app.use(middleware());
+    app.use(errorHandler());
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await close(appServer);
+    await close(coreServer);
+    resetSDK();
+    expect(unexpected).toEqual([]);
+  });
+
+  function observeSDK() {
+    const user = vi.spyOn(SuperTokens, "getUser");
+    const mapping = vi.spyOn(SuperTokens, "getUserIdMapping");
+    const metadataGet = vi.spyOn(UserMetadata, "getUserMetadata");
+    const metadataPut = vi.spyOn(UserMetadata, "updateUserMetadata");
+    const verify = vi.spyOn(SessionRaw.getInstanceOrThrowError().recipeInterfaceImpl, "getSession");
+    return () => ({ user: user.mock.calls.length, mapping: mapping.mock.calls.length,
+      metadataGet: metadataGet.mock.calls.length, metadataPut: metadataPut.mock.calls.length,
+      verify: verify.mock.calls.length });
+  }
+
+  function steady() {
+    return attempts.filter(({ path }) => path !== "/apiversion" && path !== "/.well-known/jwks.json");
+  }
+
+  function bootstrap() {
+    return {
+      cdi: attempts.filter(({ path }) => path === "/apiversion").length,
+      signingKeys: attempts.filter(({ path }) => path === "/.well-known/jwks.json").length,
+    };
+  }
+
+  async function request(path: string, body?: Json, signingKey = keys.privateKey) {
+    const token = await new SignJWT({ sessionHandle: "budget-session", refreshTokenHash1: "hash",
+      rsub: internalId, tId: "public", stt: 0 })
+      .setProtectedHeader({ alg: "RS256", typ: "JWT", kid: "d-budget-test", version: "5" })
+      .setSubject(sessionSelector ?? sdkId()).setIssuedAt().setExpirationTime("1h").sign(signingKey);
+    return fetch(`${appUrl}/auth/plugin/rownd/${path}`, {
+      method: body === undefined ? "GET" : "PUT",
+      headers: { Authorization: `Bearer ${token}`, rid: "session", "fdi-version": "1.18",
+        "st-auth-mode": "header", "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  }
+
+  const readCases = [false, true].flatMap((isMapped) =>
+    ["user", "user/meta", "user/field?field=first_name"].map((path) => ({ isMapped, path })));
+
+  function publishCanonicalFixture() {
+    metadata.set(sdkId(), getCanonicalPresentationMetadata({
+      first_name: "Published", preference: "canonical", custom: { old: true, removed: true },
+      ...storedActivity,
+      original_rownd_user: { data: { user_id: sdkId(), first_name: "Original" },
+        state: "enabled", auth_level: "verified", verified_data: {} },
+    }));
+  }
+
+  function expectCanonicalReads(start = 0) {
+    const reads = steady().slice(start);
+    expect(reads.map(({ method, path }) => `${method} ${path}`)).toEqual([
+      "POST /recipe/session/verify", "GET /user/id", "GET /recipe/user/metadata",
+    ]);
+    expect(reads[2]?.params.get("userId")).toBe(sdkId());
+  }
+
+  function expectCanonicalWrite(start: number, field: string, value: unknown) {
+    const writes = steady().slice(start);
+    expect(writes.map(({ method, path }) => `${method} ${path}`)).toEqual([
+      "POST /recipe/session/verify", "GET /user/id", "PUT /recipe/user/metadata",
+      "GET /user/id", "GET /recipe/user/metadata",
+    ]);
+    expect(writes[2]?.body).toMatchObject({ userId: sdkId(), metadataUpdate: {
+      [field]: value, [`${ROWND_PROFILE_AUTHORITY_PREFIX}${field}`]: true,
+    } });
+    expect(writes[2]?.body.metadataUpdate).not.toHaveProperty("rownd_profile_authoritative_fields");
+    expect(writes[4]?.params.get("userId")).toBe(sdkId());
+  }
+
+  function expectPrivateAuthority(record: Json) {
+    expect(Object.keys(record).some((key) => key.startsWith(ROWND_PROFILE_AUTHORITY_PREFIX) ||
+      key === "rownd_profile_authoritative_fields")).toBe(false);
+  }
+
+  it.each(readCases)("uses exactly three real Core attempts for canonical GET $path (mapped=$isMapped)", async ({ isMapped, path }) => {
+    mapped = isMapped;
+    initSDK(false, "canonical");
+    publishCanonicalFixture();
+    const calls = observeSDK();
+    const response = await request(path);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    if (path === "user") {
+      expect(body).toMatchObject({ status: "OK", rownd_user: sdkId(),
+        data: { user_id: sdkId(), first_name: "Published", email: "owner@example.com" },
+        meta: { preference: "canonical", last_sign_in: null, last_active: null, last_sign_in_method: null } });
+    } else if (path === "user/meta") {
+      expect(body).toEqual({ status: "OK", id: sdkId(), meta: {
+        first_name: "Published", preference: "canonical", custom: { old: true, removed: true }, ...storedActivity,
+      } });
+    } else expect(body).toEqual({ status: "OK", value: "Published" });
+    expect(calls()).toEqual({ user: 1, mapping: 0, metadataGet: 1, metadataPut: 0, verify: 1 });
+    expectCanonicalReads();
+    expect(bootstrap()).toEqual({ cdi: 1, signingKeys: 1 });
+
+    const warm = await request(path);
+    expect(warm.status).toBe(200);
+    expect(await warm.json()).toEqual(body);
+    expect(calls()).toEqual({ user: 2, mapping: 0, metadataGet: 2, metadataPut: 0, verify: 2 });
+    expectCanonicalReads(3);
+    expect(bootstrap()).toEqual({ cdi: 1, signingKeys: 1 });
+  });
+
+  it.each(readCases.flatMap((entry) => ["missing", "empty"].map((kind) => ({ ...entry, kind }))))(
+    "does not fall back from $kind canonical metadata for GET $path (mapped=$isMapped)", async ({ isMapped, path, kind }) => {
+      mapped = isMapped;
+      initSDK(false, "canonical");
+      if (kind === "missing") metadata.delete(sdkId());
+      else metadata.set(sdkId(), {});
+      const calls = observeSDK();
+      const response = await request(path);
+      const body = await response.json();
+      if (path === "user") {
+        const profile = body as ProfileResponse;
+        expect(response.status).toBe(200);
+        expect(profile.data.first_name).toBe("");
+        expect(profile.data.user_id).toBe(sdkId());
+        expect(profile.meta).not.toHaveProperty("alias_only");
+        expect(profile.meta).not.toHaveProperty("preference");
+      } else if (path === "user/meta") {
+        expect(response.status).toBe(200);
+        expect(body).toEqual({ status: "OK", id: sdkId(), meta: {} });
+      } else {
+        expect(response.status).toBe(200);
+        expect(body).toEqual({ status: "OK", value: "" });
+      }
+      expect(calls().mapping).toBe(0);
+      expectCanonicalReads();
+    },
+  );
+
+  it.each(readCases)("does not mask canonical metadata failures for GET $path (mapped=$isMapped)", async ({ isMapped, path }) => {
+    mapped = isMapped;
+    initSDK(false, "canonical");
+    metadataFailure = true;
+    const calls = observeSDK();
+    const response = await request(path);
+    expect(response.status).toBe(500);
+    await response.text();
+    expect(calls()).toEqual({ user: 1, mapping: 0, metadataGet: 1, metadataPut: 0, verify: 1 });
+    expectCanonicalReads();
+  });
+
+  it.each(readCases)("rejects revoked canonical GET $path before metadata (mapped=$isMapped)", async ({ isMapped, path }) => {
+    mapped = isMapped;
+    initSDK(false, "canonical");
+    revoked = true;
+    metadataFailure = true;
+    const calls = observeSDK();
+    const response = await request(path);
+    expect(response.status).toBe(401);
+    expect(calls()).toEqual({ user: 0, mapping: 0, metadataGet: 0, metadataPut: 0, verify: 1 });
+    expect(steady().map(({ method, path }) => `${method} ${path}`)).toEqual(["POST /recipe/session/verify"]);
+    expect(bootstrap()).toEqual({ cdi: 1, signingKeys: 1 });
+  });
+
+  it.each(readCases)("rejects invalid canonical GET $path before metadata (mapped=$isMapped)", async ({ isMapped, path }) => {
+    mapped = isMapped;
+    initSDK(false, "canonical");
+    metadataFailure = true;
+    const untrusted = await generateKeyPair("RS256");
+    const calls = observeSDK();
+    expect((await request(path, undefined, untrusted.privateKey)).status).toBe(401);
+    expect(calls()).toEqual({ user: 0, mapping: 0, metadataGet: 0, metadataPut: 0, verify: 1 });
+    expect(steady()).toEqual([]);
+    expect(bootstrap()).toEqual({ cdi: 0, signingKeys: 1 });
+  });
+
+  it.each([false, true].flatMap((isMapped) => [false, true].map((disableCache) => ({ isMapped, disableCache }))))(
+    "keeps published canonical writes fresh across edits/deletions/replacements (mapped=$isMapped, disableCache=$disableCache)", async ({ isMapped, disableCache }) => {
+      mapped = isMapped;
+      initSDK(disableCache, "canonical");
+      publishCanonicalFixture();
+      const calls = observeSDK();
+      for (const first_name of ["Edited", null, "Restored"]) {
+        const start = steady().length;
+        const response = await request("user", { data: { first_name } });
+        expect(response.status).toBe(200);
+        const body = await profileJson(response);
+        expect(body.rownd_user).toBe(sdkId());
+        expect(body.data.user_id).toBe(sdkId());
+        expect(body.data.first_name).toBe(first_name ?? undefined);
+        expectPrivateAuthority(body.data);
+        expectPrivateAuthority(body.meta);
+        expectCanonicalWrite(start, "first_name", first_name);
+        const read = await request("user");
+        expect(read.status).toBe(200);
+        expect((await profileJson(read)).data.first_name).toBe(first_name ?? undefined);
+      }
+      for (const custom of [{ replacement: true, nested_null: null }, {}, null]) {
+        const start = steady().length;
+        const response = await request("user/meta", { meta: { custom } });
+        expect(response.status).toBe(200);
+        const body = await metadataJson(response);
+        expect(body.id).toBe(sdkId());
+        expect(body.meta.custom).toEqual(custom ?? undefined);
+        expectPrivateAuthority(body.meta);
+        expectCanonicalWrite(start, "custom", custom);
+        const read = await request("user/meta");
+        expect(read.status).toBe(200);
+        expect((await metadataJson(read)).meta.custom).toEqual(custom ?? undefined);
+      }
+      expect(calls().mapping).toBe(0);
+      expect(calls()).toEqual({ user: 18, mapping: 0, metadataGet: 12, metadataPut: 6, verify: 12 });
+      expect(steady()).toHaveLength(48);
+      expect(steady().filter(({ path }) => path === "/recipe/user/metadata")
+        .every(({ params, body, method }) => (method === "PUT" ? body.userId : params.get("userId")) === sdkId())).toBe(true);
+      expect(bootstrap()).toEqual({ cdi: 1, signingKeys: 1 });
+    },
+  );
+
+  it.each([false, true].flatMap((isMapped) => [false, true].map((disableCache) => ({ isMapped, disableCache }))))(
+    "retains a deletion during concurrent different-field canonical writes (mapped=$isMapped, disableCache=$disableCache)", async ({ isMapped, disableCache }) => {
+      mapped = isMapped;
+      initSDK(disableCache, "canonical");
+      publishCanonicalFixture();
+      const calls = observeSDK();
+      let release!: () => void;
+      let arrivals = 0;
+      const bothWrites = new Promise<void>((resolve) => { release = resolve; });
+      // Hold Core commits until both plugin writes arrive, exposing any stale shared-array RMW.
+      beforeMetadataWrite = async () => {
+        if (++arrivals === 2) release();
+        await bothWrites;
+      };
+      const responses = await Promise.all([
+        request("user", { data: { first_name: null } }),
+        request("user", { data: { last_name: "Concurrent edit" } }),
+      ]);
+      beforeMetadataWrite = undefined;
+      expect(responses.map(({ status }) => status)).toEqual([200, 200]);
+      for (const response of responses) {
+        const body = await profileJson(response);
+        expect(body.data.user_id).toBe(sdkId());
+        expect(body.data).not.toHaveProperty("first_name");
+        expect(body.data.last_name).toBe("Concurrent edit");
+        expectPrivateAuthority(body.data);
+        expectPrivateAuthority(body.meta);
+      }
+      expect(calls()).toEqual({ user: 4, mapping: 0, metadataGet: 2, metadataPut: 2, verify: 2 });
+      expect(steady()).toHaveLength(10);
+      const writes = steady().filter(({ method }) => method === "PUT");
+      expect(writes.map(({ body }) => body.metadataUpdate)).toEqual(expect.arrayContaining([
+        { first_name: null, [`${ROWND_PROFILE_AUTHORITY_PREFIX}first_name`]: true },
+        { last_name: "Concurrent edit", [`${ROWND_PROFILE_AUTHORITY_PREFIX}last_name`]: true },
+      ]));
+      const stored = metadata.get(sdkId())!;
+      expect(getAuthoritativeProfileFields(stored).sort()).toEqual(["first_name", "last_name"]);
+      expect(buildConfiguredSessionClaims(stored, { ...getPluginConfig()!, schema: {
+        first_name: { display_name: "First name", type: "string", user_visible: true, include_in_session_claims: true },
+        last_name: { display_name: "Last name", type: "string", user_visible: true, include_in_session_claims: true },
+      } })).toEqual({ last_name: "Concurrent edit" });
+      const start = steady().length;
+      const fresh = await request("user");
+      expect(fresh.status).toBe(200);
+      const profile = await profileJson(fresh);
+      expect(profile.data).not.toHaveProperty("first_name");
+      expect(profile.data.last_name).toBe("Concurrent edit");
+      expectCanonicalReads(start);
+      const publicMeta = await metadataJson(await request("user/meta"));
+      expect(publicMeta.id).toBe(sdkId());
+      expectPrivateAuthority(publicMeta.meta);
+      expect(publicMeta.meta).not.toHaveProperty("first_name");
+      // Parallel cold SDK calls negotiate CDI separately; neither is a steady-state attempt.
+      expect(bootstrap()).toEqual({ cdi: 2, signingKeys: 1 });
+    },
+  );
+
+  it("switches static metadata modes without a hidden presentation cache", async () => {
+    mapped = true;
+    const calls = observeSDK();
+    expect((await profileJson(await request("user"))).data.first_name).toBe("Profile");
+    const compatibilityConfig = getPluginConfig()!;
+    setPluginConfig({ ...compatibilityConfig, metadataMode: "canonical" });
+    publishCanonicalFixture();
+    const start = steady().length;
+    expect((await profileJson(await request("user"))).data.first_name).toBe("Published");
+    expectCanonicalReads(start);
+    metadata.set(externalId, { first_name: "Remote edit" });
+    expect((await profileJson(await request("user"))).data.first_name).toBe("Remote edit");
+    setPluginConfig(compatibilityConfig);
+    expect((await profileJson(await request("user"))).data.first_name).toBe("Profile");
+    expect(calls().mapping).toBe(4);
+    expect(bootstrap()).toEqual({ cdi: 1, signingKeys: 1 });
+  });
+
+  it.each(readCases)("database-verifies GET $path before compatibility reads (mapped=$isMapped)", async ({ isMapped, path }) => {
+    mapped = isMapped;
+    const calls = observeSDK();
+    const response = await request(path);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    if (path === "user") {
+      expect(body).toMatchObject({ status: "OK", rownd_user: sdkId(),
+        data: { user_id: sdkId(), email: "owner@example.com", first_name: "Profile" },
+        verified_data: { email: "owner@example.com" }, state: "enabled", auth_level: "verified",
+        meta: { preference: "preserved", last_sign_in: null, last_active: null, last_sign_in_method: null } });
+    } else if (path === "user/meta") {
+      expect(body).toMatchObject({ status: "OK", id: sdkId(),
+        meta: { first_name: "Profile", preference: "preserved", ...storedActivity } });
+    } else {
+      expect(body).toEqual({ status: "OK", value: "Profile" });
+    }
+    expect(calls()).toEqual({ user: 1, mapping: 2, metadataGet: mapped ? 2 : 1, metadataPut: 0, verify: 1 });
+    expect(steady()).toHaveLength(mapped ? 6 : 5);
+    expect(steady().slice(0, 4).map(({ method, path: corePath }) => `${method} ${corePath}`)).toEqual([
+      "POST /recipe/session/verify", "GET /user/id", "GET /recipe/userid/map", "GET /recipe/userid/map",
+    ]);
+    expect(steady().filter(({ path: corePath }) => corePath === "/recipe/userid/map")
+      .map(({ params }) => params.get("userIdType"))).toEqual(["SUPERTOKENS", "EXTERNAL"]);
+    expect(steady().slice(4).map(({ params }) => params.get("userId")).sort())
+      .toEqual((mapped ? [internalId, externalId] : [internalId]).sort());
+    expect(bootstrap()).toEqual({ cdi: 1, signingKeys: 1 });
+
+    const warm = await request(path);
+    expect(warm.status).toBe(200);
+    expect(await warm.json()).toEqual(body);
+    expect(calls()).toEqual({ user: 2, mapping: 4, metadataGet: mapped ? 4 : 2, metadataPut: 0, verify: 2 });
+    expect(steady()).toHaveLength(mapped ? 12 : 10);
+    expect(bootstrap()).toEqual({ cdi: 1, signingKeys: 1 });
+  });
+
+  it.each(readCases)("rejects revoked GET $path before any user/mapping/metadata access (mapped=$isMapped)", async ({ isMapped, path }) => {
+    mapped = isMapped;
+    revoked = true;
+    const calls = observeSDK();
+    const response = await request(path);
+    expect(response.status).toBe(401);
+    expect(calls()).toEqual({ user: 0, mapping: 0, metadataGet: 0, metadataPut: 0, verify: 1 });
+    expect(steady().map(({ method, path: corePath }) => `${method} ${corePath}`)).toEqual(["POST /recipe/session/verify"]);
+    expect(bootstrap()).toEqual({ cdi: 1, signingKeys: 1 });
+  });
+
+  it("rejects an invalid signature through real SDK verification before calling Core verify", async () => {
+    const untrusted = await generateKeyPair("RS256");
+    const calls = observeSDK();
+    const response = await request("user", undefined, untrusted.privateKey);
+    expect(response.status).toBe(401);
+    expect(calls()).toEqual({ user: 0, mapping: 0, metadataGet: 0, metadataPut: 0, verify: 1 });
+    expect(steady()).toEqual([]);
+    expect(bootstrap()).toEqual({ cdi: 0, signingKeys: 1 });
+  });
+
+  it.each([false, true].flatMap((isMapped) =>
+    [{}, { last_sign_in: null, last_active: "echo", last_sign_in_method: "echo" }]
+      .map((patch) => ({ isMapped, patch }))))(
+    "skips metadata PUT and duplicate discovery for no-op $patch (1A; mapped=$isMapped)", async ({ isMapped, patch }) => {
+      mapped = isMapped;
+      const calls = observeSDK();
+      const response = await request("user/meta", { meta: patch });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ status: "OK", id: sdkId(),
+        meta: { first_name: "Profile", preference: "preserved", ...storedActivity } });
+      expect(calls()).toEqual({ user: 1, mapping: 2, metadataGet: mapped ? 2 : 1, metadataPut: 0, verify: 1 });
+      expect(steady()).toHaveLength(mapped ? 6 : 5);
+      expect(steady().every(({ method }) => method !== "PUT")).toBe(true);
+      expect(metadata.get(internalId)).toMatchObject(storedActivity);
+    },
+  );
+
+  it.each([false, true].flatMap((isMapped) =>
+    [null, {}, { replacement: "value", nested_null: null }].map((custom) => ({ isMapped, custom }))))(
+    "treats custom=$custom as a real replacement/deletion (mapped=$isMapped)", async ({ isMapped, custom }) => {
+      mapped = isMapped;
+      metadata.set(internalId, { ...metadata.get(internalId), custom: { old: "value" } });
+      metadata.set(externalId, { ...metadata.get(externalId), custom: { alias: "must not return" } });
+      const calls = observeSDK();
+      const response = await request("user/meta", { meta: { custom } });
+      expect(response.status).toBe(200);
+      const body = await response.json() as { meta: Json };
+      expect(body).toMatchObject({ status: "OK", id: sdkId(), meta: storedActivity });
+      if (custom === null) expect(body.meta).not.toHaveProperty("custom");
+      else expect(body.meta.custom).toEqual(custom);
+      expect(calls()).toEqual({ user: 2, mapping: 4, metadataGet: mapped ? 3 : 2, metadataPut: 1, verify: 1 });
+      expect(steady()).toHaveLength(mapped ? 11 : 10);
+      expect(steady().filter(({ method }) => method === "PUT")).toHaveLength(1);
+      expect(metadata.get(internalId)?.custom).toEqual(custom === null ? undefined : custom);
+    },
+  );
+
+  it("does not classify an own undefined custom key as a no-op before JSON serialization", async () => {
+    const calls = observeSDK();
+    await updateUserMetadata(internalId, { custom: undefined }, {});
+    expect(calls().metadataPut).toBe(1);
+    expect(steady().filter(({ method }) => method === "PUT")).toHaveLength(1);
+    expect(bootstrap()).toEqual({ cdi: 1, signingKeys: 0 });
+  });
+
+  it.each([false, true])("keeps one fresh profile read for an empty user patch (mapped=%s)", async (isMapped) => {
+    mapped = isMapped;
+    const calls = observeSDK();
+    const response = await request("user", { data: {} });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: "OK", data: { user_id: sdkId(), first_name: "Profile" },
+      meta: { last_sign_in: null, last_active: null, last_sign_in_method: null } });
+    expect(calls()).toEqual({ user: 1, mapping: 2, metadataGet: mapped ? 2 : 1, metadataPut: 0, verify: 1 });
+    expect(steady()).toHaveLength(mapped ? 6 : 5);
+  });
+
+  it.each(["compatibility", "canonical"] as const)("preserves the full profile response selector in %s mode", async (mode) => {
+    mapped = true;
+    sessionSelector = internalId;
+    initSDK(false, mode);
+    const calls = observeSDK();
+    const canonical = mode === "canonical";
+
+    for (const patch of [undefined, { data: {} }, { data: { first_name: "After full PUT" } }]) {
+      const response = await request("user", patch);
+      expect(response.status).toBe(200);
+      expect(await profileJson(response)).toMatchObject({
+        rownd_user: internalId,
+        data: { user_id: internalId, first_name: patch?.data.first_name ?? (canonical ? "Alias" : "Profile") },
+      });
+    }
+
+    const response = await request("user/field?field=first_name", { value: "After field PUT" });
+    expect(response.status).toBe(200);
+    expect(await profileJson(response)).toMatchObject({
+      rownd_user: externalId, data: { user_id: externalId, first_name: "After field PUT" },
+    });
+
+    expect(steady().filter(({ path }) => path === "/user/id").map(({ params }) => params.get("userId")))
+      .toEqual([internalId, internalId, internalId, internalId, internalId, externalId]);
+    const writeId = canonical ? externalId : internalId;
+    expect(steady().filter(({ method }) => method === "PUT").map(({ body }) => body.userId)).toEqual([writeId, writeId]);
+    expect(calls()).toEqual({ user: 6, mapping: canonical ? 0 : 12, metadataGet: canonical ? 4 : 10, metadataPut: 2, verify: 4 });
+    expect(steady()).toHaveLength(canonical ? 16 : 34);
+  });
+
+  it.each([false, true].flatMap((isMapped) => [false, true].map((disableCache) => ({ isMapped, disableCache }))))(
+    "returns the mutation profile once (1B; mapped=$isMapped, disableCache=$disableCache)", async ({ isMapped, disableCache }) => {
+      mapped = isMapped;
+      initSDK(disableCache);
+      const calls = observeSDK();
+      const response = await request("user", { data: { first_name: "After" } });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ status: "OK", rownd_user: sdkId(),
+        data: { user_id: sdkId(), first_name: "After", email: "owner@example.com" },
+        meta: { last_sign_in: null, last_active: null, last_sign_in_method: null } });
+      expect(calls()).toEqual({ user: 2, mapping: 4, metadataGet: mapped ? 3 : 2, metadataPut: 1, verify: 1 });
+      expect(steady()).toHaveLength(mapped ? 11 : 10);
+      const writeIndex = steady().findIndex(({ method }) => method === "PUT");
+      expect(writeIndex).toBe(5);
+      expect(steady().slice(0, writeIndex + 1).map(({ method, path }) => `${method} ${path}`)).toEqual([
+        "POST /recipe/session/verify", "GET /user/id", "GET /recipe/userid/map", "GET /recipe/userid/map",
+        "GET /recipe/user/metadata", "PUT /recipe/user/metadata",
+      ]);
+      expect(steady().slice(writeIndex + 1, writeIndex + 4).map(({ path }) => path)).toEqual([
+        "/user/id", "/recipe/userid/map", "/recipe/userid/map",
+      ]);
+      expect(steady().slice(writeIndex + 1).map(({ method }) => method).every((method) => method === "GET")).toBe(true);
+      expect(metadata.get(internalId)?.first_name).toBe("After");
+      expect(bootstrap()).toEqual({ cdi: 1, signingKeys: 1 });
+    },
+  );
+
+  it.each([false, true])("keeps actual SDK GET cache/invalidation behavior (disableCache=%s)", async (disableCache) => {
+    initSDK(disableCache);
+    const calls = observeSDK();
+    const context = {};
+    await UserMetadata.getUserMetadata(internalId, context);
+    await UserMetadata.getUserMetadata(internalId, context);
+    expect(calls().metadataGet).toBe(2);
+    expect(steady()).toHaveLength(disableCache ? 2 : 1);
+    await UserMetadata.updateUserMetadata(internalId, { first_name: "Fresh" }, context);
+    expect(await UserMetadata.getUserMetadata(internalId, context)).toMatchObject({ metadata: { first_name: "Fresh" } });
+    expect(calls()).toEqual({ user: 0, mapping: 0, metadataGet: 3, metadataPut: 1, verify: 0 });
+    expect(steady()).toHaveLength(disableCache ? 4 : 3);
+    expect(bootstrap()).toEqual({ cdi: 1, signingKeys: 0 });
+  });
+});

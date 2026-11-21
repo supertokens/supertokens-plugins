@@ -5,7 +5,11 @@ import { PLUGIN_VERSION } from "../constants";
 export class OpenTelemetryClient implements RowndTelemetryClient {
   recordEvent(event: RowndTelemetryEvent): void {
     const tracer = trace.getTracer("supertokens-plugin-rownd", PLUGIN_VERSION);
-    const span = tracer.startSpan("rownd.migrate");
+    // Profile events arrive after assembly; reconstruct its span from the measured duration.
+    const profileEndTime = event.operation === "profile_read" ? Date.now() : undefined;
+    const span = profileEndTime !== undefined
+      ? tracer.startSpan("rownd.profile_read", { startTime: profileEndTime - event.durationMs })
+      : tracer.startSpan("rownd.migrate");
     span.setAttributes({
       "rownd.outcome": event.outcome,
       "rownd.duration_ms": event.durationMs,
@@ -27,6 +31,16 @@ export class OpenTelemetryClient implements RowndTelemetryClient {
         ? { "rownd.session_created": event.sessionCreated }
         : {}),
     });
+    if (event.operation === "profile_read") {
+      span.setAttributes({
+        "rownd.profile.mode": event.profileMode ?? "profile",
+        "rownd.profile.config": event.profileConfig ?? "static",
+        "rownd.profile.fallback_reason": event.profileFallbackReason ?? "",
+      });
+      for (const [kind, count] of Object.entries(event.sdkCalls ?? {})) {
+        span.setAttribute(`rownd.profile.sdk_calls.${kind}`, count);
+      }
+    }
 
     if (event.outcome === "error") {
       const err = new Error(event.error.message);
@@ -42,6 +56,7 @@ export class OpenTelemetryClient implements RowndTelemetryClient {
       span.setStatus({ code: SpanStatusCode.OK });
     }
 
-    span.end();
+    if (profileEndTime !== undefined) span.end(profileEndTime);
+    else span.end();
   }
 }

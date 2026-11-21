@@ -29,12 +29,14 @@ import type { JsonRecord, JsonValue } from "./utils";
 import { clearSuperTokensCoreCallCache, getStringList, isJsonRecord } from "./utils";
 import { invalidateReconciliationReads } from "./reconciliation-reads";
 import { readOwnerPlanCheckpoint } from "./migration-owner-plan";
-import { RowndEmailChangeError, RowndMigrationPolicyError } from "./errors";
+import { RowndEmailChangeError, RowndMigrationPolicyError, RowndPluginError } from "./errors";
+import type { ProfileReader } from "./profile-read";
 
 export type RowndMetadata = RowndUserMetadata & JsonRecord;
 
 export type LinkedUserMetadataInspection = {
   user?: SuperTokensUser;
+  mapping?: { superTokensUserId: string; externalUserId: string };
   primaryUserId: string;
   linkedUserIds: string[];
   linkedMetadata: Array<{ userId: string; metadata: RowndMetadata }>;
@@ -85,6 +87,17 @@ const IDENTITY_USER_DATA_FIELDS = new Set([
   "google_id",
   "apple_id",
 ]);
+
+export const ROWND_PROFILE_AUTHORITY_PREFIX = "rownd_profile_authority:";
+export const ROWND_APP_VARIANTS_KEY = "rownd_app_variants";
+
+export function isCanonicalReservedMetadataKey(key: string) {
+  return key === ROWND_APP_VARIANTS_KEY || key.startsWith(ROWND_PROFILE_AUTHORITY_PREFIX);
+}
+
+function isReservedMetadataField(field: string, config = getPluginConfig()) {
+  return config?.metadataMode === "canonical" && isCanonicalReservedMetadataKey(field);
+}
 
 const INTERNAL_METADATA_FIELDS = new Set([
   "rownd_profile_authoritative_fields",
@@ -200,7 +213,8 @@ export function combineLinkedMetadata(input: {
     : {};
   for (const { metadata } of linkedMetadata) {
     for (const [key, value] of Object.entries(metadata)) {
-      if (LINKED_OPERATIONAL_METADATA_FIELDS.has(key) || authoritativeFields.has(key)) {
+      if (LINKED_OPERATIONAL_METADATA_FIELDS.has(key) || isReservedMetadataField(key) ||
+          authoritativeFields.has(key)) {
         continue;
       }
       if (
@@ -266,21 +280,22 @@ export function combineLinkedMetadata(input: {
 async function getPrimaryUserMapping(
   userId: string,
   userContext?: Record<string, any>,
+  read: ProfileReader = (_kind, _key, load) => load(),
 ) {
-  const internalMapping = await SuperTokens.getUserIdMapping({
+  const internalMapping = await read("mapping", JSON.stringify(["SUPERTOKENS", userId]), () => SuperTokens.getUserIdMapping({
     userId,
     userIdType: "SUPERTOKENS",
     userContext,
-  });
+  }));
   if (internalMapping.status === "OK") {
     return internalMapping;
   }
 
-  const externalMapping = await SuperTokens.getUserIdMapping({
+  const externalMapping = await read("mapping", JSON.stringify(["EXTERNAL", userId]), () => SuperTokens.getUserIdMapping({
     userId,
     userIdType: "EXTERNAL",
     userContext,
-  });
+  }));
   return externalMapping.status === "OK" ? externalMapping : undefined;
 }
 
@@ -342,22 +357,25 @@ export async function inspectLinkedUserMetadata(
   userId: string,
   userContext?: Record<string, any>,
   userSnapshot?: SuperTokensUser,
+  read: ProfileReader = (_kind, _key, load) => load(),
 ): Promise<LinkedUserMetadataInspection> {
-  let user = userSnapshot ?? (await SuperTokens.getUser(userId, userContext));
+  const readUser = (id: string) => read("user", id, () => SuperTokens.getUser(id, userContext));
+  const readMetadata = (id: string) => read("metadata", id, () => getRawUserMetadata(id, userContext));
+  let user = userSnapshot ?? (await readUser(userId));
   const references = new Set<string>([userId]);
   let referenceId = userId;
   // Retired aliases are literal metadata records, not SDK users. Resolve their
   // profile references here only; migration checkpoints must keep using raw reads.
   while (!user) {
-    const metadata = await getRawUserMetadata(referenceId, userContext);
+    const metadata = await readMetadata(referenceId);
     const target = metadata.rownd_migration_canonical_target ?? metadata.rownd_migration_target;
     if (typeof target !== "string" || !target || references.has(target)) break;
     references.add(target);
     referenceId = target;
-    user = await SuperTokens.getUser(target, userContext);
+    user = await readUser(target);
   }
   if (!user) {
-    const metadata = await getRawUserMetadata(userId, userContext);
+    const metadata = await readMetadata(userId);
     return {
       user: undefined,
       primaryUserId: userId,
@@ -373,7 +391,7 @@ export async function inspectLinkedUserMetadata(
     };
   }
 
-  const mapping = await getPrimaryUserMapping(user.id, userContext);
+  const mapping = await getPrimaryUserMapping(user.id, userContext, read);
   const primaryUserId = mapping?.superTokensUserId ?? user.id;
   const linkedUserIds = [
     ...new Set(
@@ -383,11 +401,11 @@ export async function inspectLinkedUserMetadata(
     ),
   ];
   const [primaryMetadata, linkedMetadata] = await Promise.all([
-    getRawUserMetadata(primaryUserId, userContext),
+    readMetadata(primaryUserId),
     Promise.all(
       linkedUserIds.map(async (linkedUserId) => ({
         userId: linkedUserId,
-        metadata: await getRawUserMetadata(linkedUserId, userContext),
+        metadata: await readMetadata(linkedUserId),
       })),
     ),
   ]);
@@ -406,7 +424,7 @@ export async function inspectLinkedUserMetadata(
   if (plan?.target === primaryUserId)
     for (const alias of plan.retiredAliases ?? []) {
       if (linkedUserIds.includes(alias.id)) continue;
-      const metadata = await getRawUserMetadata(alias.id, userContext);
+      const metadata = await readMetadata(alias.id);
       const retirement = metadata.rownd_migration_superseded;
       if (!isJsonRecord(retirement) || retirement.rowndUserId !== plan.sourceId ||
         retirement.targetUserId !== primaryUserId) continue;
@@ -429,6 +447,7 @@ export async function inspectLinkedUserMetadata(
         user),
     } as RowndMetadata,
     user,
+    mapping,
   };
 }
 
@@ -438,6 +457,60 @@ export async function getCombinedUserMetadata(
 ) {
   return (await inspectLinkedUserMetadata(userId, userContext))
     .combinedMetadata;
+}
+
+export async function inspectUserPresentationMetadata(
+  userId: string,
+  userContext?: Record<string, any>,
+  userSnapshot?: SuperTokensUser,
+  read: ProfileReader = (_kind, _key, load) => load(),
+): Promise<{ user?: SuperTokensUser; combinedMetadata: RowndMetadata }> {
+  if (getPluginConfig()?.metadataMode !== "canonical") {
+    return inspectLinkedUserMetadata(userId, userContext, userSnapshot, read);
+  }
+  const user = userSnapshot ?? await read("user", userId, () => SuperTokens.getUser(userId, userContext));
+  if (!user) return { user, combinedMetadata: {} };
+  const combinedMetadata = await read("metadata", user.id, () => getRawUserMetadata(user.id, userContext));
+  return { user, combinedMetadata };
+}
+
+// Offline publication preserves projection inputs, never migration or credential authority.
+export function getCanonicalPresentationMetadata(metadata: RowndMetadata): RowndMetadata {
+  const presentation = Object.fromEntries(Object.entries(metadata).filter(([key]) =>
+    !INTERNAL_METADATA_FIELDS.has(key) || [
+      "rownd_profile_authoritative_fields",
+      "rownd_email_metadata_version",
+      "rownd_email_recipe_user_id",
+      "rownd_email_recipe_user_ids",
+    ].includes(key))) as RowndMetadata;
+  const original = metadata.original_rownd_user;
+  if (original !== undefined) {
+    presentation.original_rownd_user = isJsonRecord(original)
+      ? Object.fromEntries(Object.entries(original).filter(([key]) =>
+        ["data", "state", "auth_level", "verified_data", "groups", "attributes"].includes(key))) as RowndUser
+      : original;
+  }
+  return presentation;
+}
+
+export async function updateUserPresentationMetadata(
+  userId: string,
+  metadataUpdate: JsonRecord,
+  userContext?: Record<string, any>,
+) {
+  if (getPluginConfig()?.metadataMode !== "canonical") {
+    return updatePrimaryUserMetadata(userId, metadataUpdate, userContext, true);
+  }
+  const user = await SuperTokens.getUser(userId, userContext);
+  if (!user) throw new RowndPluginError("ROWND_USER_NOT_FOUND");
+  const profileFields = Object.keys(metadataUpdate).filter((key) =>
+    !isInternalMetadataField(key) && !isIdentityField(key));
+  const updates = Object.fromEntries(Object.entries(metadataUpdate).filter(([key]) =>
+    key !== "rownd_profile_authoritative_fields" && !isCanonicalReservedMetadataKey(key)));
+  // Core merges top-level keys atomically: independent edits must not replace a shared authority array.
+  for (const field of profileFields) updates[`${ROWND_PROFILE_AUTHORITY_PREFIX}${field}`] = true;
+  const result = await UserMetadata.updateUserMetadata(user.id, updates as JSONObject, userContext);
+  return { primaryUserId: user.id, sdkUserId: user.id, metadata: result.metadata as RowndMetadata };
 }
 
 export async function updatePrimaryUserMetadata(
@@ -462,6 +535,9 @@ export async function updatePrimaryUserMetadata(
   } : {};
   const updates = { ...metadataUpdate };
   delete updates.rownd_profile_authoritative_fields;
+  if (profileUpdate) {
+    for (const key of Object.keys(updates)) if (isReservedMetadataField(key)) delete updates[key];
+  }
   const updatesEmailState = ["rownd_pending_verification", "rownd_email_recipe_user_ids", "rownd_email_recipe_user_id"]
     .some((key) => Object.prototype.hasOwnProperty.call(metadataUpdate, key));
   let pointerFallback: JsonRecord = {};
@@ -506,27 +582,35 @@ export function isIdentityField(field: string) {
 }
 
 export function isInternalMetadataField(field: string) {
-  return INTERNAL_METADATA_FIELDS.has(field);
+  return INTERNAL_METADATA_FIELDS.has(field) || isReservedMetadataField(field);
 }
 
 export function getAuthoritativeProfileFields(metadata: JsonRecord): string[] {
-  return getStringList(metadata.rownd_profile_authoritative_fields)
-    .filter((key) => !isInternalMetadataField(key) && !isIdentityField(key));
+  let fields = getStringList(metadata.rownd_profile_authoritative_fields);
+  if (getPluginConfig()?.metadataMode === "canonical") {
+    const markedFields = Object.entries(metadata).filter(([key, value]) =>
+      key.startsWith(ROWND_PROFILE_AUTHORITY_PREFIX) && value === true)
+      .map(([key]) => key.slice(ROWND_PROFILE_AUTHORITY_PREFIX.length));
+    fields = [...new Set([...fields, ...markedFields])];
+  }
+  return fields.filter((key) => !isInternalMetadataField(key) && !isIdentityField(key));
 }
 
 export function mergeMissingProfileMetadata(primary: JsonRecord, secondary: JsonRecord): JsonRecord {
   const authoritativeFields = new Set(getAuthoritativeProfileFields(primary));
   return mergeMissingValues(primary, Object.fromEntries(Object.entries(secondary).filter(([key]) =>
-    key !== "rownd_profile_authoritative_fields" && !authoritativeFields.has(key))));
+    key !== "rownd_profile_authoritative_fields" && !isReservedMetadataField(key) &&
+    !authoritativeFields.has(key))));
 }
 
 export function getRowndProfileData(metadata: RowndMetadata): JsonRecord {
   const data: JsonRecord = { ...metadata.original_rownd_user?.data };
+  const canonical = getPluginConfig()?.metadataMode === "canonical";
   // An absent authoritative value is a Core top-level deletion. Objects are
   // replaced whole, including nested nulls, rather than recursively merged.
   for (const key of getAuthoritativeProfileFields(metadata)) {
     if (!Object.prototype.hasOwnProperty.call(data, key)) continue;
-    if (metadata[key] === undefined) delete data[key];
+    if ((canonical && !Object.prototype.hasOwnProperty.call(metadata, key)) || metadata[key] === undefined) delete data[key];
     else data[key] = metadata[key];
   }
   return data;
@@ -877,11 +961,15 @@ export async function buildRowndOAuthUserInfo(input: {
   currentPayload?: JsonRecord;
   userContext?: Record<string, any>;
 }) {
-  const standardClaims = buildStandardOAuthClaims(
-    input.user,
-    input.scopes,
-    await getRowndMetadata(input.user, input.userContext),
-  );
+  const standardClaims = input.scopes.some(
+    (scope) => scope === "email" || scope === "phone" || scope === "profile",
+  )
+    ? buildStandardOAuthClaims(
+      input.user,
+      input.scopes,
+      await getRowndMetadata(input.user, input.userContext),
+    )
+    : {};
   const rowndClaims = pickOAuthUserInfoRowndClaims(input.accessTokenPayload);
 
   return {
@@ -891,7 +979,7 @@ export async function buildRowndOAuthUserInfo(input: {
   };
 }
 
-function buildStandardOAuthClaims(
+export function buildStandardOAuthClaims(
   user: SuperTokensUser,
   scopes: string[],
   metadata: RowndMetadata,
@@ -952,7 +1040,7 @@ async function getRowndMetadata(
   user: SuperTokensUser,
   userContext?: Record<string, any>,
 ): Promise<RowndMetadata> {
-  return (await inspectLinkedUserMetadata(user.id, userContext, user))
+  return (await inspectUserPresentationMetadata(user.id, userContext, user))
     .combinedMetadata;
 }
 
@@ -1677,6 +1765,10 @@ export function canUpdateUserDataField(
   field: string,
   pluginConfig: RowndPluginNormalisedConfig | undefined = getPluginConfig(),
 ) {
+  if (pluginConfig?.metadataMode === "canonical" &&
+      (INTERNAL_METADATA_FIELDS.has(field) || isCanonicalReservedMetadataKey(field))) {
+    return false;
+  }
   const schema = pluginConfig?.schema || DEFAULT_ROWND_SCHEMA;
   const schemaField = schema[field];
 
