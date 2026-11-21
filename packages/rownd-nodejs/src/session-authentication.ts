@@ -47,11 +47,30 @@ export async function sessionAuthenticationOrigin(user: User | undefined, recipe
       return "instant";
     }
   }
-  const recipe = await immutable(recipeUserId);
-  for (const method of user.loginMethods) {
-    if (await immutable(method.recipeUserId.getAsString()) !== recipe) continue;
+  const origin = (method: User["loginMethods"][number]) => {
     if (method.thirdParty?.id === "instant") return "instant";
     if (method.thirdParty?.id !== "guest") return "authenticated";
+  };
+  const exactIndex = user.loginMethods.findIndex((method) =>
+    method.thirdParty?.id !== "guest" && method.recipeUserId.getAsString() === recipeUserId);
+  const exactOrigin = exactIndex < 0 ? undefined : origin(user.loginMethods[exactIndex]!);
+  let end = exactIndex < 0 ? user.loginMethods.length : exactIndex;
+  // Forced mappings can make an earlier method match too. Check through the
+  // last method that could disagree with the exact match, in the original order.
+  if (exactOrigin) {
+    while (end > 0) {
+      const candidate = origin(user.loginMethods[end - 1]!);
+      if (candidate && candidate !== exactOrigin) break;
+      end--;
+    }
   }
-  return undefined;
+  let recipe: string | undefined;
+  for (let i = 0; i < end; i++) {
+    const method = user.loginMethods[i]!;
+    const candidate = origin(method);
+    if (!candidate) continue;
+    recipe ??= await immutable(recipeUserId);
+    if (await immutable(method.recipeUserId.getAsString()) === recipe) return candidate;
+  }
+  return exactOrigin;
 }

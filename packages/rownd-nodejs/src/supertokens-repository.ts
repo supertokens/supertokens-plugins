@@ -105,6 +105,7 @@ import {
   resolveAllowedClientDomain,
   rewriteMagicLink,
   createDerivedUserContext,
+  createUncachedUserContext,
   type JsonRecord,
 } from "./utils";
 
@@ -1266,6 +1267,7 @@ export async function recordRowndAppVariantForUser(
   appVariantId?: string,
   userContext?: JsonRecord,
   tenantId?: string,
+  options?: { userSnapshot?: SuperTokensUser },
 ) {
   if (!appVariantId) {
     return;
@@ -1280,17 +1282,23 @@ export async function recordRowndAppVariantForUser(
   const operationContext = userContext ?? {};
   const canonical = pluginConfig.metadataMode === "canonical";
   let metadataUserId: string;
+  let metadata: RowndMetadata;
   if (canonical) {
     clearSuperTokensCoreCallCache(operationContext);
-    const user = await SuperTokens.getUser(userId, operationContext);
+    const user = options?.userSnapshot ?? await SuperTokens.getUser(userId, operationContext);
     if (!user) throw new RowndPluginError("ROWND_USER_NOT_FOUND");
     metadataUserId = user.id;
+    metadata = await getRawUserMetadata(metadataUserId, operationContext);
   } else {
+    // Sign-in has usually warmed the cache for this inspection. Read the write
+    // source fresh without discarding it, unless the cached copy is now stale.
     const inspection = await inspectLinkedUserMetadata(userId, operationContext);
     metadataUserId = inspection.rowndMetadataSourceUserId ?? inspection.primaryUserId;
-    clearSuperTokensCoreCallCache(operationContext);
+    metadata = await getRawUserMetadata(metadataUserId, createUncachedUserContext(operationContext));
+    if (JSON.stringify(metadata) !== JSON.stringify(inspection.rowndMetadataSourceMetadata ?? inspection.primaryMetadata)) {
+      clearSuperTokensCoreCallCache(operationContext);
+    }
   }
-  const metadata = await getRawUserMetadata(metadataUserId, operationContext);
   const originalRowndUser: JsonRecord = isJsonRecord(
     metadata.original_rownd_user,
   )
@@ -1406,8 +1414,12 @@ export async function buildRowndSessionAndAnonymousClaims(
   userContext: UserContext,
   recipeUserId?: string,
   creating = false,
+  options?: { userSnapshot?: SuperTokensUser },
 ) {
-  const inspection = await inspectUserPresentationMetadata(userId, userContext);
+  const pluginConfig = getConfigForUserContext(userContext);
+  const inspection = await inspectUserPresentationMetadata(
+    userId, userContext, pluginConfig?.metadataMode === "canonical" ? options?.userSnapshot : undefined,
+  );
   const user = inspection.user;
   const rowndSessionClaims = buildRowndSessionClaimPayload({
     userId,
@@ -1415,7 +1427,7 @@ export async function buildRowndSessionAndAnonymousClaims(
     metadata: user ? inspection.combinedMetadata : undefined,
     currentPayload,
     appVariantId,
-    pluginConfig: getConfigForUserContext(userContext),
+    pluginConfig,
     authenticationOrigin: await sessionAuthenticationOrigin(user, recipeUserId, currentPayload, userContext, creating),
   });
   const isAnonymous = [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(
