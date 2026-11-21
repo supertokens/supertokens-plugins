@@ -1,10 +1,11 @@
 import express from "express";
 import { createServer, type Server } from "node:http";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { decodeJwt, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import SuperTokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
 import Passwordless from "supertokens-node/recipe/passwordless";
+import ThirdParty from "supertokens-node/recipe/thirdparty";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import EmailVerification from "supertokens-node/recipe/emailverification";
 import { middleware, errorHandler } from "supertokens-node/framework/express";
@@ -13,6 +14,7 @@ import { Querier } from "supertokens-node/lib/build/querier";
 import SuperTokensRaw from "supertokens-node/lib/build/supertokens";
 import SessionRaw from "supertokens-node/lib/build/recipe/session/recipe";
 import PasswordlessRaw from "supertokens-node/lib/build/recipe/passwordless/recipe";
+import ThirdPartyRaw from "supertokens-node/lib/build/recipe/thirdparty/recipe";
 import UserMetadataRaw from "supertokens-node/lib/build/recipe/usermetadata/recipe";
 import UserRolesRaw from "supertokens-node/lib/build/recipe/userroles/recipe";
 import AccountLinkingRaw from "supertokens-node/lib/build/recipe/accountlinking/recipe";
@@ -21,7 +23,7 @@ import MultitenancyRaw from "supertokens-node/lib/build/recipe/multitenancy/reci
 import { init } from "./plugin";
 import { updateUserMetadata } from "./supertokens-repository";
 import { buildConfiguredSessionClaims, getAuthoritativeProfileFields, getCanonicalPresentationMetadata,
-  ROWND_PROFILE_AUTHORITY_PREFIX, type RowndCompatUserResponse, type RowndMetadata } from "./rownd-compatibility";
+  ROWND_APP_VARIANTS_KEY, ROWND_PROFILE_AUTHORITY_PREFIX, type RowndCompatUserResponse, type RowndMetadata } from "./rownd-compatibility";
 import { getPluginConfig, setPluginConfig } from "./config";
 import type { JsonRecord } from "./utils";
 
@@ -42,6 +44,7 @@ function resetSDK() {
   ProcessState.getInstance().reset();
   SessionRaw.reset();
   PasswordlessRaw.reset();
+  ThirdPartyRaw.reset();
   UserMetadataRaw.reset();
   UserRolesRaw.reset();
   AccountLinkingRaw.reset();
@@ -81,8 +84,13 @@ describe("complete protected route Core budgets (installed SDK)", () => {
   let metadataFailure: boolean;
   let beforeMetadataWrite: (() => Promise<void>) | undefined;
   let sessionSelector: string | undefined;
+  let signInRecipe: "passwordless" | "thirdparty" | undefined;
   const internalId = "core-owner";
   const externalId = "rownd-owner";
+  const email = "owner@example.com";
+  const device = { email, preAuthSessionId: "budget-device", failedCodeInputAttemptCount: 0 };
+  const provider = { id: "rownd-offline", userId: "budget-provider-user" };
+  const loginCode = "budget-link-code";
   const sdkId = () => mapped ? externalId : internalId;
   const storedActivity = {
     last_sign_in: "2000-01-01T00:00:00.000Z",
@@ -112,8 +120,23 @@ describe("complete protected route Core budgets (installed SDK)", () => {
       },
       appInfo: { appName: "Core call budgets", apiDomain: appUrl, websiteDomain: "http://localhost:3000" },
       recipeList: [Session.init(), UserMetadata.init(), EmailVerification.init({ mode: "OPTIONAL" }),
-        Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" })],
-      experimental: { plugins: [init({ disableRowndUserMigration: true, ...(metadataMode ? { metadataMode } : {}) })] },
+        Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" }),
+        ...(signInRecipe === "thirdparty" ? [ThirdParty.init({ signInAndUpFeature: { providers: [{
+          config: {
+            thirdPartyId: provider.id, clients: [{ clientId: "disposable-only" }],
+            authorizationEndpoint: "https://provider.invalid/authorize", tokenEndpoint: "https://provider.invalid/token",
+            userInfoEndpoint: "https://provider.invalid/userinfo",
+          },
+          override: (original) => original.type === "oauth2" ? {
+            ...original,
+            getUserInfo: async () => ({ thirdPartyUserId: provider.userId,
+              email: { id: email, isVerified: true }, rawUserInfoFromProvider: {} }),
+          } : original,
+        }] } })] : [])],
+      experimental: { plugins: [init({
+        disableRowndUserMigration: true, metadataMode,
+        subBrands: { existing: { variant: { id: "existing" } }, added: { variant: { id: "added" } } },
+      })] },
     });
   }
 
@@ -124,6 +147,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     metadataFailure = false;
     beforeMetadataWrite = undefined;
     sessionSelector = undefined;
+    signInRecipe = undefined;
     attempts = [];
     unexpected = [];
     metadata = new Map([
@@ -144,6 +168,22 @@ describe("complete protected route Core budgets (installed SDK)", () => {
         res.statusCode = 500;
         reply({ message: "Unexpected fake Core request" });
       };
+      // Core serializes the mapped recipe ID during sign-in, including session creation.
+      const recipeUserId = signInRecipe ? sdkId() : internalId;
+      const thirdParty = signInRecipe === "thirdparty" ? provider : undefined;
+      const user = {
+        id: sdkId(), isPrimaryUser: false, timeJoined: 1000, tenantIds: ["public"],
+        emails: [email], phoneNumbers: [], thirdParty: thirdParty ? [thirdParty] : [],
+        loginMethods: [{ recipeUserId, recipeId: signInRecipe ?? "passwordless", email, thirdParty,
+          verified: true, timeJoined: 1000, tenantIds: ["public"] }],
+      };
+      const session = (userDataInJWT: Json) => ({
+        handle: "budget-session", userId: sessionSelector ?? sdkId(), recipeUserId, tenantId: "public", userDataInJWT,
+      });
+      const token = async (payload: Json) => ({
+        token: await signToken(payload, recipeUserId),
+        createdTime: Date.now(), expiry: Date.now() + 3_600_000,
+      });
       switch (`${attempt.method} ${url.pathname}`) {
         case "GET /apiversion":
           return reply({ versions: ["5.4"] });
@@ -152,18 +192,50 @@ describe("complete protected route Core budgets (installed SDK)", () => {
         case "POST /recipe/session/verify":
           if (body.checkDatabase !== true || typeof body.accessToken !== "string") return reject();
           return reply(revoked ? { status: "UNAUTHORISED", message: "Session revoked" } : {
-            status: "OK",
-            session: { handle: "budget-session", userId: sessionSelector ?? sdkId(), recipeUserId: internalId,
-              tenantId: "public", userDataInJWT: {} },
+            status: "OK", session: session({}),
           });
+        case "POST /public/recipe/session": {
+          if (!signInRecipe || body.userId !== recipeUserId) return reject();
+          const payload = body.userDataInJWT as Json;
+          return reply({ status: "OK", session: session(payload), accessToken: await token(payload),
+            refreshToken: { token: "budget-refresh", createdTime: Date.now(), expiry: Date.now() + 3_600_000 } });
+        }
+        case "POST /recipe/session/regenerate": {
+          if (!signInRecipe || typeof body.accessToken !== "string") return reject();
+          const payload = body.userDataInJWT as Json;
+          return reply({ status: "OK", session: session(payload), accessToken: await token(payload) });
+        }
         case "GET /user/id":
           if (![internalId, sdkId()].includes(url.searchParams.get("userId")!)) return reject();
-          return reply({ status: "OK", user: {
-            id: sdkId(), isPrimaryUser: false, timeJoined: 1000, tenantIds: ["public"],
-            emails: ["owner@example.com"], phoneNumbers: [], thirdParty: [],
-            loginMethods: [{ recipeUserId: internalId, recipeId: "passwordless", email: "owner@example.com",
-              verified: true, timeJoined: 1000, tenantIds: ["public"] }],
-          } });
+          return reply({ status: "OK", user });
+        case "GET /public/users/by-accountinfo": {
+          if (!signInRecipe) return reject();
+          const emailMatches = url.searchParams.has("email") ? url.searchParams.get("email") === email : undefined;
+          const providerMatches = url.searchParams.has("thirdPartyId")
+            ? url.searchParams.get("thirdPartyId") === thirdParty?.id &&
+              url.searchParams.get("thirdPartyUserId") === thirdParty?.userId
+            : undefined;
+          const filters = [emailMatches, providerMatches].filter((match) => match !== undefined);
+          const matches = url.searchParams.get("doUnionOfAccountInfo") === "true" ? filters.some(Boolean) : filters.every(Boolean);
+          return reply({ status: "OK", users: matches ? [user] : [] });
+        }
+        case "GET /public/recipe/multitenancy/tenant/v2":
+          if (!signInRecipe) return reject();
+          return reply({ status: "OK", tenantId: "public", thirdParty: { providers: [] } });
+        case "GET /public/recipe/signinup/codes":
+          if (signInRecipe !== "passwordless" || url.searchParams.get("preAuthSessionId") !== device.preAuthSessionId) return reject();
+          return reply({ status: "OK", devices: [{ ...device, codes: [
+            { codeId: "budget-code", timeCreated: String(Date.now()), codeLifetime: 900_000 },
+          ] }] });
+        case "GET /recipe/user/email/verify":
+          if (!signInRecipe || url.searchParams.get("email") !== email) return reject();
+          return reply({ status: "OK", isVerified: true });
+        case "POST /public/recipe/signinup/code/consume":
+          if (signInRecipe !== "passwordless" || body.linkCode !== loginCode || body.preAuthSessionId !== device.preAuthSessionId) return reject();
+          return reply({ status: "OK", createdNewUser: false, user, recipeUserId, consumedDevice: device });
+        case "POST /public/recipe/signinup":
+          if (!thirdParty || body.thirdPartyId !== thirdParty.id || body.thirdPartyUserId !== thirdParty.userId) return reject();
+          return reply({ status: "OK", createdNewUser: false, user, recipeUserId });
         case "GET /recipe/userid/map": {
           const id = url.searchParams.get("userId");
           const type = url.searchParams.get("userIdType");
@@ -183,7 +255,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
           return reply({ status: "OK", metadata: metadata.get(id) ?? {} });
         }
         case "PUT /recipe/user/metadata": {
-          if (body.userId !== (getPluginConfig()?.metadataMode === "canonical" ? sdkId() : internalId) ||
+          if (body.userId !== (getPluginConfig()?.metadataMode === "canonical" || signInRecipe ? sdkId() : internalId) ||
             typeof body.metadataUpdate !== "object" || !body.metadataUpdate) return reject();
           await beforeMetadataWrite?.();
           const next = { ...metadata.get(body.userId as string) };
@@ -239,6 +311,15 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     return attempts.filter(({ path }) => path !== "/apiversion" && path !== "/.well-known/jwks.json");
   }
 
+  function countCoreCalls(calls = steady()) {
+    const counts: Record<string, number> = {};
+    for (const { method, path } of calls) {
+      const key = `${method} ${path}`;
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+    return counts;
+  }
+
   function bootstrap() {
     return {
       cdi: attempts.filter(({ path }) => path === "/apiversion").length,
@@ -246,11 +327,15 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     };
   }
 
-  async function request(path: string, body?: Json, signingKey = keys.privateKey) {
-    const token = await new SignJWT({ sessionHandle: "budget-session", refreshTokenHash1: "hash",
-      rsub: internalId, tId: "public", stt: 0 })
+  function signToken(payload: Json, recipeId = internalId, signingKey = keys.privateKey) {
+    return new SignJWT({ ...payload, sessionHandle: "budget-session", refreshTokenHash1: "hash",
+      rsub: recipeId, tId: "public", stt: 0 })
       .setProtectedHeader({ alg: "RS256", typ: "JWT", kid: "d-budget-test", version: "5" })
       .setSubject(sessionSelector ?? sdkId()).setIssuedAt().setExpirationTime("1h").sign(signingKey);
+  }
+
+  async function request(path: string, body?: Json, signingKey = keys.privateKey) {
+    const token = await signToken({}, internalId, signingKey);
     return fetch(`${appUrl}/auth/plugin/rownd/${path}`, {
       method: body === undefined ? "GET" : "PUT",
       headers: { Authorization: `Bearer ${token}`, rid: "session", "fdi-version": "1.18",
@@ -296,6 +381,94 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     expect(Object.keys(record).some((key) => key.startsWith(ROWND_PROFILE_AUTHORITY_PREFIX) ||
       key === "rownd_profile_authoritative_fields")).toBe(false);
   }
+
+  it.each([
+    { mode: "compatibility", recipe: "passwordless", variant: "existing", userReads: 2, mappings: 6, metadataReads: 7 },
+    { mode: "compatibility", recipe: "passwordless", variant: "added", userReads: 3, mappings: 8, metadataReads: 9 },
+    { mode: "compatibility", recipe: "thirdparty", variant: "existing", userReads: 2, mappings: 4, metadataReads: 5 },
+    { mode: "compatibility", recipe: "thirdparty", variant: "added", userReads: 3, mappings: 6, metadataReads: 7 },
+    { mode: "canonical", recipe: "passwordless", variant: "existing", userReads: 2, mappings: 4, metadataReads: 6 },
+    { mode: "canonical", recipe: "passwordless", variant: "added", userReads: 2, mappings: 4, metadataReads: 7 },
+    { mode: "canonical", recipe: "thirdparty", variant: "existing", userReads: 1, mappings: 0, metadataReads: 2 },
+    { mode: "canonical", recipe: "thirdparty", variant: "added", userReads: 1, mappings: 0, metadataReads: 3 },
+  ] as const)("budgets $recipe sign-in with $variant variant in $mode mode", async ({ mode, recipe, variant, userReads, mappings, metadataReads }) => {
+    mapped = true;
+    signInRecipe = recipe;
+    initSDK(false, mode);
+    metadata.set(sdkId(), { original_rownd_user: {
+      data: { user_id: sdkId(), first_name: "Stored" },
+      verified_data: { email },
+      attributes: { "rownd:app_variants": ["existing"], other: "retained" },
+    } });
+    const passwordless = recipe === "passwordless";
+    const canonical = mode === "canonical";
+    const write = variant === "added";
+    const path = passwordless ? "signinup/code/consume" : "signinup";
+    const authPath = `/public/recipe/${path}`;
+    const body = passwordless
+      ? { preAuthSessionId: device.preAuthSessionId, linkCode: loginCode }
+      : { thirdPartyId: provider.id, oAuthTokens: { thirdPartyUserId: provider.userId, email } };
+    const response = await fetch(`${appUrl}/auth/${path}?app_variant_id=${variant}`, {
+      method: "POST",
+      headers: { rid: recipe, "fdi-version": "1.18", "st-auth-mode": "header", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect({ status: response.status, body: await response.json() }).toMatchObject({
+      status: 200, body: { status: "OK", createdNewRecipeUser: false, user: { id: sdkId() } },
+    });
+    const accessToken = response.headers.get("st-access-token");
+    expect(accessToken).not.toBeNull();
+    expect(decodeJwt(accessToken!)).toMatchObject({ rownd_session_authentication: "authenticated", auth_level: "verified" });
+    const calls = steady();
+    const authIndex = calls.findIndex(({ path }) => path === authPath);
+    const createIndex = calls.findIndex(({ path }) => path === "/public/recipe/session");
+    expect(createIndex).toBeGreaterThan(authIndex);
+    expect(calls[createIndex]?.body).toMatchObject({
+      userDataInJWT: { rownd_session_authentication: "authenticated" },
+    });
+    expect(calls.slice(authIndex + 1, createIndex).filter(({ path }) => path === "/recipe/userid/map")
+      .map(({ params }) => params.get("userIdType"))).toEqual(canonical ? [] : ["SUPERTOKENS", "EXTERNAL"]);
+    const variants = write ? ["existing", "added"] : ["existing"];
+    expect(metadata.get(sdkId())).toMatchObject({ original_rownd_user: { attributes: {
+      "rownd:app_variants": canonical ? ["existing"] : variants, other: "retained",
+    } } });
+    expect(metadata.get(sdkId())?.[ROWND_APP_VARIANTS_KEY])
+      .toEqual(canonical && write ? { public: variants } : undefined);
+
+    expect(countCoreCalls(calls)).toEqual({
+      "GET /public/recipe/multitenancy/tenant/v2": 1,
+      "GET /public/users/by-accountinfo": passwordless ? 2 : canonical ? 4 : 5,
+      "GET /recipe/user/email/verify": 1,
+      "GET /user/id": userReads,
+      "GET /recipe/user/metadata": metadataReads,
+      ...(mappings ? { "GET /recipe/userid/map": mappings } : {}),
+      "POST /public/recipe/session": 1,
+      "POST /recipe/session/regenerate": 1,
+      [`POST ${authPath}`]: 1,
+      ...(passwordless ? { "GET /public/recipe/signinup/codes": 1 } : {}),
+      ...(write ? { "PUT /recipe/user/metadata": 1 } : {}),
+    });
+  });
+
+  it.each(["compatibility", "canonical"] as const)("budgets matching expected-owner profile PUT in %s mode", async (mode) => {
+    mapped = true;
+    initSDK(false, mode);
+    const response = await request("user", {
+      data: { first_name: "Edited" },
+      context: { rowndExpectedUserId: internalId, rowndExpectedTenantId: "public" },
+    });
+    expect({ status: response.status, body: await profileJson(response) }).toMatchObject({
+      status: 200, body: { status: "OK", data: { user_id: sdkId(), first_name: "Edited" } },
+    });
+    expect(steady().slice(0, 3).map(({ path }) => path)).toEqual(["/recipe/session/verify", "/user/id", "/user/id"]);
+    expect(countCoreCalls()).toEqual({
+      "POST /recipe/session/verify": 1,
+      "GET /user/id": 3,
+      "GET /recipe/user/metadata": mode === "canonical" ? 1 : 3,
+      ...(mode === "compatibility" ? { "GET /recipe/userid/map": 4 } : {}),
+      "PUT /recipe/user/metadata": 1,
+    });
+  });
 
   it.each(readCases)("uses exactly three real Core attempts for canonical GET $path (mapped=$isMapped)", async ({ isMapped, path }) => {
     mapped = isMapped;

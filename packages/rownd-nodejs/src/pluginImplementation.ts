@@ -38,7 +38,6 @@ import {
 import {
   buildRowndAudience,
   canUpdateUserDataField,
-  getInternalPrimaryUserId,
   inspectUserPresentationMetadata,
   isInternalMetadataField,
 } from "./rownd-compatibility";
@@ -247,6 +246,7 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
         appVariantId,
         resolved.userContext,
         tenantId,
+        { userSnapshot: response.user },
       );
 
       await Session.createNewSession(
@@ -454,6 +454,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
           appVariantId,
           resolved.userContext,
           tenantId,
+          { userSnapshot: user },
         );
       }
 
@@ -1159,13 +1160,24 @@ async function validateExpectedProfileOwner(
   const tenantMismatch = (requestedTenant !== undefined && requestedTenant !== tenant) ||
     (expectedTenant !== undefined && (typeof expectedTenant !== "string" || !expectedTenant || expectedTenant !== tenant));
   if (expected === undefined && expectedTenant === undefined && !tenantMismatch) return;
-  const owner = await getInternalPrimaryUserId(session.getUserId(userContext), userContext);
-  const expectedOwner = typeof expected === "string" && expected.length > 0
-    ? await getInternalPrimaryUserId(expected, userContext) : undefined;
-  if (tenantMismatch || !owner || owner !== expectedOwner) {
-    return { status: "ERROR" as const, code: 409, error_code: "EMAIL_CHANGE_ACCOUNT_MISMATCH",
-      message: "Sign in to the account where you started this change." };
+  const sessionUserId = session.getUserId(userContext);
+  const owner = (await SuperTokens.getUser(sessionUserId, userContext))?.id;
+  if (!tenantMismatch && owner && typeof expected === "string" && expected.length > 0) {
+    const expectedOwner = expected === sessionUserId ? owner : (await SuperTokens.getUser(expected, userContext))?.id;
+    if (owner === expectedOwner) return;
+    if (expectedOwner) {
+      // Forced aliases can also be internal IDs. For differing IDs preserve
+      // the legacy normalization, which gives SUPERTOKENS mappings priority.
+      const normalize = async (userId: string) => {
+        if ((await SuperTokens.getUserIdMapping({ userId, userIdType: "SUPERTOKENS", userContext })).status === "OK") return userId;
+        const external = await SuperTokens.getUserIdMapping({ userId, userIdType: "EXTERNAL", userContext });
+        return external.status === "OK" ? external.superTokensUserId : userId;
+      };
+      if (await normalize(owner) === await normalize(expectedOwner)) return;
+    }
   }
+  return { status: "ERROR" as const, code: 409, error_code: "EMAIL_CHANGE_ACCOUNT_MISMATCH",
+    message: "Sign in to the account where you started this change." };
 }
 
 function recentAuthenticationRequiredResponse() {
