@@ -799,8 +799,10 @@ describe("complete protected route Core budgets (installed SDK)", () => {
       expect(publicMeta.id).toBe(sdkId());
       expectPrivateAuthority(publicMeta.meta);
       expect(publicMeta.meta).not.toHaveProperty("first_name");
-      // Parallel cold SDK calls negotiate CDI separately; neither is a steady-state attempt.
-      expect(bootstrap()).toEqual({ cdi: 2, signingKeys: 1 });
+      // The second request may reuse the CDI version cached by the first.
+      const { cdi, signingKeys } = bootstrap();
+      expect([1, 2]).toContain(cdi);
+      expect(signingKeys).toBe(1);
     },
   );
 
