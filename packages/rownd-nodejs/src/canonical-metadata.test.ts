@@ -60,16 +60,19 @@ describe("static presentation metadata configuration", () => {
     expect(getPluginConfig()?.metadataMode).toBe("compatibility");
   });
 
-  it.each(["canonical", "compatibility"] as const)("normalizes explicit %s mode", (mode) => {
+  it.each(["canonical", "dual-write", "compatibility"] as const)("normalizes explicit %s mode", (mode) => {
     configure(mode);
     expect(getPluginConfig()?.metadataMode).toBe(mode);
   });
 
-  it.each([undefined, false])("rejects canonical mode with credentials unless migration is explicitly disabled: %j", (disableRowndUserMigration) => {
-    expect(() => init({ metadataMode: "canonical", disableRowndUserMigration,
-      rowndAppKey: "key", rowndAppSecret: "secret", rowndAppId: "app",
-    })).toThrow("canonical metadata mode requires Rownd user migration to be disabled");
-  });
+  it.each((["canonical", "dual-write"] as const).flatMap((metadataMode) =>
+    [undefined, false].map((disableRowndUserMigration) => ({ metadataMode, disableRowndUserMigration }))))(
+    "rejects $metadataMode mode with credentials unless migration is explicitly disabled: $disableRowndUserMigration",
+    ({ metadataMode, disableRowndUserMigration }) => {
+      expect(() => init({ metadataMode, disableRowndUserMigration,
+        rowndAppKey: "key", rowndAppSecret: "secret", rowndAppId: "app",
+      })).toThrow(`${metadataMode} metadata mode requires Rownd user migration to be disabled`);
+    });
 
   it("accepts canonical mode with credentials when migration is explicitly disabled", () => {
     init({ metadataMode: "canonical", disableRowndUserMigration: true,
@@ -85,7 +88,7 @@ describe("static presentation metadata configuration", () => {
 
   it.each(["auto", "", null, true, 1, {}])("rejects invalid mode %j", (mode) => {
     expect(() => configure(mode as RowndPluginConfig["metadataMode"]))
-      .toThrow("metadataMode must be compatibility or canonical");
+      .toThrow("metadataMode must be compatibility, dual-write or canonical");
   });
 
   it("does not permit dynamic config to change the static mode", async () => {
