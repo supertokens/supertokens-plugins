@@ -21,11 +21,15 @@ export class RowndLegacyUserNotFoundError extends Error {
   }
 }
 
+// Shared with the Rownd Hub, which matches on it instead of the message text.
+export type RowndEmailChangeErrorCode = "EMAIL_CHANGE_EMAIL_UNAVAILABLE";
+
 export class RowndEmailChangeError extends Error {
   constructor(
     public readonly code: "CONFLICT" | "AMBIGUOUS" | "INVALID_EMAIL",
     public readonly httpStatus: number,
     message: string,
+    public readonly errorCode?: RowndEmailChangeErrorCode,
   ) {
     super(message);
   }
