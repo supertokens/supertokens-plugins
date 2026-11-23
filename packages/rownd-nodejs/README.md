@@ -186,9 +186,11 @@ compatibility reads. Every plugin write that can change the compatibility
 presentation is also applied to the SDK-visible `user.id` record when that
 record differs from the one written. That covers profile, field and metadata
 PUTs, app-variant recording on sign-in and guest login, and email change,
-verification and pending-email writes. Unmapped owners are written in place, so
-they need no extra Core call. Mapped owners need one extra metadata PUT per
-write that changes their presentation.
+verification and pending-email writes. When the compatibility write targets
+the SDK record, no second PUT is needed for those keys. An unmapped owner can
+still need a mirror PUT when its Rownd app variants are written to a linked
+recipe record. Mapped owners can need a mirror PUT even when only the profile
+authority list is stale.
 
 The mirrored record uses the same shape as the offline publication: profile
 values, `rownd_profile_authoritative_fields`, email selectors and the
@@ -196,15 +198,16 @@ presentation parts of `original_rownd_user` (`data`, `state`, `auth_level`,
 `verified_data`, `groups`, `attributes`). App variants stay in
 `original_rownd_user.attributes`. Pending verification, migration state and the
 canonical-only `rownd_profile_authority:*` / `rownd_app_variants` keys are never
-mirrored. If an owner's canonical presentation already equals its compatibility
-presentation, it stays equal after every plugin write.
+mirrored. Successful, non-concurrent plugin writes keep published presentations
+in sync.
 
 Like canonical mode, dual-write requires `disableRowndUserMigration: true`.
 Migration, repair and consolidation write many alias records that are not
 mirrored, and newly migrated owners would not have been published. Dual-write
-also rejects profile writes of internal or canonical-reserved fields, so no
-owner becomes unpublishable during the transition. It keeps compatibility
-account linking.
+also rejects profile, field and meta writes to internal or canonical-reserved
+fields, and rejects null values for identity keys such as `google_id`.
+Otherwise compatibility could fall back to a linked value after deletion
+while canonical could not. Account linking stays in compatibility mode.
 
 Recommended procedure:
 
@@ -212,21 +215,25 @@ Recommended procedure:
 2. Publish every owner: write the canonical presentation of its compatibility
    view (`getCanonicalPresentationMetadata`) to its SDK-visible `user.id`. Remove
    presentation keys that are absent from that projection.
-3. Verify that every owner's compatibility and canonical presentations match
-   (profile per tenant, configured session claims, OAuth claims and email
-   selection). Republish any owner that differs.
+3. Pause and drain writers. Verify every owner's compatibility and canonical
+   presentations match (profile per tenant, configured session claims, OAuth
+   claims and email selection). Republish any owner that differs.
 4. Switch to `metadataMode: "canonical"`.
 
-Mirrors run after the compatibility write and have no compare-and-set. A failed
-mirror fails the request but never changes what compatibility reads. Replaying
-the request repairs it: app-variant recording repairs the SDK record on the
-next sign-in, even when the variant is already present. So does the next write
-to the same keys, or step 3. Concurrent profile edits to different fields never
-lose each other's values. Their mirrored authority list can be stale until the
-owner's next profile edit or republication. The same race already exists on the
-compatibility record. Writes outside the plugin, administrative reconciliation
-and account-linking changes are not mirrored. Republish affected owners before
-step 4.
+There is no compare-and-set. Concurrent writes can leave the SDK record stale,
+even if a value flips back to its previous value: a mirror can skip a key
+based on a pre-write read while another writer is changing it. A later write
+can repair drift, including a stale authority list. Run the final verify and
+republish step after draining writers, immediately before switching to canonical.
+
+If a mirror fails after a compatibility write, the request fails, but the
+compatibility write remains committed. Sign-in retries app-variant mirroring
+only when an app-variant ID is configured for that sign-in, even if the variant
+is already recorded. A replay-only failure is logged without failing sign-in.
+Otherwise a failed mirror is repaired only by a later write to the same keys
+or by step 3. Writes outside the plugin, administrative reconciliation, and
+account-linking changes are not mirrored; republish affected owners before
+switching.
 
 You can roll back from dual-write to compatibility at any time. Mirrored
 records hold only values that the compatibility view already presents. After

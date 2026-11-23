@@ -1328,8 +1328,12 @@ export async function recordRowndAppVariantForUser(
   const appVariants = getStringList(hasOwn(overlay, scope) ? overlay[scope] : legacyVariants);
 
   if (appVariants.includes(appVariantId)) {
-    // Replays a mirror that failed after its compatibility write; equal records need no PUT.
-    await mirrorAppVariantWrite(inspection, metadataUserId, originalRowndUser, operationContext);
+    // A repair-only failure must not block a sign-in that had nothing to write.
+    try {
+      await mirrorAppVariantWrite(inspection, metadataUserId, metadata, operationContext);
+    } catch {
+      logDebugMessage("Rownd app variant mirror replay failed");
+    }
     return;
   }
   const updatedVariants = [...appVariants, appVariantId];
@@ -1363,12 +1367,12 @@ export async function recordRowndAppVariantForUser(
           }),
       },
     };
-    await UserMetadata.updateUserMetadata(
+    const result = await UserMetadata.updateUserMetadata(
       metadataUserId,
       { original_rownd_user: updatedOriginalRowndUser },
       operationContext,
     );
-    await mirrorAppVariantWrite(inspection, metadataUserId, updatedOriginalRowndUser, operationContext);
+    await mirrorAppVariantWrite(inspection, metadataUserId, result.metadata as RowndMetadata, operationContext);
   }
   migrationTelemetry(operationContext)?.emit(
     "transition",
@@ -1379,18 +1383,22 @@ export async function recordRowndAppVariantForUser(
 async function mirrorAppVariantWrite(
   inspection: Awaited<ReturnType<typeof inspectLinkedUserMetadata>> | undefined,
   writtenUserId: string,
-  originalRowndUser: JsonRecord,
+  writtenMetadata: RowndMetadata,
   userContext: JsonRecord,
 ) {
   const sdkUserId = inspection?.user?.id;
-  if (!inspection || !sdkUserId || !isJsonRecord(originalRowndUser.data)) return;
+  if (!inspection || !sdkUserId) return;
+  const originalRowndUser = writtenMetadata.original_rownd_user;
   await mirrorCompatibilityPresentationWrite({
     sdkUserId,
+    primaryUserId: inspection.primaryUserId,
+    primaryMetadata: writtenUserId === inspection.primaryUserId ? writtenMetadata : inspection.primaryMetadata,
     writtenUserId,
-    originalRowndUser,
+    originalRowndUser: isJsonRecord(originalRowndUser?.data) ? originalRowndUser : undefined,
     // The inspection already read the SDK record, so equal mirrors cost no Core call.
-    sdkMetadata: inspection.linkedMetadata.find(({ userId }) => userId === sdkUserId)?.metadata ??
-      (inspection.primaryUserId === sdkUserId ? inspection.primaryMetadata : undefined),
+    sdkMetadata: sdkUserId === writtenUserId ? writtenMetadata
+      : sdkUserId === inspection.primaryUserId ? inspection.primaryMetadata
+        : inspection.linkedMetadata.find(({ userId }) => userId === sdkUserId)?.metadata,
     userContext,
   });
 }

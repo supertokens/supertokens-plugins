@@ -6,6 +6,7 @@ import UserMetadata from "supertokens-node/recipe/usermetadata";
 import { resolveCanonicalEmailForTenant } from "./canonical-email";
 import { getPluginConfig, setPluginConfig } from "./config";
 import { init } from "./plugin";
+import { handleUpdateUser, handleUpdateUserField, handleUpdateUserMeta } from "./pluginImplementation";
 import {
   buildConfiguredSessionClaims,
   buildRowndOAuthPayload,
@@ -303,6 +304,25 @@ describe("dual-write metadata transition mode", () => {
     expect(puts.map(({ id }) => id)).toEqual([internalId, internalId, internalId]);
   });
 
+  it("mirrors variants written to an unmapped owner's linked recipe with no extra read", async () => {
+    const entry: Fixture = { mapped: false, linked: true, source: "recipe" };
+    install(entry);
+    configure("compatibility");
+    await recordRowndAppVariantForUser(internalId, "green", {}, "public");
+    const reads = vi.mocked(UserMetadata.getUserMetadata).mock.calls.map(([id]) => id);
+    const compatibility = await projections("compatibility");
+
+    install(entry);
+    puts = [];
+    vi.mocked(UserMetadata.getUserMetadata).mockClear();
+    configure("dual-write");
+    await recordRowndAppVariantForUser(internalId, "green", {}, "public");
+    expect(vi.mocked(UserMetadata.getUserMetadata).mock.calls.map(([id]) => id)).toEqual(reads);
+    expect(puts.map(({ id }) => id)).toEqual(["linked-recipe", internalId]);
+    expect(await projections("compatibility")).toEqual(compatibility);
+    expect((await projections("canonical")).profiles[0]?.attributes?.["rownd:app_variants"]).toEqual(["blue", "green"]);
+  });
+
   it("mirrors email selector state without operational pending state", async () => {
     install({ mapped: true, linked: true, source: "internal" });
     await publish();
@@ -329,15 +349,17 @@ describe("dual-write metadata transition mode", () => {
   });
 
   describe("concurrent different-field profile edits", () => {
-    // Each order is [compatibility A, compatibility B, mirror A, mirror B] permuted.
-    const orders = [
-      ["A:internal", "A:sdk", "B:internal", "B:sdk"],
-      ["A:internal", "B:internal", "A:sdk", "B:sdk"],
-      ["A:internal", "B:internal", "B:sdk", "A:sdk"],
+    const reversedMirrors = ["A:internal", "B:internal", "B:sdk", "A:sdk"];
+    const scenarios = [
+      { order: ["A:internal", "A:sdk", "B:internal", "B:sdk"], repair: "none" },
+      { order: ["A:internal", "B:internal", "A:sdk", "B:sdk"], repair: "none" },
+      { order: reversedMirrors, repair: "new variant then pending cleanup" },
+      { order: reversedMirrors, repair: "existing variant then pending cleanup" },
+      { order: reversedMirrors, repair: "pending cleanup alone" },
     ];
 
-    it.each(orders.flatMap((order) => [false, true].map((linked) => ({ order, linked }))))(
-      "converges for $order (linked=$linked)", async ({ order, linked }) => {
+    it.each(scenarios.flatMap((scenario) => [false, true].map((linked) => ({ ...scenario, linked }))))(
+      "converges for $order with $repair (linked=$linked)", async ({ order, repair, linked }) => {
         install({ mapped: true, linked, source: "internal" });
         await publish();
         configure("dual-write");
@@ -360,24 +382,72 @@ describe("dual-write metadata transition mode", () => {
           setImmediate(step);
         };
         await Promise.all([
-          updateUserPresentationMetadata(externalId, { first_name: null }),
-          updateUserPresentationMetadata(externalId, { last_name: "Concurrent" }),
+          updateUserPresentationMetadata(externalId, { first_name: "A" }),
+          updateUserPresentationMetadata(externalId, { last_name: "B" }),
         ]);
         beforePut = undefined;
         expect(next).toBe(4);
-        expect(store.get(externalId)?.first_name).toBeUndefined();
-        expect(store.get(externalId)?.last_name).toBe("Concurrent");
-        if (order[order.length - 1] === "A:sdk") {
-          // The shared authority array has no CAS: when mirrors land in the opposite order to
-          // their compatibility writes, the SDK record can keep a stale array until the next
-          // profile write republishes it.
+        expect(store.get(externalId)).toMatchObject({ first_name: "A", last_name: "B" });
+        if (repair !== "none") {
+          const expectedClaims = { first_name: "Original first", last_name: "B" };
+          expect((await projections("compatibility")).configuredClaims).toMatchObject(expectedClaims);
+          let afterVariant;
+          if (repair.includes("variant")) {
+            configure("dual-write");
+            await recordRowndAppVariantForUser(externalId, repair.startsWith("new") ? "green" : "blue", {}, "public");
+            afterVariant = (await projections("canonical")).configuredClaims;
+          }
           configure("dual-write");
-          await updateUserPresentationMetadata(externalId, { custom: { later: true } });
+          await updatePrimaryUserMetadata(externalId, { rownd_pending_verification: [] });
+          expect((await projections("canonical")).configuredClaims).toMatchObject(expectedClaims);
+          if (afterVariant) expect(afterVariant).toMatchObject(expectedClaims);
         }
         await expectEqualPresentation();
       },
     );
   });
+
+  it("repairs stale authority when the app variant is already on the SDK record", async () => {
+    install({ mapped: true, linked: false, source: "alias" });
+    await publish();
+    store.set(externalId, { ...store.get(externalId), rownd_profile_authoritative_fields: ["first_name"] });
+    configure("dual-write");
+    await recordRowndAppVariantForUser(externalId, "blue", {}, "public");
+    expect(puts).toEqual([{ id: externalId, patch: { rownd_profile_authoritative_fields: ["deleted"] } }]);
+    await expectEqualPresentation();
+  });
+
+  it.each([false, true].flatMap((mapped) => (["meta", "profile", "field"] as const).map((route) => ({ mapped, route }))))(
+    "rejects null identity keys in $route PUT without losing linked fallback (mapped=$mapped)", async ({ mapped, route }) => {
+      install({ mapped, linked: true, source: "internal" });
+      const field = route === "meta" ? "google_id" : "phone_number";
+      const linkedValue = route === "meta" ? "g-linked" : "+15550000000";
+      store.set("linked-recipe", { [field]: linkedValue });
+      await publish();
+      configure("dual-write");
+      const deps: Parameters<typeof handleUpdateUser>[0] = {
+        pluginConfig: getPluginConfig()!,
+        stConfig: {} as Parameters<typeof handleUpdateUser>[0]["stConfig"],
+        telemetryClient: { recordEvent: vi.fn(), recordSuccess: vi.fn(), recordError: vi.fn() },
+      };
+      const handler = route === "meta" ? handleUpdateUserMeta()
+        : route === "profile" ? handleUpdateUser(deps) : handleUpdateUserField(deps);
+      const patch = { [field]: null };
+      const body = route === "meta" ? { meta: patch } : route === "profile" ? { data: patch } : { value: null };
+      const result = await handler({
+        getJSONBody: async () => body,
+        getKeyValueFromQuery: (key: string) => key === "field" ? field : undefined,
+      } as Parameters<typeof handler>[0], {} as Parameters<typeof handler>[1], {
+        getUserId: () => user.id,
+        getTenantId: () => "public",
+      } as Parameters<typeof handler>[2], {});
+      expect(result).toEqual({ status: "ERROR", code: 403, message: `field is not writable: ${field}` });
+      expect(puts).toEqual([]);
+      expect((await inspectUserPresentationMetadata(user.id)).combinedMetadata[field]).toBe(linkedValue);
+      configure("canonical");
+      expect((await inspectUserPresentationMetadata(user.id)).combinedMetadata[field]).toBe(linkedValue);
+    },
+  );
 
   describe("mirror failures", () => {
     function failSdkWrites() {

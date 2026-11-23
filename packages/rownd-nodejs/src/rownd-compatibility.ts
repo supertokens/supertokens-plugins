@@ -502,7 +502,7 @@ export function isDualWriteMetadataMode(config = getPluginConfig()) {
  * that canonical mode reads, so a published owner stays equal across modes.
  *
  * Every mirrored key receives the value the compatibility view now presents:
- * - profile fields are authoritative, so the view ignores linked copies;
+ * - authority follows the current primary metadata, even on non-profile writes;
  * - email selectors follow the written record once it carries a metadata version;
  * - `original_rownd_user` is merged with the SDK record's original exactly as the
  *   view merges them, and skipped when the SDK record's original shadows it.
@@ -510,38 +510,40 @@ export function isDualWriteMetadataMode(config = getPluginConfig()) {
  * Non-authoritative public keys that operational writers echo back unchanged are
  * never mirrored: replacing a linked copy could change the compatibility merge.
  * Canonical-only keys are never written because compatibility treats them as
- * public metadata. The mirror runs after the compatibility write and throws on
- * failure; replaying the request or republishing the owner converges it. Keys
- * already equal in an SDK record that was read are skipped.
+ * public metadata. Keys already equal in the SDK snapshot are skipped.
  */
 export async function mirrorCompatibilityPresentationWrite(input: {
   sdkUserId: string;
+  primaryUserId: string;
+  primaryMetadata: RowndMetadata;
   writtenUserId: string;
   profileFields?: JsonRecord;
-  authoritativeFields?: string[];
-  writtenMetadata?: RowndMetadata;
+  updatesEmailState?: boolean;
   originalRowndUser?: JsonValue;
   sdkMetadata?: RowndMetadata;
   userContext?: Record<string, any>;
 }) {
-  if (!isDualWriteMetadataMode() || input.sdkUserId === input.writtenUserId) return;
+  if (!isDualWriteMetadataMode()) return;
+  const mirrorsAuthority = input.sdkUserId !== input.primaryUserId;
+  const mirrorsWrite = input.sdkUserId !== input.writtenUserId;
+  if (!mirrorsAuthority && !mirrorsWrite) return;
+
   const mirror: JsonRecord = {};
-  for (const [key, value] of Object.entries(input.profileFields ?? {})) {
-    if (isInternalMetadataField(key) || isCanonicalReservedMetadataKey(key) || value === undefined) continue;
-    // A deleted identity key is not authoritative: the view falls back to the linked copy.
-    if (isIdentityField(key) && value === null) continue;
-    mirror[key] = value;
-  }
-  if (input.authoritativeFields?.length) {
-    mirror.rownd_profile_authoritative_fields = input.authoritativeFields;
-  }
-  if (input.writtenMetadata) {
-    for (const key of PRESENTATION_EMAIL_STATE_FIELDS) {
-      mirror[key] = input.writtenMetadata[key] ?? null;
+  if (mirrorsWrite) {
+    for (const [key, value] of Object.entries(input.profileFields ?? {})) {
+      if (isInternalMetadataField(key) || isCanonicalReservedMetadataKey(key) || value === undefined) continue;
+      // A deleted identity key is not authoritative: the view falls back to the linked copy.
+      if (isIdentityField(key) && value === null) continue;
+      mirror[key] = value;
+    }
+    if (input.updatesEmailState) {
+      for (const key of PRESENTATION_EMAIL_STATE_FIELDS) {
+        mirror[key] = input.primaryMetadata[key] ?? null;
+      }
     }
   }
+  const original = mirrorsWrite ? input.originalRowndUser : undefined;
   let sdkMetadata = input.sdkMetadata;
-  const original = input.originalRowndUser;
   if (isJsonRecord(original)) {
     sdkMetadata ??= await getRawUserMetadata(input.sdkUserId, input.userContext);
     // A mapped SDK ID is the selected Rownd ID. Selected originals deep-merge in the
@@ -553,6 +555,13 @@ export async function mirrorCompatibilityPresentationWrite(input: {
       mirror.original_rownd_user = getCanonicalOriginalRowndUser(mergeMissingValues(original,
         isJsonRecord(sdkOriginal) && (sdkSelected || !writtenSelected) ? sdkOriginal : {}));
     }
+  }
+  if (mirrorsAuthority) {
+    // If a PUT is already needed, include authority without a separate comparison read.
+    if (Object.keys(mirror).length === 0) {
+      sdkMetadata ??= await getRawUserMetadata(input.sdkUserId, input.userContext);
+    }
+    mirror.rownd_profile_authoritative_fields = input.primaryMetadata.rownd_profile_authoritative_fields ?? null;
   }
   if (sdkMetadata) {
     for (const [key, value] of Object.entries(mirror)) {
@@ -627,10 +636,11 @@ export async function updatePrimaryUserMetadata(
   if (user && mapping) {
     await mirrorCompatibilityPresentationWrite({
       sdkUserId: user.id,
+      primaryUserId,
+      primaryMetadata: result.metadata as RowndMetadata,
       writtenUserId: primaryUserId,
       profileFields: profileUpdate ? updates : undefined,
-      authoritativeFields: profileAuthority.rownd_profile_authoritative_fields,
-      writtenMetadata: updatesEmailState ? result.metadata as RowndMetadata : undefined,
+      updatesEmailState,
       originalRowndUser: updates.original_rownd_user,
       sdkMetadata: aliasMetadata,
       userContext,

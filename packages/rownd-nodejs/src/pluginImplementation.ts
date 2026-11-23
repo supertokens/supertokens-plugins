@@ -41,6 +41,7 @@ import {
   inspectUserPresentationMetadata,
   isCanonicalReservedMetadataKey,
   isDualWriteMetadataMode,
+  isIdentityField,
   isInternalMetadataField,
 } from "./rownd-compatibility";
 import {
@@ -72,6 +73,7 @@ import {
   resolveTenantId,
   resolveAllowedClientDomain,
   createDerivedUserContext,
+  type JsonRecord,
 } from "./utils";
 
 type SuperTokensRequest = Parameters<PluginRouteHandler["handler"]>[0];
@@ -779,6 +781,7 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
         hasEmailField &&
         (typeof email !== "string" || email.trim().length === 0)
       ) {
+        if (email === null && isDualWriteMetadataMode(resolved.config)) return fieldNotWritableResponse("email");
         return {
           status: "ERROR" as const,
           code: 400,
@@ -787,7 +790,7 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
       }
       const hasEmailUpdate = hasEmailField && typeof email === "string";
       const permissionError = validateWritableFields(
-        Object.keys(inputData),
+        inputData,
         resolved.config,
       );
 
@@ -947,16 +950,10 @@ export function handleUpdateUserMeta() {
     userContext: SuperTokensUserContext,
   ) => {
     const payload = parseUpdateMetaBody(await getJsonBody(req));
-    const internalField = Object.keys(payload.meta ?? {}).find((key) =>
-      isInternalMetadataField(key) || (isDualWriteMetadataMode() && isCanonicalReservedMetadataKey(key)));
-
-    if (internalField) {
-      return {
-        status: "ERROR" as const,
-        code: 403,
-        message: `field is not writable: ${internalField}`,
-      };
-    }
+    const dualWrite = isDualWriteMetadataMode();
+    const readOnlyField = Object.entries(payload.meta ?? {}).find(([key, value]) =>
+      isInternalMetadataField(key) || (dualWrite && (isCanonicalReservedMetadataKey(key) || isNullIdentityField(key, value))))?.[0];
+    if (readOnlyField !== undefined) return fieldNotWritableResponse(readOnlyField);
 
     const updateMetadataResult = await updateUserMetadata(
       session!.getUserId(userContext),
@@ -1028,7 +1025,7 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
     });
     {
       if (field === "email") {
-        const permissionError = validateWritableFields([field], resolved.config);
+        const permissionError = validateWritableFields({ [field]: payload.value }, resolved.config);
         if (permissionError) return permissionError;
         if (
           typeof payload.value !== "string" ||
@@ -1094,7 +1091,7 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
         }
       }
 
-      const permissionError = validateWritableFields([field], resolved.config);
+      const permissionError = validateWritableFields({ [field]: payload.value }, resolved.config);
       if (permissionError) {
         return permissionError;
       }
@@ -1191,21 +1188,26 @@ function recentAuthenticationRequiredResponse() {
 }
 
 function validateWritableFields(
-  fields: string[],
-  pluginConfig?: RowndPluginNormalisedConfig,
+  fields: JsonRecord,
+  pluginConfig: RowndPluginNormalisedConfig,
 ) {
-  const readOnlyField = fields.find(
+  const dualWrite = isDualWriteMetadataMode(pluginConfig);
+  const readOnlyField = Object.entries(fields).find(
+    ([field, value]) => (dualWrite && isNullIdentityField(field, value)) ||
     // Email is an identity field, absent from the default custom-profile schema.
-    (field) => !(field === "email" && !pluginConfig?.schema?.email) && !canUpdateUserDataField(field, pluginConfig),
-  );
+      (!(field === "email" && !pluginConfig.schema?.email) && !canUpdateUserDataField(field, pluginConfig)),
+  )?.[0];
+  if (readOnlyField !== undefined) return fieldNotWritableResponse(readOnlyField);
+}
 
-  if (readOnlyField === undefined) {
-    return undefined;
-  }
+function isNullIdentityField(field: string, value: unknown) {
+  return value === null && isIdentityField(field);
+}
 
+function fieldNotWritableResponse(field: string) {
   return {
     status: "ERROR" as const,
     code: 403,
-    message: `field is not writable: ${readOnlyField}`,
+    message: `field is not writable: ${field}`,
   };
 }

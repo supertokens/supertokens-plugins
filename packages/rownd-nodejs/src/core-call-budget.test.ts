@@ -25,7 +25,10 @@ import { updateUserMetadata } from "./supertokens-repository";
 import { buildConfiguredSessionClaims, getAuthoritativeProfileFields, getCanonicalPresentationMetadata,
   ROWND_APP_VARIANTS_KEY, ROWND_PROFILE_AUTHORITY_PREFIX, type RowndCompatUserResponse, type RowndMetadata } from "./rownd-compatibility";
 import { getPluginConfig, setPluginConfig } from "./config";
+import { logDebugMessage } from "./logger";
 import type { JsonRecord } from "./utils";
+
+vi.mock("./logger", () => ({ logDebugMessage: vi.fn(), enableDebugLogs: vi.fn() }));
 
 type Json = Record<string, unknown>;
 type Attempt = { method: string; path: string; params: URLSearchParams; body: Json };
@@ -82,6 +85,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
   let unexpected: string[];
   let metadata: Map<string, RowndMetadata>;
   let metadataFailure: boolean;
+  let metadataWriteFailureId: string | undefined;
   let beforeMetadataWrite: (() => Promise<void>) | undefined;
   let extraWritableIds: string[];
   let sessionSelector: string | undefined;
@@ -146,6 +150,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     mapped = false;
     revoked = false;
     metadataFailure = false;
+    metadataWriteFailureId = undefined;
     beforeMetadataWrite = undefined;
     extraWritableIds = [];
     sessionSelector = undefined;
@@ -261,6 +266,10 @@ describe("complete protected route Core budgets (installed SDK)", () => {
             : [getPluginConfig()?.metadataMode === "canonical" || signInRecipe ? sdkId() : internalId, ...extraWritableIds];
           if (!writableIds.includes(body.userId as string) ||
             typeof body.metadataUpdate !== "object" || !body.metadataUpdate) return reject();
+          if (body.userId === metadataWriteFailureId) {
+            res.statusCode = 500;
+            return reply({ message: `Metadata write failed for ${email}` });
+          }
           await beforeMetadataWrite?.();
           const next = { ...metadata.get(body.userId as string) };
           for (const [key, value] of Object.entries(body.metadataUpdate as JsonRecord)) {
@@ -409,14 +418,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     const write = variant === "added";
     const path = passwordless ? "signinup/code/consume" : "signinup";
     const authPath = `/public/recipe/${path}`;
-    const body = passwordless
-      ? { preAuthSessionId: device.preAuthSessionId, linkCode: loginCode }
-      : { thirdPartyId: provider.id, oAuthTokens: { thirdPartyUserId: provider.userId, email } };
-    const response = await fetch(`${appUrl}/auth/${path}?app_variant_id=${variant}`, {
-      method: "POST",
-      headers: { rid: recipe, "fdi-version": "1.18", "st-auth-mode": "header", "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    const response = await signIn(recipe, variant);
     expect({ status: response.status, body: await response.json() }).toMatchObject({
       status: 200, body: { status: "OK", createdNewRecipeUser: false, user: { id: sdkId() } },
     });
@@ -460,22 +462,48 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     const body = passwordless
       ? { preAuthSessionId: device.preAuthSessionId, linkCode: loginCode }
       : { thirdPartyId: provider.id, oAuthTokens: { thirdPartyUserId: provider.userId, email } };
-    const response = await fetch(`${appUrl}/auth/${path}?app_variant_id=${variant}`, {
+    return fetch(`${appUrl}/auth/${path}?app_variant_id=${variant}`, {
       method: "POST",
       headers: { rid: recipe, "fdi-version": "1.18", "st-auth-mode": "header", "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    expect({ status: response.status, body: await response.json() }).toMatchObject({
-      status: 200, body: { status: "OK", user: { id: sdkId() } },
-    });
   }
 
-  // Dual-write reads exactly as compatibility does and adds only the mirror PUT.
+  it.each((["passwordless", "thirdparty"] as const).flatMap((recipe) =>
+    ["existing", "added"].map((variant) => ({ recipe, variant }))))(
+    "handles a failed mirror on $recipe sign-in with an $variant variant", async ({ recipe, variant }) => {
+      mapped = true;
+      signInRecipe = recipe;
+      initSDK(false, "dual-write");
+      metadata.set(internalId, { original_rownd_user: {
+        data: { user_id: externalId }, verified_data: { email },
+        attributes: { "rownd:app_variants": ["existing"] },
+      } });
+      metadataWriteFailureId = externalId;
+      vi.mocked(logDebugMessage).mockClear();
+
+      const response = await signIn(recipe, variant);
+      expect(steady().filter(({ method }) => method === "PUT").map(({ body }) => body.userId))
+        .toEqual(variant === "existing" ? [externalId] : [internalId, externalId]);
+      if (variant === "existing") {
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ status: "OK", user: { id: externalId } });
+        expect(response.headers.has("st-access-token")).toBe(true);
+        expect(logDebugMessage).toHaveBeenCalledWith("Rownd app variant mirror replay failed");
+        expect(vi.mocked(logDebugMessage).mock.calls.flat().join(" ")).not.toContain(email);
+      } else {
+        expect(response.status).toBe(500);
+        expect(metadata.get(internalId)?.original_rownd_user?.attributes?.["rownd:app_variants"])
+          .toEqual(["existing", "added"]);
+      }
+    },
+  );
+
   it.each((["passwordless", "thirdparty"] as const).flatMap((recipe) => ["existing", "added"].flatMap((variant) =>
-    ([["internal", true], ["internal", false], ["sdk", true]] as const)
-      .map(([source, published]) => ({ recipe, variant, source, published })))))(
-    "budgets dual-write $recipe sign-in with $variant variant stored at the $source record (published=$published)",
-    async ({ recipe, variant, source, published }) => {
+    ([["internal", true, false], ["internal", false, false], ["sdk", true, false], ["sdk", true, true]] as const)
+      .map(([source, published, staleAuthority]) => ({ recipe, variant, source, published, staleAuthority })))))(
+    "budgets dual-write $recipe sign-in with $variant variant at $source (published=$published, stale authority=$staleAuthority)",
+    async ({ recipe, variant, source, published, staleAuthority }) => {
       mapped = true;
       signInRecipe = recipe;
       // Compatibility records variants at whichever record sources the Rownd user.
@@ -485,15 +513,20 @@ describe("complete protected route Core budgets (installed SDK)", () => {
       const run = async (mode: "compatibility" | "dual-write") => {
         initSDK(false, mode);
         attempts = [];
-        metadata.set(internalId, source === "internal" ? { original_rownd_user: original } : {});
-        metadata.set(externalId, { first_name: "Alias", ...(published ? { original_rownd_user: original } : {}) });
-        await signIn(recipe, variant);
+        metadata.set(internalId, { ...(source === "internal" ? { original_rownd_user: original } : {}),
+          ...(staleAuthority ? { rownd_profile_authoritative_fields: ["last_name"] } : {}) });
+        metadata.set(externalId, { first_name: "Alias", ...(published ? { original_rownd_user: original } : {}),
+          ...(staleAuthority ? { rownd_profile_authoritative_fields: ["first_name"] } : {}) });
+        const response = await signIn(recipe, variant);
+        expect({ status: response.status, body: await response.json() }).toMatchObject({
+          status: 200, body: { status: "OK", user: { id: sdkId() } },
+        });
         return { counts: countCoreCalls(), puts: steady().filter(({ method }) => method === "PUT").map(({ body }) => body) };
       };
       const compatibility = await run("compatibility");
       const dualWrite = await run("dual-write");
-      // An unpublished SDK record is repaired by the first sign-in, even without a new variant.
-      const mirrored = source === "internal" && (variant === "added" || !published);
+      const mirrorsOriginal = source === "internal" && (variant === "added" || !published);
+      const mirrored = mirrorsOriginal || staleAuthority;
       const compatibilityPuts = compatibility.counts["PUT /recipe/user/metadata"] ?? 0;
       expect(compatibilityPuts).toBe(variant === "added" ? 1 : 0);
       const { "PUT /recipe/user/metadata": _ignored, ...compatibilityReads } = compatibility.counts;
@@ -510,9 +543,10 @@ describe("complete protected route Core budgets (installed SDK)", () => {
       expect(dualWrite.puts.slice(0, compatibility.puts.length)).toEqual(compatibility.puts);
       if (mirrored) {
         expect(dualWrite.puts[dualWrite.puts.length - 1]).toEqual({ userId: externalId, metadataUpdate: {
-          original_rownd_user: metadata.get(internalId)?.original_rownd_user,
+          ...(mirrorsOriginal ? { original_rownd_user: metadata.get(internalId)?.original_rownd_user } : {}),
+          ...(staleAuthority ? { rownd_profile_authoritative_fields: ["last_name"] } : {}),
         } });
-        expect(metadata.get(externalId)?.original_rownd_user).toEqual(metadata.get(internalId)?.original_rownd_user);
+        if (mirrorsOriginal) expect(metadata.get(externalId)?.original_rownd_user).toEqual(metadata.get(internalId)?.original_rownd_user);
       }
     },
   );

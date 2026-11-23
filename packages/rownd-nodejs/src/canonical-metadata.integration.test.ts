@@ -14,6 +14,7 @@ import ThirdParty from "supertokens-node/recipe/thirdparty";
 import OAuth2Provider from "supertokens-node/recipe/oauth2provider";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import EmailVerification from "supertokens-node/recipe/emailverification";
+import Multitenancy from "supertokens-node/recipe/multitenancy";
 import { middleware, errorHandler } from "supertokens-node/framework/express";
 import { ProcessState } from "supertokens-node/lib/build/processState";
 import { Querier } from "supertokens-node/lib/build/querier";
@@ -781,12 +782,13 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
     expect((await SuperTokens.getUser(ownerId))?.loginMethods).toHaveLength(mode === "canonical" ? 1 : 2);
   });
 
-  async function presentation(sdkId: string, mode: "compatibility" | "canonical") {
+  async function presentation(sdkId: string, mode: "compatibility" | "canonical", tenantId: string) {
     configure(mode);
     const { user, combinedMetadata } = await inspectUserPresentationMetadata(sdkId);
     if (!user) throw new Error("Published owner missing from disposable Core");
     return {
       profile: await getUserById(sdkId),
+      tenantProfile: await getUserById(sdkId, tenantId),
       configuredClaims: buildConfiguredSessionClaims(combinedMetadata, getPluginConfig()),
       sessionClaims: await buildRowndSessionClaims(sdkId, { rownd_session_authentication: "authenticated" }, "added"),
       oauth: await buildRowndOAuthPayload({ user, scopes: ["openid", "email", "phone", "profile"] }),
@@ -794,9 +796,9 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
     };
   }
 
-  async function expectTransitionParity(sdkId: string) {
-    const compatibility = await presentation(sdkId, "compatibility");
-    expect(await presentation(sdkId, "canonical")).toEqual(compatibility);
+  async function expectTransitionParity(sdkId: string, tenantId: string) {
+    const compatibility = await presentation(sdkId, "compatibility", tenantId);
+    expect(await presentation(sdkId, "canonical", tenantId)).toEqual(compatibility);
     configure("dual-write");
     return compatibility;
   }
@@ -804,6 +806,10 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
   it.each([false, true])("keeps a published owner identical while dual-write runs real writers (mapped=%s)", async (mapped) => {
     initialize("dual-write");
     const fixture = await seed(mapped);
+    const tenantId = `transition-${randomUUID()}`;
+    expect(await Multitenancy.createOrUpdateTenant(tenantId, { firstFactors: ["link-email"] })).toMatchObject({ status: "OK" });
+    expect(await Multitenancy.associateUserToTenant(tenantId, fixture.recipeUserId)).toMatchObject({ status: "OK" });
+    const expectParity = () => expectTransitionParity(fixture.sdkId, tenantId);
     const original = fixture.original.original_rownd_user!;
     // A migrated owner: the internal record sources the Rownd user and live profile.
     await UserMetadata.updateUserMetadata(fixture.internalId, {
@@ -811,14 +817,15 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
       rownd_migration_complete: true,
       original_rownd_user: { ...original, data: { ...original.data, email: fixture.email },
         verified_data: { ...original.verified_data, email: fixture.email },
-        attributes: { ...original.attributes, "rownd:app_variants": ["existing"] } },
+        attributes: { ...original.attributes, "rownd:app_variants": ["existing"],
+          "rownd:app_variants_by_tenant": { [tenantId]: [] } } },
     });
     if (mapped) await UserMetadata.updateUserMetadata(fixture.sdkId, { alias_only: "Alias overlay", first_name: "Alias first" });
 
     configure("compatibility");
     const publication = getCanonicalPresentationMetadata((await inspectLinkedUserMetadata(fixture.sdkId)).combinedMetadata);
     await UserMetadata.updateUserMetadata(fixture.sdkId, publication);
-    await expectTransitionParity(fixture.sdkId);
+    await expectParity();
 
     const session = await Session.createNewSessionWithoutRequestResponse("public", fixture.recipeUserId, {}, {}, true);
     const token = session.getAccessToken();
@@ -826,30 +833,31 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
     await profileRequest(token, "PUT", { value: "Field edit" }, "/field?field=last_name");
     await profileRequest(token, "PUT", { meta: { preference: { endpoint: true }, last_active: null } }, "/meta");
     await profileRequest(token, "PUT", { data: { deleted: "Restored" } });
-    await expectTransitionParity(fixture.sdkId);
+    await expectParity();
 
-    // Real Core merges with no CAS; a later edit republishes any stale shared authority.
     await Promise.all([
       updateUserPresentationMetadata(fixture.sdkId, { first_name: "Concurrent first" }),
       updateUserPresentationMetadata(fixture.sdkId, { last_name: "Concurrent last" }),
     ]);
-    await updateUserPresentationMetadata(fixture.sdkId, { custom: { later: true } });
-    await expectTransitionParity(fixture.sdkId);
-
     const signIn = await consumePasswordlessCodeWithVariant(fixture.email, "added");
     expect({ status: signIn.status, body: await signIn.json() }).toMatchObject({ status: 200, body: { status: "OK" } });
-    const afterSignIn = await expectTransitionParity(fixture.sdkId);
+    const afterSignIn = await expectParity();
     expect(afterSignIn.profile.attributes?.["rownd:app_variants"]).toEqual(["existing", "added"]);
+    const tenantSignIn = await consumePasswordlessCodeWithVariant(fixture.email, "added", tenantId);
+    expect({ status: tenantSignIn.status, body: await tenantSignIn.json() }).toMatchObject({ status: 200, body: { status: "OK" } });
+    const afterTenantSignIn = await expectParity();
+    expect(afterTenantSignIn.tenantProfile.attributes?.["rownd:app_variants"]).toEqual(["added"]);
+    expect(afterTenantSignIn.profile.attributes?.["rownd:app_variants"]).toEqual(["existing", "added"]);
 
     const newEmail = `${randomUUID()}@example.com`;
     const verify = await startEmailChange(token, newEmail, fixture.email);
-    await expectTransitionParity(fixture.sdkId);
+    await expectParity();
     configure("dual-write");
     const verified = await verify();
     await expectVerifiedEmail(fixture.sdkId, verified, newEmail);
-    const final = await expectTransitionParity(fixture.sdkId);
+    const final = await expectParity();
     expect(final.profile).toMatchObject({ data: { email: newEmail, last_name: "Concurrent last", deleted: "Restored",
-      custom: { later: true }, first_name: "Concurrent first" }, verified_data: { email: newEmail } });
+      custom: { replacement: { nested_null: null } }, first_name: "Concurrent first" }, verified_data: { email: newEmail } });
 
     // The switch: canonical mode serves the published record with nothing left to copy.
     initialize("canonical");
@@ -864,9 +872,10 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
     } else expect(stored.rownd_pending_verification).toEqual([]);
   });
 
-  async function consumePasswordlessCodeWithVariant(email: string, appVariantId: string) {
-    const code = await Passwordless.createCode({ tenantId: "public", email });
-    return request(`/signinup/code/consume?app_variant_id=${appVariantId}`, {
+  async function consumePasswordlessCodeWithVariant(email: string, appVariantId: string, tenantId = "public") {
+    const code = await Passwordless.createCode({ tenantId, email });
+    const prefix = tenantId === "public" ? "" : `/${tenantId}`;
+    return request(`${prefix}/signinup/code/consume?app_variant_id=${appVariantId}`, {
       rid: "passwordless", body: { preAuthSessionId: code.preAuthSessionId, linkCode: code.linkCode },
     });
   }

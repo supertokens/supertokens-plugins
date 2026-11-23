@@ -2,4 +2,4 @@
 "@supertokens-plugins/rownd-nodejs": minor
 ---
 
-Add an opt-in `metadataMode: "dual-write"` that allows moving to canonical metadata without a drift window. Reads stay identical to compatibility mode. Presentation-affecting plugin writes are also applied to the SDK-visible user ID, in the shape that canonical mode reads, so published owners stay equal until the switch. Like canonical mode, dual-write requires Rownd user migration to be disabled and rejects writes to internal or canonical-reserved fields. Compatibility remains the default and is unchanged.
+Add opt-in `metadataMode: "dual-write"` to prepare for canonical metadata. Reads stay in compatibility mode, and presentation writes are mirrored to the SDK-visible user ID. Drain writers and verify parity before switching to canonical. Dual-write requires Rownd user migration to be disabled and rejects writes to internal or canonical-reserved fields and null identity values. Compatibility remains the default and is unchanged.
