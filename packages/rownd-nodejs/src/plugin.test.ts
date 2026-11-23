@@ -505,8 +505,20 @@ describe("rownd-nodejs plugin", () => {
           },
         },
       });
-      const userContext = {
-        _default: { coreCallCache: { metadata: "stale" } },
+      const sharedCache = {
+        metadata: {
+          original_rownd_user: {
+            data: { user_id: "user-id" },
+            attributes: { concurrent_update: "stale" },
+          },
+        },
+      };
+      const userContext = { _default: { coreCallCache: sharedCache } };
+      const freshMetadata = {
+        original_rownd_user: {
+          data: { user_id: "user-id" },
+          attributes: { concurrent_update: "retained" },
+        },
       };
       vi.spyOn(SuperTokens, "getUser").mockResolvedValue({
         id: "user-id",
@@ -517,27 +529,12 @@ describe("rownd-nodejs plugin", () => {
       });
       const getMetadata = vi
         .spyOn(UserMetadata, "getUserMetadata")
-        .mockResolvedValueOnce({
-          status: "OK",
-          metadata: {
-            original_rownd_user: {
-              data: { user_id: "user-id" },
-              attributes: {},
-            },
-          },
-        } as any)
-        .mockImplementationOnce(async (_userId, context) => {
-          expect(context).toBe(userContext);
-          expect((context as any)._default.coreCallCache).toEqual({});
+        .mockImplementation(async (_userId, context) => {
+          expect(userContext._default.coreCallCache).toBe(sharedCache);
           return {
             status: "OK",
-            metadata: {
-              original_rownd_user: {
-                data: { user_id: "user-id" },
-                attributes: { concurrent_update: "retained" },
-              },
-            },
-          } as any;
+            metadata: context?._default?.coreCallCache?.metadata ?? freshMetadata,
+          };
         });
       const updateMetadata = vi
         .spyOn(UserMetadata, "updateUserMetadata")
@@ -550,14 +547,24 @@ describe("rownd-nodejs plugin", () => {
       );
 
       expect(getMetadata).toHaveBeenCalledTimes(2);
-      expect(updateMetadata.mock.calls[0]?.[1]).toMatchObject({
+      expect(getMetadata).toHaveBeenNthCalledWith(1, "user-id", userContext);
+      const [readId, readContext] = getMetadata.mock.calls[1]!;
+      expect(readId).toBe("user-id");
+      expect(readContext).toBeDefined();
+      expect(readContext).not.toBe(userContext);
+      expect(readContext?._default?.coreCallCache).toBeUndefined();
+      expect(userContext._default.coreCallCache).toEqual({});
+      expect(updateMetadata).toHaveBeenCalledOnce();
+      expect(updateMetadata).toHaveBeenCalledWith("user-id", {
         original_rownd_user: {
+          data: { user_id: "user-id" },
+          verified_data: {},
           attributes: {
             concurrent_update: "retained",
             "rownd:app_variants": ["variant_123"],
           },
         },
-      });
+      }, userContext);
     });
 
     it("compares an existing third-party owner in internal ID space", async () => {

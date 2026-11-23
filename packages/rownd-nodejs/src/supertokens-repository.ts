@@ -84,6 +84,7 @@ import {
   type PasswordlessAuthSnapshot,
   getHistoricalPasswordlessScope,
   validateHistoricalPasswordlessOwner,
+  mirrorCompatibilityPresentationWrite,
   updatePrimaryUserMetadata,
   updateUserPresentationMetadata,
   getRowndProfileData,
@@ -105,6 +106,7 @@ import {
   resolveAllowedClientDomain,
   rewriteMagicLink,
   createDerivedUserContext,
+  createUncachedUserContext,
   type JsonRecord,
 } from "./utils";
 
@@ -1266,6 +1268,7 @@ export async function recordRowndAppVariantForUser(
   appVariantId?: string,
   userContext?: JsonRecord,
   tenantId?: string,
+  options?: { userSnapshot?: SuperTokensUser },
 ) {
   if (!appVariantId) {
     return;
@@ -1280,17 +1283,24 @@ export async function recordRowndAppVariantForUser(
   const operationContext = userContext ?? {};
   const canonical = pluginConfig.metadataMode === "canonical";
   let metadataUserId: string;
+  let metadata: RowndMetadata;
+  let inspection: Awaited<ReturnType<typeof inspectLinkedUserMetadata>> | undefined;
   if (canonical) {
     clearSuperTokensCoreCallCache(operationContext);
-    const user = await SuperTokens.getUser(userId, operationContext);
+    const user = options?.userSnapshot ?? await SuperTokens.getUser(userId, operationContext);
     if (!user) throw new RowndPluginError("ROWND_USER_NOT_FOUND");
     metadataUserId = user.id;
+    metadata = await getRawUserMetadata(metadataUserId, operationContext);
   } else {
-    const inspection = await inspectLinkedUserMetadata(userId, operationContext);
+    // Sign-in has usually warmed the cache for this inspection. Read the write
+    // source fresh without discarding it, unless the cached copy is now stale.
+    inspection = await inspectLinkedUserMetadata(userId, operationContext);
     metadataUserId = inspection.rowndMetadataSourceUserId ?? inspection.primaryUserId;
-    clearSuperTokensCoreCallCache(operationContext);
+    metadata = await getRawUserMetadata(metadataUserId, createUncachedUserContext(operationContext));
+    if (JSON.stringify(metadata) !== JSON.stringify(inspection.rowndMetadataSourceMetadata ?? inspection.primaryMetadata)) {
+      clearSuperTokensCoreCallCache(operationContext);
+    }
   }
-  const metadata = await getRawUserMetadata(metadataUserId, operationContext);
   const originalRowndUser: JsonRecord = isJsonRecord(
     metadata.original_rownd_user,
   )
@@ -1318,42 +1328,79 @@ export async function recordRowndAppVariantForUser(
   const appVariants = getStringList(hasOwn(overlay, scope) ? overlay[scope] : legacyVariants);
 
   if (appVariants.includes(appVariantId)) {
+    // A repair-only failure must not block a sign-in that had nothing to write.
+    try {
+      await mirrorAppVariantWrite(inspection, metadataUserId, metadata, operationContext);
+    } catch {
+      logDebugMessage("Rownd app variant mirror replay failed");
+    }
     return;
   }
   const updatedVariants = [...appVariants, appVariantId];
 
-  await UserMetadata.updateUserMetadata(
-    metadataUserId,
-    canonical ? { [ROWND_APP_VARIANTS_KEY]: { ...overlay, [scope]: updatedVariants } } : {
-      original_rownd_user: {
-        ...originalRowndUser,
-        data: isJsonRecord(originalRowndUser.data)
-          ? originalRowndUser.data
-          : { user_id: userId },
-        verified_data: isJsonRecord(originalRowndUser.verified_data)
-          ? originalRowndUser.verified_data
-          : {},
-        attributes: {
-          ...attributes,
-          ...(tenantKey !== undefined
-            ? {
-              "rownd:app_variants_by_tenant": {
-                ...variantsByTenant,
-                [tenantKey]: updatedVariants,
-              },
-            }
-            : {
-              "rownd:app_variants": updatedVariants,
-            }),
-        },
+  if (canonical) {
+    await UserMetadata.updateUserMetadata(
+      metadataUserId,
+      { [ROWND_APP_VARIANTS_KEY]: { ...overlay, [scope]: updatedVariants } },
+      operationContext,
+    );
+  } else {
+    const updatedOriginalRowndUser = {
+      ...originalRowndUser,
+      data: isJsonRecord(originalRowndUser.data)
+        ? originalRowndUser.data
+        : { user_id: userId },
+      verified_data: isJsonRecord(originalRowndUser.verified_data)
+        ? originalRowndUser.verified_data
+        : {},
+      attributes: {
+        ...attributes,
+        ...(tenantKey !== undefined
+          ? {
+            "rownd:app_variants_by_tenant": {
+              ...variantsByTenant,
+              [tenantKey]: updatedVariants,
+            },
+          }
+          : {
+            "rownd:app_variants": updatedVariants,
+          }),
       },
-    },
-    operationContext,
-  );
+    };
+    const result = await UserMetadata.updateUserMetadata(
+      metadataUserId,
+      { original_rownd_user: updatedOriginalRowndUser },
+      operationContext,
+    );
+    await mirrorAppVariantWrite(inspection, metadataUserId, result.metadata as RowndMetadata, operationContext);
+  }
   migrationTelemetry(operationContext)?.emit(
     "transition",
     "app_variant_metadata_written",
   );
+}
+
+async function mirrorAppVariantWrite(
+  inspection: Awaited<ReturnType<typeof inspectLinkedUserMetadata>> | undefined,
+  writtenUserId: string,
+  writtenMetadata: RowndMetadata,
+  userContext: JsonRecord,
+) {
+  const sdkUserId = inspection?.user?.id;
+  if (!inspection || !sdkUserId) return;
+  const originalRowndUser = writtenMetadata.original_rownd_user;
+  await mirrorCompatibilityPresentationWrite({
+    sdkUserId,
+    primaryUserId: inspection.primaryUserId,
+    primaryMetadata: writtenUserId === inspection.primaryUserId ? writtenMetadata : inspection.primaryMetadata,
+    writtenUserId,
+    originalRowndUser: isJsonRecord(originalRowndUser?.data) ? originalRowndUser : undefined,
+    // The inspection already read the SDK record, so equal mirrors cost no Core call.
+    sdkMetadata: sdkUserId === writtenUserId ? writtenMetadata
+      : sdkUserId === inspection.primaryUserId ? inspection.primaryMetadata
+        : inspection.linkedMetadata.find(({ userId }) => userId === sdkUserId)?.metadata,
+    userContext,
+  });
 }
 
 function getAppVariantOverlay(metadata: RowndMetadata): JsonRecord {
@@ -1406,8 +1453,12 @@ export async function buildRowndSessionAndAnonymousClaims(
   userContext: UserContext,
   recipeUserId?: string,
   creating = false,
+  options?: { userSnapshot?: SuperTokensUser },
 ) {
-  const inspection = await inspectUserPresentationMetadata(userId, userContext);
+  const pluginConfig = getConfigForUserContext(userContext);
+  const inspection = await inspectUserPresentationMetadata(
+    userId, userContext, pluginConfig?.metadataMode === "canonical" ? options?.userSnapshot : undefined,
+  );
   const user = inspection.user;
   const rowndSessionClaims = buildRowndSessionClaimPayload({
     userId,
@@ -1415,7 +1466,7 @@ export async function buildRowndSessionAndAnonymousClaims(
     metadata: user ? inspection.combinedMetadata : undefined,
     currentPayload,
     appVariantId,
-    pluginConfig: getConfigForUserContext(userContext),
+    pluginConfig,
     authenticationOrigin: await sessionAuthenticationOrigin(user, recipeUserId, currentPayload, userContext, creating),
   });
   const isAnonymous = [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(
