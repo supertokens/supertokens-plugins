@@ -1392,12 +1392,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
     },
     () => ({}),
     (config: RowndPluginConfig) => {
-      if (config.metadataMode !== undefined &&
-          config.metadataMode !== "compatibility" && config.metadataMode !== "canonical") {
-        throw new Error("metadataMode must be compatibility or canonical in plugin config");
+      if (config.metadataMode !== undefined && !["compatibility", "dual-write", "canonical"].includes(config.metadataMode)) {
+        throw new Error("metadataMode must be compatibility, dual-write or canonical in plugin config");
       }
-      if (config.metadataMode === "canonical" && config.disableRowndUserMigration !== true) {
-        throw new Error("canonical metadata mode requires Rownd user migration to be disabled");
+      // Migration, repair and consolidation write many alias records that dual-write does not mirror.
+      if (config.metadataMode !== undefined && config.metadataMode !== "compatibility" &&
+          config.disableRowndUserMigration !== true) {
+        throw new Error(`${config.metadataMode} metadata mode requires Rownd user migration to be disabled`);
       }
       const telemetryProvider = (
         config.telemetry as { provider?: unknown } | undefined

@@ -723,8 +723,11 @@ export type RowndConfigResolverContext = {
 };
 
 export interface RowndPluginConfig extends RowndPluginDynamicConfig {
-  /** Enable only after offline publication and deployment of compatible presentation writers. */
-  metadataMode?: "compatibility" | "canonical";
+  /**
+   * `dual-write` keeps compatibility reads while mirroring presentation writes to the
+   * SDK-visible user ID. Enable `canonical` only after offline publication.
+   */
+  metadataMode?: RowndMetadataMode;
   rowndAppKey?: string;
   /** App scope for administrative email discovery and uncached profile reads. */
   rowndAppId?: string;
@@ -911,8 +914,10 @@ export interface MigrationResponse {
   message?: string;
 }
 
+export type RowndMetadataMode = "compatibility" | "dual-write" | "canonical";
+
 export interface RowndPluginNormalisedConfig {
-  metadataMode?: "compatibility" | "canonical";
+  metadataMode?: RowndMetadataMode;
   rowndAppKey: string;
   rowndAppId?: string;
   rowndAppSecret?: string;
