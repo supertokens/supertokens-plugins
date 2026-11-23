@@ -1,5 +1,30 @@
 # @supertokens-plugins/rownd-nodejs
 
+## 2.0.0
+
+### Major Changes
+
+- f84dc18: Rownd profile responses now default `meta.last_sign_in`, `meta.last_active`, and `meta.last_sign_in_method` to `null`. Clients that rely on these fields must pass `include_activity=true` on `GET {apiBasePath}/plugin/rownd/user` to enrich them from active sessions. The former `profile=lightweight-v1` selector is ignored.
+
+### Minor Changes
+
+- f84dc18: Add an opt-in `metadataMode: "canonical"` for deployments whose metadata has been consolidated at the SDK-visible user ID. Presentation reads use that single address instead of discovering mappings and merging aliases; compatibility remains the default and is unchanged.
+
+  Canonical mode requires Rownd user migration to be disabled, reserves `rownd_profile_authority:*` and `rownd_app_variants` metadata keys, and disables automatic account linking. Reverting to compatibility requires resynchronizing legacy metadata.
+
+- 172ad3a: Add opt-in `metadataMode: "dual-write"` to prepare for canonical metadata. Reads stay in compatibility mode, and presentation writes are mirrored to the SDK-visible user ID. Drain writers and verify parity before switching to canonical. Dual-write requires Rownd user migration to be disabled and rejects writes to internal or canonical-reserved fields and null identity values. Compatibility remains the default and is unchanged.
+- 2d60e6e: Add `appConfig.customContent.profileModal.emailConflictMessage` to customize the Hub's duplicate-email field error, including import support in generated plugin configurations. Omitted or empty overrides retain the Hub's localized default copy.
+
+### Patch Changes
+
+- 172ad3a: Reduce redundant Core calls during sign-in and email-change owner checks.
+
+  In compatibility mode, recording an app variant reads the metadata it updates fresh from Core without discarding the request's cached reads, so the session-claim refresh after an unchanged variant no longer re-reads the user, mappings and linked metadata. Canonical mode reuses the user returned by sign-in. Session-authentication origin skips user ID mapping lookups when the session's recipe user matches a login method directly and no earlier method could decide a different origin. Email-change owner checks skip mapping lookups when both IDs resolve to the same user.
+
+- f84dc18: Avoid metadata writes for empty or activity-only public metadata patches, duplicate profile reads after non-email updates, and unused compatibility metadata reads for OAuth userinfo scopes.
+
+  Empty/activity-only metadata patches no longer invoke metadata-write overrides. OAuth userinfo without exact `email`, `phone`, or `profile` scopes no longer invokes unused metadata-read overrides.
+
 ## 1.0.4
 
 ### Patch Changes
