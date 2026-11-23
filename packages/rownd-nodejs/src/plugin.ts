@@ -1,4 +1,4 @@
-import { SuperTokensPlugin, type UserContext } from "supertokens-node/types";
+import { SuperTokensPlugin, type User, type UserContext } from "supertokens-node/types";
 import {
   EmailVerificationClaim,
   type APIInterface as EmailVerificationAPIInterface,
@@ -103,19 +103,20 @@ const INACTIVE_PASSWORDLESS_EMAIL_REASON = "No existing account found";
 
 async function refreshRowndSessionClaims(input: {
   session: SessionContainerInterface;
-  userId: string;
+  userSnapshot: User;
   appVariantId?: string;
   userContext: UserContext;
   provenAuthentication: boolean;
 }) {
   const currentPayload = input.session.getAccessTokenPayload();
   const buildClaims = () => buildRowndSessionAndAnonymousClaims(
-    input.userId,
+    input.userSnapshot.id,
     currentPayload,
     input.appVariantId,
     input.userContext,
     input.session.getRecipeUserId(input.userContext).getAsString(),
     input.provenAuthentication,
+    { userSnapshot: input.userSnapshot },
   );
   const { rowndSessionClaims, rowndIsAnonymousClaim } = await (input.provenAuthentication
     ? withProvenSessionAuthentication(buildClaims) : buildClaims());
@@ -1081,11 +1082,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     appVariantId,
                     operationContext,
                     input.tenantId,
+                    { userSnapshot: response.user },
                   );
 
                   await refreshRowndSessionClaims({
                     session: response.session,
-                    userId: response.user.id,
+                    userSnapshot: response.user,
                     appVariantId,
                     userContext: operationContext,
                     provenAuthentication: true,
@@ -1140,10 +1142,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     appVariantId,
                     operationContext,
                     input.tenantId,
+                    { userSnapshot: response.user },
                   );
                   await refreshRowndSessionClaims({
                     session: response.session,
-                    userId: response.user.id,
+                    userSnapshot: response.user,
                     appVariantId,
                     userContext: operationContext,
                     provenAuthentication: !["instant", "guest"].includes(input.provider.id),

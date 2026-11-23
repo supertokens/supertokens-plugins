@@ -7,6 +7,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import SuperTokens from "supertokens-node";
+import type { NetworkInterceptor } from "supertokens-node/types";
 import Session from "supertokens-node/recipe/session";
 import Passwordless from "supertokens-node/recipe/passwordless";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
@@ -139,6 +140,7 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
   let baseUrl: string;
   let coreUrl: string;
   let verificationLinks: Map<string, string>;
+  let coreCalls: Parameters<NetworkInterceptor>[0][];
 
   function configure(metadataMode?: RowndPluginConfig["metadataMode"]) {
     return init({
@@ -152,7 +154,13 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
     resetSDK();
     SuperTokens.init({
       telemetry: false,
-      supertokens: { connectionURI: coreUrl },
+      supertokens: {
+        connectionURI: coreUrl,
+        networkInterceptor: (request) => {
+          coreCalls.push(request);
+          return request;
+        },
+      },
       appInfo: { appName: "Disposable canonical metadata validation", apiDomain: baseUrl, websiteDomain: "http://localhost:3000" },
       recipeList: [
         Session.init(), UserMetadata.init(), OAuth2Provider.init(),
@@ -248,6 +256,7 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
 
   beforeEach(async () => {
     verificationLinks = new Map();
+    coreCalls = [];
     const app = express();
     server = app.listen(0);
     await new Promise<void>((resolve) => server!.once("listening", resolve));
@@ -315,6 +324,15 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
     const token = response.headers.get("st-access-token");
     if (!token) throw new Error("Expected a real session in the response");
     return Session.getSessionWithoutRequestResponse(token);
+  }
+
+  function countCoreCalls(calls: typeof coreCalls) {
+    const counts: Record<string, number> = {};
+    for (const { method, url } of calls) {
+      const key = `${method.toUpperCase()} ${new URL(url).pathname}`;
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+    return counts;
   }
 
   async function startEmailChange(token: string, email: string, currentEmail: string) {
@@ -574,6 +592,126 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
       body: { preAuthSessionId: code.preAuthSessionId, linkCode: code.linkCode },
     });
   }
+
+  it.each([
+    { mode: "compatibility", recipe: "passwordless", variant: "existing", userReads: 2, mappings: 6, metadataReads: 7 },
+    { mode: "compatibility", recipe: "passwordless", variant: "added", userReads: 3, mappings: 8, metadataReads: 9 },
+    { mode: "compatibility", recipe: "thirdparty", variant: "existing", userReads: 2, mappings: 4, metadataReads: 5 },
+    { mode: "compatibility", recipe: "thirdparty", variant: "added", userReads: 3, mappings: 6, metadataReads: 7 },
+    { mode: "canonical", recipe: "passwordless", variant: "existing", userReads: 2, mappings: 4, metadataReads: 6 },
+    { mode: "canonical", recipe: "passwordless", variant: "added", userReads: 2, mappings: 4, metadataReads: 7 },
+    { mode: "canonical", recipe: "thirdparty", variant: "existing", userReads: 1, mappings: 0, metadataReads: 2 },
+    { mode: "canonical", recipe: "thirdparty", variant: "added", userReads: 1, mappings: 0, metadataReads: 3 },
+  ] as const)("budgets $recipe sign-in with $variant variant in $mode mode", async ({ mode, recipe, variant, userReads, mappings, metadataReads }) => {
+    blockNonLoopbackRequests();
+    initialize(mode);
+    const passwordless = recipe === "passwordless";
+    const canonical = mode === "canonical";
+    const write = variant === "added";
+    const email = `${randomUUID()}@example.com`;
+    const providerId = randomUUID();
+    const account = passwordless
+      ? await Passwordless.signInUp({ tenantId: "public", email })
+      : await ThirdParty.manuallyCreateOrUpdateUser("public", OFFLINE_PROVIDER_ID, providerId, email, true);
+    if (account.status !== "OK" || !("user" in account)) throw new Error(`Account seed failed: ${account.status}`);
+    const internalId = account.recipeUserId.getAsString();
+    const sdkId = `rownd-${randomUUID()}`;
+    expect(await SuperTokens.createUserIdMapping({ superTokensUserId: internalId, externalUserId: sdkId })).toEqual({ status: "OK" });
+    await UserMetadata.updateUserMetadata(sdkId, {
+      original_rownd_user: {
+        data: { user_id: sdkId, first_name: "Stored" },
+        verified_data: { email },
+        attributes: { "rownd:app_variants": ["existing"], other: "retained" },
+      },
+    });
+    const code = passwordless ? await Passwordless.createCode({ tenantId: "public", email }) : undefined;
+    const start = coreCalls.length;
+    const authPath = passwordless ? "/public/recipe/signinup/code/consume" : "/public/recipe/signinup";
+    const suffix = `?app_variant_id=${variant}`;
+    const response = code
+      ? await request(`/signinup/code/consume${suffix}`, {
+        rid: recipe, body: { preAuthSessionId: code.preAuthSessionId, linkCode: code.linkCode },
+      })
+      : await request(`/signinup${suffix}`, {
+        rid: recipe, body: { thirdPartyId: OFFLINE_PROVIDER_ID, oAuthTokens: { thirdPartyUserId: providerId, email } },
+      });
+    const calls = coreCalls.slice(start);
+    expect({ status: response.status, body: await response.json() }).toMatchObject({
+      status: 200, body: { status: "OK", createdNewRecipeUser: false, user: { id: sdkId } },
+    });
+    const session = await sessionFrom(response);
+    expect(session.getRecipeUserId().getAsString()).toBe(sdkId);
+    expect(session.getAccessTokenPayload()).toMatchObject({
+      rownd_session_authentication: "authenticated", auth_level: "verified", first_name: "Stored",
+    });
+    const createIndex = calls.findIndex(({ method, url }) => method === "post" && new URL(url).pathname === "/public/recipe/session");
+    const authIndex = calls.findIndex(({ method, url }) => method === "post" && new URL(url).pathname === authPath);
+    expect(createIndex).toBeGreaterThan(authIndex);
+    expect(calls[createIndex]?.body).toMatchObject({ userDataInJWT: { rownd_session_authentication: "authenticated" } });
+    expect(calls.slice(authIndex + 1, createIndex).filter(({ url }) => new URL(url).pathname === "/recipe/userid/map")
+      .map(({ params }) => params?.userIdType)).toEqual(canonical ? [] : ["SUPERTOKENS", "EXTERNAL"]);
+    const stored = (await UserMetadata.getUserMetadata(sdkId)).metadata;
+    const variants = write ? ["existing", "added"] : ["existing"];
+    expect(stored).toMatchObject({ original_rownd_user: { attributes: {
+      "rownd:app_variants": canonical ? ["existing"] : variants, other: "retained",
+    } } });
+    expect(stored[ROWND_APP_VARIANTS_KEY]).toEqual(canonical && write ? { public: variants } : undefined);
+
+    expect(countCoreCalls(calls)).toEqual({
+      "GET /public/recipe/multitenancy/tenant/v2": 1,
+      "GET /public/users/by-accountinfo": passwordless ? 2 : canonical ? 4 : 5,
+      "GET /recipe/user/email/verify": 1,
+      "GET /user/id": userReads,
+      "GET /recipe/user/metadata": metadataReads,
+      ...(mappings ? { "GET /recipe/userid/map": mappings } : {}),
+      "POST /public/recipe/session": 1,
+      "POST /recipe/session/regenerate": 1,
+      [`POST ${authPath}`]: 1,
+      ...(passwordless ? { "GET /public/recipe/signinup/codes": 1 } : {}),
+      ...(write ? { "PUT /recipe/user/metadata": 1 } : {}),
+    });
+  });
+
+  it.each(["compatibility", "canonical"] as const)("budgets matching expected-owner profile PUT in %s mode", async (mode) => {
+    initialize(mode);
+    const fixture = await seed(true);
+    const session = await Session.createNewSessionWithoutRequestResponse("public", fixture.recipeUserId);
+    const start = coreCalls.length;
+    expect(await profileRequest(session.getAccessToken(), "PUT", {
+      data: { first_name: "Edited" },
+      context: { rowndExpectedUserId: fixture.internalId, rowndExpectedTenantId: "public" },
+    })).toMatchObject({ status: "OK", data: { user_id: fixture.sdkId, first_name: "Edited" } });
+    const calls = coreCalls.slice(start);
+    expect(calls.slice(0, 3).map(({ url }) => new URL(url).pathname))
+      .toEqual(["/recipe/session/verify", "/user/id", "/user/id"]);
+    expect(countCoreCalls(calls)).toEqual({
+      "POST /recipe/session/verify": 1,
+      "GET /user/id": 3,
+      "GET /recipe/user/metadata": mode === "canonical" ? 1 : 3,
+      ...(mode === "compatibility" ? { "GET /recipe/userid/map": 4 } : {}),
+      "PUT /recipe/user/metadata": 1,
+    });
+  });
+
+  it("prefers the SUPERTOKENS mapping for an ANY lookup with overlapping IDs in a single pool", async () => {
+    const newUser = () => Passwordless.signInUp({ tenantId: "public", email: `${randomUUID()}@example.com` });
+    const { user: owner } = await newUser();
+    const { user: other } = await newUser();
+    const externalUserId = `rownd-${randomUUID()}`;
+    expect(await SuperTokens.createUserIdMapping({ superTokensUserId: owner.id, externalUserId })).toEqual({ status: "OK" });
+    expect(await SuperTokens.createUserIdMapping({
+      superTokensUserId: other.id, externalUserId: owner.id, force: true,
+    })).toEqual({ status: "OK" });
+
+    const lookup = (userIdType: "ANY" | "SUPERTOKENS" | "EXTERNAL") =>
+      SuperTokens.getUserIdMapping({ userId: owner.id, userIdType });
+    const internal = await lookup("SUPERTOKENS");
+    expect(internal).toMatchObject({ status: "OK", superTokensUserId: owner.id, externalUserId });
+    expect(await lookup("EXTERNAL")).toMatchObject({
+      status: "OK", superTokensUserId: other.id, externalUserId: owner.id,
+    });
+    expect(await lookup("ANY")).toEqual(internal);
+  });
 
   it.each([
     ["canonical", "passwordless"], ["compatibility", "passwordless"],
