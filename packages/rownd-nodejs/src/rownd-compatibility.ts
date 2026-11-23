@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { normalizeOptionalRowndIdentities, resolveRowndProviderSubject } from "./provider-identity";
 
 import { reconciliationSuperTokens as SuperTokens, reconciliationAccountLinking as AccountLinking, reconciliationUserMetadata as UserMetadata } from "./reconciliation-sdk";
@@ -467,23 +468,99 @@ export async function inspectUserPresentationMetadata(
   return { user, combinedMetadata };
 }
 
+const PRESENTATION_EMAIL_STATE_FIELDS = [
+  "rownd_email_metadata_version",
+  "rownd_email_recipe_user_id",
+  "rownd_email_recipe_user_ids",
+] as const;
+
+function getCanonicalOriginalRowndUser(original: JsonValue) {
+  return isJsonRecord(original)
+    ? Object.fromEntries(Object.entries(original).filter(([key]) =>
+      ["data", "state", "auth_level", "verified_data", "groups", "attributes"].includes(key))) as RowndUser
+    : original;
+}
+
 // Offline publication preserves projection inputs, never migration or credential authority.
 export function getCanonicalPresentationMetadata(metadata: RowndMetadata): RowndMetadata {
   const presentation = Object.fromEntries(Object.entries(metadata).filter(([key]) =>
-    !INTERNAL_METADATA_FIELDS.has(key) || [
-      "rownd_profile_authoritative_fields",
-      "rownd_email_metadata_version",
-      "rownd_email_recipe_user_id",
-      "rownd_email_recipe_user_ids",
-    ].includes(key))) as RowndMetadata;
+    !INTERNAL_METADATA_FIELDS.has(key) || key === "rownd_profile_authoritative_fields" ||
+    (PRESENTATION_EMAIL_STATE_FIELDS as readonly string[]).includes(key))) as RowndMetadata;
   const original = metadata.original_rownd_user;
   if (original !== undefined) {
-    presentation.original_rownd_user = isJsonRecord(original)
-      ? Object.fromEntries(Object.entries(original).filter(([key]) =>
-        ["data", "state", "auth_level", "verified_data", "groups", "attributes"].includes(key))) as RowndUser
-      : original;
+    presentation.original_rownd_user = getCanonicalOriginalRowndUser(original) as RowndUser;
   }
   return presentation;
+}
+
+export function isDualWriteMetadataMode(config = getPluginConfig()) {
+  return config?.metadataMode === "dual-write";
+}
+
+/**
+ * Applies a compatibility write's presentation effect to the SDK-visible record
+ * that canonical mode reads, so a published owner stays equal across modes.
+ *
+ * Every mirrored key receives the value the compatibility view now presents:
+ * - profile fields are authoritative, so the view ignores linked copies;
+ * - email selectors follow the written record once it carries a metadata version;
+ * - `original_rownd_user` is merged with the SDK record's original exactly as the
+ *   view merges them, and skipped when the SDK record's original shadows it.
+ *
+ * Non-authoritative public keys that operational writers echo back unchanged are
+ * never mirrored: replacing a linked copy could change the compatibility merge.
+ * Canonical-only keys are never written because compatibility treats them as
+ * public metadata. The mirror runs after the compatibility write and throws on
+ * failure; replaying the request or republishing the owner converges it. Keys
+ * already equal in an SDK record that was read are skipped.
+ */
+export async function mirrorCompatibilityPresentationWrite(input: {
+  sdkUserId: string;
+  writtenUserId: string;
+  profileFields?: JsonRecord;
+  authoritativeFields?: string[];
+  writtenMetadata?: RowndMetadata;
+  originalRowndUser?: JsonValue;
+  sdkMetadata?: RowndMetadata;
+  userContext?: Record<string, any>;
+}) {
+  if (!isDualWriteMetadataMode() || input.sdkUserId === input.writtenUserId) return;
+  const mirror: JsonRecord = {};
+  for (const [key, value] of Object.entries(input.profileFields ?? {})) {
+    if (isInternalMetadataField(key) || isCanonicalReservedMetadataKey(key) || value === undefined) continue;
+    // A deleted identity key is not authoritative: the view falls back to the linked copy.
+    if (isIdentityField(key) && value === null) continue;
+    mirror[key] = value;
+  }
+  if (input.authoritativeFields?.length) {
+    mirror.rownd_profile_authoritative_fields = input.authoritativeFields;
+  }
+  if (input.writtenMetadata) {
+    for (const key of PRESENTATION_EMAIL_STATE_FIELDS) {
+      mirror[key] = input.writtenMetadata[key] ?? null;
+    }
+  }
+  let sdkMetadata = input.sdkMetadata;
+  const original = input.originalRowndUser;
+  if (isJsonRecord(original)) {
+    sdkMetadata ??= await getRawUserMetadata(input.sdkUserId, input.userContext);
+    // A mapped SDK ID is the selected Rownd ID. Selected originals deep-merge in the
+    // view and shadow unselected ones; with none selected, every original merges.
+    const sdkSelected = getOriginalRowndUserId(sdkMetadata) === input.sdkUserId;
+    const writtenSelected = getOriginalRowndUserId({ original_rownd_user: original }) === input.sdkUserId;
+    if (writtenSelected || !sdkSelected) {
+      const sdkOriginal = sdkMetadata.original_rownd_user;
+      mirror.original_rownd_user = getCanonicalOriginalRowndUser(mergeMissingValues(original,
+        isJsonRecord(sdkOriginal) && (sdkSelected || !writtenSelected) ? sdkOriginal : {}));
+    }
+  }
+  if (sdkMetadata) {
+    for (const [key, value] of Object.entries(mirror)) {
+      if (isDeepStrictEqual(value ?? undefined, sdkMetadata[key])) delete mirror[key];
+    }
+  }
+  if (Object.keys(mirror).length === 0) return;
+  await UserMetadata.updateUserMetadata(input.sdkUserId, mirror as JSONObject, input.userContext);
 }
 
 export async function updateUserPresentationMetadata(
@@ -534,10 +611,11 @@ export async function updatePrimaryUserMetadata(
   const updatesEmailState = ["rownd_pending_verification", "rownd_email_recipe_user_ids", "rownd_email_recipe_user_id"]
     .some((key) => Object.prototype.hasOwnProperty.call(metadataUpdate, key));
   let pointerFallback: JsonRecord = {};
+  let aliasMetadata: RowndMetadata | undefined;
   if (mapping && user && updatesEmailState) {
-    pointerFallback = getMappedEmailPointerFallback(
-      await getRawUserMetadata(primaryUserId, userContext),
-      await getRawUserMetadata(mapping.externalUserId, userContext), user);
+    const primaryMetadata = await getRawUserMetadata(primaryUserId, userContext);
+    aliasMetadata = await getRawUserMetadata(mapping.externalUserId, userContext);
+    pointerFallback = getMappedEmailPointerFallback(primaryMetadata, aliasMetadata, user);
   }
   const result = await UserMetadata.updateUserMetadata(
     primaryUserId,
@@ -546,6 +624,18 @@ export async function updatePrimaryUserMetadata(
     } as JSONObject,
     userContext,
   );
+  if (user && mapping) {
+    await mirrorCompatibilityPresentationWrite({
+      sdkUserId: user.id,
+      writtenUserId: primaryUserId,
+      profileFields: profileUpdate ? updates : undefined,
+      authoritativeFields: profileAuthority.rownd_profile_authoritative_fields,
+      writtenMetadata: updatesEmailState ? result.metadata as RowndMetadata : undefined,
+      originalRowndUser: updates.original_rownd_user,
+      sdkMetadata: aliasMetadata,
+      userContext,
+    });
+  }
 
   return {
     primaryUserId,
@@ -1758,7 +1848,8 @@ export function canUpdateUserDataField(
   field: string,
   pluginConfig: RowndPluginNormalisedConfig | undefined = getPluginConfig(),
 ) {
-  if (pluginConfig?.metadataMode === "canonical" &&
+  // Dual-write rejects what canonical would, so no new owner becomes unpublishable.
+  if ((pluginConfig?.metadataMode === "canonical" || isDualWriteMetadataMode(pluginConfig)) &&
       (INTERNAL_METADATA_FIELDS.has(field) || isCanonicalReservedMetadataKey(field))) {
     return false;
   }

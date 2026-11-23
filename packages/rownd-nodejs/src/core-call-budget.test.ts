@@ -83,6 +83,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
   let metadata: Map<string, RowndMetadata>;
   let metadataFailure: boolean;
   let beforeMetadataWrite: (() => Promise<void>) | undefined;
+  let extraWritableIds: string[];
   let sessionSelector: string | undefined;
   let signInRecipe: "passwordless" | "thirdparty" | undefined;
   const internalId = "core-owner";
@@ -103,7 +104,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     jwk = { ...await exportJWK(keys.publicKey), kid: "d-budget-test", alg: "RS256", use: "sig" };
   });
 
-  function initSDK(disableCoreCallCache = false, metadataMode?: "compatibility" | "canonical") {
+  function initSDK(disableCoreCallCache = false, metadataMode?: "compatibility" | "dual-write" | "canonical") {
     resetSDK();
     SuperTokens.init({
       telemetry: false,
@@ -146,6 +147,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     revoked = false;
     metadataFailure = false;
     beforeMetadataWrite = undefined;
+    extraWritableIds = [];
     sessionSelector = undefined;
     signInRecipe = undefined;
     attempts = [];
@@ -255,7 +257,9 @@ describe("complete protected route Core budgets (installed SDK)", () => {
           return reply({ status: "OK", metadata: metadata.get(id) ?? {} });
         }
         case "PUT /recipe/user/metadata": {
-          if (body.userId !== (getPluginConfig()?.metadataMode === "canonical" || signInRecipe ? sdkId() : internalId) ||
+          const writableIds = getPluginConfig()?.metadataMode === "dual-write" ? [internalId, sdkId()]
+            : [getPluginConfig()?.metadataMode === "canonical" || signInRecipe ? sdkId() : internalId, ...extraWritableIds];
+          if (!writableIds.includes(body.userId as string) ||
             typeof body.metadataUpdate !== "object" || !body.metadataUpdate) return reject();
           await beforeMetadataWrite?.();
           const next = { ...metadata.get(body.userId as string) };
@@ -448,6 +452,108 @@ describe("complete protected route Core budgets (installed SDK)", () => {
       ...(passwordless ? { "GET /public/recipe/signinup/codes": 1 } : {}),
       ...(write ? { "PUT /recipe/user/metadata": 1 } : {}),
     });
+  });
+
+  async function signIn(recipe: "passwordless" | "thirdparty", variant: string) {
+    const passwordless = recipe === "passwordless";
+    const path = passwordless ? "signinup/code/consume" : "signinup";
+    const body = passwordless
+      ? { preAuthSessionId: device.preAuthSessionId, linkCode: loginCode }
+      : { thirdPartyId: provider.id, oAuthTokens: { thirdPartyUserId: provider.userId, email } };
+    const response = await fetch(`${appUrl}/auth/${path}?app_variant_id=${variant}`, {
+      method: "POST",
+      headers: { rid: recipe, "fdi-version": "1.18", "st-auth-mode": "header", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect({ status: response.status, body: await response.json() }).toMatchObject({
+      status: 200, body: { status: "OK", user: { id: sdkId() } },
+    });
+  }
+
+  // Dual-write reads exactly as compatibility does and adds only the mirror PUT.
+  it.each((["passwordless", "thirdparty"] as const).flatMap((recipe) => ["existing", "added"].flatMap((variant) =>
+    ([["internal", true], ["internal", false], ["sdk", true]] as const)
+      .map(([source, published]) => ({ recipe, variant, source, published })))))(
+    "budgets dual-write $recipe sign-in with $variant variant stored at the $source record (published=$published)",
+    async ({ recipe, variant, source, published }) => {
+      mapped = true;
+      signInRecipe = recipe;
+      // Compatibility records variants at whichever record sources the Rownd user.
+      if (source === "internal") extraWritableIds = [internalId];
+      const original = { data: { user_id: externalId, first_name: "Stored" }, verified_data: { email },
+        attributes: { "rownd:app_variants": ["existing"] } };
+      const run = async (mode: "compatibility" | "dual-write") => {
+        initSDK(false, mode);
+        attempts = [];
+        metadata.set(internalId, source === "internal" ? { original_rownd_user: original } : {});
+        metadata.set(externalId, { first_name: "Alias", ...(published ? { original_rownd_user: original } : {}) });
+        await signIn(recipe, variant);
+        return { counts: countCoreCalls(), puts: steady().filter(({ method }) => method === "PUT").map(({ body }) => body) };
+      };
+      const compatibility = await run("compatibility");
+      const dualWrite = await run("dual-write");
+      // An unpublished SDK record is repaired by the first sign-in, even without a new variant.
+      const mirrored = source === "internal" && (variant === "added" || !published);
+      const compatibilityPuts = compatibility.counts["PUT /recipe/user/metadata"] ?? 0;
+      expect(compatibilityPuts).toBe(variant === "added" ? 1 : 0);
+      const { "PUT /recipe/user/metadata": _ignored, ...compatibilityReads } = compatibility.counts;
+      // A repair PUT clears the request's Core cache, so session claims re-read the
+      // owner exactly as they do after a compatibility variant write.
+      const repairReads = mirrored && !compatibilityPuts;
+      expect(dualWrite.counts).toEqual({ ...compatibilityReads,
+        ...(repairReads ? {
+          "GET /user/id": compatibilityReads["GET /user/id"]! + 1,
+          "GET /recipe/userid/map": compatibilityReads["GET /recipe/userid/map"]! + 2,
+          "GET /recipe/user/metadata": compatibilityReads["GET /recipe/user/metadata"]! + 2,
+        } : {}),
+        ...(compatibilityPuts + Number(mirrored) ? { "PUT /recipe/user/metadata": compatibilityPuts + Number(mirrored) } : {}) });
+      expect(dualWrite.puts.slice(0, compatibility.puts.length)).toEqual(compatibility.puts);
+      if (mirrored) {
+        expect(dualWrite.puts[dualWrite.puts.length - 1]).toEqual({ userId: externalId, metadataUpdate: {
+          original_rownd_user: metadata.get(internalId)?.original_rownd_user,
+        } });
+        expect(metadata.get(externalId)?.original_rownd_user).toEqual(metadata.get(internalId)?.original_rownd_user);
+      }
+    },
+  );
+
+  it.each([false, true])("budgets dual-write profile PUT as compatibility plus one mirror for mapped owners (mapped=%s)", async (isMapped) => {
+    mapped = isMapped;
+    const run = async (mode: "compatibility" | "dual-write") => {
+      initSDK(false, mode);
+      attempts = [];
+      metadata.set(internalId, { first_name: "Profile" });
+      metadata.set(externalId, { first_name: "Alias" });
+      const response = await request("user", { data: { first_name: "Edited" } });
+      expect({ status: response.status, body: await profileJson(response) }).toMatchObject({
+        status: 200, body: { status: "OK", data: { user_id: sdkId(), first_name: "Edited" } },
+      });
+      return { counts: countCoreCalls(), puts: steady().filter(({ method }) => method === "PUT").map(({ body }) => body) };
+    };
+    const compatibility = await run("compatibility");
+    const dualWrite = await run("dual-write");
+    expect(dualWrite.counts).toEqual({ ...compatibility.counts,
+      "PUT /recipe/user/metadata": isMapped ? 2 : 1 });
+    expect(dualWrite.puts[0]).toEqual(compatibility.puts[0]);
+    if (isMapped) {
+      expect(dualWrite.puts[1]).toEqual({ userId: externalId, metadataUpdate: {
+        first_name: "Edited", rownd_profile_authoritative_fields: ["first_name"],
+      } });
+    }
+  });
+
+  it.each(readCases)("reads GET $path in dual-write mode exactly as compatibility (mapped=$isMapped)", async ({ isMapped, path }) => {
+    mapped = isMapped;
+    const run = async (mode: "compatibility" | "dual-write") => {
+      initSDK(false, mode);
+      attempts = [];
+      const response = await request(path);
+      expect(response.status).toBe(200);
+      // Linked metadata reads are concurrent, so only their multiset is stable.
+      return { body: await response.json(), calls: steady().map(({ method, path: corePath, params }) =>
+        `${method} ${corePath}?${params}`).sort() };
+    };
+    expect(await run("dual-write")).toEqual(await run("compatibility"));
   });
 
   it.each(["compatibility", "canonical"] as const)("budgets matching expected-owner profile PUT in %s mode", async (mode) => {

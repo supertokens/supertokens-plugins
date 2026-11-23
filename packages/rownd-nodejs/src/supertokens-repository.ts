@@ -84,6 +84,7 @@ import {
   type PasswordlessAuthSnapshot,
   getHistoricalPasswordlessScope,
   validateHistoricalPasswordlessOwner,
+  mirrorCompatibilityPresentationWrite,
   updatePrimaryUserMetadata,
   updateUserPresentationMetadata,
   getRowndProfileData,
@@ -1283,6 +1284,7 @@ export async function recordRowndAppVariantForUser(
   const canonical = pluginConfig.metadataMode === "canonical";
   let metadataUserId: string;
   let metadata: RowndMetadata;
+  let inspection: Awaited<ReturnType<typeof inspectLinkedUserMetadata>> | undefined;
   if (canonical) {
     clearSuperTokensCoreCallCache(operationContext);
     const user = options?.userSnapshot ?? await SuperTokens.getUser(userId, operationContext);
@@ -1292,7 +1294,7 @@ export async function recordRowndAppVariantForUser(
   } else {
     // Sign-in has usually warmed the cache for this inspection. Read the write
     // source fresh without discarding it, unless the cached copy is now stale.
-    const inspection = await inspectLinkedUserMetadata(userId, operationContext);
+    inspection = await inspectLinkedUserMetadata(userId, operationContext);
     metadataUserId = inspection.rowndMetadataSourceUserId ?? inspection.primaryUserId;
     metadata = await getRawUserMetadata(metadataUserId, createUncachedUserContext(operationContext));
     if (JSON.stringify(metadata) !== JSON.stringify(inspection.rowndMetadataSourceMetadata ?? inspection.primaryMetadata)) {
@@ -1326,42 +1328,71 @@ export async function recordRowndAppVariantForUser(
   const appVariants = getStringList(hasOwn(overlay, scope) ? overlay[scope] : legacyVariants);
 
   if (appVariants.includes(appVariantId)) {
+    // Replays a mirror that failed after its compatibility write; equal records need no PUT.
+    await mirrorAppVariantWrite(inspection, metadataUserId, originalRowndUser, operationContext);
     return;
   }
   const updatedVariants = [...appVariants, appVariantId];
 
-  await UserMetadata.updateUserMetadata(
-    metadataUserId,
-    canonical ? { [ROWND_APP_VARIANTS_KEY]: { ...overlay, [scope]: updatedVariants } } : {
-      original_rownd_user: {
-        ...originalRowndUser,
-        data: isJsonRecord(originalRowndUser.data)
-          ? originalRowndUser.data
-          : { user_id: userId },
-        verified_data: isJsonRecord(originalRowndUser.verified_data)
-          ? originalRowndUser.verified_data
-          : {},
-        attributes: {
-          ...attributes,
-          ...(tenantKey !== undefined
-            ? {
-              "rownd:app_variants_by_tenant": {
-                ...variantsByTenant,
-                [tenantKey]: updatedVariants,
-              },
-            }
-            : {
-              "rownd:app_variants": updatedVariants,
-            }),
-        },
+  if (canonical) {
+    await UserMetadata.updateUserMetadata(
+      metadataUserId,
+      { [ROWND_APP_VARIANTS_KEY]: { ...overlay, [scope]: updatedVariants } },
+      operationContext,
+    );
+  } else {
+    const updatedOriginalRowndUser = {
+      ...originalRowndUser,
+      data: isJsonRecord(originalRowndUser.data)
+        ? originalRowndUser.data
+        : { user_id: userId },
+      verified_data: isJsonRecord(originalRowndUser.verified_data)
+        ? originalRowndUser.verified_data
+        : {},
+      attributes: {
+        ...attributes,
+        ...(tenantKey !== undefined
+          ? {
+            "rownd:app_variants_by_tenant": {
+              ...variantsByTenant,
+              [tenantKey]: updatedVariants,
+            },
+          }
+          : {
+            "rownd:app_variants": updatedVariants,
+          }),
       },
-    },
-    operationContext,
-  );
+    };
+    await UserMetadata.updateUserMetadata(
+      metadataUserId,
+      { original_rownd_user: updatedOriginalRowndUser },
+      operationContext,
+    );
+    await mirrorAppVariantWrite(inspection, metadataUserId, updatedOriginalRowndUser, operationContext);
+  }
   migrationTelemetry(operationContext)?.emit(
     "transition",
     "app_variant_metadata_written",
   );
+}
+
+async function mirrorAppVariantWrite(
+  inspection: Awaited<ReturnType<typeof inspectLinkedUserMetadata>> | undefined,
+  writtenUserId: string,
+  originalRowndUser: JsonRecord,
+  userContext: JsonRecord,
+) {
+  const sdkUserId = inspection?.user?.id;
+  if (!inspection || !sdkUserId || !isJsonRecord(originalRowndUser.data)) return;
+  await mirrorCompatibilityPresentationWrite({
+    sdkUserId,
+    writtenUserId,
+    originalRowndUser,
+    // The inspection already read the SDK record, so equal mirrors cost no Core call.
+    sdkMetadata: inspection.linkedMetadata.find(({ userId }) => userId === sdkUserId)?.metadata ??
+      (inspection.primaryUserId === sdkUserId ? inspection.primaryMetadata : undefined),
+    userContext,
+  });
 }
 
 function getAppVariantOverlay(metadata: RowndMetadata): JsonRecord {

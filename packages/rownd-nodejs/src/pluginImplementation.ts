@@ -39,6 +39,8 @@ import {
   buildRowndAudience,
   canUpdateUserDataField,
   inspectUserPresentationMetadata,
+  isCanonicalReservedMetadataKey,
+  isDualWriteMetadataMode,
   isInternalMetadataField,
 } from "./rownd-compatibility";
 import {
@@ -945,9 +947,8 @@ export function handleUpdateUserMeta() {
     userContext: SuperTokensUserContext,
   ) => {
     const payload = parseUpdateMetaBody(await getJsonBody(req));
-    const internalField = Object.keys(payload.meta ?? {}).find(
-      isInternalMetadataField,
-    );
+    const internalField = Object.keys(payload.meta ?? {}).find((key) =>
+      isInternalMetadataField(key) || (isDualWriteMetadataMode() && isCanonicalReservedMetadataKey(key)));
 
     if (internalField) {
       return {
