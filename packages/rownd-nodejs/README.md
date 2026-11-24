@@ -104,7 +104,7 @@ refresh the resulting session using the SuperTokens refresh token and session SD
 Use `resolveConfig` when Rownd app configuration differs by SuperTokens tenant.
 The resolver runs once per logical operation. `tenantId` and `request` are
 optional because SDK function calls do not always originate from an HTTP route;
-`userContext` is always provided. It may return `clientDomains`,
+`userContext` is always provided. It may return `clientDomains`, `compactMagicLinks`,
 `crossDeviceConfirmationBypass`, `schema`, `appConfig`, `subBrands`, or
 `emailChange`.
 
@@ -394,6 +394,28 @@ RowndMigrationPlugin.init({
   },
 });
 ```
+
+### Compact Magic Links
+
+Set `compactMagicLinks: true` to shorten passwordless email and SMS magic
+links, including links from `createMagicLinkWithConfirmationBypass`. Compact
+links omit `appKey`, `apiDomain`, and `apiBasePath` and use shorter names for
+optional parameters. Email verification links are unchanged. The flag defaults
+to `false` and can be overridden per tenant with `resolveConfig`.
+
+Deploy a Hub version that supports compact links first, populate its host
+registry, then enable the flag per customer.
+
+- Web `clientDomains` targets must run the Rownd SDK (which supplies the app key
+  and API configuration) or be registered Hub hosts. The SuperTokens website
+  domain must also meet this requirement if it can receive links as a fallback.
+- Every native app must set `Rownd.config.baseUrl` to a dedicated customer Hub
+  host (`<customer>.rownd-hub.supertokens.com`) registered in the Hub's host
+  registry. The shared default `https://rownd-hub.supertokens.com` is unsupported:
+  native SDKs reload the link's query and hash on `baseUrl` without injecting
+  bootstrap config. Set `clientDomains.mobile` to that same host, since app
+  links only open the app from hosts serving the customer's `.well-known`
+  association files.
 
 ### Same-device Passwordless Hub Policy
 

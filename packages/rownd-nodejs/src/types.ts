@@ -696,6 +696,8 @@ export type RowndSubBrandConfigInput = RowndAppConfigInput & {
 
 export type RowndPluginDynamicConfig = {
   clientDomains?: RowndClientDomains;
+  /** Shorten passwordless magic links for targets that can resolve their own bootstrap config. Defaults to false. */
+  compactMagicLinks?: boolean;
   crossDeviceConfirmationBypass?: {
     allowedRedirectPaths: string[];
   };
@@ -912,6 +914,7 @@ export interface RowndPluginNormalisedConfig {
   disableRowndUserMigration: boolean;
   enableDebugLogs?: boolean;
   clientDomains?: RowndClientDomains;
+  compactMagicLinks?: boolean;
   crossDeviceConfirmationBypass?: {
     allowedRedirectPaths: string[];
   };

@@ -22,6 +22,7 @@ const RESOLVED_CONFIG = Symbol("rowndResolvedConfig");
 type ResolvedDynamicConfig = Pick<
   RowndPluginNormalisedConfig,
   | "clientDomains"
+  | "compactMagicLinks"
   | "crossDeviceConfirmationBypass"
   | "schema"
   | "appConfig"
@@ -339,6 +340,12 @@ export function validateDynamicConfig(
   for (const [key, value] of Object.entries(config.clientDomains ?? {})) {
     validateClientDomainUrl(key, value);
   }
+  if (
+    config.compactMagicLinks !== undefined &&
+    typeof config.compactMagicLinks !== "boolean"
+  ) {
+    throw new Error("compactMagicLinks must be a boolean in plugin config");
+  }
   if (config.crossDeviceConfirmationBypass !== undefined) {
     requireRecord(
       config.crossDeviceConfirmationBypass,
@@ -405,6 +412,7 @@ function dynamicConfigFrom(
 ): ResolvedDynamicConfig {
   return {
     clientDomains: config.clientDomains,
+    compactMagicLinks: config.compactMagicLinks,
     crossDeviceConfirmationBypass: config.crossDeviceConfirmationBypass,
     schema: config.schema,
     appConfig: config.appConfig,
@@ -471,6 +479,8 @@ export async function resolvePluginConfigSnapshot<
   const resolvedConfig: RowndPluginNormalisedConfig = {
     ...config,
     clientDomains: dynamicConfig.clientDomains ?? config.clientDomains,
+    compactMagicLinks:
+      dynamicConfig.compactMagicLinks ?? config.compactMagicLinks,
     crossDeviceConfirmationBypass:
       dynamicConfig.crossDeviceConfirmationBypass ??
       config.crossDeviceConfirmationBypass,

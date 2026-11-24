@@ -1500,11 +1500,12 @@ export async function createMagicLinkWithConfirmationBypass(
   )}&tenantId=${encodeURIComponent(tenantId)}#${encodeURIComponent(codeInfo.linkCode)}`;
   const oauthLoginChallenge = (operationContext as Record<string, unknown>)
     .rowndOAuthLoginChallenge;
-  const rewrittenUrl = new URL(
-    rewriteMagicLink({
-      magicLink,
-      clientDomain,
-      bootstrapParams: getMagicLinkBootstrapParams({
+  return rewriteMagicLink({
+    magicLink,
+    clientDomain,
+    compactMagicLinks: pluginConfig.compactMagicLinks,
+    bootstrapParams: {
+      ...getMagicLinkBootstrapParams({
         appKey: pluginConfig.rowndAppKey,
         apiDomain: getAppInfoString(stConfig.appInfo.apiDomain),
         apiBasePath: getAppInfoString(stConfig.appInfo.apiBasePath),
@@ -1517,15 +1518,9 @@ export async function createMagicLinkWithConfirmationBypass(
             ? oauthLoginChallenge
             : undefined,
       }),
-    }),
-  );
-
-  rewrittenUrl.searchParams.set(
-    PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM,
-    "true",
-  );
-
-  return rewrittenUrl.toString();
+      [PASSWORDLESS_BYPASS_DEVICE_CONFIRMATION_PARAM]: "true",
+    },
+  });
 }
 
 export async function getUserMetadata(

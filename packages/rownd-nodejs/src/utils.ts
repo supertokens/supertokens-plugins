@@ -5,6 +5,7 @@ import type {
 } from "supertokens-node/types";
 
 import { HUB_LOGIN_PAGE_PATH, PUBLIC_TENANT_ID } from "./constants";
+import { compactMagicLinkParams } from "./compact-magic-link";
 import { RowndPluginError } from "./errors";
 import type { RowndPluginNormalisedConfig } from "./types";
 
@@ -87,25 +88,36 @@ export function rewriteLinkPath(
   inputUrl: string,
   targetPath: string,
   searchParams?: Record<string, string>,
+  compactMagicLinks?: boolean,
 ) {
+  const pathname = `/${targetPath.replace(/^\//, "")}`;
+  let url: URL;
   try {
-    const url = new URL(inputUrl);
-    url.pathname = `/${targetPath.replace(/^\//, "")}`;
-    for (const [key, value] of Object.entries(searchParams ?? {})) {
-      url.searchParams.set(key, value);
-    }
-    return url.toString();
+    url = new URL(inputUrl);
   } catch {
-    const [path = inputUrl, query = ""] = inputUrl
-      .replace(/auth\/verify[^?]*/, targetPath)
+    const hashIndex = compactMagicLinks ? inputUrl.indexOf("#") : -1;
+    const hash = hashIndex === -1 ? "" : inputUrl.slice(hashIndex);
+    const relativeUrl = hashIndex === -1 ? inputUrl : inputUrl.slice(0, hashIndex);
+    const [path = inputUrl, ...queryParts] = relativeUrl
+      .replace(/(\/?)auth\/verify[^?]*/, (_, slash: string) =>
+        compactMagicLinks ? pathname : `${slash}${targetPath}`,
+      )
       .split("?");
+    const query = compactMagicLinks ? queryParts.join("?") : queryParts[0];
     const params = new URLSearchParams(query);
     for (const [key, value] of Object.entries(searchParams ?? {})) {
       params.set(key, value);
     }
+    if (compactMagicLinks) compactMagicLinkParams(params);
     const queryString = params.toString();
-    return queryString ? `${path}?${queryString}` : path;
+    return `${path}${queryString ? `?${queryString}` : ""}${hash}`;
   }
+  url.pathname = pathname;
+  for (const [key, value] of Object.entries(searchParams ?? {})) {
+    url.searchParams.set(key, value);
+  }
+  if (compactMagicLinks) compactMagicLinkParams(url.searchParams);
+  return url.toString();
 }
 
 export function rewriteLinkToBaseUrl(
@@ -113,6 +125,7 @@ export function rewriteLinkToBaseUrl(
   targetPath: string,
   baseUrl: string,
   searchParams?: Record<string, string>,
+  compactMagicLinks?: boolean,
 ) {
   const normalizedBaseUrl = baseUrl.endsWith("://")
     ? baseUrl
@@ -135,6 +148,7 @@ export function rewriteLinkToBaseUrl(
   for (const [key, value] of Object.entries(searchParams ?? {})) {
     targetUrl.searchParams.set(key, value);
   }
+  if (compactMagicLinks) compactMagicLinkParams(targetUrl.searchParams);
 
   return targetUrl.toString();
 }
@@ -409,12 +423,14 @@ export function rewriteMagicLink(input: {
   magicLink: string;
   clientDomain: string;
   bootstrapParams: Record<string, string>;
+  compactMagicLinks?: boolean;
 }) {
   return rewriteLinkToBaseUrl(
     input.magicLink,
     HUB_LOGIN_PAGE_PATH,
     input.clientDomain,
     input.bootstrapParams,
+    input.compactMagicLinks,
   );
 }
 
