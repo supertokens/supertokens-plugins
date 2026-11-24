@@ -9,7 +9,7 @@ import { isSyntheticEmail, resolveCanonicalEmailForTenant } from "./canonical-em
 import { getPrimaryUserMetadata, type SuperTokensLoginMethod } from "./rownd-compatibility";
 import { completeDisconnectedSignInMethod, DisconnectedSignInMethodError, getDisconnectedSignInMethods, recordDisconnectedSignInMethod } from "./disconnected-sign-in-identities";
 import { assertRetainedPasswordlessAuthentication, assertRetainedPasswordlessAuthenticationFresh, immutableRecipeUserId, SIGN_IN_METHOD_AUTHENTICATION_MAX_AGE_MS } from "./session-authentication";
-import { logSignInMethodPolicy } from "./sign-in-method-policy-log";
+import { logSignInMethodPolicy, signInMethodPolicyFailureLevel } from "./sign-in-method-policy-log";
 import { RowndSignInMethodError } from "./errors";
 import type { RowndPluginNormalisedConfig } from "./types";
 import { clearSuperTokensCoreCallCache, isRecord, type JsonRecord } from "./utils";
@@ -84,11 +84,12 @@ async function readState(input: Input) {
   const pending = metadata.rownd_pending_verification;
   const pendingEmail = pending !== undefined && (!Array.isArray(pending) || pending.some((entry) =>
     !isRecord(entry) || ((entry.tenantId ?? "public") === tenantId && entry.field === "email")));
-  const retained = canonicalMethods.length === 1 && await retainedEmailIsEnabled(input, tenantId)
+  const canonicalMethod = canonicalMethods.length === 1 && await retainedEmailIsEnabled(input, tenantId)
     ? canonicalMethods[0] : undefined;
-  const retainedRecipe = retained ? await immutableRecipeUserId(retained.recipeUserId.getAsString(), userContext) : undefined;
+  const retained = canonicalMethod?.email ? { email: canonicalMethod.email,
+    recipeUserId: await immutableRecipeUserId(canonicalMethod.recipeUserId.getAsString(), userContext) } : undefined;
   const records = await getDisconnectedSignInMethods(owner, userContext);
-  return { user, owner, mapping, tenantId, retained, retainedRecipe, pendingEmail, records };
+  return { user, owner, mapping, tenantId, retained, pendingEmail, records };
 }
 
 type State = Awaited<ReturnType<typeof readState>>;
@@ -128,17 +129,18 @@ export async function listConnectedSignInMethods(input: Input) {
   assertConnectedSignInMethodsEnabled(input.config);
   const state = await readState(input);
   let validUntil: number | undefined;
-  if (state.retained?.email && state.retainedRecipe) {
+  if (state.retained) {
     try {
       const proof = await assertRetainedPasswordlessAuthentication({ session: input.session,
-        userId: state.owner, tenantId: state.tenantId, recipeUserId: state.retainedRecipe,
+        userId: state.owner, tenantId: state.tenantId, recipeUserId: state.retained.recipeUserId,
         email: state.retained.email, userContext: input.userContext });
       validUntil = Math.min(proof.authenticatedAt + SIGN_IN_METHOD_AUTHENTICATION_MAX_AGE_MS, proof.sessionExpiresAt);
     } catch (error) {
       if (!(error instanceof RowndSignInMethodError) || error.errorCode !== "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED") throw error;
     }
   }
-  const reauthReason = validUntil === undefined ? "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED" : undefined;
+  const validFor = validUntil === undefined ? 0 : Math.max(0, validUntil - Date.now());
+  const reauthReason = validFor > 0 ? undefined : "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED";
   const methods = state.user.loginMethods.flatMap<ConnectedSignInMethod>((method) => {
     if (!method.tenantIds.includes(state.tenantId) && !isPendingDisconnect(state, method)) return [];
     const reason = blockReason(state, method) ?? reauthReason;
@@ -173,7 +175,8 @@ export async function listConnectedSignInMethods(input: Input) {
       ...(reason ? { disconnect_block_reason: reason } : {}) });
   }
   return { status: "OK" as const, user_id: state.user.id, tenant_id: state.tenantId, methods,
-    reauthentication: reauthentication(state), ...(validUntil === undefined ? {} : { reauthentication_valid_until: validUntil }) };
+    reauthentication: reauthentication(state),
+    ...(validFor > 0 ? { reauthentication_valid_until: validUntil!, reauthentication_valid_for_ms: validFor } : {}) };
 }
 
 export async function disconnectConnectedSignInMethod(input: Input & { body: unknown }) {
@@ -197,14 +200,14 @@ export async function disconnectConnectedSignInMethod(input: Input & { body: unk
   if (checkpoint?.completed === true) {
     throw new RowndSignInMethodError("SIGN_IN_METHOD_ALREADY_DISCONNECTED", 409, "This sign-in method was already disconnected.");
   }
+  const retained = state.retained;
   const reason = selected ? blockReason(state, selected) : retainedFactorBlockReason(state);
   if (reason) throw new RowndSignInMethodError(reason, 409, "This sign-in method cannot be disconnected.");
-  if (!state.retained?.email || !state.retainedRecipe) conflict();
-  const retainedEmail = state.retained.email;
+  const { email: retainedEmail, recipeUserId: retainedRecipe } = retained!;
   const sdkUserId = state.user.id;
   const mappingSnapshot = JSON.stringify(state.mapping);
   const proofInput = { session, userId: state.owner, tenantId: state.tenantId,
-    recipeUserId: state.retainedRecipe, email: retainedEmail, userContext };
+    recipeUserId: retainedRecipe, email: retainedEmail, userContext };
   let proof = await assertRetainedPasswordlessAuthentication(proofInput);
   const target = {
     userId: state.owner, tenantId: state.tenantId,
@@ -215,7 +218,7 @@ export async function disconnectConnectedSignInMethod(input: Input & { body: unk
   const verify = async () => {
     const fresh = await readState(input);
     if (fresh.owner !== state.owner || fresh.user.id !== sdkUserId || !fresh.user.isPrimaryUser ||
-      JSON.stringify(fresh.mapping) !== mappingSnapshot || fresh.retainedRecipe !== state.retainedRecipe ||
+      JSON.stringify(fresh.mapping) !== mappingSnapshot || fresh.retained?.recipeUserId !== retainedRecipe ||
       fresh.retained?.email !== retainedEmail || fresh.pendingEmail) conflict();
     const matching = fresh.user.loginMethods.filter((method) => isRealSSO(method) &&
       method.thirdParty!.id === target.providerId && method.thirdParty!.userId === target.providerUserId);
@@ -283,7 +286,7 @@ export async function disconnectConnectedSignInMethod(input: Input & { body: unk
   } catch (error) {
     const code = error instanceof DisconnectedSignInMethodError ? error.code : error instanceof RowndSignInMethodError
       ? error.errorCode : "SIGN_IN_METHOD_OPERATION_INCOMPLETE";
-    logSignInMethodPolicy("error", "rownd_disconnect_step_failed", { ...logFields, step, code });
+    logSignInMethodPolicy(signInMethodPolicyFailureLevel(code), "rownd_disconnect_step_failed", { ...logFields, step, code });
     throw error;
   }
   return { status: "OK" as const, signed_out: true as const };

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import SuperTokens from "supertokens-node";
+import SuperTokensError from "supertokens-node/lib/build/error";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import { reconciliationSuperTokens as ReconciliationCore, reconciliationUserMetadata as PolicyMetadata } from "./reconciliation-sdk";
 import { assertReconciliationWritesAllowed } from "./reconciliation-reads";
@@ -28,17 +29,17 @@ const conflictPrefix = `${prefix}owner_transition_conflict_`;
 const completionPrefix = `${prefix}completion_`;
 const indexField = "rownd_disconnected_sign_in_identity_index";
 
-export class DisconnectedSignInMethodError extends Error {
+export class DisconnectedSignInMethodError extends SuperTokensError {
   constructor(
     readonly code: "SIGN_IN_METHOD_DISCONNECTED" | "DISCONNECT_POLICY_INVALID" | "DISCONNECT_OWNER_CHANGED" | "DISCONNECT_RESTORATION_BLOCKED",
     readonly ownerId?: string,
   ) {
-    super({
+    super({ type: SuperTokensError.BAD_INPUT_ERROR, message: {
       SIGN_IN_METHOD_DISCONNECTED: "This sign-in method is disconnected from this account",
       DISCONNECT_POLICY_INVALID: "Sign-in method policy requires account review",
       DISCONNECT_OWNER_CHANGED: "Sign-in method ownership changed; retry after account review",
       DISCONNECT_RESTORATION_BLOCKED: "Migration and reconciliation are unavailable for accounts with disconnected sign-in methods",
-    }[code]);
+    }[code] });
     this.name = "DisconnectedSignInMethodError";
   }
 }
@@ -456,6 +457,14 @@ type Gate = {
   policy?: ReturnType<typeof parsePolicy>;
 };
 
+type GateOptions = {
+  scope: "session" | "signin";
+  user?: User;
+  // Only pass a snapshot from an earlier check in the same auth operation.
+  // The commit check reuses its row addresses, never its policy contents.
+  previous?: Gate;
+};
+
 async function assertLiteralReferences(literalIds: string[], userContext?: Context) {
   for (const id of literalIds) {
     const { metadata } = await UserMetadata.getUserMetadata(id, userContext);
@@ -470,13 +479,17 @@ async function assertLiteralReferences(literalIds: string[], userContext?: Conte
 
 export async function readPolicyGate(
   reference: string, userContext: Context | undefined,
-  options: { scope: "session" | "signin"; user?: User; previous?: Gate },
+  options: GateOptions,
 ): Promise<Gate> {
   const previous = options.previous?.reference === reference ? options.previous : undefined;
   let owner = previous?.owner ?? await lenientOwner(reference, userContext);
   const literalIds = new Set(previous?.literalIds);
-  if (reference !== owner.id) literalIds.add(reference);
-  await assertLiteralReferences([...literalIds], previous ? uncachedContext(userContext) : userContext);
+  // Refresh checks the canonical internal owner row. Sign-in and issuance also
+  // check literal aliases for a conflicting internal owner after a relink.
+  if (options.scope === "signin") {
+    if (reference !== owner.id) literalIds.add(reference);
+    await assertLiteralReferences([...literalIds], previous ? uncachedContext(userContext) : userContext);
+  }
   let activeContext = previous ? uncachedContext(userContext) : userContext;
   let { metadata } = await UserMetadata.getUserMetadata(owner.id, activeContext);
   if (!previous && options.scope === "signin") {
@@ -518,7 +531,7 @@ export async function readPolicyGate(
 
 export async function checkSignInMethodAuthentication(
   userId: string, recipeUserId: RecipeUserId, tenantId: string, userContext?: Context,
-  options: Parameters<typeof readPolicyGate>[2] = { scope: "signin" },
+  options: GateOptions = { scope: "signin" },
 ) {
   const gate = await readPolicyGate(userId, userContext, options);
   let method: User["loginMethods"][number] | undefined;
@@ -532,14 +545,7 @@ export async function checkSignInMethodAuthentication(
     }
     if (method) assertMethodAllowed(method, tenantId, gate.policy.identities, gate.owner.id);
   }
-  return { gate, method, policy: gate.policy?.methods ?? [] };
-}
-
-export async function assertSignInMethodAuthenticationAllowed(
-  userId: string, recipeUserId: RecipeUserId, tenantId: string, userContext?: Context,
-): Promise<{ policy: DisconnectedSignInMethod[]; method?: User["loginMethods"][number] }> {
-  const { method, policy } = await checkSignInMethodAuthentication(userId, recipeUserId, tenantId, userContext);
-  return method ? { method, policy } : { policy };
+  return { gate, method };
 }
 
 export async function assertSignInMethodLinkAllowed(
@@ -596,7 +602,7 @@ export function assertNoPolicyInMetadata(ownerId: string, metadata: Record<strin
 
 export async function assertNoDisconnectedSignInMethodsAtInternalOwner(
   internalOwnerId: string, userContext?: Context, transitionTargetUserId?: string,
-  options: { fresh?: boolean; allowFence?: boolean } = {},
+  options: { fresh?: boolean } = {},
 ): Promise<void> {
   const { metadata } = options.fresh
     ? await UserMetadata.getUserMetadata(internalOwnerId, uncachedContext(userContext))
@@ -612,7 +618,7 @@ export async function assertNoDisconnectedSignInMethodsAtInternalOwner(
   }
   // This argument is a pinned internal metadata row, not a selector to redirect
   // through today's primary. Its checkpoint remains evidence after reassociation.
-  if (!options.allowFence && !transitionTargetUserId) throw failure;
+  if (!transitionTargetUserId) throw failure;
   let current: Owner | undefined;
   try {
     current = await ownerFor(internalOwnerId, userContext);

@@ -456,6 +456,9 @@ export async function createMissingLoginMethod(
     rowndDisableAutomaticAccountLinking: true,
   });
   if (importMethod.recipeId === "thirdparty") {
+    await assertSignInIdentityNotIndexed({
+      tenantId, providerId: importMethod.thirdPartyId, providerUserId: importMethod.thirdPartyUserId,
+    }, operationContext);
     const result = await ThirdParty.manuallyCreateOrUpdateUser(
       tenantId,
       importMethod.thirdPartyId,

@@ -24,7 +24,7 @@ import {
 import { RowndEmailChangeError, RowndLegacyUserNotFoundError, RowndPluginError, RowndSignInMethodError } from "./errors";
 import { assertConnectedSignInMethodsEnabled, connectedSignInMethodsAreAvailable, disconnectConnectedSignInMethod, listConnectedSignInMethods } from "./connected-sign-in-methods";
 import { assertNoDisconnectedSignInMethods, DisconnectedSignInMethodError } from "./disconnected-sign-in-identities";
-import { logSignInMethodPolicy } from "./sign-in-method-policy-log";
+import { logSignInMethodPolicy, signInMethodPolicyFailureLevel } from "./sign-in-method-policy-log";
 import { logDebugMessage } from "./logger";
 import type {
   RowndEmailChangeRequestContext,
@@ -153,7 +153,7 @@ export function handleConnectedSignInMethods(deps: RowndRouteHandlerDeps, discon
     } catch (error) {
       const code = error instanceof DisconnectedSignInMethodError ? error.code : error instanceof RowndSignInMethodError
         ? error.errorCode : error instanceof RowndEmailChangeError ? "SIGN_IN_METHOD_EMAIL_CHANGE_PENDING" : "SIGN_IN_METHOD_OPERATION_INCOMPLETE";
-      logSignInMethodPolicy("error", "rownd_sign_in_methods_request_failed", {
+      logSignInMethodPolicy(signInMethodPolicyFailureLevel(code), "rownd_sign_in_methods_request_failed", {
         code, step: disconnect ? "disconnect" : "list", ownerId: session?.getUserId?.(userContext),
       });
       if (error instanceof DisconnectedSignInMethodError) {

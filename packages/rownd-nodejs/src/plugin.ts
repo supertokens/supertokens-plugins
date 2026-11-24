@@ -50,7 +50,7 @@ import {
   readPolicyGate,
   DisconnectedSignInMethodError,
 } from "./disconnected-sign-in-identities";
-import { logSignInMethodPolicy } from "./sign-in-method-policy-log";
+import { logSignInMethodPolicy, signInMethodPolicyFailureLevel } from "./sign-in-method-policy-log";
 import {
   applyRowndOAuthResourceParams,
   buildRowndOAuthPayload,
@@ -121,8 +121,14 @@ function thirdPartyAuthenticationOperation(context: Record<string, any>) {
   return Reflect.get(context, THIRD_PARTY_AUTHENTICATION) as ThirdPartyAuthenticationOperation | undefined;
 }
 
+function logPolicyDenial(error: DisconnectedSignInMethodError, step: string, ownerId?: string) {
+  logSignInMethodPolicy(signInMethodPolicyFailureLevel(error.code), "rownd_disconnect_auth_denied", {
+    code: error.code, step, ownerId: error.ownerId ?? ownerId,
+  });
+}
+
 function policyFailure(error: DisconnectedSignInMethodError, step: string, ownerId?: string) {
-  logSignInMethodPolicy("error", "rownd_disconnect_auth_denied", { code: error.code, step, ownerId: error.ownerId ?? ownerId });
+  logPolicyDenial(error, step, ownerId);
   return { status: "SIGN_IN_UP_NOT_ALLOWED" as const, reason: error.code };
 }
 
@@ -1013,13 +1019,21 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   resolved.userContext,
                   { rowndAppVariantId: appVariantId },
                 );
+                let session = input.shouldTryLinkingWithSessionUser === false ? undefined : input.session;
+                if (session && !await Session.getSessionInformation(session.getHandle(operationContext), operationContext)) {
+                  if (input.shouldTryLinkingWithSessionUser === true) {
+                    throw new Session.Error({ type: Session.Error.UNAUTHORISED, message: "Session was revoked", payload: { clearTokens: true } });
+                  }
+                  // An optional stateless token may outlive a revoked session or removed recipe.
+                  session = undefined;
+                }
                 const historicalOwner = consumedEmail
                   ? await findHistoricalEmailOwner({
                     snapshot: authSnapshot,
                     requireNewPasswordless: true,
                     email: consumedEmail,
                     tenantId: input.tenantId,
-                    session: input.session,
+                    session,
                     userContext: operationContext,
                   })
                   : undefined;
@@ -1032,10 +1046,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const consumeContext = createDerivedUserContext(operationContext, {
                   [passwordlessHistoryOwner]: historicalScope,
                 });
-                if (input.session && !historicalScope) {
-                  const id = input.session.getUserId(consumeContext);
+                if (session && !historicalScope && input.shouldTryLinkingWithSessionUser === true) {
+                  const id = session.getUserId(consumeContext);
                   try {
-                    await checkSignInMethodAuthentication(id, input.session.getRecipeUserId(consumeContext), input.tenantId, consumeContext);
+                    await checkSignInMethodAuthentication(id, session.getRecipeUserId(consumeContext), input.tenantId, consumeContext);
                   } catch (error) {
                     if (error instanceof DisconnectedSignInMethodError) return policyFailure(error, "passwordless_existing_session", id);
                     throw error;
@@ -1044,7 +1058,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const response = await originalImplementation.consumeCodePOST({
                   ...input,
                   // Authenticate the historical owner instead of upgrading the incidental guest session.
-                  ...(historicalScope ? { session: undefined, shouldTryLinkingWithSessionUser: false } : {}),
+                  ...(historicalScope ? { session: undefined, shouldTryLinkingWithSessionUser: false } : { session }),
                   userContext: consumeContext,
                   options: historicalScope ? {
                     ...input.options,
@@ -1125,6 +1139,15 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   return { status: "SIGN_IN_UP_NOT_ALLOWED" as const, reason: INACTIVE_PASSWORDLESS_EMAIL_REASON };
                 }
                 if (response.status === "OK") {
+                  if (session && !historicalScope && response.session.getHandle(consumeContext) === session.getHandle(consumeContext)) {
+                    const id = session.getUserId(consumeContext);
+                    try {
+                      await checkSignInMethodAuthentication(id, session.getRecipeUserId(consumeContext), input.tenantId, consumeContext);
+                    } catch (error) {
+                      if (error instanceof DisconnectedSignInMethodError) return policyFailure(error, "passwordless_reused_session", id);
+                      throw error;
+                    }
+                  }
                   if (consumedEmail) {
                     try {
                       const disposition =
@@ -1324,7 +1347,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   }
                   return result;
                 } catch (error) {
-                  if (error instanceof DisconnectedSignInMethodError) policyFailure(error, "link_accounts", input.primaryUserId);
+                  if (error instanceof DisconnectedSignInMethodError) logPolicyDenial(error, "link_accounts", input.primaryUserId);
                   throw error;
                 }
               },
@@ -1350,11 +1373,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                         const { policy } = await readPolicyGate(ownerId, input[4], { scope: "signin", user: input[1] });
                         if (policy?.identities.some((entry) => entry.tenantId === input[3] &&
                           entry.providerId === candidate.id && entry.providerUserId === candidate.userId)) {
-                          policyFailure(new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED"), "automatic_link", ownerId);
+                          logPolicyDenial(new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED"), "automatic_link", ownerId);
                           return { shouldAutomaticallyLink: false, shouldRequireVerification: false };
                         }
                       } catch (error) {
-                        if (error instanceof DisconnectedSignInMethodError) policyFailure(error, "automatic_link", ownerId);
+                        if (error instanceof DisconnectedSignInMethodError) logPolicyDenial(error, "automatic_link", ownerId);
                         throw error;
                       }
                     }
@@ -1401,7 +1424,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   } catch (error) {
                     if (!(error instanceof DisconnectedSignInMethodError)) throw error;
                     if (authentication || Reflect.has(context, passwordlessHistoryOwner)) throw error;
-                    policyFailure(error, "create_session", userId);
+                    logPolicyDenial(error, "create_session", userId);
                     throw unauthorizedPolicy(error);
                   }
                 };
@@ -1454,7 +1477,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     session.getTenantId(input.userContext), input.userContext, { scope: "session" });
                 } catch (error) {
                   if (!(error instanceof DisconnectedSignInMethodError)) throw error;
-                  policyFailure(error, "refresh", userId);
+                  logPolicyDenial(error, "refresh", userId);
                   if (error.code === "SIGN_IN_METHOD_DISCONNECTED") {
                     await Promise.allSettled([session.revokeSession(input.userContext)]);
                   }
@@ -1476,7 +1499,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   }
                   return result;
                 } catch (error) {
-                  if (error instanceof DisconnectedSignInMethodError) policyFailure(error, "associate_tenant", input.recipeUserId.getAsString());
+                  if (error instanceof DisconnectedSignInMethodError) logPolicyDenial(error, "associate_tenant", input.recipeUserId.getAsString());
                   throw error;
                 }
               },

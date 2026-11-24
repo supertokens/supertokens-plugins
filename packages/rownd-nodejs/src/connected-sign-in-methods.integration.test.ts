@@ -120,6 +120,9 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     const headers = { authorization: `Bearer ${signedIn.token}`, "st-auth-mode": "header", "content-type": "application/json" };
     const listed = await (await request(`${origin}/plugin/rownd/user/sign-in-methods`, { headers })).json() as any;
     expect(listed).toMatchObject({ status: "OK", user_id: f.rowndId, reauthentication: { method: "email", identifier: f.email } });
+    expect(listed.reauthentication_valid_until).toBeGreaterThan(Date.now());
+    expect(listed.reauthentication_valid_for_ms).toBeGreaterThan(0);
+    expect(listed.reauthentication_valid_for_ms).toBeLessThanOrEqual(600_000);
     const method = listed.methods.find((entry: any) => entry.kind === "sso");
     expect(method).toMatchObject({ provider: "google", can_disconnect: true });
     const response = await request(`${origin}/plugin/rownd/user/sign-in-methods/disconnect`, { method: "POST", headers,
@@ -158,6 +161,24 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     expect((await SuperTokens.getUser(f.internalId))?.loginMethods).toHaveLength(1);
   });
 
+  it("signs in with the retained email when the request still carries a revoked SSO access token", async () => {
+    const f = await fixture();
+    const staleToken = f.ssoSession.getAccessToken();
+    const signedIn = await emailSignIn(f.email);
+    const headers = { authorization: `Bearer ${signedIn.token}`, "st-auth-mode": "header", "content-type": "application/json" };
+    const listed = await (await request(`${origin}/plugin/rownd/user/sign-in-methods`, { headers })).json() as any;
+    const method = listed.methods.find((entry: any) => entry.kind === "sso");
+    expect(await (await request(`${origin}/plugin/rownd/user/sign-in-methods/disconnect`, { method: "POST", headers,
+      body: JSON.stringify({ method_id: method.id, expected_user_id: f.rowndId, expected_tenant_id: "public" }) })).json())
+      .toEqual({ status: "OK", signed_out: true });
+    await expect(Session.getSessionWithoutRequestResponse(staleToken)).resolves.toBeDefined();
+
+    const retained = await emailSignIn(f.email, staleToken);
+    expect(retained.response.headers.get("st-access-token")).toBeTruthy();
+    expect(retained.session.getUserId()).toBe(f.rowndId);
+    expect(retained.session.getRecipeUserId().getAsString()).toBe(f.passwordless.recipeUserId.getAsString());
+  });
+
   it("does not mint disconnect proof when email consumption reuses an SSO-bound session", async () => {
     const f = await fixture();
     const consumed = await emailSignIn(f.email, f.ssoSession.getAccessToken());
@@ -165,6 +186,7 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     const headers = { authorization: `Bearer ${consumed.token}`, "st-auth-mode": "header", "content-type": "application/json" };
     const listed = await (await request(`${origin}/plugin/rownd/user/sign-in-methods`, { headers })).json() as any;
     expect(listed).not.toHaveProperty("reauthentication_valid_until");
+    expect(listed).not.toHaveProperty("reauthentication_valid_for_ms");
     expect(listed.methods.find((entry: any) => entry.kind === "sso")).toMatchObject({
       can_disconnect: false, disconnect_block_reason: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED",
     });

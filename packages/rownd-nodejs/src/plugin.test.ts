@@ -565,6 +565,7 @@ describe("rownd-nodejs plugin", () => {
       const userContext = {
         _default: { coreCallCache: { mapping: "UNKNOWN_MAPPING_ERROR" } },
       };
+      vi.spyOn(UserMetadata, "getUserMetadata").mockResolvedValue({ status: "OK", metadata: {} });
       vi.spyOn(ThirdParty, "manuallyCreateOrUpdateUser").mockResolvedValue({
         status: "OK",
         user: { id: "rownd-external-id" },

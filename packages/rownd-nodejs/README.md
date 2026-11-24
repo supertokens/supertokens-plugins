@@ -14,12 +14,20 @@ After the first disconnect, **do not roll back to a binary that ignores owner
 policy or the disconnected-identity index**. Old instances can recreate and
 auto-link the removed recipe. To roll back the UI, set the flag to `false` on
 the supporting fleet. This removes the capability and returns 404 on the
-management routes; enforcement remains on. If a binary rollback is unavoidable,
-first deploy an enforcement-only backport to the older line, or pause affected
-authentication traffic until enforcement returns. Use `rownd_disconnect_completed`
+management routes; enforcement remains on. Binary rollback after a disconnect is
+unsupported. There is no enforcement-only backport. If a binary rollback is
+unavoidable, keep affected authentication traffic paused until a build that
+enforces both records is deployed. Use `rownd_disconnect_completed`
 and `rownd_disconnect_step_failed` (tenant, provider, hashed owner ID) to scope an
 incident: Core UserMetadata cannot enumerate all affected owners. Do not clear
 policy or index records during rollback.
+
+This rollout assumes no disconnects were completed on the prerelease that wrote
+owner policy but not the index. If that prerelease was enabled, audit its affected
+accounts before rollout and escalate completed records to engineering for index
+backfill while affected SSO traffic is paused. Without an index, a deleted
+provider subject cannot be located from owner policy alone at SSO sign-in.
+Incomplete disconnects can be retried to rebuild their indexes.
 
 ### API and enforcement
 
@@ -48,7 +56,10 @@ email can be removed. Pending email changes and ambiguous canonical methods bloc
 removal. The server requires a receipt from canonical-email code consumption less
 than 10 minutes ago, bound to the initiating session. Otherwise, eligible rows
 show `SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED`; sign out and sign in with the
-retained email. `reauthentication_valid_until`, when present, is epoch milliseconds.
+retained email. When fresh, the list returns `reauthentication_valid_until` (epoch
+milliseconds) and `reauthentication_valid_for_ms` (remaining milliseconds at
+response time). Use the latter for a client timer so device clock skew does not
+block disconnect. The server still validates proof at POST time.
 Refresh, SSO, migration and consumption that retains an SSO-bound session do not
 create this receipt.
 
@@ -56,8 +67,9 @@ Management errors include `{ status: "ERROR", code, error_code, message, reauthe
 404 for unavailable management, 403 for missing proof, and 409 for ownership,
 eligibility, policy or incomplete cleanup. A disconnected subject signing in
 with SSO in its original tenant gets exactly
-`{ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_DISCONNECTED" }`;
-it does not create a separate account.
+`{ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_DISCONNECTED" }`.
+A sign-in racing the removal can leave a standalone recipe user, but the
+denied attempt does not issue a session. See the cleanup procedure below.
 
 The plugin stores intent and the per-tenant identity index before destructive work.
 Neither is rolled back. After interrupted cleanup, sign in with the retained email
@@ -89,6 +101,16 @@ on sensitive application endpoints, use `checkDatabase: true` with SuperTokens.
    resuming traffic. Repair does not change the graph, index, valid intents or
    completions, or records of unknown versions. Escalate ambiguous ownership,
    orphaned completions, unknown formats, and live completed identities.
+4. If a racing SSO sign-in left a standalone recipe, pause affected writes and
+   look up the exact tenant, provider and subject from `inspectSignInMethodPolicy`.
+   In Core, verify the result is a single, unlinked recipe with no active
+   sessions. Check the application for associated customer data. Delete only
+   the verified orphan recipe, not the mapped
+   owner or its policy/index. Escalate if ownership or provenance is unclear.
+
+Policy denials from SDK linking and association calls are also SuperTokens
+`BAD_INPUT_ERROR`s. Use the SuperTokens error handler for app-defined routes, or
+catch the exported `DisconnectedSignInMethodError` and map its `code` to a 4xx.
 
 Owner keys begin `rownd_disconnected_sign_in_identity_`; `completion_` and
 `owner_transition_conflict_` mark completions and fences. The identity index is

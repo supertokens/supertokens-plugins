@@ -2,11 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SuperTokens from "supertokens-node";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import Session from "supertokens-node/recipe/session";
+import ThirdParty from "supertokens-node/recipe/thirdparty";
 import { LoginMethod, User as SuperTokensUserFixture } from "supertokens-node/lib/build/user";
 import {
   assertNoDisconnectedSignInMethods,
   assertNoDisconnectedSignInMethodsAtInternalOwner,
-  assertSignInMethodAuthenticationAllowed,
+  checkSignInMethodAuthentication,
   assertSignInIdentityNotIndexed,
   assertSignInMethodLinkAllowed,
   assertSignInMethodTenantAssociationAllowed,
@@ -21,7 +22,7 @@ import { reconciliationReadRevision, withReadOnlyReconciliationReads, withReconc
 import { buildConfiguredSessionClaims, buildRowndUserMetadata, combineLinkedMetadata, getCombinedUserMetadata,
   isInternalMetadataField, mapRowndUserToSuperTokens, mergeMissingProfileMetadata, updatePrimaryUserMetadata } from "./rownd-compatibility";
 import { previewReconciliation } from "./reconcile-preview";
-import { importUser, reconcileRowndUserWithExistingLoginMethods, updateUserData, updateUserMetadata } from "./supertokens-repository";
+import { createMissingLoginMethod, importUser, reconcileRowndUserWithExistingLoginMethods, updateUserData, updateUserMetadata } from "./supertokens-repository";
 import type { JsonRecord } from "./utils";
 import { fetchAdministrativeMigrationSource } from "./migration-email";
 import { prepareOwnerConsolidation } from "./migration-consolidation";
@@ -30,6 +31,11 @@ import { OWNER_PLAN_KEY, readOwnerPlanCheckpoint, type OwnerPlanCheckpoint } fro
 
 type User = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
 const recipe = (id: string) => SuperTokens.convertToRecipeUserId(id);
+async function assertSignInMethodAuthenticationAllowed(...input: Parameters<typeof checkSignInMethodAuthentication>) {
+  const { gate, method } = await checkSignInMethodAuthentication(...input);
+  const policy = gate.policy?.methods ?? [];
+  return method ? { method, policy } : { policy };
+}
 const thirdparty = (id = "google-old", providerId = "google", subject = "subject", tenantIds = ["public"]) =>
   new LoginMethod({ recipeId: "thirdparty", recipeUserId: id, thirdParty: { id: providerId, userId: subject },
     email: "old@example.com", verified: true, tenantIds, timeJoined: 1 });
@@ -297,6 +303,16 @@ describe("owner-scoped disconnected sign-in policy", () => {
     await expect(assertSignInMethodAuthenticationAllowed("new-owner", recipe("google-new"), "public")).resolves.toEqual({ policy: [] });
     await expect(assertSignInMethodLinkAllowed("owner", recipe("google-new"))).rejects.toMatchObject({ code: "SIGN_IN_METHOD_DISCONNECTED" });
     await expect(assertSignInMethodAuthenticationAllowed("owner", recipe("google-new"), "public")).rejects.toMatchObject({ code: "DISCONNECT_OWNER_CHANGED" });
+  });
+
+  it("denies creation of an indexed provider recipe before reconciliation calls Core", async () => {
+    await checkpoint();
+    const create = vi.spyOn(ThirdParty, "manuallyCreateOrUpdateUser");
+    await expect(createMissingLoginMethod({
+      recipeId: "thirdparty", thirdPartyId: input.providerId, thirdPartyUserId: input.providerUserId,
+      email: "another@example.com", isVerified: true,
+    }, input.tenantId, "another-owner", {})).rejects.toMatchObject({ code: "SIGN_IN_METHOD_DISCONNECTED" });
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("refuses importing a donor graph's policy or suppressed identity into another owner", async () => {

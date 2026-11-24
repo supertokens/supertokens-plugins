@@ -105,6 +105,18 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
       const main = [0, 0, 0, 18, 17];
       const budget = [0, 0, 2, 4, 5];
       counts.forEach((count, i) => expect(count - main[i]!, `flow ${i} delta`).toBeLessThanOrEqual(budget[i]!));
+
+      const rowndId = `rownd-${randomUUID()}`;
+      expect(await SuperTokens.createUserIdMapping({ superTokensUserId: f.ownerId, externalUserId: rowndId, force: true }))
+        .toMatchObject({ status: "OK" });
+      const mappedSession = await Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(rowndId));
+      expect(mappedSession.getUserId()).toBe(rowndId);
+      const refreshToken = mappedSession.getAllSessionTokensDangerously().refreshToken!;
+      const mappedRefresh = await extra(async () => {
+        expect((await Session.refreshSessionWithoutRequestResponse(refreshToken, true)).getUserId()).toBe(rowndId);
+      });
+      console.info("mapped session refresh Core GET count", { enabled, mappedRefresh });
+      expect(mappedRefresh).toBeLessThanOrEqual(2);
     } finally {
       fetchCore.mockRestore();
     }
@@ -205,6 +217,15 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
     expect(inspected.rows).toContainEqual(protectedRow);
     await expect(assertNoDisconnectedSignInMethodsAtInternalOwner(ownerId, {}, destination.ownerId))
       .rejects.toMatchObject({ code: "DISCONNECT_RESTORATION_BLOCKED" });
+    const adminError = await AccountLinking.linkAccounts(donor.recipeUserId, destination.ownerId).catch((error: unknown) => error);
+    expect(adminError).toMatchObject({ code: "DISCONNECT_OWNER_CHANGED" });
+    const adminRequest = new PreParsedRequest({
+      url: `${origin}/app-admin/link`, method: "post", cookies: {}, query: {}, headers: new Headers(),
+      getJSONBody: async () => ({}), getFormBody: async () => ({}),
+    });
+    const adminResponse = new CollectingResponse();
+    await errorHandler()(adminError, adminRequest, adminResponse, (error) => { if (error) throw error; });
+    expect(adminResponse.statusCode).toBe(400);
     const invalid = "rownd_disconnected_sign_in_identity_invalid";
     await UserMetadata.updateUserMetadata(destination.ownerId, { [invalid]: false });
     const repair = { userId: destination.ownerId, remove: ["fences"] as Array<"fences"> };

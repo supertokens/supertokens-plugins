@@ -134,9 +134,21 @@ describe("connected sign-in method management", () => {
 
   it("shows when fresh retained-email authentication expires and pre-signals missing proof", async () => {
     const proof = await assertRetainedPasswordlessAuthentication({} as any);
-    expect(await listConnectedSignInMethods(input)).toMatchObject({
-      reauthentication_valid_until: proof.authenticatedAt + 600_000,
-    });
+    const now = vi.spyOn(Date, "now").mockReturnValue(proof.authenticatedAt + 10_000);
+    try {
+      expect(await listConnectedSignInMethods(input)).toMatchObject({
+        reauthentication_valid_until: proof.authenticatedAt + 600_000,
+        reauthentication_valid_for_ms: 590_000,
+      });
+      now.mockReturnValue(proof.authenticatedAt + 600_000);
+      const expired = await listConnectedSignInMethods(input);
+      expect(expired).not.toHaveProperty("reauthentication_valid_until");
+      expect(expired).not.toHaveProperty("reauthentication_valid_for_ms");
+      expect(expired.methods.find(({ kind }) => kind === "sso"))
+        .toMatchObject({ can_disconnect: false, disconnect_block_reason: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED" });
+    } finally {
+      now.mockRestore();
+    }
     vi.mocked(assertRetainedPasswordlessAuthentication).mockRejectedValueOnce(new RowndSignInMethodError(
       "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED", 403, "Sign in again"));
     const stale = await listConnectedSignInMethods(input);
