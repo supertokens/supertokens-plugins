@@ -28,6 +28,7 @@ import { getPluginConfig, setPluginConfig } from "./config";
 import { logDebugMessage } from "./logger";
 import { createHash } from "node:crypto";
 import type { JsonRecord } from "./utils";
+import { mappedVariantSignInBudgets } from "./sign-in-variant-budget.test-fixture";
 
 vi.mock("./logger", () => ({ logDebugMessage: vi.fn(), enableDebugLogs: vi.fn() }));
 
@@ -404,18 +405,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
       key === "rownd_profile_authoritative_fields")).toBe(false);
   }
 
-  // Tuple order: user, mapping and metadata. Keep main's presentation budget
-  // separate from the incremental cost of disconnect enforcement.
-  it.each([
-    { mode: "compatibility", recipe: "passwordless", variant: "existing", baseline: [2, 6, 7], policy: [0, 0, 2] },
-    { mode: "compatibility", recipe: "passwordless", variant: "added", baseline: [3, 8, 9], policy: [0, 0, 2] },
-    { mode: "compatibility", recipe: "thirdparty", variant: "existing", baseline: [2, 4, 5], policy: [0, 0, 3] },
-    { mode: "compatibility", recipe: "thirdparty", variant: "added", baseline: [3, 6, 7], policy: [0, 0, 3] },
-    { mode: "canonical", recipe: "passwordless", variant: "existing", baseline: [2, 4, 6], policy: [0, 1, 1] },
-    { mode: "canonical", recipe: "passwordless", variant: "added", baseline: [2, 4, 7], policy: [0, 1, 1] },
-    { mode: "canonical", recipe: "thirdparty", variant: "existing", baseline: [1, 0, 2], policy: [0, 1, 4] },
-    { mode: "canonical", recipe: "thirdparty", variant: "added", baseline: [1, 0, 3], policy: [0, 1, 4] },
-  ] as const)("budgets $recipe sign-in with $variant variant in $mode mode", async ({ mode, recipe, variant, baseline, policy }) => {
+  it.each(mappedVariantSignInBudgets)("budgets $recipe sign-in with $variant variant in $mode mode", async ({ mode, recipe, variant, baseline, policy }) => {
     mapped = true;
     signInRecipe = recipe;
     initSDK(false, mode);
