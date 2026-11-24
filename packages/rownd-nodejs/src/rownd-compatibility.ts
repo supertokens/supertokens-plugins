@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { normalizeOptionalRowndIdentities, resolveRowndProviderSubject } from "./provider-identity";
+import { readSessionAuthenticationOrigin, SESSION_AUTHENTICATION_KEY, type SessionAuthenticationOrigin } from "./session-authentication";
 
 import { reconciliationSuperTokens as SuperTokens, reconciliationAccountLinking as AccountLinking, reconciliationUserMetadata as UserMetadata } from "./reconciliation-sdk";
 import type { JSONObject, UserContext } from "supertokens-node/types";
@@ -914,15 +915,13 @@ export function buildRowndSessionClaimPayload(input: {
   currentPayload?: JsonRecord;
   appVariantId?: string;
   pluginConfig?: RowndPluginNormalisedConfig;
-  authenticationOrigin?: "instant" | "authenticated";
+  authenticationOrigin?: SessionAuthenticationOrigin;
 }) {
   const currentPayload = input.currentPayload ?? {};
   const originalRowndUser = input.metadata?.original_rownd_user;
   const verifiedData = originalRowndUser?.verified_data as
     JsonRecord | undefined;
-  const recordedOrigin = currentPayload.rownd_session_authentication;
-  const authenticationOrigin = input.authenticationOrigin ??
-    (recordedOrigin === "instant" || recordedOrigin === "authenticated" ? recordedOrigin : undefined);
+  const authenticationOrigin = input.authenticationOrigin ?? readSessionAuthenticationOrigin(currentPayload);
   const authLevel = authenticationOrigin === "instant" ||
     (authenticationOrigin === undefined && currentPayload.auth_level === "instant") ? "instant" : getEffectiveAuthLevel(
       input.user,
@@ -961,7 +960,7 @@ export function buildRowndSessionClaimPayload(input: {
     ...configuredClaims,
     app_user_id: appUserId,
     auth_level: authLevel,
-    ...(input.authenticationOrigin ? { rownd_session_authentication: input.authenticationOrigin } : {}),
+    ...(authenticationOrigin ? { [SESSION_AUTHENTICATION_KEY]: authenticationOrigin } : {}),
     is_verified_user: isVerifiedUser,
     [ROWND_JWT_CLAIMS.AppUserId]: appUserId,
     [ROWND_JWT_CLAIMS.AuthLevel]: authLevel,

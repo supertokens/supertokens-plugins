@@ -6,7 +6,8 @@ import { migrationPhoneAccountInfos, sameCorePhoneNumber } from "./migration-pho
 import { backfillAdministrativeMetadata } from "./migration-admin-metadata";
 import { getAdministrativeRepairMetadata, prepareAdministrativeCanonicalEmail } from "./migration-admin-email";
 import { RowndMigrationPolicyError } from "./errors";
-import { sessionAuthenticationOrigin, assertEmailChangeSessionClaims } from "./session-authentication";
+import { sessionAuthenticationOrigin, assertEmailChangeSessionClaims, isAnonymousSessionUser, SESSION_AUTHENTICATION_KEY } from "./session-authentication";
+import { isSessionHandoffCarrier } from "./session-handoff-carrier";
 import { assertMigrationPostconditions, assertMigrationOwnerGraph, reconcileAdministrativeEmailVerification } from "./migration-postconditions";
 import { assertCurrentRowndProviders, checkpointProviderIntroduction, finishProviderIntroductions, prepareRowndProviderRetirement, recoverProviderRevocations, type ProviderIntroduction } from "./migration-provider";
 import { finishAdministrativeProviderIntroductions, inspectAdministrativeProviderIntroductions } from "./migration-admin-provider";
@@ -56,6 +57,7 @@ import {
   getConfigForUserContext,
   getPluginConfig,
   getSuperTokensConfig,
+  resolveConfirmationBypassTarget,
   resolvePluginConfigSnapshot,
 } from "./config";
 import type { SuperTokensUserImport } from "./types";
@@ -92,7 +94,6 @@ import {
   ROWND_APP_VARIANTS_KEY,
 } from "./rownd-compatibility";
 import {
-  assertAllowedBypassRedirectPath,
   clearSuperTokensCoreCallCache,
   getErrorMessage,
   getStringList,
@@ -102,8 +103,6 @@ import {
   hasOwn,
   isJsonRecord,
   isRecord,
-  normalizeRedirectToPathForClientDomain,
-  resolveAllowedClientDomain,
   rewriteMagicLink,
   createDerivedUserContext,
   createUncachedUserContext,
@@ -1419,10 +1418,7 @@ export const RowndIsAnonymousClaim = new BooleanClaim({
   ) => {
     const user = await SuperTokens.getUser(userId, userContext);
     const origin = await sessionAuthenticationOrigin(user, recipeUserId.getAsString(), payload ?? {}, userContext);
-    const effectiveAuthLevel = origin === "instant" ? "instant" : getEffectiveAuthLevel(user);
-    return [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(
-      effectiveAuthLevel,
-    );
+    return isAnonymousSessionUser(user, origin);
   },
 });
 
@@ -1460,6 +1456,10 @@ export async function buildRowndSessionAndAnonymousClaims(
     userId, userContext, pluginConfig?.metadataMode === "canonical" ? options?.userSnapshot : undefined,
   );
   const user = inspection.user;
+  if (creating) {
+    currentPayload = { ...currentPayload };
+    delete currentPayload[SESSION_AUTHENTICATION_KEY];
+  }
   const rowndSessionClaims = buildRowndSessionClaimPayload({
     userId,
     user,
@@ -1511,21 +1511,15 @@ export async function createMagicLinkWithConfirmationBypass(
   });
   const pluginConfig = resolved.config;
   const appVariantId = input.appVariantId;
-  assertRowndAppVariantIsConfigured(pluginConfig, appVariantId);
-
-  const clientDomain = resolveAllowedClientDomain({
+  const { clientDomain, redirectToPath } = resolveConfirmationBypassTarget({
     clientDomain: input.clientDomain,
+    redirectToPath: input.redirectToPath,
+    appVariantId,
     pluginConfig,
     stConfig,
     request: input.request,
     userContext: resolved.userContext,
   });
-  const redirectToPath = normalizeRedirectToPathForClientDomain(
-    input.redirectToPath,
-    clientDomain,
-  );
-  assertAllowedBypassRedirectPath(pluginConfig, redirectToPath);
-
   const operationContext = createDerivedUserContext(resolved.userContext, {
     rowndDisplayContext: input.displayContext,
     rowndRedirectToPath: redirectToPath,
@@ -1921,7 +1915,7 @@ async function getLatestSessionInfo(
   let latestSessionInfo: (typeof sessionInfos)[number];
   for (const sessionInfo of sessionInfos) {
     if (
-      sessionInfo &&
+      sessionInfo && !isSessionHandoffCarrier(sessionInfo) &&
       (!latestSessionInfo ||
         sessionInfo.timeCreated > latestSessionInfo.timeCreated)
     ) {

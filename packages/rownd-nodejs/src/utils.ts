@@ -364,13 +364,17 @@ export function normalizeRedirectToPathForClientDomain(
     }
   }
 
+  if (redirectUrl.pathname.startsWith("//")) {
+    throw new Error("redirectToPath cannot normalize to a schemaless URL");
+  }
+
   return `${redirectUrl.pathname}${redirectUrl.search}${redirectUrl.hash}`;
 }
 
 export function assertAllowedBypassRedirectPath(
   pluginConfig: RowndPluginNormalisedConfig,
   redirectToPath: string | undefined,
-) {
+): asserts redirectToPath is string {
   if (!redirectToPath) {
     throw new Error(
       "redirectToPath is required for confirmation bypass magic links",

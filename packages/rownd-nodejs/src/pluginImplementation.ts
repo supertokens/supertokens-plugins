@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
-import { withProvenSessionAuthentication } from "./session-authentication";
+import { isSessionHandoff, withProvenSessionAuthentication } from "./session-authentication";
+import { bufferSessionResponse } from "./buffer-session-response";
 import { MigrationTelemetry } from "./telemetry/migrationTelemetry";
 import { assertMigrationMapping, resolveMigrationMapping } from "./migration-mapping";
 import { resolveConsolidatedTokenOwner } from "./migration-consolidation";
@@ -507,22 +508,12 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       await assertMigrationMapping(internalUserId, rowndUserId, resolved.userContext);
       // Keep newly issued credentials off the response until the actual session
       // binding has been checked. Existing browser credentials are never cleared.
-      const responseWrites: Array<() => void> = [];
-      const sessionResponse: SuperTokensResponse = Object.create(res);
-      sessionResponse.setHeader = (...args) => {
-        responseWrites.push(() => res.setHeader(...args));
-      };
-      sessionResponse.removeHeader = (...args) => {
-        responseWrites.push(() => res.removeHeader(...args));
-      };
-      sessionResponse.setCookie = (...args) => {
-        responseWrites.push(() => res.setCookie(...args));
-      };
+      const buffered = bufferSessionResponse(res);
       const sessionTenantId = tenantId;
       const sessionRecipeUserId = recipeUserId;
       const createSession = () => Session.createNewSession(
         req,
-        sessionResponse,
+        buffered.response,
         sessionTenantId,
         sessionRecipeUserId,
         {
@@ -549,7 +540,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         await Promise.allSettled([Session.revokeSession(createdSession.getHandle(resolved.userContext), resolved.userContext)]);
         throw error;
       }
-      for (const write of responseWrites) write();
+      buffered.flush();
 
       telemetry.sessionCreated = true;
       telemetry.canonicalRowndUserId = consolidatedAlias?.canonicalRowndId ?? rowndUserId;
@@ -623,13 +614,9 @@ async function migrateExistingMappedUser(input: {
   telemetry.superTokensUserId = owner.userId;
   telemetry.recipeUserId = owner.recipeUserId.getAsString();
   telemetry.stage = "session_creation";
-  const responseWrites: Array<() => void> = [];
-  const sessionResponse: SuperTokensResponse = Object.create(res);
-  sessionResponse.setHeader = (...args) => { responseWrites.push(() => res.setHeader(...args)); };
-  sessionResponse.removeHeader = (...args) => { responseWrites.push(() => res.removeHeader(...args)); };
-  sessionResponse.setCookie = (...args) => { responseWrites.push(() => res.setCookie(...args)); };
+  const buffered = bufferSessionResponse(res);
   const createSession = () => Session.createNewSession(
-    req, sessionResponse, tenantId, owner.recipeUserId,
+    req, buffered.response, tenantId, owner.recipeUserId,
     { ...buildRowndAudience({}, appVariantId, config) }, {}, userContext,
   );
   const createdSession = await (owner.provenAuthentication
@@ -650,7 +637,7 @@ async function migrateExistingMappedUser(input: {
     await Session.revokeSession(createdSession.getHandle(userContext), userContext);
     throw error;
   }
-  for (const write of responseWrites) write();
+  buffered.flush();
 }
 
 export async function associateUserLoginMethodsToTenant(
@@ -902,6 +889,9 @@ export function handleDeleteUser() {
     session: SuperTokensSession,
     userContext: SuperTokensUserContext,
   ) => {
+    if (isSessionHandoff(session)) {
+      return { status: "ERROR" as const, code: 403, message: "recent authentication is required to delete user" };
+    }
     await SuperTokens.deleteUser(
       session!.getUserId(userContext),
       true,
@@ -1126,6 +1116,9 @@ async function validateEmailChangeSession(
   appVariantId: string | undefined,
   userContext: SuperTokensUserContext,
 ) {
+  if (isSessionHandoff(session)) {
+    return recentAuthenticationRequiredResponse();
+  }
   if (!isEmailSignInEnabled(deps.pluginConfig, appVariantId)) {
     return {
       status: "ERROR" as const,

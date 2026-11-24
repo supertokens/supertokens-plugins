@@ -93,13 +93,22 @@ import {
   handleValidatePasswordlessConfirmationBypass,
 } from "./pluginImplementation";
 
-import { withProvenSessionAuthentication } from "./session-authentication";
+import { isSessionHandoff, SESSION_AUTHENTICATION_KEY, withProvenSessionAuthentication } from "./session-authentication";
+import { handleSessionHandoffConsume } from "./session-handoff";
+import { isCreatingSessionHandoffCarrier, SESSION_HANDOFF_CARRIER_CLAIM } from "./session-handoff-carrier";
 import { withAppleJwksRetry } from "./apple-jwks-retry";
 
 const DISABLED_MIGRATION_ROWND_APP_KEY = "migration-disabled";
 const PENDING_EMAIL_VERIFICATION_SESSION_ERROR =
   "email change verification requires the initiating session";
 const INACTIVE_PASSWORDLESS_EMAIL_REASON = "No existing account found";
+const HANDOFF_LINKING_REASON = "Sign in again before linking accounts";
+
+function rejectCarrierSession(session: SessionContainerInterface | undefined) {
+  if (session?.getAccessTokenPayload()[SESSION_HANDOFF_CARRIER_CLAIM] === true) {
+    throw new Session.Error({ type: Session.Error.UNAUTHORISED, message: "Invalid session" });
+  }
+}
 
 async function refreshRowndSessionClaims(input: {
   session: SessionContainerInterface;
@@ -264,7 +273,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           audience: pluginConfig.rowndJwtAudience!,
           jwksUrl: pluginConfig.jwksUrl,
         }) : undefined);
-      setPluginConfig(pluginConfig);
+      setPluginConfig(pluginConfig, telemetryClient.recordEvent);
 
       if (pluginConfig.enableDebugLogs) {
         enableDebugLogs();
@@ -333,6 +342,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 path: `${apiBasePath}${HANDLE_BASE_PATH}/guest`,
                 method: "post" as const,
                 handler: withRequestHandler(handleGuestLogin(routeHandlerDeps)),
+              },
+              {
+                path: `${apiBasePath}${HANDLE_BASE_PATH}/session-handoff/consume`,
+                method: "post" as const,
+                handler: handleSessionHandoffConsume(routeHandlerDeps),
               },
               ...(!pluginConfig.disableRowndUserMigration
                 ? [
@@ -973,10 +987,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const consumeContext = createDerivedUserContext(operationContext, {
                   [passwordlessHistoryOwner]: historicalScope,
                 });
+                const handoff = isSessionHandoff(input.session);
+                if (handoff && input.shouldTryLinkingWithSessionUser === true) {
+                  return { status: "SIGN_IN_UP_NOT_ALLOWED" as const, reason: HANDOFF_LINKING_REASON };
+                }
                 const response = await originalImplementation.consumeCodePOST({
                   ...input,
                   // Authenticate the historical owner instead of upgrading the incidental guest session.
-                  ...(historicalScope ? { session: undefined, shouldTryLinkingWithSessionUser: false } : {}),
+                  ...(historicalScope || handoff ? { session: undefined, shouldTryLinkingWithSessionUser: false } : {}),
                   userContext: consumeContext,
                   options: historicalScope ? {
                     ...input.options,
@@ -1109,6 +1127,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 if (originalImplementation.signInUpPOST === undefined) {
                   throw new Error("ThirdParty signInUpPOST is unavailable");
                 }
+                const handoff = isSessionHandoff(input.session);
+                if (handoff && input.shouldTryLinkingWithSessionUser === true) {
+                  return { status: "SIGN_IN_UP_NOT_ALLOWED" as const, reason: HANDOFF_LINKING_REASON };
+                }
 
                 const appVariantId = getRequestedAppVariantIdFromRequest(
                   input.options.req,
@@ -1131,6 +1153,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 );
                 const response = await originalImplementation.signInUpPOST({
                   ...input,
+                  ...(handoff ? { session: undefined, shouldTryLinkingWithSessionUser: false } : {}),
                   // Retry verification only: an OAuth authorization code may already be consumed.
                   provider: withAppleJwksRetry(input.provider),
                   userContext: operationContext,
@@ -1170,7 +1193,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     return { shouldAutomaticallyLink: false };
                   }
 
-                  if (input[4]?.rowndDisableAutomaticAccountLinking === true) {
+                  if (isSessionHandoff(input[2]) || input[4]?.rowndDisableAutomaticAccountLinking === true) {
                     return {
                       shouldAutomaticallyLink: false,
                       shouldRequireVerification: false,
@@ -1203,6 +1226,15 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
             functions: (originalImplementation) => ({
               ...originalImplementation,
               createNewSession: async (input) => {
+                if (isCreatingSessionHandoffCarrier()) {
+                  return originalImplementation.createNewSession({
+                    ...input,
+                    accessTokenPayload: { ...input.accessTokenPayload, [SESSION_HANDOFF_CARRIER_CLAIM]: true },
+                  });
+                }
+                const accessTokenPayload = { ...input.accessTokenPayload };
+                delete accessTokenPayload[SESSION_AUTHENTICATION_KEY];
+                delete accessTokenPayload[SESSION_HANDOFF_CARRIER_CLAIM];
                 const resolved = await resolvePluginConfigSnapshot(
                   pluginConfig,
                   {
@@ -1217,22 +1249,27 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const { rowndSessionClaims, rowndIsAnonymousClaim } =
                   await buildRowndSessionAndAnonymousClaims(
                     input.userId,
-                    input.accessTokenPayload,
+                    accessTokenPayload,
                     appVariantId,
                     resolved.userContext,
                     input.recipeUserId.getAsString(),
                     true,
                   );
-                input.accessTokenPayload = {
-                  ...input.accessTokenPayload,
-                  ...rowndSessionClaims,
-                  ...rowndIsAnonymousClaim,
-                };
-
                 return originalImplementation.createNewSession({
                   ...input,
+                  accessTokenPayload: { ...accessTokenPayload, ...rowndSessionClaims, ...rowndIsAnonymousClaim },
                   userContext: resolved.userContext,
                 });
+              },
+              getSession: async (input) => {
+                const session = await originalImplementation.getSession(input);
+                rejectCarrierSession(session);
+                return session;
+              },
+              refreshSession: async (input) => {
+                const session = await originalImplementation.refreshSession(input);
+                rejectCarrierSession(session);
+                return session;
               },
             }),
           },

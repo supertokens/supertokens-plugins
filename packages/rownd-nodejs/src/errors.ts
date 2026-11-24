@@ -12,6 +12,22 @@ export class RowndPluginError extends Error {
   }
 }
 
+const sessionHandoffErrors = {
+  inactive_source: "Session handoff requires an active source session for the current user",
+  anonymous_source: "Guest and instant sessions cannot create session handoff links",
+  handoff_source: "A handoff session cannot create another session handoff link; sign in again first",
+  tenant_mismatch: "Session handoff tenant must match the source session",
+  insecure_client_domain: "Session handoff requires an HTTPS client domain",
+  invalid_target: "Invalid session handoff destination",
+} as const;
+
+export class RowndSessionHandoffError extends Error {
+  constructor(readonly reason: keyof typeof sessionHandoffErrors, message: string = sessionHandoffErrors[reason]) {
+    super(message);
+    this.name = "RowndSessionHandoffError";
+  }
+}
+
 export class RowndLegacyUserNotFoundError extends Error {
   readonly code = "LEGACY_USER_NOT_FOUND" as const;
 
