@@ -11,16 +11,17 @@ import MultiFactorAuth from "supertokens-node/recipe/multifactorauth";
 import TOTP from "supertokens-node/recipe/totp";
 import { CollectingResponse, PreParsedRequest, middleware, errorHandler } from "supertokens-node/framework/custom";
 import { init } from "./plugin";
-import { configureConnectedSignInMethodsTestLicense, startConnectedSignInMethodsCore } from "./connected-sign-in-methods-core.test-fixture";
+import { getConnectedSignInMethodsTestFeatures, startConnectedSignInMethodsCore } from "./connected-sign-in-methods-core.test-fixture";
 
 // Optional backend-state coverage, not MFA support or a prerequisite for Rownd's sign-in flow.
 describe("connected sign-in methods optional backend security preservation against Core", { timeout: 30000 }, () => {
   let coreFixture: Awaited<ReturnType<typeof startConnectedSignInMethodsCore>> | undefined;
+  let hasMfa: boolean;
   const origin = "http://localhost:3001/auth";
 
   beforeAll(async () => {
-    coreFixture = await startConnectedSignInMethodsCore();
-    await configureConnectedSignInMethodsTestLicense(coreFixture.connectionURI);
+    coreFixture = await startConnectedSignInMethodsCore("memory");
+    hasMfa = (await getConnectedSignInMethodsTestFeatures(coreFixture.connectionURI)).includes("mfa");
     SuperTokens.init({
       framework: "custom",
       supertokens: { connectionURI: coreFixture.connectionURI },
@@ -74,7 +75,9 @@ describe("connected sign-in methods optional backend security preservation again
     return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).padStart(6, "0");
   }
 
-  it("preserves a verified backend TOTP device when disconnecting a mapped PRIMARY SSO anchor", async () => {
+  it("preserves a verified backend TOTP device when disconnecting a mapped PRIMARY SSO anchor", async ({ skip }) => {
+    if (process.env.CONNECTED_METHODS_TEST_CORE_URI && !hasMfa) return skip();
+    expect(hasMfa).toBe(true);
     const rowndId = `rownd-${randomUUID()}`;
     const subject = randomUUID();
     const oldEmail = `${randomUUID()}@old.example.com`;

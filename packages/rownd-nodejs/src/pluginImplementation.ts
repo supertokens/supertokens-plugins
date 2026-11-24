@@ -24,6 +24,7 @@ import {
 import { RowndEmailChangeError, RowndLegacyUserNotFoundError, RowndPluginError, RowndSignInMethodError } from "./errors";
 import { assertConnectedSignInMethodsEnabled, connectedSignInMethodsAreAvailable, disconnectConnectedSignInMethod, listConnectedSignInMethods } from "./connected-sign-in-methods";
 import { assertNoDisconnectedSignInMethods, DisconnectedSignInMethodError } from "./disconnected-sign-in-identities";
+import { logSignInMethodPolicy } from "./sign-in-method-policy-log";
 import { logDebugMessage } from "./logger";
 import type {
   RowndEmailChangeRequestContext,
@@ -150,6 +151,11 @@ export function handleConnectedSignInMethods(deps: RowndRouteHandlerDeps, discon
         ? await disconnectConnectedSignInMethod({ ...input, body: await getJsonBody(req) })
         : await listConnectedSignInMethods(input);
     } catch (error) {
+      const code = error instanceof DisconnectedSignInMethodError ? error.code : error instanceof RowndSignInMethodError
+        ? error.errorCode : error instanceof RowndEmailChangeError ? "SIGN_IN_METHOD_EMAIL_CHANGE_PENDING" : "SIGN_IN_METHOD_OPERATION_INCOMPLETE";
+      logSignInMethodPolicy("error", "rownd_sign_in_methods_request_failed", {
+        code, step: disconnect ? "disconnect" : "list", ownerId: session?.getUserId?.(userContext),
+      });
       if (error instanceof DisconnectedSignInMethodError) {
         return { status: "ERROR" as const, code: 409, error_code: error.code, message: error.message };
       }
@@ -157,7 +163,6 @@ export function handleConnectedSignInMethods(deps: RowndRouteHandlerDeps, discon
         return { status: "ERROR" as const, code: 409, error_code: "SIGN_IN_METHOD_EMAIL_CHANGE_PENDING", message: error.message };
       }
       if (!(error instanceof RowndSignInMethodError)) {
-        logDebugMessage(`Connected sign-in method operation failed: ${getErrorMessage(error)}`);
         return { status: "ERROR" as const, code: 409, error_code: "SIGN_IN_METHOD_OPERATION_INCOMPLETE",
           message: "The operation did not complete. Reload your sign-in methods and retry after signing in with email." };
       }

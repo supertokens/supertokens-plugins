@@ -24,7 +24,7 @@ import type { MethodPlan } from "./migration-method-plan";
 import { resolveRowndProviderSubject } from "./provider-identity";
 import { recoverOrphanMapping } from "./migration-orphan-mapping";
 import { archivePlaceholderProvenance, completePlaceholderProvenanceOverride, inspectPlaceholderProvenanceOverride, isInternalIdPlaceholder } from "./migration-placeholder-provenance";
-import { assertNoDisconnectedSignInMethods, DisconnectedSignInMethodError } from "./disconnected-sign-in-identities";
+import { assertNoDisconnectedSignInMethodsAtInternalOwner, assertNoPolicyInMetadata, DisconnectedSignInMethodError } from "./disconnected-sign-in-identities";
 
 export type ReconcileUserInput = (
   | { rownd_user_id: string; email?: never; supertokens_user_id?: never }
@@ -83,7 +83,6 @@ async function discover(users: User[], userContext: JsonRecord, provenRecovery?:
   const requiredMembers = new Map<string, ActivityCandidate>();
   const unprovenAliases = new Set<string>();
   for (const [id, user] of owners) {
-    await assertNoDisconnectedSignInMethods(id, userContext);
     const sources = new Set<string>();
     const aliases = new Set<string>();
     const ids = new Set([id, user.id, ...user.loginMethods.map((method) => method.recipeUserId.getAsString())]);
@@ -96,6 +95,7 @@ async function discover(users: User[], userContext: JsonRecord, provenRecovery?:
       }
       // Discovery must not merge away conflicting secondary provenance.
       const metadata = await getRawUserMetadata(alias, userContext);
+      assertNoPolicyInMetadata(alias, metadata);
       const rowndId = metadata.original_rownd_user?.data.user_id;
       if (rowndId) sources.add(rowndId);
     }
@@ -473,9 +473,6 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
     const tenantId = input.tenantId ?? "public";
     const { userContext } = await resolvePluginConfigSnapshot(config, { tenantId, userContext: input.userContext ?? {} });
     clearSuperTokensCoreCallCache(userContext);
-    if (input.rownd_user_id) await assertNoDisconnectedSignInMethods(input.rownd_user_id, userContext);
-    if (input.supertokens_user_id) await assertNoDisconnectedSignInMethods(input.supertokens_user_id, userContext);
-    if (orphanHandoff) await assertNoDisconnectedSignInMethods(orphanHandoff.target, userContext);
     if (input.rownd_user_id && !orphanHandoff) {
       const recovered = await recoverOrphanMapping({ sourceId: input.rownd_user_id, tenantId, userContext, dryRun: input.dryRun,
         onMutation: () => { mutationStarted = true; result.changed = null; },
@@ -536,12 +533,15 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
     }
     if (!input.dryRun) {
       const mapping = await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL", userContext });
-      if (mapping.status === "OK") await recoverProviderRevocations(mapping.superTokensUserId, rowndId, tenantId, userContext, () => {
-        mutationStarted = true;
-        result.changed = true;
-        if (!revocationProgress) result.actions.push("provider_revocations_recovered");
-        revocationProgress = true;
-      });
+      if (mapping.status === "OK") {
+        await assertNoDisconnectedSignInMethodsAtInternalOwner(mapping.superTokensUserId, userContext);
+        await recoverProviderRevocations(mapping.superTokensUserId, rowndId, tenantId, userContext, () => {
+          mutationStarted = true;
+          result.changed = true;
+          if (!revocationProgress) result.actions.push("provider_revocations_recovered");
+          revocationProgress = true;
+        });
+      }
     }
     if (discoveredEmail !== undefined && getMigrationContactEmail(source, tenantId) !== discoveredEmail) throw new RowndMigrationPolicyError("Rownd email discovery source changed");
     let sourceOwner = await SuperTokens.getUser(rowndId, userContext);
@@ -556,7 +556,6 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
     }
     if (sourcePlan) sourceOwner = await SuperTokens.getUser(sourcePlan.target, userContext);
     sourceOwner ??= await findRecoveryOwner(source, tenantId, userContext, true);
-    if (sourceOwner) await assertNoDisconnectedSignInMethods(sourceOwner.id, userContext);
     const initialSourceOwner = sourceOwner ? await internalOwner(sourceOwner, userContext) : undefined;
     const initialSourceMapping = await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL", userContext });
     const inspection = await inspectSourceElection(source, sourceOwner, tenantId, userContext, resolvedElection?.candidates, discoveredEmail, input.overridePlaceholderProvenance);
@@ -594,9 +593,9 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
         throw new RowndMigrationPolicyError("The survivor canonical mapping changed during election");
       }
       if (selectedOwner) {
-        await assertNoDisconnectedSignInMethods(selectedOwner, userContext);
         await inspectMappingPublication(selectedOwner, source, tenantId, userContext);
         const metadata = await getRawUserMetadata(selectedOwner, userContext);
+        assertNoPolicyInMetadata(selectedOwner, metadata);
         const mapping = await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL", userContext });
         const primaryProvider = selected?.loginMethods.find((method) => method.recipeUserId.getAsString() === selectedOwner)?.thirdParty;
         if (mapping.status !== "OK" && primaryProvider && metadata.original_rownd_user?.data.user_id === rowndId &&
@@ -621,7 +620,6 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
     }
     selected ??= await findRecoveryOwner(source, tenantId, userContext);
     const beforeId = selectedOwner ?? (selected ? await internalOwner(selected, userContext) : undefined);
-    if (beforeId) await assertNoDisconnectedSignInMethods(beforeId, userContext);
     const publication = beforeId ? await inspectMappingPublication(beforeId, source, tenantId, userContext) : undefined;
     if (!beforeId) await assertFreshAliasVerification(source, tenantId, userContext);
     const canonicalTarget = getMigrationTarget(await assertMigrationSourceActive(rowndId, userContext));
@@ -644,6 +642,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
       mapping: await SuperTokens.getUserIdMapping({ userId: id, userIdType: "ANY", userContext }),
     } : undefined;
     const before = await snapshot(beforeId);
+    if (beforeId) assertNoPolicyInMetadata(beforeId, await getRawUserMetadata(beforeId, userContext));
     const restoreMapping = !consolidation?.managesMapping && beforeId !== undefined && beforeId !== rowndId && before?.mapping.status !== "OK";
     if (input.rownd_user_id && selected && !restoreMapping) {
       await assertUnambiguousSource(selected, rowndId, userContext, consolidation?.managesMapping && beforeId
@@ -688,6 +687,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
     try {
       await assertAuthenticatedMigrationSource(source, tenantId);
       await orphanHandoff?.assertReady();
+      if (beforeId && !consolidation) await assertNoDisconnectedSignInMethodsAtInternalOwner(beforeId, userContext, undefined, { fresh: true });
       mutationStarted = true;
       if (restoreMapping) {
         await publishPinnedMapping(beforeId!, source, tenantId, userContext, input.overridePlaceholderProvenance);
@@ -760,6 +760,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
       if (input.overridePlaceholderProvenance) await completePlaceholderProvenanceOverride(id, source, tenantId, userContext);
       await completeMappingPublication(id, source, tenantId, userContext);
       await publishPublicMetadata({ source, tenantId, internalUserId: id, userContext });
+      if (!consolidation) await assertNoDisconnectedSignInMethodsAtInternalOwner(id, userContext, undefined, { fresh: true });
       result.status = "OK";
     } catch (error) {
       operationFailed = true;

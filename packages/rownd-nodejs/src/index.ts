@@ -14,3 +14,4 @@ export type {
 export { setRowndClient, getRowndClient } from "./rownd-repository";
 export { reconcileUser } from "./reconcile-user";
 export type { ReconcileUserInput, ReconcileUserResult, ReconcileCandidate } from "./reconcile-user";
+export { inspectSignInMethodPolicy, repairSignInMethodPolicy } from "./disconnected-sign-in-identities";

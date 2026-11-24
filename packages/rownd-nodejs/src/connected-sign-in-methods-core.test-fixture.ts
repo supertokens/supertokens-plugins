@@ -1,7 +1,8 @@
 import { GenericContainer, Network, Wait, type StartedNetwork, type StartedTestContainer } from "testcontainers";
 
-export async function startConnectedSignInMethodsCore() {
-  const storage = process.env.CONNECTED_METHODS_TEST_CORE_STORAGE ?? "postgres";
+const defaultStorage = process.env.CONNECTED_METHODS_TEST_CORE_STORAGE ?? "postgres";
+
+export async function startConnectedSignInMethodsCore(storage = defaultStorage) {
   if (storage !== "postgres" && storage !== "memory") {
     throw new Error("CONNECTED_METHODS_TEST_CORE_STORAGE must be postgres or memory");
   }
@@ -44,17 +45,21 @@ export async function startConnectedSignInMethodsCore() {
   }
 }
 
-export async function configureConnectedSignInMethodsTestLicense(connectionURI: string) {
-  if (process.env.CONNECTED_METHODS_TEST_CORE_STORAGE === "memory") {
-    // Core's built-in in-memory storage enables EE features without license activation.
-    const response = await fetch(`${connectionURI}/ee/featureflag`);
-    if (!response.ok) {
-      throw new Error(`In-memory Core test fixture feature check failed (HTTP ${response.status})`);
-    }
-    const result = await response.json() as { status?: string; features?: string[] };
-    if (result.status !== "OK" || !Array.isArray(result.features) || !result.features.includes("account_linking")) {
-      throw new Error("In-memory Core test fixture does not expose the required account_linking feature");
-    }
+export async function getConnectedSignInMethodsTestFeatures(connectionURI: string) {
+  const response = await fetch(`${connectionURI}/ee/featureflag`);
+  if (!response.ok) {
+    throw new Error(`In-memory Core test fixture feature check failed (HTTP ${response.status})`);
+  }
+  const result = await response.json() as { status?: string; features?: string[] };
+  if (result.status !== "OK" || !Array.isArray(result.features) || !result.features.includes("account_linking")) {
+    throw new Error("In-memory Core test fixture does not expose the required account_linking feature");
+  }
+  return result.features;
+}
+
+export async function configureConnectedSignInMethodsTestLicense(connectionURI: string, storage = defaultStorage) {
+  if (storage === "memory") {
+    await getConnectedSignInMethodsTestFeatures(connectionURI);
     return;
   }
   const response = await fetch(`${connectionURI}/ee/license`, { method: "PUT", headers: { "Content-Type": "application/json" },

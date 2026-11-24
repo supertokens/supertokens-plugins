@@ -329,8 +329,9 @@ describe("revised reconciliation separates the canonical Rownd profile from the 
     const network = { reads: requests.mock.calls.filter(([, options]) => options?.method === "GET").length,
       writes: requests.mock.calls.filter(([, options]) => options?.method !== "GET").length };
     console.info("single-owner reconciliation request counts", { sdk: counts, network });
-    expect(counts).toEqual({ users: 12, mappings: 22, metadata: 11, searches: 2 });
-    expect(network).toEqual({ reads: 52, writes: 6 });
+    // Read the literal owner row at both commit boundaries, outside discovery caches.
+    expect(counts).toEqual({ users: 12, mappings: 22, metadata: 13, searches: 2 });
+    expect(network).toEqual({ reads: 54, writes: 6 });
     await expectMapped(rowndId, owner.internalId);
     expect((await SuperTokens.getUser(rowndId))?.loginMethods).toHaveLength(2);
     expect(await EmailVerification.isEmailVerified(SuperTokens.convertToRecipeUserId(rowndId), email)).toBe(true);

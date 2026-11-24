@@ -34,7 +34,7 @@ function retainedAuthenticationRequired(email: string): never {
 export function assertRetainedPasswordlessAuthenticationFresh(proof: ValidatedPasswordlessAuthentication) {
   const now = Date.now();
   if (!Number.isFinite(proof.authenticatedAt) || proof.authenticatedAt > now ||
-    now - proof.authenticatedAt > SIGN_IN_METHOD_AUTHENTICATION_MAX_AGE_MS ||
+    now - proof.authenticatedAt >= SIGN_IN_METHOD_AUTHENTICATION_MAX_AGE_MS ||
     !Number.isFinite(proof.sessionExpiresAt) || proof.sessionExpiresAt <= now) retainedAuthenticationRequired(proof.email);
 }
 
@@ -53,7 +53,6 @@ export async function recordPasswordlessAuthentication(
   authenticatedEmail: string,
   authenticatedAt = Date.now(),
 ) {
-  clearSuperTokensCoreCallCache(userContext);
   const owner = await getInternalPrimaryUserId(session.getUserId(userContext), userContext);
   const recipe = await immutableRecipeUserId(authenticatedRecipeUserId, userContext);
   const user = await SuperTokens.getUser(session.getUserId(userContext), userContext);

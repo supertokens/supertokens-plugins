@@ -62,7 +62,7 @@ import {
 import type { RowndUser, SuperTokensUserImport } from "./types";
 import type { ReconcilePreviewAction } from "./reconcile-preview";
 import { hasReconciliationReads, invalidateReconciliationReads, reconciliationReadRevision, withReadOnlyReconciliationReads } from "./reconciliation-reads";
-import { assertNoDisconnectedSignInMethods, assertNoDisconnectedSignInMethodsAtInternalOwner } from "./disconnected-sign-in-identities";
+import { assertNoDisconnectedSignInMethodsAtInternalOwner, assertNoPolicyInMetadata } from "./disconnected-sign-in-identities";
 
 type User = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
 type Method = User["loginMethods"][number];
@@ -781,13 +781,11 @@ export async function prepareOwnerConsolidation(input: {
   if (!isAdministrativeMigration(source, tenantId)) return undefined;
   const pinnedOwnerIds = new Set([target, ...(input.ownerIds ?? []), ...candidates.flatMap((candidate) =>
     candidate.supertokens_user_id ? [candidate.supertokens_user_id] : [])]);
-  const assertDisconnectPolicies = async () => {
+  const assertDisconnectPolicies = async (fresh = false) => {
     for (const id of pinnedOwnerIds) {
-      await assertNoDisconnectedSignInMethodsAtInternalOwner(id, context, target);
+      await assertNoDisconnectedSignInMethodsAtInternalOwner(id, context, target, { fresh });
     }
-    await assertNoDisconnectedSignInMethods(target, context);
   };
-  await assertDisconnectPolicies();
   const fail: (reason: string) => never = (reason) => {
     throw new UnresolvedConsolidationOwners(candidates, reason);
   };
@@ -799,13 +797,13 @@ export async function prepareOwnerConsolidation(input: {
   for (const member of existing?.initial.graph ?? []) pinnedOwnerIds.add(member.owner);
   let previous: OwnerPlanCheckpoint | undefined;
   const legacy = readConsolidationCheckpoint(initialMetadata);
+  for (const member of legacy?.members ?? []) pinnedOwnerIds.add(member.supertokens_user_id);
+  await assertDisconnectPolicies();
   if (legacy) {
-    for (const member of legacy.members) pinnedOwnerIds.add(member.supertokens_user_id);
     if (legacy.winner !== sourceId || legacy.target !== target)
       fail("the v1 checkpoint target changed");
     const assertOwners = async () => {
       clearSuperTokensCoreCallCache(context);
-      await assertDisconnectPolicies();
       await assertV1(legacy, context);
     };
     await assertOwners();
@@ -813,6 +811,7 @@ export async function prepareOwnerConsolidation(input: {
       if (!isAdministrativeElectionCandidate(source, sourceId))
         fail("the private election binding is missing");
       await assertAuthenticatedMigrationSource(source, tenantId);
+      await assertDisconnectPolicies(true);
       await assertOwners();
     };
     return {
@@ -1319,7 +1318,6 @@ export async function prepareOwnerConsolidation(input: {
   for (const member of plan.initial.graph) pinnedOwnerIds.add(member.owner);
   const assertOwners = async (complete = false) => {
     clearSuperTokensCoreCallCache(context);
-    await assertDisconnectPolicies();
     if (complete) {
       const instant = hasAdministrativeInstantProof(source);
       // Adjacent completion checks share fresh evidence only until a cache
@@ -1598,7 +1596,6 @@ export async function prepareOwnerConsolidation(input: {
     return observed;
   };
   const assertFresh = async () => {
-    await assertDisconnectPolicies();
     if (
       plan.candidates.some(
         (candidate) =>
@@ -1767,12 +1764,13 @@ export async function prepareOwnerConsolidation(input: {
       supertokens_user_id: target,
     });
   const assertCheckpoint = async () => {
-    await assertDisconnectPolicies();
     invalidateReconciliationReads("metadata", target);
     clearSuperTokensCoreCallCache(context);
+    const metadata = await getRawUserMetadata(target, context);
+    assertNoPolicyInMetadata(target, metadata);
     if (
       !isDeepStrictEqual(
-        readOwnerPlanCheckpoint(await getRawUserMetadata(target, context)),
+        readOwnerPlanCheckpoint(metadata),
         expected,
       )
     )
@@ -1856,6 +1854,7 @@ export async function prepareOwnerConsolidation(input: {
     ]),
     async execute() {
       await assertFresh();
+      await assertDisconnectPolicies(true);
       if (plan.status === "COMPLETE") return;
       if (!expected || previous) {
         await save(plan);
@@ -2026,6 +2025,7 @@ export async function prepareOwnerConsolidation(input: {
       await assertOwners(true);
       if (plan.status === "COMPLETE") {
         await clearRecoveryPointers();
+        await assertDisconnectPolicies(true);
         return;
       }
       for (const [id, saved] of reservations) {
@@ -2080,6 +2080,7 @@ export async function prepareOwnerConsolidation(input: {
       });
       await assertCompletedPlan(plan, context);
       await clearRecoveryPointers();
+      await assertDisconnectPolicies(true);
     },
   };
 }

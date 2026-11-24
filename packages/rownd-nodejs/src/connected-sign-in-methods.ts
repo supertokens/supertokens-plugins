@@ -7,8 +7,9 @@ import type { SessionContainerInterface } from "supertokens-node/recipe/session/
 import { isEmailSignInEnabled } from "./config";
 import { isSyntheticEmail, resolveCanonicalEmailForTenant } from "./canonical-email";
 import { getPrimaryUserMetadata, type SuperTokensLoginMethod } from "./rownd-compatibility";
-import { completeDisconnectedSignInMethod, getDisconnectedSignInMethods, recordDisconnectedSignInMethod } from "./disconnected-sign-in-identities";
-import { assertRetainedPasswordlessAuthentication, assertRetainedPasswordlessAuthenticationFresh, immutableRecipeUserId } from "./session-authentication";
+import { completeDisconnectedSignInMethod, DisconnectedSignInMethodError, getDisconnectedSignInMethods, recordDisconnectedSignInMethod } from "./disconnected-sign-in-identities";
+import { assertRetainedPasswordlessAuthentication, assertRetainedPasswordlessAuthenticationFresh, immutableRecipeUserId, SIGN_IN_METHOD_AUTHENTICATION_MAX_AGE_MS } from "./session-authentication";
+import { logSignInMethodPolicy } from "./sign-in-method-policy-log";
 import { RowndSignInMethodError } from "./errors";
 import type { RowndPluginNormalisedConfig } from "./types";
 import { clearSuperTokensCoreCallCache, isRecord, type JsonRecord } from "./utils";
@@ -21,6 +22,7 @@ export type ConnectedSignInMethod = {
   verified: boolean;
   can_disconnect: boolean;
   disconnect_block_reason?: string;
+  pending_disconnect?: true;
 };
 
 type Input = {
@@ -112,10 +114,10 @@ function isPendingDisconnect(state: State, method: SuperTokensLoginMethod) {
     record.providerId === method.thirdParty!.id && record.providerUserId === method.thirdParty!.userId);
 }
 
-function idForMethod(state: State, method: SuperTokensLoginMethod) {
+function idForMethod(state: State, method: SuperTokensLoginMethod, kind: ConnectedSignInMethod["kind"]) {
   return methodId(state.owner, state.tenantId, isRealSSO(method)
     ? ["thirdparty", method.thirdParty!.id, method.thirdParty!.userId]
-    : [method.recipeId, method.recipeUserId.getAsString()]);
+    : [method.recipeId, method.recipeUserId.getAsString(), kind]);
 }
 
 function reauthentication(state: State): { method: "email"; identifier: string } | null {
@@ -125,18 +127,38 @@ function reauthentication(state: State): { method: "email"; identifier: string }
 export async function listConnectedSignInMethods(input: Input) {
   assertConnectedSignInMethodsEnabled(input.config);
   const state = await readState(input);
+  let validUntil: number | undefined;
+  if (state.retained?.email && state.retainedRecipe) {
+    try {
+      const proof = await assertRetainedPasswordlessAuthentication({ session: input.session,
+        userId: state.owner, tenantId: state.tenantId, recipeUserId: state.retainedRecipe,
+        email: state.retained.email, userContext: input.userContext });
+      validUntil = Math.min(proof.authenticatedAt + SIGN_IN_METHOD_AUTHENTICATION_MAX_AGE_MS, proof.sessionExpiresAt);
+    } catch (error) {
+      if (!(error instanceof RowndSignInMethodError) || error.errorCode !== "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED") throw error;
+    }
+  }
+  const reauthReason = validUntil === undefined ? "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED" : undefined;
   const methods = state.user.loginMethods.flatMap<ConnectedSignInMethod>((method) => {
     if (!method.tenantIds.includes(state.tenantId) && !isPendingDisconnect(state, method)) return [];
-    const reason = blockReason(state, method);
-    const base = { id: idForMethod(state, method), verified: method.verified, can_disconnect: reason === undefined,
+    const reason = blockReason(state, method) ?? reauthReason;
+    const base = { verified: method.verified, can_disconnect: reason === undefined,
       ...(reason ? { disconnect_block_reason: reason } : {}) };
-    if (isRealSSO(method)) return [{ ...base, kind: "sso" as const, provider: method.thirdParty!.id,
-      ...(method.email && !isSyntheticEmail(method.email) ? { identifier: method.email } : {}) }];
-    if (method.recipeId === "passwordless" && method.phoneNumber) return [{ ...base, kind: "phone" as const, identifier: method.phoneNumber }];
-    if (["passwordless", "emailpassword"].includes(method.recipeId) && method.email && !isSyntheticEmail(method.email)) {
-      return [{ ...base, kind: "email" as const, identifier: method.email }];
+    if (isRealSSO(method)) {
+      const pending = state.records.some((record) => record.tenantId === state.tenantId && !record.completed &&
+        record.providerId === method.thirdParty!.id && record.providerUserId === method.thirdParty!.userId);
+      return [{ ...base, id: idForMethod(state, method, "sso"), kind: "sso", provider: method.thirdParty!.id,
+        ...(pending ? { pending_disconnect: true } : {}),
+        ...(method.email && !isSyntheticEmail(method.email) ? { identifier: method.email } : {}) }];
     }
-    return [];
+    const rows: ConnectedSignInMethod[] = [];
+    if (["passwordless", "emailpassword"].includes(method.recipeId) && method.email && !isSyntheticEmail(method.email)) {
+      rows.push({ ...base, id: idForMethod(state, method, "email"), kind: "email", identifier: method.email });
+    }
+    if (method.recipeId === "passwordless" && method.phoneNumber) {
+      rows.push({ ...base, id: idForMethod(state, method, "phone"), kind: "phone", identifier: method.phoneNumber });
+    }
+    return rows;
   });
   for (const record of state.records) {
     if (record.tenantId !== state.tenantId || record.completed === true) continue;
@@ -144,14 +166,14 @@ export async function listConnectedSignInMethods(input: Input) {
     if (methods.some((method) => method.id === id)) continue;
     const live = state.user.loginMethods.find((method) => isRealSSO(method) &&
       method.thirdParty!.id === record.providerId && method.thirdParty!.userId === record.providerUserId);
-    const reason = live ? blockReason(state, live) : retainedFactorBlockReason(state);
+    const reason = (live ? blockReason(state, live) : retainedFactorBlockReason(state)) ?? reauthReason;
     // A deleted recipe can still owe revocation or final verification. Only
     // unfinished checkpoints become recovery rows; permanent suppression stays.
-    methods.push({ id, kind: "sso", provider: record.providerId, verified: false, can_disconnect: reason === undefined,
+    methods.push({ id, kind: "sso", provider: record.providerId, verified: true, pending_disconnect: true, can_disconnect: reason === undefined,
       ...(reason ? { disconnect_block_reason: reason } : {}) });
   }
   return { status: "OK" as const, user_id: state.user.id, tenant_id: state.tenantId, methods,
-    reauthentication: reauthentication(state) };
+    reauthentication: reauthentication(state), ...(validUntil === undefined ? {} : { reauthentication_valid_until: validUntil }) };
 }
 
 export async function disconnectConnectedSignInMethod(input: Input & { body: unknown }) {
@@ -164,7 +186,9 @@ export async function disconnectConnectedSignInMethod(input: Input & { body: unk
   const state = await readState(input);
   if (body.expected_user_id !== state.user.id || body.expected_tenant_id !== state.tenantId) conflict();
   const selected = state.user.loginMethods.find((method) => (method.tenantIds.includes(state.tenantId) || isPendingDisconnect(state, method)) &&
-    idForMethod(state, method) === body.method_id);
+    (isRealSSO(method) ? idForMethod(state, method, "sso") === body.method_id :
+      !!method.email && idForMethod(state, method, "email") === body.method_id ||
+      !!method.phoneNumber && idForMethod(state, method, "phone") === body.method_id));
   const checkpoint = state.records.find((record) => record.tenantId === state.tenantId &&
     methodId(state.owner, state.tenantId, ["thirdparty", record.providerId, record.providerUserId]) === body.method_id);
   if (!selected && !checkpoint) {
@@ -203,42 +227,59 @@ export async function disconnectConnectedSignInMethod(input: Input & { body: unk
     if (targetOwner && await immutableRecipeUserId(targetOwner.id, userContext) !== state.owner) conflict();
     return method;
   };
-  await verify();
-  // Intent precedes every destructive call and is never rolled back, including
-  // when Core commits a write but the caller loses its response.
-  await recordDisconnectedSignInMethod(target, userContext, async () => {
+  const logFields = { ownerId: state.owner, tenantId: state.tenantId, providerId: target.providerId };
+  const sessionUserIds = [...new Set([state.owner, sdkUserId, target.recipeUserId,
+    ...state.user.loginMethods.map((method) => method.recipeUserId.getAsString())])];
+  const revokeAccountSessions = async () => {
+    for (const id of sessionUserIds) await Session.revokeAllSessionsForUser(id, true, undefined, userContext);
+  };
+  let step = "intent";
+  try {
+    // Intent precedes every destructive call and survives an ambiguous response.
     await verify();
-    proof = await assertRetainedPasswordlessAuthentication(proofInput);
-  });
-  // Some SDK authentication flows reuse a retained-factor session. Revoke the
-  // whole account now as well as on completion so partial failures cannot keep it.
-  assertRetainedPasswordlessAuthenticationFresh(proof);
-  await Session.revokeAllSessionsForUser(state.owner, true, undefined, userContext);
-  let method = await verify();
-  if (target.recipeUserId !== state.owner) {
-    if (method?.tenantIds.includes(state.tenantId)) {
-      assertRetainedPasswordlessAuthenticationFresh(proof);
-      const removed = await Multitenancy.disassociateUserFromTenant(state.tenantId, method.recipeUserId, userContext);
-      if (removed.status !== "OK") conflict("Credential tenant removal did not complete; retry after signing in with email.");
-    }
-    method = await verify();
-    if (method?.tenantIds.includes(state.tenantId)) conflict("Credential tenant removal is incomplete.");
-  }
-  if (method) {
-    // Disassociating a primary anchor also deletes the account's tenant roles
-    // and TOTP. Recipe-only deletion preserves them, its ID and mapping while
-    // the verified canonical Passwordless credential remains attached.
+    await recordDisconnectedSignInMethod(target, userContext, async () => {
+      await verify();
+      proof = await assertRetainedPasswordlessAuthentication(proofInput);
+    });
+    step = "revoke_before_removal";
     assertRetainedPasswordlessAuthenticationFresh(proof);
-    await SuperTokens.deleteUser(target.recipeUserId, false, userContext);
+    await revokeAccountSessions();
+    step = "disassociate";
+    let method = await verify();
+    if (target.recipeUserId !== state.owner) {
+      if (method?.tenantIds.includes(state.tenantId)) {
+        assertRetainedPasswordlessAuthenticationFresh(proof);
+        const removed = await Multitenancy.disassociateUserFromTenant(state.tenantId, method.recipeUserId, userContext);
+        if (removed.status !== "OK") conflict("Credential tenant removal did not complete; retry after signing in with email.");
+      }
+      method = await verify();
+      if (method?.tenantIds.includes(state.tenantId)) conflict("Credential tenant removal is incomplete.");
+    }
+    step = "delete_recipe";
+    if (method) {
+      // Recipe-only deletion preserves the primary anchor's tenant roles and TOTP.
+      assertRetainedPasswordlessAuthenticationFresh(proof);
+      await SuperTokens.deleteUser(target.recipeUserId, false, userContext);
+    }
+    if (await verify()) conflict("Credential removal is incomplete.");
+    step = "revoke_after_removal";
+    assertRetainedPasswordlessAuthenticationFresh(proof);
+    await revokeAccountSessions();
+    await session.revokeSession(userContext);
+    for (const id of sessionUserIds) {
+      if ((await Session.getAllSessionHandlesForUser(id, true, undefined, userContext)).length) {
+        conflict("Account session revocation is incomplete; retry after signing in with email.");
+      }
+    }
+    step = "complete";
+    if (await verify()) conflict("Credential removal is incomplete.");
+    await completeDisconnectedSignInMethod(target, userContext);
+    logSignInMethodPolicy("info", "rownd_disconnect_completed", { ...logFields, step, code: "OK" });
+  } catch (error) {
+    const code = error instanceof DisconnectedSignInMethodError ? error.code : error instanceof RowndSignInMethodError
+      ? error.errorCode : "SIGN_IN_METHOD_OPERATION_INCOMPLETE";
+    logSignInMethodPolicy("error", "rownd_disconnect_step_failed", { ...logFields, step, code });
+    throw error;
   }
-  if (await verify()) conflict("Credential removal is incomplete.");
-  assertRetainedPasswordlessAuthenticationFresh(proof);
-  await Session.revokeAllSessionsForUser(state.owner, true, undefined, userContext);
-  await session.revokeSession(userContext);
-  if ((await Session.getAllSessionHandlesForUser(state.owner, true, undefined, userContext)).length) {
-    conflict("Account session revocation is incomplete; retry after signing in with email.");
-  }
-  if (await verify()) conflict("Credential removal is incomplete.");
-  await completeDisconnectedSignInMethod(target, userContext);
   return { status: "OK" as const, signed_out: true as const };
 }

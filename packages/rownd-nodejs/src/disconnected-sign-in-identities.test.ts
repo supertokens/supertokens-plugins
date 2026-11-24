@@ -7,12 +7,14 @@ import {
   assertNoDisconnectedSignInMethods,
   assertNoDisconnectedSignInMethodsAtInternalOwner,
   assertSignInMethodAuthenticationAllowed,
+  assertSignInIdentityNotIndexed,
   assertSignInMethodLinkAllowed,
   assertSignInMethodTenantAssociationAllowed,
   getDisconnectedSignInMethods,
   isDisconnectedSignInMethodMetadataKey,
   recordDisconnectedSignInMethod,
   completeDisconnectedSignInMethod,
+  repairSignInMethodPolicy,
 } from "./disconnected-sign-in-identities";
 import { reconciliationUserMetadata } from "./reconciliation-sdk";
 import { reconciliationReadRevision, withReadOnlyReconciliationReads, withReconciliationReads } from "./reconciliation-reads";
@@ -94,18 +96,18 @@ describe("owner-scoped disconnected sign-in policy", () => {
     await expect(assertNoDisconnectedSignInMethods("owner")).rejects.toMatchObject({ code: "DISCONNECT_RESTORATION_BLOCKED" });
   });
 
-  it("keeps absent-owner legacy repair discoverable but never authenticates an absent graph", async () => {
+  it("leaves absent-owner handling to the SDK when no policy exists", async () => {
     mappings.set("absent", "orphan");
     await expect(assertNoDisconnectedSignInMethods("orphan")).resolves.toBeUndefined();
-    await expect(assertSignInMethodAuthenticationAllowed("orphan", recipe("absent"), "public")).rejects.toMatchObject({ code: "DISCONNECT_OWNER_CHANGED" });
+    await expect(assertSignInMethodAuthenticationAllowed("orphan", recipe("absent"), "public")).resolves.toEqual({ policy: [] });
   });
 
-  it("uses four SDK reads for ordinary unmapped one-method authentication without policy", async () => {
+  it("uses three SDK reads for ordinary unmapped one-method authentication without policy", async () => {
     owners.set("owner", user("owner", [thirdparty("owner")]));
     const context = {};
     expect(await assertSignInMethodAuthenticationAllowed("owner", recipe("owner"), "public", context)).toEqual({ policy: [] });
     expect(SuperTokens.getUser).toHaveBeenCalledTimes(1);
-    expect(SuperTokens.getUserIdMapping).toHaveBeenCalledTimes(2);
+    expect(SuperTokens.getUserIdMapping).toHaveBeenCalledTimes(1);
     expect(UserMetadata.getUserMetadata).toHaveBeenCalledTimes(1);
     await recordDisconnectedSignInMethod({ ...input, recipeUserId: "owner" }, context);
     await expect(assertSignInMethodAuthenticationAllowed("owner", recipe("owner"), "public", context)).rejects.toMatchObject({ code: "SIGN_IN_METHOD_DISCONNECTED" });
@@ -147,7 +149,7 @@ describe("owner-scoped disconnected sign-in policy", () => {
     expect(await getDisconnectedSignInMethods("owner")).toEqual([{ ...input, version: 1 }]);
     owners.set("owner", user("owner", [passwordless()]));
     await recordDisconnectedSignInMethod(input);
-    expect(UserMetadata.updateUserMetadata).toHaveBeenCalledTimes(1);
+    expect(UserMetadata.updateUserMetadata).toHaveBeenCalledTimes(2);
     expect(records.has("google-old")).toBe(false);
   });
 
@@ -207,14 +209,14 @@ describe("owner-scoped disconnected sign-in policy", () => {
     expect(await delayed).toMatchObject({ message: "Delayed intent response lost" });
     expect(records.get("owner")).toEqual(completedSnapshot);
     expect(await getDisconnectedSignInMethods("owner")).toEqual([{ ...input, version: 1, completed: true }]);
-    const updates = write.mock.calls.map(([, update]) => Object.keys(update));
+    const updates = write.mock.calls.filter(([id]) => id === "owner").map(([, update]) => Object.keys(update));
     expect(updates).toHaveLength(3);
     expect(updates.every((keys) => keys.length === 1)).toBe(true);
     expect(updates[0]).toEqual(updates[1]);
     expect(updates[2]![0]).toMatch(/^rownd_disconnected_sign_in_identity_completion_[a-f0-9]{64}$/);
   });
 
-  it.each([{ completed: false }, { completed: null }, { completed: undefined }, { version: 2 },
+  it.each([{ completed: false }, { completed: null }, { completed: undefined },
     { userId: "other-owner" }, { tenantId: "other" }, { providerId: "other-issuer" },
     { providerUserId: "other-subject" }, { recipeUserId: "other-recipe" }])("rejects malformed or unbound completion markers %j", async (change) => {
     await checkpoint();
@@ -247,7 +249,7 @@ describe("owner-scoped disconnected sign-in policy", () => {
     const beforeCommit = vi.fn(async () => { throw new Error("Reauthentication required"); });
     await expect(recordDisconnectedSignInMethod(input, {}, beforeCommit)).rejects.toThrow("Reauthentication required");
     expect(beforeCommit).toHaveBeenCalledOnce();
-    expect(UserMetadata.updateUserMetadata).toHaveBeenCalledTimes(1);
+    expect(UserMetadata.updateUserMetadata).toHaveBeenCalledTimes(2);
     expect(records.get("owner")![key]).toEqual(value);
   });
 
@@ -286,8 +288,10 @@ describe("owner-scoped disconnected sign-in policy", () => {
     }
   });
 
-  it("permits a separate new account but prevents linking it back to the original owner", async () => {
+  it("indexes the disconnected subject only in its original tenant and blocks reattachment", async () => {
     await checkpoint();
+    await expect(assertSignInIdentityNotIndexed(input)).rejects.toMatchObject({ code: "SIGN_IN_METHOD_DISCONNECTED" });
+    await expect(assertSignInIdentityNotIndexed({ ...input, tenantId: "other" })).resolves.toBeUndefined();
     owners.set("owner", user("owner", [passwordless()]));
     owners.set("new-owner", user("new-owner", [thirdparty("google-new")], false));
     await expect(assertSignInMethodAuthenticationAllowed("new-owner", recipe("google-new"), "public")).resolves.toEqual({ policy: [] });
@@ -314,7 +318,7 @@ describe("owner-scoped disconnected sign-in policy", () => {
     await expect(assertSignInMethodAuthenticationAllowed("rownd-owner", recipe("google-old"), "public")).resolves.toEqual({ policy: [] });
   });
 
-  it.each([null, {}, [], { version: 2 }, { userId: "different-owner" }, { tenantId: "" },
+  it.each([null, {}, [], { userId: "different-owner" }, { tenantId: "" },
     { recipeUserId: 42 }, { providerId: "instant" }, { providerUserId: "different-subject" },
     { completed: true }, { completed: false }, { completed: null }, { completed: "true" }, { completed: undefined }])("fails closed for malformed present policy %j", async (bad) => {
     const { key, value } = await checkpoint();
@@ -324,6 +328,17 @@ describe("owner-scoped disconnected sign-in policy", () => {
     await expect(assertSignInMethodAuthenticationAllowed("owner", recipe("owner"), "public")).rejects.toMatchObject({ code: "DISCONNECT_POLICY_INVALID" });
     await expect(assertSignInMethodLinkAllowed("owner", recipe("google-old"))).rejects.toMatchObject({ code: "DISCONNECT_POLICY_INVALID" });
     await expect(assertNoDisconnectedSignInMethods("owner")).rejects.toMatchObject({ code: "DISCONNECT_POLICY_INVALID" });
+  });
+
+  it("enforces readable future versions without failing retained auth or allowing management", async () => {
+    const { key, value } = await checkpoint();
+    records.set("owner", { [key]: { ...(value as JsonRecord), version: 2 } });
+    await expect(assertSignInMethodAuthenticationAllowed("owner", recipe("owner"), "public")).resolves.toMatchObject({ policy: [] });
+    await expect(assertSignInMethodAuthenticationAllowed("owner", recipe("google-old"), "public")).rejects.toMatchObject({ code: "SIGN_IN_METHOD_DISCONNECTED" });
+    await expect(getDisconnectedSignInMethods("owner")).rejects.toMatchObject({ code: "DISCONNECT_POLICY_INVALID" });
+    await expect(assertNoDisconnectedSignInMethods("owner")).rejects.toMatchObject({ code: "DISCONNECT_POLICY_INVALID" });
+    await expect(repairSignInMethodPolicy({ userId: "owner", remove: ["invalid"], dryRun: false }))
+      .resolves.toMatchObject({ keys: [] });
   });
 
   it("keeps simultaneous checkpoints for different identities", async () => {
@@ -405,15 +420,15 @@ describe("owner-scoped disconnected sign-in policy", () => {
     expect(records.has("other")).toBe(false);
   });
 
-  it("quarantines an already-reassociated protected graph before any restoration postcheck", async () => {
+  it("denies a live reassociated graph without fencing from authentication", async () => {
     const { key } = await checkpoint();
     const graph = owners.get("owner")!;
     owners.delete("owner");
     owners.set("survivor", user("survivor", graph.loginMethods));
     await expect(assertSignInMethodAuthenticationAllowed("survivor", recipe("google-old"), "public")).rejects.toMatchObject({ code: "DISCONNECT_OWNER_CHANGED" });
-    expect(records.get("survivor")![key]).toBeUndefined();
+    expect(records.get("survivor")?.[key]).toBeUndefined();
     owners.set("survivor", user("survivor", [thirdparty("fresh", "apple", "fresh-subject")]));
-    await expect(assertSignInMethodAuthenticationAllowed("survivor", recipe("fresh"), "public")).rejects.toMatchObject({ code: "DISCONNECT_OWNER_CHANGED" });
+    await expect(assertSignInMethodAuthenticationAllowed("survivor", recipe("fresh"), "public")).resolves.toEqual({ policy: [] });
   });
 
   it("resolves retired migration aliases without restoring the removed provider", async () => {
@@ -426,10 +441,13 @@ describe("owner-scoped disconnected sign-in policy", () => {
   it("does not roll back committed intent after an ambiguous write response", async () => {
     const write = vi.mocked(UserMetadata.updateUserMetadata);
     const original = write.getMockImplementation()!;
-    write.mockImplementation(async (...args) => { await original(...args); throw new Error("response lost"); });
+    write.mockImplementationOnce(async (...args) => { await original(...args); throw new Error("response lost"); });
     await expect(recordDisconnectedSignInMethod(input)).rejects.toThrow("response lost");
     expect(await getDisconnectedSignInMethods("owner")).toEqual([{ ...input, version: 1 }]);
     await expect(assertSignInMethodAuthenticationAllowed("owner", recipe("google-old"), "public")).rejects.toMatchObject({ code: "SIGN_IN_METHOD_DISCONNECTED" });
+    await expect(assertSignInIdentityNotIndexed(input)).resolves.toBeUndefined();
+    await recordDisconnectedSignInMethod(input);
+    await expect(assertSignInIdentityNotIndexed(input)).rejects.toMatchObject({ code: "SIGN_IN_METHOD_DISCONNECTED" });
   });
 
   it("protects every reserved prefix key from operational and schema-independent profile writes", async () => {
@@ -525,7 +543,7 @@ describe("owner-scoped disconnected sign-in policy", () => {
       data: { user_id: "owner", email: "retained@example.com" } });
     await expect(importUser(source, { connectionURI: "http://unused.invalid" })).rejects.toMatchObject({ code: "DISCONNECT_RESTORATION_BLOCKED" });
     expect(records.get("owner")![key]).toEqual(value);
-    expect(UserMetadata.updateUserMetadata).toHaveBeenCalledTimes(1);
+    expect(UserMetadata.updateUserMetadata).toHaveBeenCalledTimes(2);
   });
 
   it("blocks existing-owner reconciliation and returns a blocked preview before mutation", async () => {
@@ -552,7 +570,7 @@ describe("owner-scoped disconnected sign-in policy", () => {
     }
   });
 
-  it("detects a checkpoint plus donor reassociation injected after a clean consolidation precheck", async () => {
+  it("blocks consolidation and authentication when a donor graph changes after discovery", async () => {
     const { key, value } = await checkpoint();
     records.set("owner", {});
     owners.set("survivor", user("survivor", [thirdparty("survivor", "apple", "separate")]));
@@ -574,13 +592,15 @@ describe("owner-scoped disconnected sign-in policy", () => {
       return cleanSnapshot;
     });
     await expect(prepareOwnerConsolidation({ source, target: "survivor", tenantId: "public", userContext: {}, ownerIds: ["owner"],
-      candidates: [{ rownd_user_id: "rownd", supertokens_user_id: "owner" }] })).rejects.toMatchObject({ code: "DISCONNECT_OWNER_CHANGED" });
+      candidates: [{ rownd_user_id: "rownd", supertokens_user_id: "owner" }] })).rejects.toThrow();
     expect(injected).toBe(true);
     expect(records.get("owner")![key]).toEqual(value);
-    expect(records.get("survivor")![key]).toBeUndefined();
+    expect(records.get("survivor")?.[key]).toBeUndefined();
     expect(owners.get("survivor")!.loginMethods.some((method) => method.recipeUserId.getAsString() === "owner")).toBe(true);
+    await expect(assertSignInMethodAuthenticationAllowed("survivor", recipe("survivor"), "public")).rejects.toMatchObject({ code: "DISCONNECT_OWNER_CHANGED" });
+    expect(records.has("survivor")).toBe(false);
+    await expect(assertNoDisconnectedSignInMethodsAtInternalOwner("owner", {}, "survivor")).rejects.toMatchObject({ code: "DISCONNECT_RESTORATION_BLOCKED" });
     owners.set("survivor", user("survivor", [thirdparty("survivor", "apple", "separate")]));
     await expect(assertSignInMethodAuthenticationAllowed("survivor", recipe("survivor"), "public")).rejects.toMatchObject({ code: "DISCONNECT_OWNER_CHANGED" });
-    await expect(assertNoDisconnectedSignInMethodsAtInternalOwner("owner", {}, "survivor")).rejects.toMatchObject({ code: "DISCONNECT_RESTORATION_BLOCKED" });
   });
 });

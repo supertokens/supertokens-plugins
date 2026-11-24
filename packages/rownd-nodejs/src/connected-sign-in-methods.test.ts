@@ -17,9 +17,13 @@ vi.mock("supertokens-node/lib/build/recipe/passwordless/recipe", () => ({ defaul
 } }));
 vi.mock("./config", () => ({ isEmailSignInEnabled: () => true }));
 vi.mock("./rownd-compatibility", () => ({ getPrimaryUserMetadata: vi.fn() }));
-vi.mock("./disconnected-sign-in-identities", () => ({ completeDisconnectedSignInMethod: vi.fn(), getDisconnectedSignInMethods: vi.fn(), recordDisconnectedSignInMethod: vi.fn() }));
+vi.mock("./disconnected-sign-in-identities", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./disconnected-sign-in-identities")>(),
+  completeDisconnectedSignInMethod: vi.fn(), getDisconnectedSignInMethods: vi.fn(), recordDisconnectedSignInMethod: vi.fn(),
+}));
 vi.mock("./session-authentication", () => ({ assertRetainedPasswordlessAuthentication: vi.fn(),
   assertRetainedPasswordlessAuthenticationFresh: vi.fn(),
+  SIGN_IN_METHOD_AUTHENTICATION_MAX_AGE_MS: 600_000,
   immutableRecipeUserId: async (id: string) => id === "rownd" ? "owner" : id }));
 
 const recipe = (id: string) => ({ getAsString: () => id });
@@ -120,11 +124,38 @@ describe("connected sign-in method management", () => {
   });
 
   it("requires retained-factor proof before checkpointing", async () => {
+    const request = await body();
     vi.mocked(assertRetainedPasswordlessAuthentication).mockRejectedValueOnce(new RowndSignInMethodError(
       "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED", 403, "Sign in again", { method: "email", identifier: "new@example.com" }));
-    await expect(disconnectConnectedSignInMethod({ ...input, body: await body() })).rejects.toMatchObject({ httpStatus: 403,
+    await expect(disconnectConnectedSignInMethod({ ...input, body: request })).rejects.toMatchObject({ httpStatus: 403,
       errorCode: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED" });
     expect(recordDisconnectedSignInMethod).not.toHaveBeenCalled();
+  });
+
+  it("shows when fresh retained-email authentication expires and pre-signals missing proof", async () => {
+    const proof = await assertRetainedPasswordlessAuthentication({} as any);
+    expect(await listConnectedSignInMethods(input)).toMatchObject({
+      reauthentication_valid_until: proof.authenticatedAt + 600_000,
+    });
+    vi.mocked(assertRetainedPasswordlessAuthentication).mockRejectedValueOnce(new RowndSignInMethodError(
+      "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED", 403, "Sign in again"));
+    const stale = await listConnectedSignInMethods(input);
+    expect(stale).not.toHaveProperty("reauthentication_valid_until");
+    expect(stale.methods.find(({ kind }) => kind === "sso")).toMatchObject({
+      can_disconnect: false, disconnect_block_reason: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED",
+    });
+  });
+
+  it("lists both identifiers from the same passwordless recipe with distinct stable IDs", async () => {
+    user.loginMethods[1].phoneNumber = "+15550100100";
+    const first = await listConnectedSignInMethods(input);
+    const second = await listConnectedSignInMethods(input);
+    const email = first.methods.find(({ kind }) => kind === "email");
+    const phone = first.methods.find(({ kind }) => kind === "phone");
+    expect(email).toMatchObject({ identifier: "new@example.com", can_disconnect: false });
+    expect(phone).toMatchObject({ identifier: "+15550100100", can_disconnect: false });
+    expect(email?.id).not.toBe(phone?.id);
+    expect(second.methods).toEqual(first.methods);
   });
 
   it("refuses a retained factor disabled by the tenant's first-factor policy", async () => {
@@ -163,11 +194,13 @@ describe("connected sign-in method management", () => {
   });
 
   it.each(["revoked", "expired"])("refuses a session %s during graph reads before checkpoint commitment", async () => {
+    const request = await body();
+    vi.mocked(assertRetainedPasswordlessAuthentication).mockClear();
     const proof = Object.freeze({ userId: "owner", tenantId: "public", recipeUserId: "email", email: "new@example.com", sessionHandle: "handle",
       authenticatedAt: Date.now(), sessionExpiresAt: Date.now() + 3600_000 });
     vi.mocked(assertRetainedPasswordlessAuthentication).mockResolvedValueOnce(proof).mockRejectedValueOnce(
       new RowndSignInMethodError("SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED", 403, "The initiating session is no longer valid."));
-    await expect(disconnectConnectedSignInMethod({ ...input, body: await body() })).rejects.toMatchObject({ errorCode: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED" });
+    await expect(disconnectConnectedSignInMethod({ ...input, body: request })).rejects.toMatchObject({ errorCode: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED" });
     expect(recordDisconnectedSignInMethod).toHaveBeenCalled();
     expect(assertRetainedPasswordlessAuthentication).toHaveBeenCalledTimes(2);
     expect(records).toEqual([]);
@@ -207,7 +240,14 @@ describe("connected sign-in method management", () => {
   it.each(["final revocation", "completion checkpoint"])("exposes deleted-recipe recovery after failed %s, then hides only the completed row", async (failure) => {
     const request = await body();
     if (failure === "final revocation") {
-      vi.mocked(Session.revokeAllSessionsForUser).mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("interrupted"));
+      let failOnce = true;
+      vi.mocked(Session.revokeAllSessionsForUser).mockImplementation(async () => {
+        if (failOnce && !user.loginMethods.some((method: any) => method.recipeId === "thirdparty")) {
+          failOnce = false;
+          throw new Error("interrupted");
+        }
+        return [];
+      });
     } else {
       vi.mocked(completeDisconnectedSignInMethod).mockRejectedValueOnce(new Error("interrupted"));
     }
@@ -233,7 +273,7 @@ describe("connected sign-in method management", () => {
     user.loginMethods[0].verified = false;
     const listed = await listConnectedSignInMethods(input);
     expect(listed.methods.filter((method) => method.kind === "sso")).toEqual([{
-      id: request.method_id, kind: "sso", provider: "google", verified: false, can_disconnect: false,
+      id: request.method_id, kind: "sso", provider: "google", verified: true, pending_disconnect: true, can_disconnect: false,
       disconnect_block_reason: "SIGN_IN_METHOD_RETAINED_EMAIL_REQUIRED",
     }]);
   });

@@ -1815,9 +1815,11 @@ describe("rownd-nodejs plugin", () => {
         input.userIdType === "EXTERNAL"
           ? { status: "OK", externalUserId: "rownd-id", superTokensUserId: "internal-id" } as any
           : { status: "OK", externalUserId: "rownd-id", superTokensUserId: "internal-id" } as any);
-      const getUser = vi.spyOn(SuperTokens, "getUser").mockResolvedValue({
-        id: "rownd-id", loginMethods: [{ recipeId: "passwordless", recipeUserId, tenantIds: ["tenant-a"] }],
-      } as any);
+      let credentialTenant = "tenant-a";
+      vi.spyOn(SuperTokens, "getUser").mockImplementation(async (id) =>
+        id === "rownd-id" || id === "internal-id" ? {
+          id: "rownd-id", loginMethods: [{ recipeId: "passwordless", recipeUserId, tenantIds: [credentialTenant] }],
+        } as any : undefined);
       vi.spyOn(UserMetadata, "getUserMetadata").mockImplementation(async (id: string) => ({
         status: "OK", metadata: id === "internal-id"
           ? (ownerComplete === undefined ? {} : { rownd_migration_complete: ownerComplete })
@@ -1825,7 +1827,7 @@ describe("rownd-nodejs plugin", () => {
       } as any));
       const createSession = vi.spyOn(Session, "createNewSession").mockResolvedValue({
         getUserId: () => "rownd-id", getRecipeUserId: () => recipeUserId,
-        getTenantId: () => "tenant-a", getHandle: () => "handle",
+        getTenantId: () => "tenant-a", getHandle: () => "handle", revokeSession: vi.fn(),
       } as any);
       const deps = {
         pluginConfig: getPluginConfig()!,
@@ -1839,10 +1841,9 @@ describe("rownd-nodejs plugin", () => {
       expect(result, JSON.stringify(deps.telemetryClient.recordEvent.mock.calls)).toEqual({ status: "OK" });
       expect(createSession).toHaveBeenCalledTimes(1);
       expect(fetchProfile).not.toHaveBeenCalled();
-      getUser.mockResolvedValueOnce({ id: "rownd-id", loginMethods: [
-        { recipeId: "passwordless", recipeUserId, tenantIds: ["tenant-b"] },
-      ] } as any);
+      credentialTenant = "tenant-b";
       expect((await handleMigrate(deps)(req, res, undefined, {})).status).toBe("ERROR");
+      credentialTenant = "tenant-a";
       expect(createSession).toHaveBeenCalledTimes(1);
       expect(fetchProfile).not.toHaveBeenCalled();
       mapping.mockResolvedValue({ status: "UNKNOWN_MAPPING_ERROR" } as any);
@@ -1852,7 +1853,7 @@ describe("rownd-nodejs plugin", () => {
       const revokeSession = vi.spyOn(Session, "revokeSession").mockResolvedValue({ status: "OK" } as any);
       createSession.mockResolvedValueOnce({
         getUserId: () => "different-user", getRecipeUserId: () => recipeUserId,
-        getTenantId: () => "tenant-a", getHandle: () => "unbound-handle",
+        getTenantId: () => "tenant-a", getHandle: () => "unbound-handle", revokeSession: vi.fn(),
       } as any);
       expect((await handleMigrate(deps)(req, res, undefined, {})).status).toBe("ERROR");
       expect(revokeSession).toHaveBeenCalledWith("unbound-handle", expect.anything());
@@ -2894,7 +2895,7 @@ describe("rownd-nodejs plugin", () => {
         "mergeIntoAccessTokenPayload",
       );
       const userContext = {};
-      const originalConsumeCodePOST = vi.fn().mockImplementation((input) => {
+      const originalConsumeCodePOST = vi.fn().mockImplementation(async (input) => {
         expect(input.userContext).not.toBe(userContext);
         expect(input.userContext.rowndAppVariantId).toBe("variant_123");
         return { status: "OK", user: linkedUser, session };
@@ -4172,21 +4173,30 @@ describe("rownd-nodejs plugin", () => {
         "mergeIntoAccessTokenPayload",
       );
       const userContext = {};
-      const originalSignInUpPOST = vi.fn().mockImplementation((input) => {
+      const override = (init(pluginConfig) as any).overrideMap.thirdparty;
+      const signInUpFunctions = override.functions({
+        signInUp: async () => ({ ...signInUpResult, user: linkedUser }),
+      });
+      const originalSignInUpPOST = vi.fn().mockImplementation(async (input) => {
         expect(input.userContext).not.toBe(userContext);
         expect(input.userContext.rowndAppVariantId).toBe("variant_123");
+        const result = await signInUpFunctions.signInUp({
+          tenantId: "public", thirdPartyId: "google", thirdPartyUserId: signInUpResult.user.thirdParty[0]!.userId,
+          userContext: input.userContext,
+        });
+        expect(result.status).toBe("OK");
         return { status: "OK", user: linkedUser, session };
       });
 
-      const thirdPartyApis = (
-        init(pluginConfig) as any
-      ).overrideMap.thirdparty.apis({
+      const thirdPartyApis = override.apis({
         signInUpPOST: originalSignInUpPOST,
       });
 
       await thirdPartyApis.signInUpPOST({
         provider: { id: "google" },
-        options: { req: makeVariantRequest("variant_123") },
+        tenantId: "public",
+        session,
+        options: { req: makeVariantRequest("variant_123"), res: new CollectingResponse() },
         userContext,
       });
 
@@ -4235,7 +4245,10 @@ describe("rownd-nodejs plugin", () => {
       const sessionFunctions = (
         init(pluginConfig) as any
       ).overrideMap.session.functions({
-        createNewSession: vi.fn().mockImplementation(async (input) => input),
+        createNewSession: vi.fn().mockImplementation(async (input) => ({
+          ...input, getUserId: () => input.userId, getRecipeUserId: () => input.recipeUserId,
+          getTenantId: () => input.tenantId, revokeSession: vi.fn(),
+        })),
       });
 
       const session = await sessionFunctions.createNewSession({
@@ -16005,3 +16018,4 @@ describe("linked user metadata", () => {
     expect(result.rowndMetadataSourceUserId).toBe("primary");
   });
 });
+import { CollectingResponse } from "supertokens-node/framework/custom";

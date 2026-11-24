@@ -16,6 +16,7 @@ import { previewReconciliation } from "./reconcile-preview";
 import { invalidateReconciliationReads } from "./reconciliation-reads";
 import { clearSuperTokensCoreCallCache, isRecord, type JsonRecord } from "./utils";
 import type { ReconcileUserResult } from "./reconcile-user";
+import { assertNoPolicyInMetadata } from "./disconnected-sign-in-identities";
 
 type Source = NonNullable<Awaited<ReturnType<typeof fetchAdministrativeMigrationSource>>>;
 type User = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
@@ -113,6 +114,7 @@ async function inspect(sourceId: string, absentId: string, tenantId: string, con
         internal: await SuperTokens.getUserIdMapping({ userId: id, userIdType: "SUPERTOKENS", userContext: context }) });
     }
     const stored = { ...await getRawUserMetadata(id, context) };
+    assertNoPolicyInMetadata(id, stored);
     delete stored[key];
     if (stored.rownd_migration_superseded !== undefined || stored.rownd_migration_owner_consolidation !== undefined ||
       stored.rownd_migration_mapping_publication !== undefined ||

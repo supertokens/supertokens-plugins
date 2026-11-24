@@ -5,19 +5,21 @@ import { init } from "./plugin";
 import { buildRowndSessionAndAnonymousClaims } from "./supertokens-repository";
 import { buildRowndSessionClaimPayload } from "./rownd-compatibility";
 import {
-  assertSignInMethodAuthenticationAllowed,
+  checkSignInMethodAuthentication,
+  assertSignInIdentityNotIndexed,
   assertSignInMethodLinkAllowed,
   assertSignInMethodTenantAssociationAllowed,
-  getDisconnectedSignInMethods,
+  readPolicyGate,
   DisconnectedSignInMethodError,
 } from "./disconnected-sign-in-identities";
 
 vi.mock("./disconnected-sign-in-identities", () => ({
   assertNoDisconnectedSignInMethods: vi.fn(),
-  assertSignInMethodAuthenticationAllowed: vi.fn(),
+  checkSignInMethodAuthentication: vi.fn(),
+  assertSignInIdentityNotIndexed: vi.fn(),
   assertSignInMethodLinkAllowed: vi.fn(),
   assertSignInMethodTenantAssociationAllowed: vi.fn(),
-  getDisconnectedSignInMethods: vi.fn(),
+  readPolicyGate: vi.fn(),
   recordDisconnectedSignInMethod: vi.fn(),
   completeDisconnectedSignInMethod: vi.fn(),
   DisconnectedSignInMethodError: class extends Error {
@@ -30,6 +32,8 @@ vi.mock("./supertokens-repository", async (importOriginal) => {
 });
 
 const recipe = { getAsString: () => "recipe" };
+const gate = { reference: "owner", owner: { id: "owner" }, literalIds: [] };
+const identity = { providerId: "google", providerUserId: "subject", tenantId: "public" };
 let overrides: any;
 let session: any;
 beforeEach(() => {
@@ -37,8 +41,8 @@ beforeEach(() => {
   overrides = (init({ disableRowndUserMigration: true, connectedSignInMethods: { enabled: false } }) as any).overrideMap;
   session = { getUserId: () => "owner", getRecipeUserId: () => recipe, getTenantId: () => "public", getHandle: () => "handle",
     getAccessTokenPayload: () => ({}), mergeIntoAccessTokenPayload: vi.fn(), revokeSession: vi.fn() };
-  vi.mocked(getDisconnectedSignInMethods).mockResolvedValue([]);
-  vi.mocked(assertSignInMethodAuthenticationAllowed).mockResolvedValue({ policy: [] });
+  vi.mocked(readPolicyGate).mockResolvedValue(gate as any);
+  vi.mocked(checkSignInMethodAuthentication).mockResolvedValue({ policy: [], gate } as any);
   vi.mocked(buildRowndSessionAndAnonymousClaims).mockResolvedValue({ rowndSessionClaims: buildRowndSessionClaimPayload({
     userId: "owner", user: undefined, currentPayload: { auth_level: "verified" }, authenticationOrigin: "authenticated",
   }), rowndIsAnonymousClaim: {} });
@@ -53,28 +57,19 @@ function deferred() {
 
 describe("durable policy recipe seams", () => {
   it("rejects suppressed session creation before issuance even when management is disabled", async () => {
-    vi.mocked(assertSignInMethodAuthenticationAllowed).mockRejectedValueOnce(new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED"));
+    vi.mocked(checkSignInMethodAuthentication).mockRejectedValueOnce(new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED"));
     const original = { createNewSession: vi.fn() };
     await expect(overrides.session.functions(original).createNewSession({ userId: "owner", recipeUserId: recipe, tenantId: "public", userContext: {} }))
-      .rejects.toBeInstanceOf(DisconnectedSignInMethodError);
+      .rejects.toMatchObject({ type: Session.Error.UNAUTHORISED });
     expect(original.createNewSession).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])("rejects and revokes a suppressed JWT with checkDatabase=%s", async (checkDatabase) => {
-    vi.mocked(getDisconnectedSignInMethods).mockResolvedValueOnce([{ version: 1, userId: "owner", recipeUserId: "deleted",
-      providerId: "google", providerUserId: "subject", tenantId: "public" }]);
-    vi.mocked(assertSignInMethodAuthenticationAllowed).mockRejectedValueOnce(new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED"));
+  it.each([false, true])("leaves JWT verification entirely to the SDK with checkDatabase=%s", async (checkDatabase) => {
     const original = { getSession: vi.fn(async () => session) };
-    await expect(overrides.session.functions(original).getSession({ options: { checkDatabase }, userContext: {} })).rejects.toMatchObject({ type: "UNAUTHORISED" });
-    expect(session.revokeSession).toHaveBeenCalled();
-  });
-
-  it("database-checks an otherwise valid JWT on an account with disconnect policy", async () => {
-    vi.mocked(getDisconnectedSignInMethods).mockResolvedValueOnce([{ version: 1, userId: "owner", recipeUserId: "deleted",
-      providerId: "google", providerUserId: "subject", tenantId: "public" }]);
-    const original = { getSession: vi.fn(async () => session), getSessionInformation: vi.fn(async () => undefined) };
-    await expect(overrides.session.functions(original).getSession({ userContext: {} })).rejects.toMatchObject({ type: "UNAUTHORISED" });
-    expect(original.getSessionInformation).toHaveBeenCalledWith({ sessionHandle: "handle", userContext: {} });
+    await expect(overrides.session.functions(original).getSession({ options: { checkDatabase }, userContext: {} })).resolves.toBe(session);
+    expect(session.revokeSession).not.toHaveBeenCalled();
+    expect(readPolicyGate).not.toHaveBeenCalled();
+    expect(checkSignInMethodAuthentication).not.toHaveBeenCalled();
   });
 
   it("does not add a session-database read for users without policy", async () => {
@@ -84,9 +79,7 @@ describe("durable policy recipe seams", () => {
   });
 
   it("rechecks refreshed credentials and revokes a suppressed result", async () => {
-    vi.mocked(getDisconnectedSignInMethods).mockResolvedValueOnce([{ version: 1, userId: "owner", recipeUserId: "deleted",
-      providerId: "google", providerUserId: "subject", tenantId: "public" }]);
-    vi.mocked(assertSignInMethodAuthenticationAllowed).mockRejectedValueOnce(new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED"));
+    vi.mocked(checkSignInMethodAuthentication).mockRejectedValueOnce(new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED"));
     const original = { refreshSession: vi.fn(async () => session) };
     await expect(overrides.session.functions(original).refreshSession({ userContext: {} })).rejects.toMatchObject({ type: "UNAUTHORISED" });
     expect(session.revokeSession).toHaveBeenCalled();
@@ -104,8 +97,7 @@ describe("durable policy recipe seams", () => {
   });
 
   it("denies automatic linking before the application's permissive fallback", async () => {
-    vi.mocked(getDisconnectedSignInMethods).mockResolvedValueOnce([{ version: 1, userId: "owner", recipeUserId: "deleted",
-      providerId: "google", providerUserId: "subject", tenantId: "public" }]);
+    vi.mocked(readPolicyGate).mockResolvedValueOnce({ ...gate, policy: { identities: [identity] } } as any);
     const fallback = vi.fn(async () => ({ shouldAutomaticallyLink: true }));
     const config = overrides.accountlinking.config({ shouldDoAutomaticAccountLinking: fallback });
     expect(await config.shouldDoAutomaticAccountLinking({ recipeId: "thirdparty", thirdParty: { id: "google", userId: "subject" } },
@@ -114,8 +106,7 @@ describe("durable policy recipe seams", () => {
   });
 
   it("rejects native SSO authentication even when the SDK would reuse a retained-email session", async () => {
-    vi.mocked(getDisconnectedSignInMethods).mockResolvedValueOnce([{ version: 1, userId: "owner", recipeUserId: "deleted",
-      providerId: "google", providerUserId: "subject", tenantId: "public" }]);
+    vi.mocked(readPolicyGate).mockResolvedValueOnce({ ...gate, policy: { identities: [identity] } } as any);
     const original = { signInUp: vi.fn() };
     expect(await overrides.thirdparty.functions(original).signInUp({ thirdPartyId: "google", thirdPartyUserId: "subject", session,
       tenantId: "public", userContext: {} })).toMatchObject({ status: "SIGN_IN_UP_NOT_ALLOWED" });
@@ -139,8 +130,9 @@ describe("durable policy recipe seams", () => {
     expect(await api.signInUpPOST({ provider: { id: "google" }, tenantId: "public", session,
       options: { req: { getKeyValueFromQuery: () => undefined }, res: response }, userContext: {} })).toMatchObject({ status: "OK" });
     expect(responseSpies.setHeader).toHaveBeenCalledWith("st-access-token", "allowed-token", false);
-    expect(assertSignInMethodAuthenticationAllowed).toHaveBeenCalledTimes(2);
-    expect(getDisconnectedSignInMethods).toHaveBeenCalledTimes(1);
+    expect(checkSignInMethodAuthentication).toHaveBeenCalledTimes(2);
+    expect(assertSignInIdentityNotIndexed).toHaveBeenCalledTimes(1);
+    expect(readPolicyGate).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -153,9 +145,9 @@ describe("durable policy recipe seams", () => {
     const revokeEntered = deferred();
     const finishRevocation = deferred();
     vi.spyOn(SuperTokens, "listUsersByAccountInfo").mockResolvedValue([]);
-    vi.mocked(assertSignInMethodAuthenticationAllowed).mockImplementation(async () => {
+    vi.mocked(checkSignInMethodAuthentication).mockImplementation(async () => {
       if (suppressed) throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED");
-      return { policy: [] };
+      return { policy: [], gate } as any;
     });
     const revoke = vi.spyOn(Session, "revokeSession").mockImplementation(async () => {
       revokeEntered.resolve();
@@ -185,16 +177,17 @@ describe("durable policy recipe seams", () => {
     await recipeChecked.promise;
     suppressed = true;
     finishPostAuth.resolve();
-    await revokeEntered.promise;
+    if (!reused) await revokeEntered.promise;
     expect(responseSpies.setHeader).not.toHaveBeenCalled();
     expect(responseSpies.setCookie).not.toHaveBeenCalled();
     expect(responseSpies.sendJSONResponse).not.toHaveBeenCalled();
     finishRevocation.resolve();
-    expect(await result).toMatchObject({ status: "SIGN_IN_UP_NOT_ALLOWED" });
-    expect(revoke).toHaveBeenCalledWith("handle", expect.anything());
+    expect(await result).toMatchObject({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_DISCONNECTED" });
+    if (reused) expect(revoke).not.toHaveBeenCalled();
+    else expect(revoke).toHaveBeenCalledWith("handle", expect.anything());
     expect(session.mergeIntoAccessTokenPayload).toHaveBeenCalledTimes(1);
-    expect(assertSignInMethodAuthenticationAllowed).toHaveBeenCalledTimes(2);
-    const checks = vi.mocked(assertSignInMethodAuthenticationAllowed).mock.calls;
+    expect(checkSignInMethodAuthentication).toHaveBeenCalledTimes(2);
+    const checks = vi.mocked(checkSignInMethodAuthentication).mock.calls;
     const lastCheck = checks[checks.length - 1];
     expect(lastCheck?.[1].getAsString()).toBe("actual-sso");
     expect(responseSpies.setHeader).not.toHaveBeenCalled();

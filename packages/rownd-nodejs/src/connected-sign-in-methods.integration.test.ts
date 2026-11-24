@@ -135,9 +135,12 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     expect(await UserRoles.getRolesForUser("public", f.rowndId)).toMatchObject({ status: "OK", roles: [role] });
     expect(await getDisconnectedSignInMethods(f.internalId)).toMatchObject([{ providerId: "google", providerUserId: f.subject, completed: true }]);
     expect(await Session.getAllSessionHandlesForUser(f.internalId, true)).toEqual([]);
-    for (const old of [f.ssoSession, signedIn.session, otherSession]) {
+    for (const [index, old] of [f.ssoSession, signedIn.session, otherSession].entries()) {
+      expect(await Session.getSessionInformation(old.getHandle()) === undefined, `session ${index} was revoked`).toBe(true);
       await expect(Session.getSessionWithoutRequestResponse(old.getAccessToken(), undefined, { checkDatabase: true })).rejects.toBeDefined();
     }
+    await expect(Session.refreshSessionWithoutRequestResponse(f.ssoSession.getAllSessionTokensDangerously().refreshToken!, true)).rejects.toBeDefined();
+    await expect(Session.getSessionWithoutRequestResponse(f.ssoSession.getAccessToken(), undefined, { checkDatabase: false })).resolves.toBeDefined();
     const retained = await emailSignIn(f.email);
     expect(retained.session.getUserId()).toBe(f.rowndId);
     expect(retained.session.getRecipeUserId().getAsString()).toBe(f.passwordless.recipeUserId.getAsString());
@@ -150,12 +153,8 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
       tenantId: "public", session: undefined, shouldTryLinkingWithSessionUser: undefined,
       oAuthTokens: {}, rawUserInfoFromProvider: {}, userContext: getUserContext({}),
     });
-    if (oldSignIn.status === "OK") {
-      expect(oldSignIn.user.id).not.toBe(f.rowndId);
-      const isolated = await Session.createNewSessionWithoutRequestResponse("public", oldSignIn.recipeUserId);
-      expect(isolated.getUserId()).not.toBe(f.rowndId);
-      await expect(AccountLinking.linkAccounts(oldSignIn.recipeUserId, f.internalId)).rejects.toBeDefined();
-    }
+    expect(oldSignIn).toEqual({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_DISCONNECTED" });
+    expect(await SuperTokens.listUsersByAccountInfo("public", { thirdParty: { id: "google", userId: f.subject } }, false)).toEqual([]);
     expect((await SuperTokens.getUser(f.internalId))?.loginMethods).toHaveLength(1);
   });
 
@@ -165,6 +164,10 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     expect(consumed.session.getRecipeUserId().getAsString()).toBe(f.rowndId);
     const headers = { authorization: `Bearer ${consumed.token}`, "st-auth-mode": "header", "content-type": "application/json" };
     const listed = await (await request(`${origin}/plugin/rownd/user/sign-in-methods`, { headers })).json() as any;
+    expect(listed).not.toHaveProperty("reauthentication_valid_until");
+    expect(listed.methods.find((entry: any) => entry.kind === "sso")).toMatchObject({
+      can_disconnect: false, disconnect_block_reason: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED",
+    });
     const response = await request(`${origin}/plugin/rownd/user/sign-in-methods/disconnect`, { method: "POST", headers,
       body: JSON.stringify({ method_id: listed.methods.find((entry: any) => entry.kind === "sso").id,
         expected_user_id: f.rowndId, expected_tenant_id: "public" }) });
@@ -182,7 +185,7 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     const revoke = Session.revokeAllSessionsForUser.bind(Session);
     let calls = 0;
     const failure = vi.spyOn(Session, "revokeAllSessionsForUser").mockImplementation(async (...args) => {
-      if (++calls === 2) throw new Error("Injected final revocation interruption");
+      if (args[0] === f.internalId && ++calls === 2) throw new Error("Injected final revocation interruption");
       return revoke(...args);
     });
     try {
@@ -196,7 +199,9 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     const reauthenticated = await emailSignIn(f.email);
     const retryHeaders = { ...headers, authorization: `Bearer ${reauthenticated.token}` };
     const reopened = await (await request(`${origin}/plugin/rownd/user/sign-in-methods`, { headers: retryHeaders })).json() as any;
-    expect(reopened.methods.find((entry: any) => entry.id === method.id)).toMatchObject({ kind: "sso", provider: "google", can_disconnect: true });
+    expect(reopened.methods.find((entry: any) => entry.id === method.id)).toMatchObject({
+      kind: "sso", provider: "google", can_disconnect: true, pending_disconnect: true,
+    });
     const retried = await request(`${origin}/plugin/rownd/user/sign-in-methods/disconnect`, { method: "POST", headers: retryHeaders, body });
     expect(await retried.json()).toEqual({ status: "OK", signed_out: true });
     expect(await getDisconnectedSignInMethods(f.internalId)).toMatchObject([{ providerId: "google", providerUserId: f.subject, completed: true }]);
@@ -231,6 +236,12 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
       const appConfig = await (await request(`${origin}/plugin/rownd/app-config`)).json() as any;
       expect(appConfig).not.toHaveProperty("plugin_capabilities");
       await expect(Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(f.rowndId))).rejects.toBeDefined();
+      const suppressed = await ThirdPartyRecipe.getInstanceOrThrowError().recipeInterfaceImpl.signInUp({
+        thirdPartyId: "google", thirdPartyUserId: f.subject, email: f.oldEmail, isVerified: false,
+        tenantId: "public", session: undefined, shouldTryLinkingWithSessionUser: undefined,
+        oAuthTokens: {}, rawUserInfoFromProvider: {}, userContext: getUserContext({}),
+      });
+      expect(suppressed).toEqual({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_DISCONNECTED" });
       const retained = await emailSignIn(f.email);
       const response = await request(`${origin}/plugin/rownd/user/sign-in-methods`, {
         headers: { authorization: `Bearer ${retained.token}`, "st-auth-mode": "header" },

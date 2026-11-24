@@ -143,10 +143,10 @@ describe("server-side retained Passwordless authentication receipt", () => {
     await expect(assertRetainedPasswordlessAuthentication(proof)).rejects.toMatchObject({ errorCode: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED" });
   });
 
-  it("accepts the exact 600-second freshness limit", async () => {
+  it("expires proof at the 600-second freshness limit", async () => {
     await recordPasswordlessAuthentication(session, "canonical", "public", {}, "new@example.com");
     vi.setSystemTime(Date.now() + 600_000);
-    await expect(assertRetainedPasswordlessAuthentication(proof)).resolves.toMatchObject({ recipeUserId: "canonical" });
+    await expect(assertRetainedPasswordlessAuthentication(proof)).rejects.toMatchObject({ errorCode: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED" });
   });
 
   it.each(["revoked", "expired"])("rejects an initiating session that was %s while graph work was awaited", async (change) => {
