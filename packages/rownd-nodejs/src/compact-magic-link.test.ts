@@ -85,7 +85,7 @@ describe("compact magic links", () => {
 
     expect(sendEmail).toHaveBeenCalledWith({
       ...input,
-      urlWithLinkCode: `${mobile}/account/login?preAuthSessionId=pid&v=variant&d=w&c=mobile&r=%2Fprofile%3Ftab%3Dsecurity&o=challenge&f=cl&i=u&ra=1#code`,
+      urlWithLinkCode: `${mobile}/account/login?preAuthSessionId=pid&v=variant&d=w&r=%2Fprofile%3Ftab%3Dsecurity&o=challenge&f=cl&i=u&ra=1#code`,
     });
   });
 

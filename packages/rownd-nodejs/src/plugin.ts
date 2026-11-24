@@ -228,9 +228,6 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           ...(typeof appVariantId === "string" ? { appVariantId } : {}),
           ...(typeof displayContext === "string" ? { displayContext } : {}),
           ...(typeof redirectToPath === "string" ? { redirectToPath } : {}),
-          ...(compactMagicLinks && typeof clientDomain === "string"
-            ? { clientDomain }
-            : {}),
           ...(typeof oauthLoginChallenge === "string"
             ? { oauthLoginChallenge }
             : {}),
