@@ -201,9 +201,37 @@ canonical-only `rownd_profile_authority:*` / `rownd_app_variants` keys are never
 mirrored. Successful, non-concurrent plugin writes keep published presentations
 in sync.
 
-Like canonical mode, dual-write requires `disableRowndUserMigration: true`.
-Migration, repair and consolidation write many alias records that are not
-mirrored, and newly migrated owners would not have been published. Dual-write
+Rownd user and session migration can stay enabled in dual-write. Migration,
+repair and consolidation write many records that are not mirrored one by one.
+Instead, after each `/plugin/rownd/migrate` or `/plugin/migrate-session` request
+that uses Rownd API credentials, and after each `reconcileUser` call that may
+have changed the owner, the plugin republishes that owner. It re-reads the
+owner's compatibility view and computes its canonical presentation. Then it
+writes the smallest patch that makes the SDK-visible record present the same
+profile, claims and email selection. This happens whether the request succeeded
+or failed after writing. Stale presentation keys are deleted. Operational and
+migration state, pending verification, and the canonical-only
+`rownd_profile_authority:*` / `rownd_app_variants` keys are never written.
+Credential-free session exchange (no `rowndAppSecret`) writes no metadata and
+does not republish. For a converged mapped owner with one login method, the
+republish costs five extra Core reads and no write.
+
+The republish applies the same admission rules as the offline publication. It
+skips any owner the offline copy would refuse, and logs a warning naming only
+the reason. Refused states include retirement-dependent consolidation (retired
+aliases, superseded or orphan-mapping markers), unfinished migration
+checkpoints, pending verification, conflicting migration targets, ambiguous
+originals or email selection, reserved-key collisions, and top-level nulls that
+Core cannot store. A skipped or failed republish never fails the migration:
+its Core changes are already committed, and dual-write reads stay on the
+compatibility view. The next migration request for that owner retries the
+republish. Sign-in and email-change writes that later clear a refused state,
+such as pending verification, do not trigger a republish. Owners that were skipped, failed or migrated before dual-write must
+be handled in the final verify and republish step. The runtime republish does
+not prove the full ownership graph the offline copy checks, so that step stays
+mandatory.
+
+Canonical mode still requires `disableRowndUserMigration: true`. Dual-write
 also rejects profile, field and meta writes to internal or canonical-reserved
 fields, and rejects null values for identity keys such as `google_id`.
 Otherwise compatibility could fall back to a linked value after deletion
@@ -211,14 +239,14 @@ while canonical could not. Account linking stays in compatibility mode.
 
 Recommended procedure:
 
-1. Deploy with `metadataMode: "dual-write"` and migration disabled.
+1. Deploy with `metadataMode: "dual-write"`. Migration may stay enabled.
 2. Publish every owner: write the canonical presentation of its compatibility
    view (`getCanonicalPresentationMetadata`) to its SDK-visible `user.id`. Remove
    presentation keys that are absent from that projection.
-3. Pause and drain writers. Verify every owner's compatibility and canonical
+3. Pause and drain writers, including migration. Verify every owner's compatibility and canonical
    presentations match (profile per tenant, configured session claims, OAuth
    claims and email selection). Republish any owner that differs.
-4. Switch to `metadataMode: "canonical"`.
+4. Switch to `metadataMode: "canonical"` with `disableRowndUserMigration: true`.
 
 There is no compare-and-set. Concurrent writes can leave the SDK record stale,
 even if a value flips back to its previous value: a mirror can skip a key
@@ -231,9 +259,8 @@ compatibility write remains committed. Sign-in retries app-variant mirroring
 only when an app-variant ID is configured for that sign-in, even if the variant
 is already recorded. A replay-only failure is logged without failing sign-in.
 Otherwise a failed mirror is repaired only by a later write to the same keys
-or by step 3. Writes outside the plugin, administrative reconciliation, and
-account-linking changes are not mirrored; republish affected owners before
-switching.
+or by step 3. Writes outside the plugin and account-linking changes are not mirrored;
+republish affected owners before switching.
 
 You can roll back from dual-write to compatibility at any time. Mirrored
 records hold only values that the compatibility view already presents. After

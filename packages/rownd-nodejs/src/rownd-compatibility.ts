@@ -674,19 +674,19 @@ export function isIdentityField(field: string) {
   return IDENTITY_USER_DATA_FIELDS.has(field);
 }
 
-export function isInternalMetadataField(field: string) {
-  return INTERNAL_METADATA_FIELDS.has(field) || isReservedMetadataField(field);
+export function isInternalMetadataField(field: string, config = getPluginConfig()) {
+  return INTERNAL_METADATA_FIELDS.has(field) || isReservedMetadataField(field, config);
 }
 
-export function getAuthoritativeProfileFields(metadata: JsonRecord): string[] {
+export function getAuthoritativeProfileFields(metadata: JsonRecord, config = getPluginConfig()): string[] {
   let fields = getStringList(metadata.rownd_profile_authoritative_fields);
-  if (getPluginConfig()?.metadataMode === "canonical") {
+  if (config?.metadataMode === "canonical") {
     const markedFields = Object.entries(metadata).filter(([key, value]) =>
       key.startsWith(ROWND_PROFILE_AUTHORITY_PREFIX) && value === true)
       .map(([key]) => key.slice(ROWND_PROFILE_AUTHORITY_PREFIX.length));
     fields = [...new Set([...fields, ...markedFields])];
   }
-  return fields.filter((key) => !isInternalMetadataField(key) && !isIdentityField(key));
+  return fields.filter((key) => !isInternalMetadataField(key, config) && !isIdentityField(key));
 }
 
 export function mergeMissingProfileMetadata(primary: JsonRecord, secondary: JsonRecord): JsonRecord {
@@ -696,12 +696,12 @@ export function mergeMissingProfileMetadata(primary: JsonRecord, secondary: Json
     !authoritativeFields.has(key))));
 }
 
-export function getRowndProfileData(metadata: RowndMetadata): JsonRecord {
+export function getRowndProfileData(metadata: RowndMetadata, config = getPluginConfig()): JsonRecord {
   const data: JsonRecord = { ...metadata.original_rownd_user?.data };
-  const canonical = getPluginConfig()?.metadataMode === "canonical";
+  const canonical = config?.metadataMode === "canonical";
   // An absent authoritative value is a Core top-level deletion. Objects are
   // replaced whole, including nested nulls, rather than recursively merged.
-  for (const key of getAuthoritativeProfileFields(metadata)) {
+  for (const key of getAuthoritativeProfileFields(metadata, config)) {
     if (!Object.prototype.hasOwnProperty.call(data, key)) continue;
     if ((canonical && !Object.prototype.hasOwnProperty.call(metadata, key)) || metadata[key] === undefined) delete data[key];
     else data[key] = metadata[key];
@@ -845,7 +845,7 @@ export function buildConfiguredSessionClaims(
   const claims: JsonRecord = {};
 
   for (const [key, field] of Object.entries(schema)) {
-    if (field.include_in_session_claims !== true || isInternalMetadataField(key)) {
+    if (field.include_in_session_claims !== true || isInternalMetadataField(key, pluginConfig)) {
       continue;
     }
 
@@ -853,7 +853,7 @@ export function buildConfiguredSessionClaims(
     if (RESERVED_SESSION_CLAIMS.has(claimName)) {
       continue;
     }
-    const value = getRowndProfileData(metadata)[key] ?? metadata[key];
+    const value = getRowndProfileData(metadata, pluginConfig)[key] ?? metadata[key];
     if (value !== undefined) {
       claims[claimName] = value as JsonValue;
     }
@@ -1076,9 +1076,10 @@ export function buildStandardOAuthClaims(
   user: SuperTokensUser,
   scopes: string[],
   metadata: RowndMetadata,
+  pluginConfig: RowndPluginNormalisedConfig | undefined = getPluginConfig(),
 ) {
   const claims: JsonRecord = {};
-  const rowndData = getRowndProfileData(metadata);
+  const rowndData = getRowndProfileData(metadata, pluginConfig);
   const verifiedData = isJsonRecord(metadata.original_rownd_user?.verified_data)
     ? metadata.original_rownd_user.verified_data
     : ({} as JsonRecord);

@@ -7,7 +7,8 @@ import { assertMigrationPostconditions, assertMigrationOwnerGraph, reconcileAdmi
 import { findExistingImportMethodUsers, getUserMetadata, importUser, isBulkImportDuplicateIdentityError, matchesImportLoginMethod, reconcileRowndUserWithExistingLoginMethods } from "./supertokens-repository";
 import { assertMigrationMapping, assertMigrationSourceActive, assertSelectorNamespace, getMigrationTarget } from "./migration-mapping";
 import { clearSuperTokensCoreCallCache, isRecord, type JsonRecord } from "./utils";
-import { getRawUserMetadata, mapRowndUserToSuperTokens } from "./rownd-compatibility";
+import { getRawUserMetadata, isDualWriteMetadataMode, mapRowndUserToSuperTokens } from "./rownd-compatibility";
+import { republishAfterMigration } from "./canonical-republish";
 import { RowndMigrationPolicyError } from "./errors";
 import { inspectVerifiedPhoneSurvivor, inspectCheckpointVerifiedPhoneSurvivor } from "./migration-phone-election";
 import { inspectInstantPrimaryProof } from "./migration-instant-election";
@@ -433,8 +434,25 @@ async function publishPinnedMapping(id: string, source: Source, tenantId: string
 }
 
 /** Reconcile one live Rownd identity using the initialized server configuration. */
-export function reconcileUser(input: ReconcileUserInput): Promise<ReconcileUserResult> {
-  return withReconciliationReads(() => withFreshRowndReads(() => reconcileUserWithFreshSources(input)), input?.onProgress);
+export async function reconcileUser(input: ReconcileUserInput): Promise<ReconcileUserResult> {
+  const result = await withReconciliationReads(() => withFreshRowndReads(() => reconcileUserWithFreshSources(input)), input?.onProgress);
+  if (isDualWriteMetadataMode() && input?.dryRun !== true && result.rownd_user_id !== undefined &&
+      (result.changed !== false || result.partialProgress === true)) {
+    await republishReconciledOwner(result.rownd_user_id, input);
+  }
+  return result;
+}
+
+// Runs after the reconciliation read scope so the republish observes Core, not its snapshots.
+async function republishReconciledOwner(rowndUserId: string, input: ReconcileUserInput) {
+  let resolved: Awaited<ReturnType<typeof resolvePluginConfigSnapshot>>;
+  try {
+    resolved = await resolvePluginConfigSnapshot(getPluginConfig()!, { tenantId: input.tenantId ?? "public", userContext: input.userContext ?? {} });
+  } catch {
+    console.warn("RowndMigrationPlugin: dual-write canonical republish failed (config); owner is left for the final canonical check.");
+    return;
+  }
+  await republishAfterMigration({ userId: rowndUserId, userContext: resolved.userContext, config: resolved.config });
 }
 
 async function discoverEmailSources(email: string, userContext: JsonRecord): Promise<ActivityCandidate[]> {

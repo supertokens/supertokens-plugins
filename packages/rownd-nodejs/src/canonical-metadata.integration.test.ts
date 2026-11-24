@@ -49,8 +49,12 @@ import {
   type RowndCompatUserResponse,
   type RowndMetadata,
 } from "./rownd-compatibility";
+import { setRowndTokenValidator } from "./rownd-repository";
 import { buildRowndSessionClaims, getUserById, recordRowndAppVariantForUser, updateUserData, updateUserMetadata } from "./supertokens-repository";
-import type { RowndPluginConfig } from "./types";
+import type { RowndPluginConfig, RowndUser } from "./types";
+
+const rownd = vi.hoisted(() => ({ validateToken: vi.fn(), fetchUserInfo: vi.fn() }));
+vi.mock("@rownd/node", () => ({ createInstance: () => rownd }));
 
 // Registry-verified multi-architecture 12.4.0 and 16.13 indexes; never use floating tags.
 const CORE_IMAGE = "supertokens/supertokens-postgresql@sha256:d1b777a8474e3eda82d313dbfe8a80e5a32635f21001bd023f1dbf2652177831";
@@ -145,15 +149,22 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
   let verificationLinks: Map<string, string>;
   let coreCalls: Parameters<NetworkInterceptor>[0][];
 
-  function configure(metadataMode?: RowndPluginConfig["metadataMode"]) {
-    return init({
-      disableRowndUserMigration: true, metadataMode, schema,
+  // "keys-only" validates Rownd tokens without API credentials, like a JWKS-only deployment.
+  type Migration = "credentials" | "keys-only";
+
+  function configure(metadataMode?: RowndPluginConfig["metadataMode"], migration?: Migration) {
+    const plugin = init({
+      disableRowndUserMigration: migration === undefined, metadataMode, schema,
+      ...(migration ? { rowndJwtAudience: "app:test-app" } : {}),
+      ...(migration === "credentials" ? { rowndAppKey: "disposable-key", rowndAppSecret: "disposable-secret" } : {}),
       appConfig: { signInMethods: [{ method: "email" }, { method: "anonymous" }] },
       subBrands: { existing: { variant: { id: "existing" } }, added: { variant: { id: "added" } } },
     });
+    if (migration) setRowndTokenValidator(rownd.validateToken);
+    return plugin;
   }
 
-  function initialize(metadataMode?: RowndPluginConfig["metadataMode"]) {
+  function initialize(metadataMode?: RowndPluginConfig["metadataMode"], migration?: Migration) {
     resetSDK();
     SuperTokens.init({
       telemetry: false,
@@ -202,7 +213,7 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
           },
         }),
       ],
-      experimental: { plugins: [configure(metadataMode)] },
+      experimental: { plugins: [configure(metadataMode, migration)] },
     });
   }
 
@@ -879,4 +890,144 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
       rid: "passwordless", body: { preAuthSessionId: code.preAuthSessionId, linkCode: code.linkCode },
     });
   }
+  function rowndProfile(userId: string, email: string, firstName: string): RowndUser {
+    return {
+      state: "enabled", auth_level: "verified",
+      data: { user_id: userId, email, first_name: firstName, last_name: "Migrated last", custom: { migrated: { nested: true } } },
+      verified_data: { email }, meta: { first_sign_in: "2026-01-02T03:04:05.000Z" },
+      attributes: { "rownd:app_variants": ["existing"] },
+    };
+  }
+
+  function serveRowndProfiles(profiles: Map<string, RowndUser>) {
+    rownd.validateToken.mockImplementation(async (token: string) => {
+      if (!profiles.has(token)) throw new Error("Unknown disposable Rownd token");
+      return { user_id: token };
+    });
+    rownd.fetchUserInfo.mockImplementation(async ({ user_id }: { user_id: string }) => structuredClone(profiles.get(user_id)));
+  }
+
+  async function migrate(token: string, path = "/plugin/rownd/migrate") {
+    const response = await request(path, { token });
+    expect({ status: response.status, body: await response.json() }).toEqual({ status: 200, body: { status: "OK" } });
+    expect((await sessionFrom(response)).getUserId()).toBe(token);
+  }
+
+  async function migrationParity(sdkId: string, migration: Migration) {
+    const compatibility = await expectTransitionParity(sdkId, "public");
+    configure("dual-write", migration);
+    return compatibility.profile;
+  }
+
+  it("republishes owners after dual-write migration so the switch to canonical is presentation-neutral", async () => {
+    blockNonLoopbackRequests();
+    initialize("dual-write", "credentials");
+    const imported = `rownd-${randomUUID()}`;
+    const reconciled = `rownd-${randomUUID()}`;
+    const reconciledEmail = `${randomUUID()}@example.com`;
+    const existing = await Passwordless.signInUp({ tenantId: "public", email: reconciledEmail });
+    const profiles = new Map([
+      [imported, rowndProfile(imported, `${randomUUID()}@example.com`, "Imported first")],
+      [reconciled, rowndProfile(reconciled, reconciledEmail, "Rownd first")],
+    ]);
+    serveRowndProfiles(profiles);
+    const expected = new Map<string, RowndCompatUserResponse>();
+
+    // A new user created by bulk import.
+    await migrate(imported);
+    expected.set(imported, await migrationParity(imported, "credentials"));
+    expect(expected.get(imported)?.data).toMatchObject({ first_name: "Imported first", custom: { migrated: { nested: true } } });
+
+    // An existing internal user that migration maps, links and completes.
+    await migrate(reconciled);
+    expect(await SuperTokens.getUserIdMapping({ userId: reconciled, userIdType: "EXTERNAL" }))
+      .toMatchObject({ status: "OK", superTokensUserId: existing.user.id });
+    expect((await UserMetadata.getUserMetadata(reconciled)).metadata).toMatchObject({
+      rownd_migration_canonical_target: existing.user.id, first_name: "Rownd first",
+    });
+    expected.set(reconciled, await migrationParity(reconciled, "credentials"));
+
+    // Repeating a completed migration republishes nothing.
+    let start = coreCalls.length;
+    await migrate(reconciled);
+    expect(countCoreCalls(coreCalls.slice(start))).not.toHaveProperty("PUT /recipe/user/metadata");
+    expect(await migrationParity(reconciled, "credentials")).toEqual(expected.get(reconciled));
+
+    // Credential-free session exchange accepts only completed, mapped owners and writes nothing.
+    initialize("dual-write", "keys-only");
+    start = coreCalls.length;
+    await migrate(reconciled, "/plugin/migrate-session");
+    expect(countCoreCalls(coreCalls.slice(start))).not.toHaveProperty("PUT /recipe/user/metadata");
+    expect(await migrationParity(reconciled, "keys-only")).toEqual(expected.get(reconciled));
+
+    initialize("canonical");
+    for (const [sdkId, profile] of expected) {
+      expect(await getUserById(sdkId)).toEqual(profile);
+      const stored = (await UserMetadata.getUserMetadata(sdkId)).metadata;
+      expect(Object.keys(stored).filter((key) => key.startsWith(ROWND_PROFILE_AUTHORITY_PREFIX) ||
+        key === ROWND_APP_VARIANTS_KEY || key.startsWith("rownd_pending_"))).toEqual([]);
+    }
+  }, 60_000);
+
+  it("keeps a migration's session when its republish write fails and converges on the next migration", async () => {
+    blockNonLoopbackRequests();
+    initialize("dual-write", "credentials");
+    const rowndId = `rownd-${randomUUID()}`;
+    const email = `${randomUUID()}@example.com`;
+    const existing = await Passwordless.signInUp({ tenantId: "public", email });
+    serveRowndProfiles(new Map([[rowndId, rowndProfile(rowndId, email, "Rownd first")]]));
+    const realUpdate = UserMetadata.updateUserMetadata.bind(UserMetadata);
+    const failRepublish = vi.spyOn(UserMetadata, "updateUserMetadata").mockImplementation(async (id, patch, context) => {
+      if (id === rowndId && Object.prototype.hasOwnProperty.call(patch, "original_rownd_user")) throw new Error("Disposable write failure");
+      return realUpdate(id, patch, context);
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await migrate(rowndId);
+    } finally {
+      failRepublish.mockRestore();
+    }
+    expect(warn.mock.calls.flat().join("\n")).toContain("dual-write canonical republish failed");
+    expect(warn.mock.calls.flat().join("\n")).not.toContain(rowndId);
+    warn.mockRestore();
+    const compatibility = await presentation(rowndId, "compatibility", "public");
+    expect(await presentation(rowndId, "canonical", "public")).not.toEqual(compatibility);
+
+    configure("dual-write", "credentials");
+    await migrate(rowndId);
+    expect(await migrationParity(rowndId, "credentials")).toEqual(compatibility.profile);
+  }, 60_000);
+
+  it("republishes an owner whose migration wrote state and then failed", async () => {
+    blockNonLoopbackRequests();
+    initialize("dual-write", "credentials");
+    const rowndId = `rownd-${randomUUID()}`;
+    const email = `${randomUUID()}@example.com`;
+    await Passwordless.signInUp({ tenantId: "public", email });
+    serveRowndProfiles(new Map([[rowndId, rowndProfile(rowndId, email, "Rownd first")]]));
+    const failSession = vi.spyOn(Session, "createNewSession").mockRejectedValue(new Error("Disposable session failure"));
+    try {
+      const response = await request("/plugin/rownd/migrate", { token: rowndId });
+      expect({ status: response.status, body: await response.json() }).toEqual({
+        status: 400, body: { status: "ERROR", message: "Migration failed" },
+      });
+    } finally {
+      failSession.mockRestore();
+    }
+    expect((await UserMetadata.getUserMetadata(rowndId)).metadata).toMatchObject({ first_name: "Rownd first" });
+    await migrationParity(rowndId, "credentials");
+  }, 60_000);
+
+  it.each(["compatibility", "dual-write"] as const)("budgets a completed-owner migration in %s mode", async (mode) => {
+    blockNonLoopbackRequests();
+    initialize(mode, "credentials");
+    const rowndId = `rownd-${randomUUID()}`;
+    serveRowndProfiles(new Map([[rowndId, rowndProfile(rowndId, `${randomUUID()}@example.com`, "Budget first")]]));
+    await migrate(rowndId);
+    const start = coreCalls.length;
+    await migrate(rowndId);
+    const counts = countCoreCalls(coreCalls.slice(start));
+    console.info("completed-owner migration Core calls", JSON.stringify({ mode, counts }));
+    expect(counts).not.toHaveProperty("PUT /recipe/user/metadata");
+  }, 60_000);
 });
