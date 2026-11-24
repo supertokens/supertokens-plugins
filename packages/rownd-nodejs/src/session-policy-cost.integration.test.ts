@@ -50,9 +50,10 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
 
   afterAll(async () => { await core?.stop(); });
 
-  async function request(path: string, recipe: string, body: object) {
+  async function request(path: string, recipe: string, body: object, accessToken?: string, fdiVersion = "1.18") {
     const req = new PreParsedRequest({ url: `${origin}${path}`, method: "post", cookies: {}, query: {},
-      headers: new Headers({ rid: recipe, "content-type": "application/json", "fdi-version": "1.18", "st-auth-mode": "header" }),
+      headers: new Headers({ rid: recipe, "content-type": "application/json", "fdi-version": fdiVersion, "st-auth-mode": "header",
+        ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}) }),
       getJSONBody: async () => body, getFormBody: async () => ({}) });
     const res = new CollectingResponse();
     const result = await middleware()(req, res);
@@ -72,9 +73,12 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
     return { email, oauthEmail, subject, passwordless, sso, ownerId: passwordless.user.id };
   }
 
-  async function emailSignIn(email: string) {
+  async function emailSignIn(email: string, accessToken?: string, explicitLink = false) {
     const code = await Passwordless.createCode({ tenantId: "public", email });
-    return () => request("/signinup/code/consume", "passwordless", { preAuthSessionId: code.preAuthSessionId, linkCode: code.linkCode });
+    return () => request("/signinup/code/consume", "passwordless", {
+      preAuthSessionId: code.preAuthSessionId, linkCode: code.linkCode,
+      ...(explicitLink ? { shouldTryLinkingWithSessionUser: true } : {}),
+    }, accessToken, explicitLink ? "3.1" : "1.18");
   }
 
   it.each([false, true])("bounds the extra Core GETs (management enabled=%s)", async (enabled) => {
@@ -105,6 +109,26 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
       const main = [0, 0, 0, 18, 17];
       const budget = [0, 0, 2, 4, 5];
       counts.forEach((count, i) => expect(count - main[i]!, `flow ${i} delta`).toBeLessThanOrEqual(budget[i]!));
+
+      for (const explicitLink of [false, true]) {
+        const activeSession = await Session.createNewSessionWithoutRequestResponse("public", f.passwordless.recipeUserId);
+        const activeToken = activeSession.getAccessToken();
+        const consumeWithSession = await emailSignIn(f.email, activeToken, explicitLink);
+        fetchCore.mockClear();
+        const response = await consumeWithSession();
+        expect(response.body).toMatchObject({ status: "OK", user: { id: f.ownerId } });
+        const gets = fetchCore.mock.calls.filter(([, options]) => options?.method === "GET");
+        const sessionReads = gets.filter(([url]) => new URL(String(url)).pathname === "/recipe/session").length;
+        console.info("passwordless with session Core GETs", { enabled, explicitLink, reads: gets.length, sessionReads });
+        const mainWithSession = 12;
+        const extraBudget = (explicitLink ? 9 : 7) + Number(enabled);
+        expect(gets.length - mainWithSession, "passwordless consume with an active session").toBeLessThanOrEqual(extraBudget);
+        // One liveness read, plus a session-data read when issuing the retained-email receipt.
+        expect(sessionReads).toBeGreaterThanOrEqual(1);
+        expect(sessionReads).toBeLessThanOrEqual(enabled ? 2 : 1);
+        const retained = await Session.getSessionWithoutRequestResponse(response.headers.get("st-access-token") ?? activeToken);
+        expect(retained.getHandle()).toBe(activeSession.getHandle());
+      }
 
       const rowndId = `rownd-${randomUUID()}`;
       expect(await SuperTokens.createUserIdMapping({ superTokensUserId: f.ownerId, externalUserId: rowndId, force: true }))

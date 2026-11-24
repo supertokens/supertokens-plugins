@@ -12957,9 +12957,11 @@ describe("rownd-nodejs plugin", () => {
 
       it("allows one concurrent duplicate verification to complete", async () => {
         const emailVerificationLinks: string[] = [];
+        const requestErrors: unknown[] = [];
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
           emailVerificationLinks,
+          requestErrors,
         });
         server = s;
         testPORT = port;
@@ -13012,7 +13014,11 @@ describe("rownd-nodejs plugin", () => {
           ),
         ]);
         const bodies = await Promise.all(
-          responses.map((response) => response.json()),
+          responses.map((response) => {
+            expect(response.status, requestErrors.map(String).join("\n")).toBe(200);
+            expect(response.headers.get("content-type")).toContain("application/json");
+            return response.json();
+          }),
         );
         expect(bodies).toEqual(
           expect.arrayContaining([

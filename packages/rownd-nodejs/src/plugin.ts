@@ -1326,7 +1326,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   }
                   await Promise.allSettled([...authentication.sessions].map((session) => Session.revokeSession(session.getHandle(operationContext), operationContext)));
                   if (error instanceof DisconnectedSignInMethodError) return policyFailure(error, "thirdparty_post", authentication.actual?.userId);
-                  if (error instanceof RowndSignInMethodError) return { status: "SIGN_IN_UP_NOT_ALLOWED" as const, reason: error.message };
+                  if (error instanceof RowndSignInMethodError) return { status: "SIGN_IN_UP_NOT_ALLOWED" as const, reason: error.errorCode };
                   throw error;
                 } finally {
                   buffered.restore();

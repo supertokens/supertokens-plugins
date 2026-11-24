@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SuperTokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
+import { CollectingResponse } from "supertokens-node/framework/custom";
 import { init } from "./plugin";
 import { buildRowndSessionAndAnonymousClaims } from "./supertokens-repository";
 import { buildRowndSessionClaimPayload } from "./rownd-compatibility";
@@ -111,6 +112,13 @@ describe("durable policy recipe seams", () => {
     expect(await overrides.thirdparty.functions(original).signInUp({ thirdPartyId: "google", thirdPartyUserId: "subject", session,
       tenantId: "public", userContext: {} })).toMatchObject({ status: "SIGN_IN_UP_NOT_ALLOWED" });
     expect(original.signInUp).not.toHaveBeenCalled();
+  });
+
+  it("returns the stable code when the successful SDK response cannot prove the SSO identity", async () => {
+    const api = overrides.thirdparty.apis({ signInUpPOST: async () => ({ status: "OK", user: { id: "owner" }, session }) });
+    const result = await api.signInUpPOST({ provider: { id: "google" }, tenantId: "public", session,
+      options: { req: { getKeyValueFromQuery: () => undefined }, res: new CollectingResponse() }, userContext: {} });
+    expect(result).toEqual({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_AUTHENTICATION_UNPROVEN" });
   });
 
   it("publishes an allowed SSO response using one final policy snapshot without a following lookup", async () => {

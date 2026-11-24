@@ -203,7 +203,8 @@ export async function disconnectConnectedSignInMethod(input: Input & { body: unk
   const retained = state.retained;
   const reason = selected ? blockReason(state, selected) : retainedFactorBlockReason(state);
   if (reason) throw new RowndSignInMethodError(reason, 409, "This sign-in method cannot be disconnected.");
-  const { email: retainedEmail, recipeUserId: retainedRecipe } = retained!;
+  if (!retained) conflict();
+  const { email: retainedEmail, recipeUserId: retainedRecipe } = retained;
   const sdkUserId = state.user.id;
   const mappingSnapshot = JSON.stringify(state.mapping);
   const proofInput = { session, userId: state.owner, tenantId: state.tenantId,
