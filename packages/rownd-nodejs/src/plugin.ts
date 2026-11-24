@@ -217,6 +217,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           (displayContext === "mobile_app" ? "mobile" : "browser");
         const clientBaseUrl =
           resolvedPluginConfig.clientDomains?.[clientDomainKey];
+        const compactMagicLinks =
+          linkKey === "urlWithLinkCode" && resolvedPluginConfig.compactMagicLinks;
         const bootstrapParams = {
           appKey: pluginConfig.rowndAppKey,
           ...(hubBootstrapParams ?? {}),
@@ -226,6 +228,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
           ...(typeof appVariantId === "string" ? { appVariantId } : {}),
           ...(typeof displayContext === "string" ? { displayContext } : {}),
           ...(typeof redirectToPath === "string" ? { redirectToPath } : {}),
+          ...(compactMagicLinks && typeof clientDomain === "string"
+            ? { clientDomain }
+            : {}),
           ...(typeof oauthLoginChallenge === "string"
             ? { oauthLoginChallenge }
             : {}),
@@ -248,8 +253,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
             targetPath,
             clientBaseUrl,
             bootstrapParams,
+            compactMagicLinks,
           )
-          : rewriteLinkPath(input[linkKey], targetPath, bootstrapParams);
+          : rewriteLinkPath(
+            input[linkKey],
+            targetPath,
+            bootstrapParams,
+            compactMagicLinks,
+          );
 
         return {
           ...input,
@@ -1448,6 +1459,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         disableRowndUserMigration: config.disableRowndUserMigration === true,
         enableDebugLogs: config.enableDebugLogs,
         clientDomains: config.clientDomains,
+        compactMagicLinks: config.compactMagicLinks ?? false,
         crossDeviceConfirmationBypass: config.crossDeviceConfirmationBypass,
         telemetry: config.telemetry,
         schema: config.schema,

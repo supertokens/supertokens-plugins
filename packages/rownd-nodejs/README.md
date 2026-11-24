@@ -104,7 +104,7 @@ refresh the resulting session using the SuperTokens refresh token and session SD
 Use `resolveConfig` when Rownd app configuration differs by SuperTokens tenant.
 The resolver runs once per logical operation. `tenantId` and `request` are
 optional because SDK function calls do not always originate from an HTTP route;
-`userContext` is always provided. It may return `clientDomains`,
+`userContext` is always provided. It may return `clientDomains`, `compactMagicLinks`,
 `crossDeviceConfirmationBypass`, `schema`, `appConfig`, `subBrands`, or
 `emailChange`.
 
@@ -394,6 +394,20 @@ RowndMigrationPlugin.init({
   },
 });
 ```
+
+### Compact Magic Links
+
+Set `compactMagicLinks: true` to shorten passwordless email and SMS magic
+links, including links from `createMagicLinkWithConfirmationBypass`. Compact
+links omit `appKey`, `apiDomain`, and `apiBasePath` and use shorter names for
+optional parameters. Email verification links are unchanged. The flag defaults
+to `false` and can be overridden per tenant with `resolveConfig`.
+
+Deploy a Hub version that supports compact links **before** enabling the flag.
+Enable it only when every `clientDomains` target is either a customer site
+running the Rownd SDK (which supplies the app key and API configuration) or a
+Hub host registered in the Hub's host registry. The SuperTokens website domain,
+used as a fallback, must meet the same requirement if it can receive links.
 
 ### Same-device Passwordless Hub Policy
 
