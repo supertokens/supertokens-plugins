@@ -6,6 +6,7 @@ import { resolveConsolidatedTokenOwner } from "./migration-consolidation";
 import { discoverMigrationById, hasPendingMigrationById, planMigration } from "./migration-plan";
 import { authenticateExistingRowndMigration, authenticateRowndMigration, assertAuthenticatedMigrationSource } from "./migration-email";
 import { resolveCanonicalEmailForTenant } from "./canonical-email";
+import { republishAfterMigration } from "./canonical-republish";
 import SuperTokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
@@ -41,7 +42,10 @@ import {
 import {
   buildRowndAudience,
   canUpdateUserDataField,
-  getInternalPrimaryUserId,
+  inspectUserPresentationMetadata,
+  isCanonicalReservedMetadataKey,
+  isDualWriteMetadataMode,
+  isIdentityField,
   isInternalMetadataField,
 } from "./rownd-compatibility";
 import {
@@ -73,6 +77,7 @@ import {
   resolveTenantId,
   resolveAllowedClientDomain,
   createDerivedUserContext,
+  type JsonRecord,
 } from "./utils";
 
 type SuperTokensRequest = Parameters<PluginRouteHandler["handler"]>[0];
@@ -292,6 +297,7 @@ export function handleGuestLogin(deps: RowndRouteHandlerDeps) {
         appVariantId,
         resolved.userContext,
         tenantId,
+        { userSnapshot: response.user },
       );
 
       await Session.createNewSession(
@@ -366,6 +372,8 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
     let user: Awaited<ReturnType<typeof SuperTokens.getUser>>;
     let recipeUserId:
       Parameters<typeof Session.createNewSession>[3] | undefined;
+    // Set once the request may write owner state; dual-write converges it afterwards.
+    let republish: (() => Promise<unknown>) | undefined;
 
     try {
       res.setHeader("x-rownd-migration-request-id", telemetry.requestId, false);
@@ -413,8 +421,13 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       const discovery = await discoverMigrationById(rowndUserId, tenantId, resolved.userContext);
       const plan = planMigration(discovery, stUserImport);
       if (plan.status === "BLOCKED") throw new Error(plan.reason);
+      let ownerId = rowndUserId;
+      republish = () => republishAfterMigration({
+        userId: ownerId, userContext: resolved.userContext, config: resolved.config, telemetry,
+      });
       user = discovery.user;
       const consolidatedAlias = plan.status === "NOOP" ? undefined : await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext);
+      if (consolidatedAlias) ownerId = consolidatedAlias.canonicalRowndId;
       telemetry.superTokensUserId = user?.id;
       const existingMetadata = plan.status === "PLAN" && user
         ? await getUserMetadata(user.id, resolved.userContext)
@@ -501,6 +514,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
           appVariantId,
           resolved.userContext,
           tenantId,
+          { userSnapshot: user },
         );
       }
 
@@ -589,10 +603,12 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
 
       telemetry.sessionCreated = true;
       telemetry.canonicalRowndUserId = consolidatedAlias?.canonicalRowndId ?? rowndUserId;
+      await republish();
       telemetry.emit("terminal", "session_created");
 
       return { status: "OK" as const };
     } catch (error) {
+      await republish?.();
       if (error instanceof RowndLegacyUserNotFoundError) {
         telemetry.emit("terminal", "rownd_user_not_found", "error", error);
         return { status: "ERROR" as const, code: error.code, message: error.message };
@@ -784,6 +800,10 @@ export function handleGetUser(deps: RowndRouteHandlerDeps) {
       session!.getUserId(resolved.userContext),
       session!.getTenantId(resolved.userContext),
       resolved.userContext,
+      {
+        includeActivity: req.getKeyValueFromQuery("include_activity") === "true",
+        recordEvent: (event) => deps.telemetryClient.recordEvent(event),
+      },
     );
     return {
       status: "OK" as const,
@@ -822,6 +842,7 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
         hasEmailField &&
         (typeof email !== "string" || email.trim().length === 0)
       ) {
+        if (email === null && isDualWriteMetadataMode(resolved.config)) return fieldNotWritableResponse("email");
         return {
           status: "ERROR" as const,
           code: 400,
@@ -830,7 +851,7 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
       }
       const hasEmailUpdate = hasEmailField && typeof email === "string";
       const permissionError = validateWritableFields(
-        Object.keys(inputData),
+        inputData,
         resolved.config,
       );
 
@@ -904,20 +925,19 @@ export function handleUpdateUser(deps: RowndRouteHandlerDeps) {
         }
       }
 
-      if (Object.keys(dataWithoutEmail).length > 0) {
-        await updateUserData(
-          session!.getUserId(operationContext),
-          dataWithoutEmail,
-          session!.getTenantId(operationContext),
-          operationContext,
+      const user = Object.keys(dataWithoutEmail).length > 0
+        ? await updateUserData(
+            session!.getUserId(operationContext),
+            dataWithoutEmail,
+            session!.getTenantId(operationContext),
+            operationContext,
+            { preserveResponseSelector: true },
+        )
+        : await getUserById(
+            session!.getUserId(operationContext),
+            session!.getTenantId(operationContext),
+            operationContext,
         );
-      }
-
-      const user = await getUserById(
-        session!.getUserId(operationContext),
-        session!.getTenantId(operationContext),
-        operationContext,
-      );
       return {
         status: "OK" as const,
         ...user,
@@ -967,7 +987,7 @@ export function handleGetUserMeta() {
     session: SuperTokensSession,
     userContext: SuperTokensUserContext,
   ) => {
-    const metadata = await getUserMetadata(
+    const { combinedMetadata: metadata } = await inspectUserPresentationMetadata(
       session!.getUserId(userContext),
       userContext,
     );
@@ -991,17 +1011,10 @@ export function handleUpdateUserMeta() {
     userContext: SuperTokensUserContext,
   ) => {
     const payload = parseUpdateMetaBody(await getJsonBody(req));
-    const internalField = Object.keys(payload.meta ?? {}).find(
-      isInternalMetadataField,
-    );
-
-    if (internalField) {
-      return {
-        status: "ERROR" as const,
-        code: 403,
-        message: `field is not writable: ${internalField}`,
-      };
-    }
+    const dualWrite = isDualWriteMetadataMode();
+    const readOnlyField = Object.entries(payload.meta ?? {}).find(([key, value]) =>
+      isInternalMetadataField(key) || (dualWrite && (isCanonicalReservedMetadataKey(key) || isNullIdentityField(key, value))))?.[0];
+    if (readOnlyField !== undefined) return fieldNotWritableResponse(readOnlyField);
 
     const updateMetadataResult = await updateUserMetadata(
       session!.getUserId(userContext),
@@ -1073,7 +1086,7 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
     });
     {
       if (field === "email") {
-        const permissionError = validateWritableFields([field], resolved.config);
+        const permissionError = validateWritableFields({ [field]: payload.value }, resolved.config);
         if (permissionError) return permissionError;
         if (
           typeof payload.value !== "string" ||
@@ -1139,7 +1152,7 @@ export function handleUpdateUserField(deps: RowndRouteHandlerDeps) {
         }
       }
 
-      const permissionError = validateWritableFields([field], resolved.config);
+      const permissionError = validateWritableFields({ [field]: payload.value }, resolved.config);
       if (permissionError) {
         return permissionError;
       }
@@ -1206,13 +1219,24 @@ async function validateExpectedProfileOwner(
   const tenantMismatch = (requestedTenant !== undefined && requestedTenant !== tenant) ||
     (expectedTenant !== undefined && (typeof expectedTenant !== "string" || !expectedTenant || expectedTenant !== tenant));
   if (expected === undefined && expectedTenant === undefined && !tenantMismatch) return;
-  const owner = await getInternalPrimaryUserId(session.getUserId(userContext), userContext);
-  const expectedOwner = typeof expected === "string" && expected.length > 0
-    ? await getInternalPrimaryUserId(expected, userContext) : undefined;
-  if (tenantMismatch || !owner || owner !== expectedOwner) {
-    return { status: "ERROR" as const, code: 409, error_code: "EMAIL_CHANGE_ACCOUNT_MISMATCH",
-      message: "Sign in to the account where you started this change." };
+  const sessionUserId = session.getUserId(userContext);
+  const owner = (await SuperTokens.getUser(sessionUserId, userContext))?.id;
+  if (!tenantMismatch && owner && typeof expected === "string" && expected.length > 0) {
+    const expectedOwner = expected === sessionUserId ? owner : (await SuperTokens.getUser(expected, userContext))?.id;
+    if (owner === expectedOwner) return;
+    if (expectedOwner) {
+      // Forced aliases can also be internal IDs. For differing IDs preserve
+      // the legacy normalization, which gives SUPERTOKENS mappings priority.
+      const normalize = async (userId: string) => {
+        if ((await SuperTokens.getUserIdMapping({ userId, userIdType: "SUPERTOKENS", userContext })).status === "OK") return userId;
+        const external = await SuperTokens.getUserIdMapping({ userId, userIdType: "EXTERNAL", userContext });
+        return external.status === "OK" ? external.superTokensUserId : userId;
+      };
+      if (await normalize(owner) === await normalize(expectedOwner)) return;
+    }
   }
+  return { status: "ERROR" as const, code: 409, error_code: "EMAIL_CHANGE_ACCOUNT_MISMATCH",
+    message: "Sign in to the account where you started this change." };
 }
 
 function recentAuthenticationRequiredResponse() {
@@ -1225,21 +1249,26 @@ function recentAuthenticationRequiredResponse() {
 }
 
 function validateWritableFields(
-  fields: string[],
-  pluginConfig?: RowndPluginNormalisedConfig,
+  fields: JsonRecord,
+  pluginConfig: RowndPluginNormalisedConfig,
 ) {
-  const readOnlyField = fields.find(
+  const dualWrite = isDualWriteMetadataMode(pluginConfig);
+  const readOnlyField = Object.entries(fields).find(
+    ([field, value]) => (dualWrite && isNullIdentityField(field, value)) ||
     // Email is an identity field, absent from the default custom-profile schema.
-    (field) => !(field === "email" && !pluginConfig?.schema?.email) && !canUpdateUserDataField(field, pluginConfig),
-  );
+      (!(field === "email" && !pluginConfig.schema?.email) && !canUpdateUserDataField(field, pluginConfig)),
+  )?.[0];
+  if (readOnlyField !== undefined) return fieldNotWritableResponse(readOnlyField);
+}
 
-  if (!readOnlyField) {
-    return undefined;
-  }
+function isNullIdentityField(field: string, value: unknown) {
+  return value === null && isIdentityField(field);
+}
 
+function fieldNotWritableResponse(field: string) {
   return {
     status: "ERROR" as const,
     code: 403,
-    message: `field is not writable: ${readOnlyField}`,
+    message: `field is not writable: ${field}`,
   };
 }

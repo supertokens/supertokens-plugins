@@ -289,15 +289,19 @@ async function protectedOwnerRows(owner: Owner, metadata: Record<string, unknown
 
 async function assertProtectedOwnerGraph(owner: Owner, metadata: Record<string, unknown>, userContext?: Context, strict = false) {
   const rows = await protectedOwnerRows(owner, metadata, userContext, strict);
+  await assertProtectedRows(owner.id, rows, userContext);
+  return rows.size > 0;
+}
+
+async function assertProtectedRows(ownerId: string, rows: ReadonlyMap<string, boolean>, userContext?: Context) {
   for (const [id, pinnedOwner] of rows) {
     const { metadata: literal } = await UserMetadata.getUserMetadata(id, userContext);
     const entries = Object.entries(literal ?? {}).filter(([key]) => isDisconnectedSignInMethodMetadataKey(key));
     // Copied linked snapshots are not authority. A live Core member must have
     // a self-bound checkpoint; a validated plan already proves its pinned owner.
     if (!entries.length || (!pinnedOwner && !entries.some(([, value]) => isRecord(value) && value.userId === id))) continue;
-    throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED", owner.id);
+    throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED", ownerId);
   }
-  return rows.size > 0;
 }
 
 async function readPolicy(owner: Owner, userContext?: Context): Promise<DisconnectedSignInMethod[]> {
@@ -454,6 +458,7 @@ type Gate = {
   reference: string;
   owner: Owner;
   literalIds: string[];
+  ownerMetadata: Record<string, unknown>;
   policy?: ReturnType<typeof parsePolicy>;
 };
 
@@ -463,6 +468,9 @@ type GateOptions = {
   // Only pass a snapshot from an earlier check in the same auth operation.
   // The commit check reuses its row addresses, never its policy contents.
   previous?: Gate;
+  // A caller that just cleared its request cache can share the fresh policy
+  // read with downstream work instead of creating a second cache.
+  freshContext?: boolean;
 };
 
 async function assertLiteralReferences(literalIds: string[], userContext?: Context) {
@@ -484,30 +492,39 @@ export async function readPolicyGate(
   const previous = options.previous?.reference === reference ? options.previous : undefined;
   let owner = previous?.owner ?? await lenientOwner(reference, userContext);
   const literalIds = new Set(previous?.literalIds);
+  let activeContext = previous && !options.freshContext ? uncachedContext(userContext) : userContext;
   // Refresh checks the canonical internal owner row. Sign-in and issuance also
   // check literal aliases for a conflicting internal owner after a relink.
   if (options.scope === "signin") {
     if (reference !== owner.id) literalIds.add(reference);
-    await assertLiteralReferences([...literalIds], previous ? uncachedContext(userContext) : userContext);
+    await assertLiteralReferences([...literalIds], activeContext);
   }
-  let activeContext = previous ? uncachedContext(userContext) : userContext;
-  let { metadata } = await UserMetadata.getUserMetadata(owner.id, activeContext);
   if (!previous && options.scope === "signin") {
     const user = options.user ?? await SuperTokens.getUser(reference, userContext);
     if (user && user.id !== reference) {
       const primary = await lenientOwner(user.id, userContext, user);
       if (primary.id !== owner.id) {
-        if (hasPolicy(metadata)) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
+        if (hasPolicy((await UserMetadata.getUserMetadata(owner.id, userContext)).metadata)) {
+          throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
+        }
         literalIds.add(owner.id);
-        ({ metadata } = await UserMetadata.getUserMetadata(primary.id, userContext));
       }
       owner = primary;
     } else {
       owner = { ...owner, user };
     }
     literalIds.delete(owner.id);
-    const scanned = await assertProtectedOwnerGraph(owner, metadata ?? {}, userContext);
-    if (scanned && !hasPolicy(metadata)) {
+    const liveRows = await protectedOwnerRows(owner, {}, userContext);
+    await assertProtectedRows(owner.id, liveRows, userContext);
+    if (liveRows.size) activeContext = uncachedContext(userContext);
+  }
+  let { metadata } = await UserMetadata.getUserMetadata(owner.id, activeContext);
+  if (!previous && options.scope === "signin") {
+    // Read the owner after the live rows, not both before and after. A checkpoint
+    // can name additional, pinned rows that only become known on this read.
+    const pinned = pinnedOwners(owner.id, metadata ?? {}).filter((id) => id !== owner.id);
+    if (pinned.length) {
+      await assertProtectedRows(owner.id, new Map(pinned.map((id) => [id, true])), userContext);
       activeContext = uncachedContext(userContext);
       ({ metadata } = await UserMetadata.getUserMetadata(owner.id, activeContext));
     }
@@ -521,12 +538,12 @@ export async function readPolicyGate(
       await assertProtectedOwnerGraph(strict, metadata ?? {}, activeContext, true);
       owner = strict;
     }
-    return { reference, owner, literalIds: [...literalIds], policy };
+    return { reference, owner, literalIds: [...literalIds], ownerMetadata: metadata ?? {}, policy };
   }
   if (!previous && options.scope === "session" && pinnedOwners(owner.id, metadata ?? {}).length) {
     await assertProtectedOwnerGraph(owner, metadata, userContext);
   }
-  return { reference, owner, literalIds: [...literalIds] };
+  return { reference, owner, literalIds: [...literalIds], ownerMetadata: metadata ?? {} };
 }
 
 export async function checkSignInMethodAuthentication(

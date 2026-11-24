@@ -1,6 +1,6 @@
 {
   "name": "@supertokens-plugins/rownd-nodejs",
-  "version": "1.0.4",
+  "version": "2.1.0",
   "description": "Rownd User Migration Plugin for SuperTokens",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -48,8 +48,10 @@
     "@shared/eslint": "*",
     "@shared/nodejs": "*",
     "@shared/tsconfig": "*",
+    "@types/express": "^5.0.0",
     "@types/node": "^20.0.0",
     "eslint": "^8.57.0",
+    "express": "^5.1.0",
     "testcontainers": "^10.7.1",
     "tsup": "^8.0.2",
     "tsx": "^4.21.0",

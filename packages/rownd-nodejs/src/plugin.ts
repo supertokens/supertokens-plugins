@@ -1,4 +1,4 @@
-import { SuperTokensPlugin, type PluginRouteHandler, type UserContext } from "supertokens-node/types";
+import { SuperTokensPlugin, type PluginRouteHandler, type User, type UserContext } from "supertokens-node/types";
 import {
   EmailVerificationClaim,
   type APIInterface as EmailVerificationAPIInterface,
@@ -62,6 +62,7 @@ import {
   linkHistoricalPasswordlessUser,
   type HistoricalPasswordlessScope,
   type PasswordlessAuthSnapshot,
+  type RowndMetadata,
   shouldLinkRowndAccounts,
 } from "./rownd-compatibility";
 import { setRowndClient, setRowndTokenValidator } from "./rownd-repository";
@@ -86,6 +87,7 @@ import {
   rewriteLinkToBaseUrl,
   rewriteLinkPath,
   createDerivedUserContext,
+  clearSuperTokensCoreCallCache,
 } from "./utils";
 import {
   handleDeleteUser,
@@ -111,6 +113,10 @@ const PENDING_EMAIL_VERIFICATION_SESSION_ERROR =
   "email change verification requires the initiating session";
 const INACTIVE_PASSWORDLESS_EMAIL_REASON = "No existing account found";
 const THIRD_PARTY_AUTHENTICATION = Symbol("rownd.thirdPartyAuthentication");
+const PASSWORDLESS_ISSUANCE = Symbol("rownd.passwordlessIssuance");
+type PasswordlessIssuance = {
+  pending?: { session: SessionContainerInterface; confirm: () => Promise<unknown>; confirmed?: true };
+};
 type ThirdPartyAuthenticationOperation = {
   actual?: { userId: string; recipeUserId: string; tenantId: string; providerId: string; providerUserId: string };
   gate?: Awaited<ReturnType<typeof readPolicyGate>>;
@@ -152,9 +158,35 @@ function bufferAuthenticationResponse(res: Parameters<PluginRouteHandler["handle
   return { restore, publish: () => { restore(); for (const write of writes) write(); } };
 }
 
+async function withBufferedPasswordlessIssuance<T extends { status: string }>(
+  issuance: PasswordlessIssuance | undefined,
+  response: Parameters<PluginRouteHandler["handler"]>[1],
+  context: UserContext,
+  authenticate: () => Promise<T>,
+) {
+  if (!issuance) return authenticate();
+  const buffered = bufferAuthenticationResponse(response);
+  try {
+    const result = await authenticate();
+    if (result.status === "OK" && issuance.pending && !issuance.pending.confirmed) {
+      throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
+    }
+    if (result.status === "OK" || !issuance.pending) buffered.publish();
+    else await Promise.allSettled([issuance.pending.session.revokeSession(context)]);
+    return result;
+  } catch (error) {
+    const session = issuance.pending?.session;
+    if (session) await Promise.allSettled([session.revokeSession(context)]);
+    if (error instanceof DisconnectedSignInMethodError) return policyFailure(error, "passwordless", session?.getUserId(context));
+    throw error;
+  } finally {
+    buffered.restore();
+  }
+}
+
 async function refreshRowndSessionClaims(input: {
   session: SessionContainerInterface;
-  userId: string;
+  userSnapshot: User;
   appVariantId?: string;
   userContext: UserContext;
   provenAuthentication: boolean;
@@ -162,12 +194,13 @@ async function refreshRowndSessionClaims(input: {
 }) {
   const currentPayload = input.session.getAccessTokenPayload();
   const buildClaims = () => buildRowndSessionAndAnonymousClaims(
-    input.userId,
+    input.userSnapshot.id,
     currentPayload,
     input.appVariantId,
     input.userContext,
     input.session.getRecipeUserId(input.userContext).getAsString(),
     input.provenAuthentication,
+    { userSnapshot: input.userSnapshot },
   );
   const { rowndSessionClaims, rowndIsAnonymousClaim } = await (input.provenAuthentication
     ? withProvenSessionAuthentication(buildClaims) : buildClaims());
@@ -931,7 +964,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   NonNullable<PasswordlessAPIInterface["consumeCodePOST"]>
                 >[0],
               ) => {
-                if (originalImplementation.consumeCodePOST === undefined) {
+                const consumeCodePOST = originalImplementation.consumeCodePOST?.bind(originalImplementation);
+                if (consumeCodePOST === undefined) {
                   throw new Error(
                     "Passwordless consumeCodePOST is unavailable",
                   );
@@ -1043,8 +1077,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   tenantId: input.tenantId,
                   ownerRecipeUserIds: historicalOwner.loginMethods.map((method) => method.recipeUserId.getAsString()),
                 } : undefined;
+                const issuance: PasswordlessIssuance | undefined = resolved.config.metadataMode === "canonical" &&
+                  consumedEmail && !historicalScope ? {} : undefined;
                 const consumeContext = createDerivedUserContext(operationContext, {
                   [passwordlessHistoryOwner]: historicalScope,
+                  [PASSWORDLESS_ISSUANCE]: issuance,
                 });
                 if (session && !historicalScope && input.shouldTryLinkingWithSessionUser === true) {
                   const id = session.getUserId(consumeContext);
@@ -1055,102 +1092,107 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     throw error;
                   }
                 }
-                const response = await originalImplementation.consumeCodePOST({
-                  ...input,
-                  // Authenticate the historical owner instead of upgrading the incidental guest session.
-                  ...(historicalScope ? { session: undefined, shouldTryLinkingWithSessionUser: false } : { session }),
-                  userContext: consumeContext,
-                  options: historicalScope ? {
-                    ...input.options,
-                    recipeImplementation: {
-                      ...input.options.recipeImplementation,
-                      consumeCode: async (consumeInput) => {
-                        if (consumeInput.tenantId !== historicalScope.tenantId || consumeInput.session ||
+                return withBufferedPasswordlessIssuance(issuance, input.options.res, consumeContext, async () => {
+                  const response = await consumeCodePOST({
+                    ...input,
+                    // Authenticate the historical owner instead of upgrading the incidental guest session.
+                    ...(historicalScope ? { session: undefined, shouldTryLinkingWithSessionUser: false } : { session }),
+                    userContext: consumeContext,
+                    options: historicalScope ? {
+                      ...input.options,
+                      recipeImplementation: {
+                        ...input.options.recipeImplementation,
+                        consumeCode: async (consumeInput) => {
+                          if (consumeInput.tenantId !== historicalScope.tenantId || consumeInput.session ||
                           consumeInput.preAuthSessionId !== input.preAuthSessionId || historicalScope.recipeUserId ||
                           historicalScope.denied) {
-                          historicalScope.denied = true;
-                          return { status: "RESTART_FLOW_ERROR" as const };
-                        }
-                        const result = await input.options.recipeImplementation.consumeCode({
-                          ...consumeInput, userContext: consumeContext,
-                        });
-                        if (result.status !== "OK") return result;
-                        if (result.consumedDevice?.email) passwordlessAuthentication.value = {
-                          recipeUserId: result.recipeUserId.getAsString(), email: result.consumedDevice.email, authenticatedAt: Date.now(),
-                        };
-                        historicalScope.recipeUserId = result.recipeUserId.getAsString();
-                        const cleanup = async () => {
-                          if (result.createdNewRecipeUser) {
-                            await deleteRejectedConsumedPasswordlessUser({
-                              userId: result.recipeUserId.getAsString(),
-                              recipeUserId: result.recipeUserId.getAsString(),
-                              email: historicalScope.email,
-                              tenantId: historicalScope.tenantId,
-                              onlyIfStillStandalone: true,
-                              userContext: consumeContext,
-                            });
+                            historicalScope.denied = true;
+                            return { status: "RESTART_FLOW_ERROR" as const };
                           }
-                        };
-                        let user;
-                        try {
-                          user = await linkHistoricalPasswordlessUser(
-                            historicalScope, accountLinkingDecision, consumeContext,
-                          );
-                        } catch (error) {
-                          historicalScope.denied = true;
+                          const result = await input.options.recipeImplementation.consumeCode({
+                            ...consumeInput, userContext: consumeContext,
+                          });
+                          if (result.status !== "OK") return result;
+                          if (result.consumedDevice?.email) passwordlessAuthentication.value = {
+                            recipeUserId: result.recipeUserId.getAsString(), email: result.consumedDevice.email, authenticatedAt: Date.now(),
+                          };
+                          historicalScope.recipeUserId = result.recipeUserId.getAsString();
+                          const cleanup = async () => {
+                            if (result.createdNewRecipeUser) {
+                              await deleteRejectedConsumedPasswordlessUser({
+                                userId: result.recipeUserId.getAsString(),
+                                recipeUserId: result.recipeUserId.getAsString(),
+                                email: historicalScope.email,
+                                tenantId: historicalScope.tenantId,
+                                onlyIfStillStandalone: true,
+                                userContext: consumeContext,
+                              });
+                            }
+                          };
+                          let user;
                           try {
-                            await cleanup();
-                          } catch (cleanupError) {
-                            throw new RowndPasswordlessCleanupError(error, cleanupError);
+                            user = await linkHistoricalPasswordlessUser(
+                              historicalScope, accountLinkingDecision, consumeContext,
+                            );
+                          } catch (error) {
+                            historicalScope.denied = true;
+                            try {
+                              await cleanup();
+                            } catch (cleanupError) {
+                              throw new RowndPasswordlessCleanupError(error, cleanupError);
+                            }
+                            throw error;
                           }
-                          throw error;
-                        }
-                        if (!user) {
-                          await cleanup();
-                          return { status: "RESTART_FLOW_ERROR" as const };
-                        }
-                        return { ...result, user };
+                          if (!user) {
+                            await cleanup();
+                            return { status: "RESTART_FLOW_ERROR" as const };
+                          }
+                          return { ...result, user };
+                        },
+                      },
+                    } : {
+                      ...input.options,
+                      recipeImplementation: {
+                        ...input.options.recipeImplementation,
+                        consumeCode: async (consumeInput) => {
+                          const result = await input.options.recipeImplementation.consumeCode(consumeInput);
+                          if (result.status === "OK" && result.consumedDevice?.email) passwordlessAuthentication.value = {
+                            recipeUserId: result.recipeUserId.getAsString(), email: result.consumedDevice.email, authenticatedAt: Date.now(),
+                          };
+                          return result;
+                        },
                       },
                     },
-                  } : {
-                    ...input.options,
-                    recipeImplementation: {
-                      ...input.options.recipeImplementation,
-                      consumeCode: async (consumeInput) => {
-                        const result = await input.options.recipeImplementation.consumeCode(consumeInput);
-                        if (result.status === "OK" && result.consumedDevice?.email) passwordlessAuthentication.value = {
-                          recipeUserId: result.recipeUserId.getAsString(), email: result.consumedDevice.email, authenticatedAt: Date.now(),
-                        };
-                        return result;
-                      },
-                    },
-                  },
-                }).catch((error: unknown) => {
-                  if (error instanceof DisconnectedSignInMethodError) {
-                    return policyFailure(error, "passwordless", input.session?.getUserId(consumeContext));
-                  }
-                  throw error;
-                });
-
-                if (historicalScope && (historicalScope.denied || (response.status === "OK" &&
-                  response.session.getUserId(consumeContext) !== historicalScope.userId))) {
-                  historicalScope.denied = true;
-                  if (response.status === "OK") await response.session.revokeSession(consumeContext);
-                  return { status: "SIGN_IN_UP_NOT_ALLOWED" as const, reason: INACTIVE_PASSWORDLESS_EMAIL_REASON };
-                }
-                if (response.status === "OK") {
-                  if (session && !historicalScope && response.session.getHandle(consumeContext) === session.getHandle(consumeContext)) {
-                    const id = session.getUserId(consumeContext);
-                    try {
-                      await checkSignInMethodAuthentication(id, session.getRecipeUserId(consumeContext), input.tenantId, consumeContext);
-                    } catch (error) {
-                      if (error instanceof DisconnectedSignInMethodError) return policyFailure(error, "passwordless_reused_session", id);
-                      throw error;
+                  }).catch((error: unknown) => {
+                    if (error instanceof DisconnectedSignInMethodError) {
+                      return policyFailure(error, "passwordless", input.session?.getUserId(consumeContext));
                     }
+                    throw error;
+                  });
+
+                  if (historicalScope && (historicalScope.denied || (response.status === "OK" &&
+                  response.session.getUserId(consumeContext) !== historicalScope.userId))) {
+                    historicalScope.denied = true;
+                    if (response.status === "OK") await response.session.revokeSession(consumeContext);
+                    return { status: "SIGN_IN_UP_NOT_ALLOWED" as const, reason: INACTIVE_PASSWORDLESS_EMAIL_REASON };
                   }
-                  if (consumedEmail) {
-                    try {
-                      const disposition =
+                  if (response.status === "OK") {
+                    if (session && !historicalScope && response.session.getHandle(consumeContext) === session.getHandle(consumeContext)) {
+                      const id = session.getUserId(consumeContext);
+                      try {
+                        await checkSignInMethodAuthentication(id, session.getRecipeUserId(consumeContext), input.tenantId, consumeContext);
+                      } catch (error) {
+                        if (error instanceof DisconnectedSignInMethodError) return policyFailure(error, "passwordless_reused_session", id);
+                        throw error;
+                      }
+                    }
+                    if (consumedEmail) {
+                      const pending = issuance?.pending;
+                      if (pending && response.session.getHandle(consumeContext) !== pending.session.getHandle(consumeContext)) {
+                        throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
+                      }
+                      try {
+                        const disposition =
                         await validateConsumedPasswordlessEmail({
                           userId: response.user.id,
                           email: consumedEmail,
@@ -1160,58 +1202,67 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                           recipeUserId: response.session.getRecipeUserId(consumeContext).getAsString(),
                           userContext: consumeContext,
                         });
-                      if (disposition.status !== "ALLOW") {
-                        await response.session.revokeSession(operationContext);
-                        if (disposition.status === "REJECT_AND_DELETE") {
-                          await deleteRejectedConsumedPasswordlessUser({
-                            userId: response.user.id,
-                            recipeUserId: disposition.recipeUserId,
-                            email: consumedEmail,
-                            tenantId: input.tenantId,
-                            userContext: operationContext,
-                          });
+                        if (disposition.status !== "ALLOW") {
+                          if (!pending) await response.session.revokeSession(operationContext);
+                          if (disposition.status === "REJECT_AND_DELETE") {
+                            await deleteRejectedConsumedPasswordlessUser({
+                              userId: response.user.id,
+                              recipeUserId: disposition.recipeUserId,
+                              email: consumedEmail,
+                              tenantId: input.tenantId,
+                              userContext: operationContext,
+                            });
+                          }
+                          return {
+                            status: "SIGN_IN_UP_NOT_ALLOWED" as const,
+                            reason: INACTIVE_PASSWORDLESS_EMAIL_REASON,
+                          };
                         }
+                        if (pending) {
+                        // The consumed-email check freshly read the owner after
+                        // session creation. Share those reads with the policy gate.
+                          await pending.confirm();
+                          pending.confirmed = true;
+                        }
+                      } catch (error) {
+                        if (error instanceof DisconnectedSignInMethodError) throw error;
+                        if (!pending) await response.session.revokeSession(operationContext);
+                        logDebugMessage(
+                          `Passwordless consumed identity validation failed. Error: ${error instanceof Error ? error.message : String(error)}`,
+                        );
                         return {
-                          status: "SIGN_IN_UP_NOT_ALLOWED" as const,
-                          reason: INACTIVE_PASSWORDLESS_EMAIL_REASON,
+                          status: "GENERAL_ERROR" as const,
+                          message:
+                          "Unable to complete passwordless authentication.",
                         };
                       }
-                    } catch (error) {
-                      await response.session.revokeSession(operationContext);
-                      logDebugMessage(
-                        `Passwordless consumed identity validation failed. Error: ${error instanceof Error ? error.message : String(error)}`,
-                      );
-                      return {
-                        status: "GENERAL_ERROR" as const,
-                        message:
-                          "Unable to complete passwordless authentication.",
-                      };
                     }
+                    await recordRowndAppVariantForUser(
+                      response.user.id,
+                      appVariantId,
+                      operationContext,
+                      input.tenantId,
+                      { userSnapshot: response.user },
+                    );
+
+                    await refreshRowndSessionClaims({
+                      session: response.session,
+                      userSnapshot: response.user,
+                      appVariantId,
+                      userContext: operationContext,
+                      provenAuthentication: true,
+                      beforeUpdatingPayload: async () => {
+                        const consumed = passwordlessAuthentication.value;
+                        if (consumed && resolved.config.connectedSignInMethods?.enabled === true) {
+                          await recordPasswordlessAuthentication(response.session, consumed.recipeUserId,
+                            input.tenantId, operationContext, consumed.email, consumed.authenticatedAt);
+                        }
+                      },
+                    });
                   }
-                  await recordRowndAppVariantForUser(
-                    response.user.id,
-                    appVariantId,
-                    operationContext,
-                    input.tenantId,
-                  );
 
-                  await refreshRowndSessionClaims({
-                    session: response.session,
-                    userId: response.user.id,
-                    appVariantId,
-                    userContext: operationContext,
-                    provenAuthentication: true,
-                    beforeUpdatingPayload: async () => {
-                      const consumed = passwordlessAuthentication.value;
-                      if (consumed && resolved.config.connectedSignInMethods?.enabled === true) {
-                        await recordPasswordlessAuthentication(response.session, consumed.recipeUserId,
-                          input.tenantId, operationContext, consumed.email, consumed.authenticatedAt);
-                      }
-                    },
-                  });
-                }
-
-                return response;
+                  return response;
+                });
               },
             }),
           },
@@ -1305,8 +1356,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                         authenticatedResponse.session.getTenantId(operationContext) !== input.tenantId))) {
                       throw new RowndSignInMethodError("SIGN_IN_METHOD_AUTHENTICATION_UNPROVEN", 403, "The authenticated sign-in method could not be confirmed.");
                     }
-                    await recordRowndAppVariantForUser(response.user.id, appVariantId, operationContext, input.tenantId);
-                    await refreshRowndSessionClaims({ session: response.session, userId: response.user.id, appVariantId,
+                    await recordRowndAppVariantForUser(response.user.id, appVariantId, operationContext, input.tenantId,
+                      { userSnapshot: response.user });
+                    await refreshRowndSessionClaims({ session: response.session, userSnapshot: response.user, appVariantId,
                       userContext: operationContext, provenAuthentication: !["instant", "guest"].includes(input.provider.id) });
                     if (actual) {
                       const { method, gate } = await checkSignInMethodAuthentication(actual.userId,
@@ -1317,6 +1369,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                         throw new RowndSignInMethodError("SIGN_IN_METHOD_AUTHENTICATION_UNPROVEN", 403, "The authenticated sign-in method changed.");
                       }
                     }
+                  } else if (authentication.sessions.size) {
+                    // A custom SDK override can fail after creating a buffered session.
+                    await Promise.allSettled([...authentication.sessions].map((session) =>
+                      Session.revokeSession(session.getHandle(operationContext), operationContext)));
+                    return response;
                   }
                   buffered.publish();
                   return response;
@@ -1359,6 +1416,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               return {
                 ...config,
                 shouldDoAutomaticAccountLinking: accountLinkingDecision = async (...input) => {
+                  if (pluginConfig.metadataMode === "canonical") {
+                    return { shouldAutomaticallyLink: false };
+                  }
+
                   if (input[4]?.rowndDisableAutomaticAccountLinking === true) {
                     return {
                       shouldAutomaticallyLink: false,
@@ -1410,13 +1471,15 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               ...originalImplementation,
               createNewSession: async (input) => {
                 const authentication = thirdPartyAuthenticationOperation(input.userContext);
+                const passwordlessIssuance = Reflect.get(input.userContext, PASSWORDLESS_ISSUANCE) as PasswordlessIssuance | undefined;
+                if (passwordlessIssuance?.pending) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
                 const initialGate = authentication?.gate?.reference === input.userId &&
                   authentication.actual?.recipeUserId === input.recipeUserId.getAsString() ? authentication.gate : undefined;
                 const check = async (userId: string, recipeId: typeof input.recipeUserId, tenantId: string,
-                  context: typeof input.userContext, previous = initialGate, reuse = false) => {
+                  context: typeof input.userContext, previous = initialGate, reuse = false, freshContext = false) => {
                   try {
                     const gate = reuse && previous ? previous : (await checkSignInMethodAuthentication(userId, recipeId,
-                      tenantId, context, { scope: "signin", previous })).gate;
+                      tenantId, context, { scope: "signin", previous, freshContext })).gate;
                     if (input.userContext.rowndMigrationRequestId && gate.policy) {
                       throw new DisconnectedSignInMethodError("DISCONNECT_RESTORATION_BLOCKED");
                     }
@@ -1448,6 +1511,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     resolved.userContext,
                     input.recipeUserId.getAsString(),
                     true,
+                    resolved.config.metadataMode === "canonical" && gate.owner.user?.id === input.userId
+                      ? { userSnapshot: gate.owner.user,
+                        ...(gate.owner.id === input.userId ? {
+                          canonicalMetadata: { userId: input.userId, value: gate.ownerMetadata as RowndMetadata },
+                        } : {}) }
+                      : undefined,
                   );
                 input.accessTokenPayload = {
                   ...input.accessTokenPayload,
@@ -1461,8 +1530,23 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 });
                 authentication?.sessions.add(session);
                 try {
-                  await check(session.getUserId(resolved.userContext), session.getRecipeUserId(resolved.userContext),
-                    session.getTenantId(resolved.userContext), resolved.userContext, gate);
+                  const userId = session.getUserId(resolved.userContext);
+                  const recipeId = session.getRecipeUserId(resolved.userContext);
+                  const tenantId = session.getTenantId(resolved.userContext);
+                  // The buffered Thirdparty API rechecks this exact factor immediately
+                  // before publication. Other callers still check at SDK session issuance.
+                  const checkedAtPublication = authentication?.actual && initialGate &&
+                    authentication.actual.userId === userId && authentication.actual.tenantId === tenantId &&
+                    authentication.actual.recipeUserId === recipeId.getAsString();
+                  if (passwordlessIssuance && gate.reference === userId) {
+                    passwordlessIssuance.pending = {
+                      session,
+                      confirm: () => check(userId, recipeId, tenantId, resolved.userContext, gate, false, true),
+                    };
+                  } else if (!checkedAtPublication) {
+                    clearSuperTokensCoreCallCache(resolved.userContext);
+                    await check(userId, recipeId, tenantId, resolved.userContext, gate, false, true);
+                  }
                 } catch (error) {
                   await Promise.allSettled([session.revokeSession(resolved.userContext)]);
                   throw error;
@@ -1661,6 +1745,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
     },
     () => ({}),
     (config: RowndPluginConfig) => {
+      if (config.metadataMode !== undefined && !["compatibility", "dual-write", "canonical"].includes(config.metadataMode)) {
+        throw new Error("metadataMode must be compatibility, dual-write or canonical in plugin config");
+      }
+      // Migration writes alias records canonical mode never reads. Dual-write republishes
+      // each migrated owner's presentation instead (see canonical-republish.ts).
+      if (config.metadataMode === "canonical" && config.disableRowndUserMigration !== true) {
+        throw new Error(`${config.metadataMode} metadata mode requires Rownd user migration to be disabled`);
+      }
       const telemetryProvider = (
         config.telemetry as { provider?: unknown } | undefined
       )?.provider;
@@ -1714,6 +1806,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
         throw new Error("jwksUrl must be a non-empty URL in plugin config");
       }
       return {
+        metadataMode: config.metadataMode ?? "compatibility",
         rowndAppKey: config.rowndAppKey ?? DISABLED_MIGRATION_ROWND_APP_KEY,
         rowndAppId: config.rowndAppId,
         rowndAppSecret: config.rowndAppSecret,

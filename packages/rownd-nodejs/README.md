@@ -84,6 +84,9 @@ association, regardless of the management flag. The plugin adds **no policy look
 to `getSession`**. A previously issued access token can still pass stateless
 verification until expiry (by default one hour). For immediate revocation checks
 on sensitive application endpoints, use `checkDatabase: true` with SuperTokens.
+This applies in all metadata modes. Dual-write republishing copies profile
+presentation only: disconnect records stay on the internal owner and the subject
+index stays at its separate key. Keep both when switching to canonical mode.
 
 ### Support procedure
 
@@ -238,7 +241,7 @@ RowndMigrationPlugin.init({
 ```
 
 `rowndAppKey`, `rowndAppSecret`, `rowndAppId`, `rowndJwtAudience`, `jwksUrl`,
-`disableRowndUserMigration`, debug logging,
+`disableRowndUserMigration`, `metadataMode`, debug logging,
 and telemetry remain startup-static. Resolver failures and malformed results
 fail the operation instead of falling back to another tenant. The plugin keeps
 the resolved snapshot tenant-bound and does not place static credentials in the
@@ -252,6 +255,135 @@ operation. Omitted fields fall back to the corresponding top-level static
 value; objects are not deep-merged with that static value. Setting
 `disableRowndUserMigration` in resolver output is unsupported: when it is true
 at startup, migration routes and credentials remain disabled for every tenant.
+
+### Canonical metadata mode
+
+`metadataMode` is startup-static and defaults to `"compatibility"`, which keeps
+the existing mapping discovery and alias merging. Opt in to `"canonical"` only
+after the deployment's complete presentation metadata has been reconciled at the
+**current SDK-visible `user.id`**, including mapped users.
+
+Canonical mode requires `disableRowndUserMigration: true`. Built-in Rownd
+migration/import publication is not a canonical writer; initialization rejects
+that combination instead of leaving converted records stale.
+
+Canonical presentation reads use that literal address without mapping discovery
+or alias merging. Empty records/absent fields stay empty/absent; errors propagate
+instead of triggering legacy discovery. The mode applies to the whole initialized
+deployment, not to users selected from metadata or a `resolveConfig` result.
+
+In canonical mode only, the plugin reserves two kinds of top-level metadata
+keys:
+
+- `rownd_profile_authority:<field>` markers, written with each profile
+  edit/deletion so independent edits do not replace a shared authority list.
+- `rownd_app_variants`, which stores app variant membership per scope (`public`
+  or a tenant ID) separately from `original_rownd_user`. A scope entry, even an
+  empty list, replaces the original variants for that scope.
+
+Profile, field and metadata updates that use these keys or other internal
+plugin fields (such as `original_rownd_user`) are rejected in canonical mode,
+even if the schema marks them writable. In compatibility mode they remain ordinary public keys.
+
+Canonical mode also disables SuperTokens automatic account linking through the
+plugin's `shouldDoAutomaticAccountLinking` override, because a linked donor's
+metadata would not be read. The plugin's explicit verified-email linking still
+runs. Direct application calls to `linkAccounts` or `createPrimaryUser` are not
+covered.
+
+Session verification, tenant/auth-origin checks and operational checkpoint
+handling are unchanged. Before reverting to compatibility, resynchronize legacy
+records if canonical writes have made them stale, including folding authority
+markers into `rownd_profile_authoritative_fields` and `rownd_app_variants` into
+`original_rownd_user` attributes.
+
+### Moving to canonical mode with dual-write
+
+`metadataMode: "dual-write"` is a transition mode. Reads are exactly the
+compatibility reads. Every plugin write that can change the compatibility
+presentation is also applied to the SDK-visible `user.id` record when that
+record differs from the one written. That covers profile, field and metadata
+PUTs, app-variant recording on sign-in and guest login, and email change,
+verification and pending-email writes. When the compatibility write targets
+the SDK record, no second PUT is needed for those keys. An unmapped owner can
+still need a mirror PUT when its Rownd app variants are written to a linked
+recipe record. Mapped owners can need a mirror PUT even when only the profile
+authority list is stale.
+
+The mirrored record uses the same shape as the offline publication: profile
+values, `rownd_profile_authoritative_fields`, email selectors and the
+presentation parts of `original_rownd_user` (`data`, `state`, `auth_level`,
+`verified_data`, `groups`, `attributes`). App variants stay in
+`original_rownd_user.attributes`. Pending verification, migration state and the
+canonical-only `rownd_profile_authority:*` / `rownd_app_variants` keys are never
+mirrored. Successful, non-concurrent plugin writes keep published presentations
+in sync.
+
+Rownd user and session migration can stay enabled in dual-write. Migration,
+repair and consolidation write many records that are not mirrored one by one.
+Instead, after each `/plugin/rownd/migrate` or `/plugin/migrate-session` request
+that uses Rownd API credentials, and after each `reconcileUser` call that may
+have changed the owner, the plugin republishes that owner. It re-reads the
+owner's compatibility view and computes its canonical presentation. Then it
+writes the smallest patch that makes the SDK-visible record present the same
+profile, claims and email selection. This happens whether the request succeeded
+or failed after writing. Stale presentation keys are deleted. Operational and
+migration state, pending verification, and the canonical-only
+`rownd_profile_authority:*` / `rownd_app_variants` keys are never written.
+Credential-free session exchange (no `rowndAppSecret`) writes no metadata and
+does not republish. For a converged mapped owner with one login method, the
+republish costs five extra Core reads and no write.
+
+The republish applies the same admission rules as the offline publication. It
+skips any owner the offline copy would refuse, and logs a warning naming only
+the reason. Refused states include retirement-dependent consolidation (retired
+aliases, superseded or orphan-mapping markers), unfinished migration
+checkpoints, pending verification, conflicting migration targets, ambiguous
+originals or email selection, reserved-key collisions, and top-level nulls that
+Core cannot store. A skipped or failed republish never fails the migration:
+its Core changes are already committed, and dual-write reads stay on the
+compatibility view. The next migration request for that owner retries the
+republish. Sign-in and email-change writes that later clear a refused state,
+such as pending verification, do not trigger a republish. Owners that were skipped, failed or migrated before dual-write must
+be handled in the final verify and republish step. The runtime republish does
+not prove the full ownership graph the offline copy checks, so that step stays
+mandatory.
+
+Canonical mode still requires `disableRowndUserMigration: true`. Dual-write
+also rejects profile, field and meta writes to internal or canonical-reserved
+fields, and rejects null values for identity keys such as `google_id`.
+Otherwise compatibility could fall back to a linked value after deletion
+while canonical could not. Account linking stays in compatibility mode.
+
+Recommended procedure:
+
+1. Deploy with `metadataMode: "dual-write"`. Migration may stay enabled.
+2. Publish every owner: write the canonical presentation of its compatibility
+   view (`getCanonicalPresentationMetadata`) to its SDK-visible `user.id`. Remove
+   presentation keys that are absent from that projection.
+3. Pause and drain writers, including migration. Verify every owner's compatibility and canonical
+   presentations match (profile per tenant, configured session claims, OAuth
+   claims and email selection). Republish any owner that differs.
+4. Switch to `metadataMode: "canonical"` with `disableRowndUserMigration: true`.
+
+There is no compare-and-set. Concurrent writes can leave the SDK record stale,
+even if a value flips back to its previous value: a mirror can skip a key
+based on a pre-write read while another writer is changing it. A later write
+can repair drift, including a stale authority list. Run the final verify and
+republish step after draining writers, immediately before switching to canonical.
+
+If a mirror fails after a compatibility write, the request fails, but the
+compatibility write remains committed. Sign-in retries app-variant mirroring
+only when an app-variant ID is configured for that sign-in, even if the variant
+is already recorded. A replay-only failure is logged without failing sign-in.
+Otherwise a failed mirror is repaired only by a later write to the same keys
+or by step 3. Writes outside the plugin and account-linking changes are not mirrored;
+republish affected owners before switching.
+
+You can roll back from dual-write to compatibility at any time. Mirrored
+records hold only values that the compatibility view already presents. After
+switching to canonical, rolling back requires the resynchronization described
+above.
 
 ### Email Changes
 
@@ -608,6 +740,22 @@ Unauthenticated migration and guest routes accept an optional `tenantId` query p
 - **Non-public tenant**: `POST /auth/plugin/rownd/guest?tenantId=tenant-a`
 - **Description**: Creates a guest or instant user and session in the requested tenant.
 
+### User profile reads
+
+`GET {apiBasePath}/plugin/rownd/user` returns a session-free profile by default:
+`meta.last_sign_in`, `meta.last_active`, and `meta.last_sign_in_method` are `null`.
+Only `?include_activity=true` opts into active-session enrichment, adding one
+session-list call plus one detail call per session. Missing, false, or unknown
+values (including the former `profile=lightweight-v1` selector) stay session-free.
+Ordinary internal reads and mutation-returned profiles use this same default.
+This changes activity values for existing clients and can change automation
+equality/EXISTS conditions. The metadata update API ignores writes to these three
+derived activity keys, protecting stored values from wholesale profile echo.
+Database-backed authentication and revocation checks remain required.
+
+See [Profile reads](./PROFILE_READS.md) for the current working-tree contract,
+SDK-boundary counter scope, deferred prerequisites, and rollout requirements.
+
 ## Debug Logging
 
 Set `enableDebugLogs: true` in the plugin config to enable debug logging.
@@ -617,6 +765,11 @@ Set `enableDebugLogs: true` in the plugin config to enable debug logging.
 Telemetry is optional. If `telemetry` is omitted from the plugin config, no telemetry is emitted.
 
 The plugin emits exactly one telemetry event per `/migrate` call result.
+
+The in-progress profile-read implementation also emits assembly events through
+the configured telemetry client. Their fields and measurement boundaries are
+documented in [Profile read instrumentation](./PROFILE_READS.md#instrumentation-and-interpretation).
+The event shape below describes migration events.
 
 ### Event shape
 

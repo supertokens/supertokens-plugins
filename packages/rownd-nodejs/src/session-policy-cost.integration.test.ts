@@ -81,8 +81,12 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
     }, accessToken, explicitLink ? "3.1" : "1.18");
   }
 
-  it.each([false, true])("bounds the extra Core GETs (management enabled=%s)", async (enabled) => {
-    Object.assign(getPluginConfig()!, { connectedSignInMethods: { enabled } });
+  const metadataModes = ["compatibility", "dual-write", "canonical"] as const;
+  it.each(metadataModes.flatMap((metadataMode) => [false, true].map((enabled) => ({ metadataMode, enabled }))))(
+    "bounds the extra Core GETs ($metadataMode, management enabled=$enabled)", async ({ metadataMode, enabled }) => {
+    const config = getPluginConfig()!;
+    const previous = { metadataMode: config.metadataMode, connectedSignInMethods: config.connectedSignInMethods };
+    Object.assign(config, { metadataMode, connectedSignInMethods: { enabled } });
     const f = await seed();
     const consume = await emailSignIn(f.email);
     const session = await Session.createNewSessionWithoutRequestResponse("public", f.passwordless.recipeUserId);
@@ -104,11 +108,11 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
           thirdPartyId: "test-sso", oAuthTokens: { subject: f.subject, email: f.oauthEmail },
         })).body).toMatchObject({ status: "OK", user: { id: f.ownerId } })),
       ];
-      console.info("session policy GET counts [stateless, database, refresh, passwordless, SSO]", { enabled, counts });
-      // Same fixture and flows run against main (e6e11c7); the management setting does not exist there.
-      const main = [0, 0, 0, 18, 17];
+      console.info("session policy GET counts [stateless, database, refresh, passwordless, SSO]", { metadataMode, enabled, counts });
+      // Same fixture and flows run against main (1768970); the management setting does not exist there.
+      const main = metadataMode === "canonical" ? [0, 0, 0, 15, 9] : [0, 0, 0, 18, 16];
       const budget = [0, 0, 2, 4, 5];
-      counts.forEach((count, i) => expect(count - main[i]!, `flow ${i} delta`).toBeLessThanOrEqual(budget[i]!));
+      counts.forEach((count, i) => expect.soft(count - main[i]!, `flow ${i} delta`).toBeLessThanOrEqual(budget[i]!));
 
       for (const explicitLink of [false, true]) {
         const activeSession = await Session.createNewSessionWithoutRequestResponse("public", f.passwordless.recipeUserId);
@@ -119,10 +123,10 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
         expect(response.body).toMatchObject({ status: "OK", user: { id: f.ownerId } });
         const gets = fetchCore.mock.calls.filter(([, options]) => options?.method === "GET");
         const sessionReads = gets.filter(([url]) => new URL(String(url)).pathname === "/recipe/session").length;
-        console.info("passwordless with session Core GETs", { enabled, explicitLink, reads: gets.length, sessionReads });
+        console.info("passwordless with session Core GETs", { metadataMode, enabled, explicitLink, reads: gets.length, sessionReads });
         const mainWithSession = 12;
         const extraBudget = (explicitLink ? 9 : 7) + Number(enabled);
-        expect(gets.length - mainWithSession, "passwordless consume with an active session").toBeLessThanOrEqual(extraBudget);
+        expect.soft(gets.length - mainWithSession, "passwordless consume with an active session").toBeLessThanOrEqual(extraBudget);
         // One liveness read, plus a session-data read when issuing the retained-email receipt.
         expect(sessionReads).toBeGreaterThanOrEqual(1);
         expect(sessionReads).toBeLessThanOrEqual(enabled ? 2 : 1);
@@ -139,10 +143,38 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
       const mappedRefresh = await extra(async () => {
         expect((await Session.refreshSessionWithoutRequestResponse(refreshToken, true)).getUserId()).toBe(rowndId);
       });
-      console.info("mapped session refresh Core GET count", { enabled, mappedRefresh });
+      console.info("mapped session refresh Core GET count", { metadataMode, enabled, mappedRefresh });
       expect(mappedRefresh).toBeLessThanOrEqual(2);
     } finally {
       fetchCore.mockRestore();
+      Object.assign(config, previous);
+    }
+  });
+
+  it("does not publish a canonical Passwordless session if policy changes during issuance", async () => {
+    const config = getPluginConfig()!;
+    const previousMode = config.metadataMode;
+    config.metadataMode = "canonical";
+    const f = await seed();
+    const existing = await Session.createNewSessionWithoutRequestResponse("public", f.passwordless.recipeUserId);
+    const consume = await emailSignIn(f.email);
+    const repository = await import("./supertokens-repository");
+    const validateConsumedPasswordlessEmail = repository.validateConsumedPasswordlessEmail;
+    const validate = vi.spyOn(repository, "validateConsumedPasswordlessEmail").mockImplementationOnce(async (input) => {
+      // The SDK has minted a session, but the plugin has not released its credentials.
+      expect(await Session.getAllSessionHandlesForUser(f.ownerId, true)).toHaveLength(2);
+      await UserMetadata.updateUserMetadata(f.ownerId, { rownd_disconnected_sign_in_identity_invalid: true });
+      return validateConsumedPasswordlessEmail(input);
+    });
+    try {
+      const denied = await consume();
+      expect(denied.body).toEqual({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "DISCONNECT_POLICY_INVALID" });
+      expect(denied.headers.get("st-access-token")).toBeNull();
+      expect(denied.headers.get("st-refresh-token")).toBeNull();
+      expect(await Session.getAllSessionHandlesForUser(f.ownerId, true)).toEqual([existing.getHandle()]);
+    } finally {
+      validate.mockRestore();
+      config.metadataMode = previousMode;
     }
   });
 

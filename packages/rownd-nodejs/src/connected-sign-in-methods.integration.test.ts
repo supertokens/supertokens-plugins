@@ -14,7 +14,8 @@ import { getUserContext } from "supertokens-node/lib/build/utils";
 import Multitenancy from "supertokens-node/recipe/multitenancy";
 import { init } from "./plugin";
 import { getPluginConfig } from "./config";
-import { getDisconnectedSignInMethods } from "./disconnected-sign-in-identities";
+import { assertSignInIdentityNotIndexed, getDisconnectedSignInMethods, isDisconnectedSignInMethodMetadataKey } from "./disconnected-sign-in-identities";
+import { republishAfterMigration } from "./canonical-republish";
 import { configureConnectedSignInMethodsTestLicense, startConnectedSignInMethodsCore } from "./connected-sign-in-methods-core.test-fixture";
 
 describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
@@ -159,6 +160,61 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     expect(oldSignIn).toEqual({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_DISCONNECTED" });
     expect(await SuperTokens.listUsersByAccountInfo("public", { thirdParty: { id: "google", userId: f.subject } }, false)).toEqual([]);
     expect((await SuperTokens.getUser(f.internalId))?.loginMethods).toHaveLength(1);
+  });
+
+  it("keeps disconnect authority on the internal owner across dual-write republish and the canonical switch", async () => {
+    const config = getPluginConfig()!;
+    const previous = { metadataMode: config.metadataMode, connectedSignInMethods: config.connectedSignInMethods };
+    Object.assign(config, { metadataMode: "dual-write" });
+    try {
+      const f = await fixture();
+      const signedIn = await emailSignIn(f.email);
+      const headers = { authorization: `Bearer ${signedIn.token}`, "st-auth-mode": "header", "content-type": "application/json" };
+      const listed = await (await request(`${origin}/plugin/rownd/user/sign-in-methods`, { headers })).json();
+      const method = listed.methods.find((entry: { kind: string }) => entry.kind === "sso");
+      expect(await (await request(`${origin}/plugin/rownd/user/sign-in-methods/disconnect`, { method: "POST", headers,
+        body: JSON.stringify({ method_id: method.id, expected_user_id: f.rowndId, expected_tenant_id: "public" }) })).json())
+        .toEqual({ status: "OK", signed_out: true });
+
+      const policyOn = async (id: string) => Object.fromEntries(
+        Object.entries((await UserMetadata.getUserMetadata(id)).metadata).filter(([key]) => isDisconnectedSignInMethodMetadataKey(key)),
+      );
+      const before = await policyOn(f.internalId);
+      expect(Object.keys(before)).toHaveLength(2); // intent and completion
+      expect(await policyOn(f.rowndId)).toEqual({});
+      await expect(republishAfterMigration({ userId: f.rowndId, userContext: {}, config })).resolves
+        .toMatchObject({ status: "PUBLISHED" });
+      expect((await UserMetadata.getUserMetadata(f.rowndId)).metadata).toMatchObject({
+        customer_value: "preserved", rownd_email_recipe_user_ids: { public: f.passwordless.recipeUserId.getAsString() },
+      });
+      expect(await policyOn(f.internalId)).toEqual(before);
+      expect(await policyOn(f.rowndId)).toEqual({});
+      const identity = { tenantId: "public", providerId: "google", providerUserId: f.subject };
+      await expect(assertSignInIdentityNotIndexed(identity)).rejects.toMatchObject({ code: "SIGN_IN_METHOD_DISCONNECTED", ownerId: f.internalId });
+
+      config.connectedSignInMethods = { enabled: false };
+      for (const metadataMode of ["dual-write", "canonical"] as const) {
+        config.metadataMode = metadataMode;
+        const writes = vi.spyOn(UserMetadata, "updateUserMetadata");
+        try {
+          const oldSignIn = await ThirdPartyRecipe.getInstanceOrThrowError().recipeInterfaceImpl.signInUp({
+            thirdPartyId: identity.providerId, thirdPartyUserId: identity.providerUserId, email: f.oldEmail, isVerified: false,
+            tenantId: identity.tenantId, session: undefined, shouldTryLinkingWithSessionUser: undefined,
+            oAuthTokens: {}, rawUserInfoFromProvider: {}, userContext: getUserContext({}),
+          });
+          expect(oldSignIn).toEqual({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_DISCONNECTED" });
+          expect(await SuperTokens.listUsersByAccountInfo("public", { thirdParty: { id: "google", userId: f.subject } }, false)).toEqual([]);
+          const retained = await emailSignIn(f.email);
+          const refreshed = await Session.refreshSessionWithoutRequestResponse(retained.response.headers.get("st-refresh-token")!, true);
+          expect(refreshed.getUserId()).toBe(f.rowndId);
+          expect(writes).not.toHaveBeenCalled();
+        } finally {
+          writes.mockRestore();
+        }
+      }
+    } finally {
+      Object.assign(config, previous);
+    }
   });
 
   it("signs in with the retained email when the request still carries a revoked SSO access token", async () => {

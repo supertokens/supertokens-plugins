@@ -725,6 +725,12 @@ export type RowndConfigResolverContext = {
 };
 
 export interface RowndPluginConfig extends RowndPluginDynamicConfig {
+  /**
+   * `dual-write` keeps compatibility reads while mirroring presentation writes to the
+   * SDK-visible user ID, and republishes owners after Rownd migration requests.
+   * Enable `canonical` only after offline publication; it requires migration disabled.
+   */
+  metadataMode?: RowndMetadataMode;
   rowndAppKey?: string;
   /** App scope for administrative email discovery and uncached profile reads. */
   rowndAppId?: string;
@@ -768,6 +774,12 @@ export type RowndClientDomains = {
 } & Record<string, string>;
 
 export interface RowndMigrationTelemetryDetails {
+  operation?: "profile_read";
+  profileMode?: "profile" | "active-sessions";
+  profileConfig?: "static" | "dynamic";
+  profileFallbackReason?: "none" | "activity_not_requested";
+  // SDK boundary attempts, not wire-level Core request counts.
+  sdkCalls?: { user: number; mapping: number; metadata: number; sessionList: number; sessionDetail: number };
   canonicalRowndUserId?: string;
   conflictingRowndUserId?: string;
   requestId?: string;
@@ -905,8 +917,11 @@ export interface MigrationResponse {
   message?: string;
 }
 
+export type RowndMetadataMode = "compatibility" | "dual-write" | "canonical";
+
 export interface RowndPluginNormalisedConfig {
   connectedSignInMethods?: { enabled: boolean };
+  metadataMode?: RowndMetadataMode;
   rowndAppKey: string;
   rowndAppId?: string;
   rowndAppSecret?: string;
