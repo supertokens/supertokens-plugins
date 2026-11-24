@@ -725,7 +725,8 @@ export type RowndConfigResolverContext = {
 export interface RowndPluginConfig extends RowndPluginDynamicConfig {
   /**
    * `dual-write` keeps compatibility reads while mirroring presentation writes to the
-   * SDK-visible user ID. Enable `canonical` only after offline publication.
+   * SDK-visible user ID, and republishes owners after Rownd migration requests.
+   * Enable `canonical` only after offline publication; it requires migration disabled.
    */
   metadataMode?: RowndMetadataMode;
   rowndAppKey?: string;

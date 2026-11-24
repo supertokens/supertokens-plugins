@@ -6,6 +6,7 @@ import { resolveConsolidatedTokenOwner } from "./migration-consolidation";
 import { discoverMigrationById, hasPendingMigrationById, planMigration } from "./migration-plan";
 import { authenticateExistingRowndMigration, authenticateRowndMigration, assertAuthenticatedMigrationSource } from "./migration-email";
 import { resolveCanonicalEmailForTenant } from "./canonical-email";
+import { republishAfterMigration } from "./canonical-republish";
 import SuperTokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
 import ThirdParty from "supertokens-node/recipe/thirdparty";
@@ -325,6 +326,8 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
     let user: Awaited<ReturnType<typeof SuperTokens.getUser>>;
     let recipeUserId:
       Parameters<typeof Session.createNewSession>[3] | undefined;
+    // Set once the request may write owner state; dual-write converges it afterwards.
+    let republish: (() => Promise<unknown>) | undefined;
 
     try {
       res.setHeader("x-rownd-migration-request-id", telemetry.requestId, false);
@@ -370,8 +373,13 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       const discovery = await discoverMigrationById(rowndUserId, tenantId, resolved.userContext);
       const plan = planMigration(discovery, stUserImport);
       if (plan.status === "BLOCKED") throw new Error(plan.reason);
+      let ownerId = rowndUserId;
+      republish = () => republishAfterMigration({
+        userId: ownerId, userContext: resolved.userContext, config: resolved.config, telemetry,
+      });
       user = discovery.user;
       const consolidatedAlias = plan.status === "NOOP" ? undefined : await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext);
+      if (consolidatedAlias) ownerId = consolidatedAlias.canonicalRowndId;
       telemetry.superTokensUserId = user?.id;
       const existingMetadata = plan.status === "PLAN" && user
         ? await getUserMetadata(user.id, resolved.userContext)
@@ -545,10 +553,12 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
 
       telemetry.sessionCreated = true;
       telemetry.canonicalRowndUserId = consolidatedAlias?.canonicalRowndId ?? rowndUserId;
+      await republish();
       telemetry.emit("terminal", "session_created");
 
       return { status: "OK" as const };
     } catch (error) {
+      await republish?.();
       if (error instanceof RowndLegacyUserNotFoundError) {
         telemetry.emit("terminal", "rownd_user_not_found", "error", error);
         return { status: "ERROR" as const, code: error.code, message: error.message };

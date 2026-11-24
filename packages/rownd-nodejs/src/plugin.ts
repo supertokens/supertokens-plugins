@@ -1395,9 +1395,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
       if (config.metadataMode !== undefined && !["compatibility", "dual-write", "canonical"].includes(config.metadataMode)) {
         throw new Error("metadataMode must be compatibility, dual-write or canonical in plugin config");
       }
-      // Migration, repair and consolidation write many alias records that dual-write does not mirror.
-      if (config.metadataMode !== undefined && config.metadataMode !== "compatibility" &&
-          config.disableRowndUserMigration !== true) {
+      // Migration writes alias records canonical mode never reads. Dual-write republishes
+      // each migrated owner's presentation instead (see canonical-republish.ts).
+      if (config.metadataMode === "canonical" && config.disableRowndUserMigration !== true) {
         throw new Error(`${config.metadataMode} metadata mode requires Rownd user migration to be disabled`);
       }
       const telemetryProvider = (

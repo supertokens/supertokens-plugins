@@ -1674,8 +1674,8 @@ export function assembleUserProfile(
     user_id: userId,
   };
 
-  for (const [key, value] of Object.entries(getRowndProfileData(metadata))) {
-    if (!isIdentityField(key) && !isInternalMetadataField(key)) {
+  for (const [key, value] of Object.entries(getRowndProfileData(metadata, pluginConfig))) {
+    if (!isIdentityField(key) && !isInternalMetadataField(key, pluginConfig)) {
       data[key] = value;
       dataFieldKeys.add(key);
     }
@@ -1685,7 +1685,7 @@ export function assembleUserProfile(
   for (const key of Object.keys(schema)) {
     dataFieldKeys.add(key);
     if (
-      !isInternalMetadataField(key) &&
+      !isInternalMetadataField(key, pluginConfig) &&
       !isIdentityField(key) &&
       metadata[key] !== undefined
     ) {
@@ -1802,7 +1802,7 @@ export function assembleUserProfile(
 
   for (const [key, field] of Object.entries(schema)) {
     if (data[key] === undefined && field.type === "string" &&
-      !isInternalMetadataField(key) && !getAuthoritativeProfileFields(metadata).includes(key)) {
+      !isInternalMetadataField(key, pluginConfig) && !getAuthoritativeProfileFields(metadata, pluginConfig).includes(key)) {
       data[key] = "";
     }
   }
@@ -1823,7 +1823,7 @@ export function assembleUserProfile(
 
   const metadataMeta = Object.fromEntries(
     Object.entries(metadata).filter(
-      ([key]) => !isInternalMetadataField(key) && !dataFieldKeys.has(key),
+      ([key]) => !isInternalMetadataField(key, pluginConfig) && !dataFieldKeys.has(key),
     ),
   );
 

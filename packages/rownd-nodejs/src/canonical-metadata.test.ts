@@ -65,14 +65,21 @@ describe("static presentation metadata configuration", () => {
     expect(getPluginConfig()?.metadataMode).toBe(mode);
   });
 
-  it.each((["canonical", "dual-write"] as const).flatMap((metadataMode) =>
-    [undefined, false].map((disableRowndUserMigration) => ({ metadataMode, disableRowndUserMigration }))))(
-    "rejects $metadataMode mode with credentials unless migration is explicitly disabled: $disableRowndUserMigration",
-    ({ metadataMode, disableRowndUserMigration }) => {
-      expect(() => init({ metadataMode, disableRowndUserMigration,
+  it.each([undefined, false])(
+    "rejects canonical mode with credentials unless migration is explicitly disabled: %s",
+    (disableRowndUserMigration) => {
+      expect(() => init({ metadataMode: "canonical", disableRowndUserMigration,
         rowndAppKey: "key", rowndAppSecret: "secret", rowndAppId: "app",
-      })).toThrow(`${metadataMode} metadata mode requires Rownd user migration to be disabled`);
+      })).toThrow("canonical metadata mode requires Rownd user migration to be disabled");
     });
+
+  it.each([
+    { name: "with credentials", credentials: { rowndAppKey: "key", rowndAppSecret: "secret" } },
+    { name: "keys-only", credentials: {} },
+  ])("keeps migration enabled in dual-write mode $name", ({ credentials }) => {
+    init({ metadataMode: "dual-write", rowndAppId: "app", ...credentials });
+    expect(getPluginConfig()).toMatchObject({ metadataMode: "dual-write", disableRowndUserMigration: false });
+  });
 
   it("accepts canonical mode with credentials when migration is explicitly disabled", () => {
     init({ metadataMode: "canonical", disableRowndUserMigration: true,
