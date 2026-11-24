@@ -92,31 +92,32 @@ export function rewriteLinkPath(
 ) {
   const pathname = `/${targetPath.replace(/^\//, "")}`;
   let url: URL;
-  let isRelative = false;
   try {
     url = new URL(inputUrl);
   } catch {
-    if (compactMagicLinks) {
-      url = new URL(inputUrl, "https://relative.invalid");
-      isRelative = true;
-    } else {
-      const [path = inputUrl, query = ""] = inputUrl
-        .replace(/auth\/verify[^?]*/, targetPath)
-        .split("?");
-      const params = new URLSearchParams(query);
-      for (const [key, value] of Object.entries(searchParams ?? {})) {
-        params.set(key, value);
-      }
-      const queryString = params.toString();
-      return queryString ? `${path}?${queryString}` : path;
+    const hashIndex = compactMagicLinks ? inputUrl.indexOf("#") : -1;
+    const hash = hashIndex === -1 ? "" : inputUrl.slice(hashIndex);
+    const relativeUrl = hashIndex === -1 ? inputUrl : inputUrl.slice(0, hashIndex);
+    const [path = inputUrl, ...queryParts] = relativeUrl
+      .replace(/(\/?)auth\/verify[^?]*/, (_, slash: string) =>
+        compactMagicLinks ? pathname : `${slash}${targetPath}`,
+      )
+      .split("?");
+    const query = compactMagicLinks ? queryParts.join("?") : queryParts[0];
+    const params = new URLSearchParams(query);
+    for (const [key, value] of Object.entries(searchParams ?? {})) {
+      params.set(key, value);
     }
+    if (compactMagicLinks) compactMagicLinkParams(params);
+    const queryString = params.toString();
+    return `${path}${queryString ? `?${queryString}` : ""}${hash}`;
   }
   url.pathname = pathname;
   for (const [key, value] of Object.entries(searchParams ?? {})) {
     url.searchParams.set(key, value);
   }
   if (compactMagicLinks) compactMagicLinkParams(url.searchParams);
-  return isRelative ? `${url.pathname}${url.search}${url.hash}` : url.toString();
+  return url.toString();
 }
 
 export function rewriteLinkToBaseUrl(

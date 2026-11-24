@@ -38,8 +38,6 @@ export function compactMagicLinkParams(params: URLSearchParams) {
       params.set(alias, value);
     } else if (Object.prototype.hasOwnProperty.call(values, value)) {
       params.set(alias, values[value]!);
-    } else {
-      params.delete(alias);
     }
   }
 }

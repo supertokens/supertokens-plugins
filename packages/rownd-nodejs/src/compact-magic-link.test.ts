@@ -89,19 +89,19 @@ describe("compact magic links", () => {
     });
   });
 
-  it("compacts SMS magic links, keeping a non-public tenant and a relative link's hash", async () => {
+  it.each(["", "/prefix"])("compacts relative SMS magic links with path prefix %j, keeping a non-public tenant and hash", async (prefix) => {
     const plugin = makePlugin({ compactMagicLinks: true });
     const sendSms = vi.fn();
     const delivery = plugin.overrideMap.passwordless.config({}).smsDelivery.override({ sendSms });
     const input = {
-      urlWithLinkCode: "/auth/verify?preAuthSessionId=pid&tenantId=customer&displayContext=browser#code%2B?tail",
+      urlWithLinkCode: `${prefix}/auth/verify?preAuthSessionId=pid&tenantId=customer&displayContext=browser#code%2B?tail`,
       userContext: { rowndDisplayContext: "mobile_app", rowndAuthIntent: "sign_in" },
     };
     await delivery.sendSms(input);
 
     expect(sendSms).toHaveBeenCalledWith({
       ...input,
-      urlWithLinkCode: "/account/login?preAuthSessionId=pid&tenantId=customer&d=m&i=i#code%2B?tail",
+      urlWithLinkCode: `${prefix}/account/login?preAuthSessionId=pid&tenantId=customer&d=m&i=i#code%2B?tail`,
     });
   });
 
