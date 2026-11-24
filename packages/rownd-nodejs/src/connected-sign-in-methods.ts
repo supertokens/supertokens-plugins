@@ -147,7 +147,7 @@ export async function listConnectedSignInMethods(input: Input) {
     if (isRealSSO(method)) {
       const pending = state.records.some((record) => record.tenantId === state.tenantId && !record.completed &&
         record.providerId === method.thirdParty!.id && record.providerUserId === method.thirdParty!.userId);
-      return [{ ...base, id: idForMethod(state, method, "sso"), kind: "sso", provider: method.thirdParty!.id,
+      return [{ ...base, verified: pending || method.verified, id: idForMethod(state, method, "sso"), kind: "sso", provider: method.thirdParty!.id,
         ...(pending ? { pending_disconnect: true } : {}),
         ...(method.email && !isSyntheticEmail(method.email) ? { identifier: method.email } : {}) }];
     }
@@ -228,10 +228,15 @@ export async function disconnectConnectedSignInMethod(input: Input & { body: unk
     return method;
   };
   const logFields = { ownerId: state.owner, tenantId: state.tenantId, providerId: target.providerId };
-  const sessionUserIds = [...new Set([state.owner, sdkUserId, target.recipeUserId,
-    ...state.user.loginMethods.map((method) => method.recipeUserId.getAsString())])];
+  const sessionOwnerIds = new Set([state.owner, sdkUserId]);
+  const sessionUserIds = new Set([...sessionOwnerIds, target.recipeUserId,
+    ...state.user.loginMethods.map((method) => method.recipeUserId.getAsString())]);
   const revokeAccountSessions = async () => {
-    for (const id of sessionUserIds) await Session.revokeAllSessionsForUser(id, true, undefined, userContext);
+    // Cover both owner ID namespaces and literal recipe sessions. Only the
+    // owner IDs may fan out to every linked recipe.
+    for (const id of sessionUserIds) {
+      await Session.revokeAllSessionsForUser(id, sessionOwnerIds.has(id), undefined, userContext);
+    }
   };
   let step = "intent";
   try {
@@ -267,7 +272,7 @@ export async function disconnectConnectedSignInMethod(input: Input & { body: unk
     await revokeAccountSessions();
     await session.revokeSession(userContext);
     for (const id of sessionUserIds) {
-      if ((await Session.getAllSessionHandlesForUser(id, true, undefined, userContext)).length) {
+      if ((await Session.getAllSessionHandlesForUser(id, sessionOwnerIds.has(id), undefined, userContext)).length) {
         conflict("Account session revocation is incomplete; retry after signing in with email.");
       }
     }

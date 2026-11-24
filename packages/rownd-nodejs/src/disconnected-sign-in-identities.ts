@@ -192,7 +192,7 @@ function inspectPolicyRow(userId: string, metadata: Record<string, unknown>) {
         malformed(key, "Invalid completion key or marker");
         continue;
       }
-      completions.set(key, identity);
+      completions.set(key, { ...identity, completed: true });
     } else {
       if (key !== checkpointKey(identity) || "completed" in value) {
         malformed(key, "Invalid intent key or marker");
@@ -622,7 +622,7 @@ export async function assertNoDisconnectedSignInMethodsAtInternalOwner(
   if (current?.user) await fenceOwnerTransition(current.id, internalOwnerId, userContext);
   if (transitionTargetUserId && (!current?.user || current.id !== internalOwnerId)) {
     const target = await ownerFor(transitionTargetUserId, userContext);
-    if (target.user) await fenceOwnerTransition(target.id, internalOwnerId, userContext);
+    if (target.user && target.id !== current?.id) await fenceOwnerTransition(target.id, internalOwnerId, userContext);
   }
   throw failure;
 }
