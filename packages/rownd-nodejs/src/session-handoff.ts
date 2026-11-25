@@ -42,6 +42,7 @@ import {
 } from "./utils";
 
 type Request = Parameters<PluginRouteHandler["handler"]>[0];
+type Response = Parameters<PluginRouteHandler["handler"]>[1];
 
 export type CreateSessionHandoffLinkInput = {
   session: SessionContainerInterface;
@@ -136,7 +137,7 @@ async function matchesIdentity(info: SessionInformation, identity: SessionIdenti
     await sameUserId(info.recipeUserId.getAsString(), identity.recipeUserId, userContext);
 }
 
-async function getBrowserSession(req: Request, res: Parameters<PluginRouteHandler["handler"]>[1], userContext: JsonRecord) {
+async function getBrowserSession(req: Request, res: Response, userContext: JsonRecord) {
   try {
     // This probe identifies a browser session; it does not authorize a protected operation.
     const session = await Session.getSession(req, bufferSessionResponse(res).response, {
@@ -147,17 +148,20 @@ async function getBrowserSession(req: Request, res: Parameters<PluginRouteHandle
   } catch (error) {
     if (error instanceof Session.Error) {
       if (error.type === Session.Error.TRY_REFRESH_TOKEN) return { needsRefresh: true };
-      if (error.type === Session.Error.UNAUTHORISED || error.type === Session.Error.INVALID_CLAIMS) return { needsRefresh: false };
+      if (error.type === Session.Error.UNAUTHORISED) return { needsRefresh: false };
     }
     throw error;
   }
 }
 
-async function isSamePrimaryUser(session: SessionContainerInterface, targetUserId: string, userContext: JsonRecord) {
+async function classifyBrowserSession(session: SessionContainerInterface, targetUserId: string, userContext: JsonRecord) {
   const userId = session.getUserId(userContext);
-  if (await sameUserId(userId, targetUserId, userContext)) return true;
   const user = await SuperTokens.getUser(userId, userContext);
-  return user !== undefined && await sameUserId(user.id, targetUserId, userContext);
+  const origin = await sessionAuthenticationOrigin(
+    user, session.getRecipeUserId(userContext).getAsString(), session.getAccessTokenPayload(userContext), userContext,
+  );
+  if (isAnonymousSessionUser(user, origin)) return "anonymous";
+  return await sameUserId(user?.id ?? userId, targetUserId, userContext) ? "same_user" : "different_user";
 }
 
 async function checkSource(identity: SessionIdentity, context: JsonRecord) {
@@ -311,6 +315,8 @@ export function handleSessionHandoffConsume(deps: RowndRouteHandlerDeps): Plugin
     let secret: string | undefined;
     res.setHeader("Cache-Control", "no-store", false);
     const consume = async () => {
+      const mediaType = req.getHeaderValue("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+      if (mediaType !== "application/json") throw new HandoffRejected("invalid_body");
       const body = await getJsonBody(req).catch(() => { throw new HandoffRejected("invalid_body"); });
       token = isRecord(body) && typeof body.token === "string" ? body.token : "";
       const [, handle, tokenSecret] = TOKEN_PATTERN.exec(token) ?? [];
@@ -344,11 +350,17 @@ export function handleSessionHandoffConsume(deps: RowndRouteHandlerDeps): Plugin
         }
         const context = createDerivedUserContext(target.userContext, { rowndAppVariantId: data.appVariantId });
         const recipeUserId = await checkSource(data, context);
+        const expiresAt = Math.min(info.expiry, data.expiresAt);
+        if (expiresAt <= Date.now()) throw new HandoffRejected("expired");
         const browser = await getBrowserSession(req, res, userContext);
-        const previousSession = browser.session && !await isSamePrimaryUser(browser.session, data.userId, context)
-          ? browser.session : undefined;
-        if (Math.min(info.expiry, data.expiresAt) <= Date.now()) throw new HandoffRejected("expired");
-        if (browser.needsRefresh || (previousSession && bodyTarget.data.confirmSwitch !== true)) {
+        if (browser.needsRefresh) {
+          revokeOnFailure = false;
+          emit(deps.telemetryClient.recordEvent, startedAt, "session_refresh_required");
+          return { status: "SESSION_REFRESH_REQUIRED" };
+        }
+        const browserAccount = browser.session ? await classifyBrowserSession(browser.session, data.userId, context) : undefined;
+        if (expiresAt <= Date.now()) throw new HandoffRejected("expired");
+        if (browserAccount === "different_user" && bodyTarget.data.confirmSwitch !== true) {
           revokeOnFailure = false;
           logDebugMessage("Session handoff confirmation required");
           emit(deps.telemetryClient.recordEvent, startedAt, "confirmation_required");
@@ -359,6 +371,11 @@ export function handleSessionHandoffConsume(deps: RowndRouteHandlerDeps): Plugin
         const revoked = await Session.revokeSession(handle, context);
         revokeOnFailure = false;
         if (!revoked) throw new HandoffRejected("replay");
+        const success = () => {
+          emit(deps.telemetryClient.recordEvent, startedAt, "consume_ok");
+          return { status: "OK", redirectToPath: data.redirectToPath };
+        };
+        if (browserAccount === "same_user") return success();
 
         const buffered = bufferSessionResponse(res);
         const created = await withSessionHandoffAuthentication(() => Session.createNewSession(
@@ -376,14 +393,13 @@ export function handleSessionHandoffConsume(deps: RowndRouteHandlerDeps): Plugin
           throw error;
         }
         buffered.flush();
-        if (previousSession) {
+        if (browser.session) {
           // Once the new credentials are published, a cleanup failure must not turn success into a 401.
-          await Session.revokeSession(previousSession.getHandle(userContext), userContext).catch(() => {
+          await Session.revokeSession(browser.session.getHandle(userContext), userContext).catch(() => {
             logDebugMessage("Could not revoke the previous browser session after handoff");
           });
         }
-        emit(deps.telemetryClient.recordEvent, startedAt, "consume_ok");
-        return { status: "OK", redirectToPath: data.redirectToPath };
+        return success();
       } finally {
         if (revokeOnFailure) await Session.revokeSession(handle, userContext);
       }

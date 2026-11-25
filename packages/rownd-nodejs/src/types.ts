@@ -773,7 +773,7 @@ export type RowndClientDomains = {
 
 export interface RowndMigrationTelemetryDetails {
   operation?: "profile_read" | "session_handoff";
-  handoffEvent?: "mint" | "mint_reject" | "consume_ok" | "confirmation_required" | "reject" | "replay";
+  handoffEvent?: "mint" | "mint_reject" | "consume_ok" | "confirmation_required" | "session_refresh_required" | "reject" | "replay";
   profileMode?: "profile" | "active-sessions";
   profileConfig?: "static" | "dynamic";
   profileFallbackReason?: "none" | "activity_not_requested";
