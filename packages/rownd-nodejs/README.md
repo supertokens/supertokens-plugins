@@ -625,7 +625,7 @@ Open the returned `/account/login?rownd_handoff=1&…#<token>` URL in the in-app
 
 If the browser already has a non-anonymous session for a different account, consume returns HTTP 200 `{ "status": "CONFIRMATION_REQUIRED" }` without changing the session or extending the link's expiry. Resubmit with `confirmSwitch: true` only after the user agrees to switch. If the browser session needs refreshing, consume returns HTTP 200 `{ "status": "SESSION_REFRESH_REQUIRED" }` even with `confirmSwitch: true`, leaving the link untouched. Refresh the browser session before retrying.
 
-For the same non-anonymous account, consume uses the link but keeps the existing session. A guest or instant session can be replaced without confirmation. A confirmed switch or anonymous replacement revokes the previous session after publishing the new one. Requests must use `Content-Type: application/json`; cross-origin clients must pass CORS preflight.
+For the same non-anonymous account and tenant, consume uses the link but keeps the existing session. A session for the same account in another tenant, or a guest or instant session, can be replaced without confirmation. When replacing a session, consume revokes the previous one after publishing the new one. Requests must use `Content-Type: application/json`; cross-origin clients must pass CORS preflight.
 
 A signed-out visitor can still be signed into an attacker's account by opening a link the attacker minted. This is the same exposure as passwordless bypass magic links; the two-minute expiry and allowlisted redirect paths limit it.
 

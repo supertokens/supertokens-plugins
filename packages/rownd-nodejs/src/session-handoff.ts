@@ -154,14 +154,19 @@ async function getBrowserSession(req: Request, res: Response, userContext: JsonR
   }
 }
 
-async function classifyBrowserSession(session: SessionContainerInterface, targetUserId: string, userContext: JsonRecord) {
+async function classifyBrowserSession(
+  session: SessionContainerInterface,
+  target: Pick<SessionIdentity, "userId" | "tenantId">,
+  userContext: JsonRecord,
+) {
   const userId = session.getUserId(userContext);
   const user = await SuperTokens.getUser(userId, userContext);
   const origin = await sessionAuthenticationOrigin(
     user, session.getRecipeUserId(userContext).getAsString(), session.getAccessTokenPayload(userContext), userContext,
   );
   if (isAnonymousSessionUser(user, origin)) return "anonymous";
-  return await sameUserId(user?.id ?? userId, targetUserId, userContext) ? "same_user" : "different_user";
+  if (!await sameUserId(user?.id ?? userId, target.userId, userContext)) return "different_user";
+  return session.getTenantId(userContext) === target.tenantId ? "same_user" : "different_tenant";
 }
 
 async function checkSource(identity: SessionIdentity, context: JsonRecord) {
@@ -358,7 +363,7 @@ export function handleSessionHandoffConsume(deps: RowndRouteHandlerDeps): Plugin
           emit(deps.telemetryClient.recordEvent, startedAt, "session_refresh_required");
           return { status: "SESSION_REFRESH_REQUIRED" };
         }
-        const browserAccount = browser.session ? await classifyBrowserSession(browser.session, data.userId, context) : undefined;
+        const browserAccount = browser.session ? await classifyBrowserSession(browser.session, data, context) : undefined;
         if (expiresAt <= Date.now()) throw new HandoffRejected("expired");
         if (browserAccount === "different_user" && bodyTarget.data.confirmSwitch !== true) {
           revokeOnFailure = false;

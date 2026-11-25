@@ -7,6 +7,7 @@ import { errorHandler, middleware } from "supertokens-node/framework/express";
 import { getUserContext } from "supertokens-node/lib/build/utils";
 import AccountLinking from "supertokens-node/recipe/accountlinking";
 import EmailVerification from "supertokens-node/recipe/emailverification";
+import Multitenancy from "supertokens-node/recipe/multitenancy";
 import Passwordless from "supertokens-node/recipe/passwordless";
 import Session from "supertokens-node/recipe/session";
 import type { SessionContainerInterface } from "supertokens-node/recipe/session/types";
@@ -212,6 +213,27 @@ it("consumes the link without replacing an existing session for the same primary
   );
   expect(await Session.getAllSessionHandlesForUser(source.getUserId())).toHaveLength(2);
   await expectRejected(await consume(token, {}, browser.getAccessToken()));
+});
+
+it("replaces a same-user browser session from another tenant without confirmation", async () => {
+  const tenantId = `handoff-${randomUUID()}`;
+  expect(await Multitenancy.createOrUpdateTenant(tenantId)).toMatchObject({ status: "OK" });
+  const browser = await seed();
+  const recipeUserId = browser.getRecipeUserId();
+  expect(await Multitenancy.associateUserToTenant(tenantId, recipeUserId)).toMatchObject({ status: "OK" });
+  const source = await Session.createNewSessionWithoutRequestResponse(tenantId, recipeUserId);
+  const { token, handle } = await mint(source);
+
+  const response = await consume(token, {}, browser.getAccessToken());
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ status: "OK", redirectToPath: "/profile" });
+  const web = await verify(response.headers.get("st-access-token")!);
+  expect(web.getUserId()).toBe(browser.getUserId());
+  expect(web.getTenantId()).toBe(tenantId);
+  expect(isSessionHandoff(web)).toBe(true);
+  expect(await Session.getSessionInformation(browser.getHandle())).toBeUndefined();
+  expect(await Session.getSessionInformation(handle)).toBeUndefined();
+  expect(await verify(source.getAccessToken())).toBeDefined();
 });
 
 it("leaves a mismatched cookie session and link intact until the browser confirms a switch", async () => {
