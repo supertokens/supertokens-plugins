@@ -93,6 +93,8 @@ from .config import (
 )
 from .email_change_session_recovery import restore_session_after_failed_email_change
 from .errors import (
+    EMAIL_CHANGE_COMPLETION_FAILED_MESSAGE,
+    EMAIL_CHANGE_REPLACEMENT_SESSION_FAILED_MESSAGE,
     RowndEmailChangeError,
     RowndEmailChangeSessionsRevokedError,
     RowndPluginError,
@@ -369,6 +371,14 @@ async def _refresh_rownd_session_claims_or_revoke(
             except Exception:
                 pass
         raise
+
+
+def _clear_email_change_client_session(request: Any, initiating_session: SessionContainer) -> None:
+    # Session creation attaches its tokens to the request's session before it can
+    # still fail, so clear whichever session the response will be built from.
+    current = request.get_session() if hasattr(request, "get_session") else None
+    for candidate in {id(s): s for s in (initiating_session, current) if s is not None}.values():
+        _append_clear_session_response_mutator(candidate)
 
 
 def _append_clear_session_response_mutator(returned_session: Any) -> bool:
@@ -1660,7 +1670,7 @@ def _emailverification_api_override():
                                 error, session, api_options.request, user_context
                             )
                         ):
-                            _append_clear_session_response_mutator(session)
+                            _clear_email_change_client_session(api_options.request, session)
                         return GeneralErrorResponse(str(error))
                     except RowndEmailChangeError as error:
                         if session is not None:
@@ -1708,19 +1718,34 @@ def _emailverification_api_override():
                                     user_context,
                                 )
                             except Exception:
+                                # Every session is already revoked, so the client must
+                                # drop its dead session whatever happens next.
+                                _clear_email_change_client_session(api_options.request, session)
                                 rollback = verification_result.get(
                                     "rollback_on_session_replacement_failure"
                                 )
                                 if rollback is not None:
-                                    await cast(Callable[[], Any], rollback)()
-                                else:
+                                    try:
+                                        await cast(Callable[[], Any], rollback)()
+                                    except RowndEmailChangeError as rollback_error:
+                                        return GeneralErrorResponse(str(rollback_error))
+                                    return GeneralErrorResponse(
+                                        EMAIL_CHANGE_COMPLETION_FAILED_MESSAGE
+                                    )
+                                with suppress(Exception):
                                     await session_asyncio.revoke_all_sessions_for_user(
                                         cast(str, verification_result["user_id"]),
                                         True,
                                         None,
                                         user_context,
                                     )
-                                raise
+                                log_warning(
+                                    rownd_config.get_active_rownd_config(),
+                                    "email_change_replacement_session_failed",
+                                )
+                                return GeneralErrorResponse(
+                                    EMAIL_CHANGE_REPLACEMENT_SESSION_FAILED_MESSAGE
+                                )
             return result
 
         original.email_verify_post = email_verify_post

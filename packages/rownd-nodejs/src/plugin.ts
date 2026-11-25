@@ -47,7 +47,9 @@ import {
   RowndPasswordlessCleanupError,
 } from "./errors";
 import {
+  clearClientSession,
   EMAIL_CHANGE_COMPLETION_FAILED_ERROR,
+  EMAIL_CHANGE_REPLACEMENT_SESSION_FAILED_ERROR,
   restoreSessionAfterFailedEmailChange,
 } from "./email-change-session-recovery";
 import {
@@ -1395,14 +1397,29 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                         {},
                         input.userContext,
                       );
-                    } catch (error) {
-                      await Session.revokeAllSessionsForUser(
-                        verificationResult.userId,
-                        true,
-                        undefined,
+                    } catch {
+                      // The change is committed and every session revoked; the
+                      // client must drop its dead session and sign in again.
+                      await Promise.allSettled([
+                        Session.revokeAllSessionsForUser(
+                          verificationResult.userId,
+                          true,
+                          undefined,
+                          input.userContext,
+                        ),
+                      ]);
+                      clearClientSession(
+                        input.options.req,
+                        input.options.res,
                         input.userContext,
                       );
-                      throw error;
+                      logDebugMessage(
+                        `email_change_replacement_session_failed userId=${verificationResult.userId}`,
+                      );
+                      return {
+                        status: "GENERAL_ERROR" as const,
+                        message: EMAIL_CHANGE_REPLACEMENT_SESSION_FAILED_ERROR,
+                      };
                     }
                   }
                 }

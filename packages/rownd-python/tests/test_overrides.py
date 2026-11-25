@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from supertokens_python.types.response import GeneralErrorResponse
 from supertokens_python.recipe.accountlinking.types import (
     AccountInfoWithRecipeId,
     ShouldNotAutomaticallyLink,
@@ -3824,18 +3825,19 @@ async def test_replacement_session_failure_runs_email_change_rollback(
         cast(Any, SimpleNamespace(email_verify_post=email_verify_post))
     )
 
-    with pytest.raises(RuntimeError, match="replacement session failed"):
-        await overridden.email_verify_post(
-            "raw-token",
-            cast(Any, session),
-            "public",
-            cast(
-                Any,
-                SimpleNamespace(request=FakeRequest({"rowndPendingVerificationId": "pending-id"})),
-            ),
-            {},
-        )
+    result = await overridden.email_verify_post(
+        "raw-token",
+        cast(Any, session),
+        "public",
+        cast(
+            Any,
+            SimpleNamespace(request=FakeRequest({"rowndPendingVerificationId": "pending-id"})),
+        ),
+        {},
+    )
 
+    assert isinstance(result, GeneralErrorResponse)
+    assert result.message == "email change could not be completed; try again"
     assert rolled_back is True
 
 

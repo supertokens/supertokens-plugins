@@ -163,6 +163,9 @@ class RowndEmailChangeError(Exception):
 
 
 EMAIL_CHANGE_COMPLETION_FAILED_MESSAGE = "email change could not be completed; try again"
+EMAIL_CHANGE_REPLACEMENT_SESSION_FAILED_MESSAGE = (
+    "email change completed; sign in again with the verified email"
+)
 
 
 class RowndEmailChangeSessionsRevokedError(RowndEmailChangeError):

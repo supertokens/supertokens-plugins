@@ -12855,26 +12855,96 @@ describe("rownd-nodejs plugin", () => {
           );
         });
 
-        it("clears the client session when destructive cleanup is incomplete", async () => {
+        async function expectClientSessionCleared(
+          response: Response,
+          userId: string,
+          message: string,
+        ) {
+          expect(response.status).toBe(200);
+          await expect(response.json()).resolves.toEqual({
+            status: "GENERAL_ERROR",
+            message,
+          });
+          expect(response.headers.get("front-token")).toBe("remove");
+          expect(response.headers.get("st-access-token")).toBeFalsy();
+          await expect(
+            Session.getAllSessionHandlesForUser(userId),
+          ).resolves.toEqual([]);
+        }
+
+        it("clears the client session when passwordless sign-in would reject the original method", async () => {
+          const scenario = await startEmailChange("recover-unauthorized");
+          vi.spyOn(AccountLinking, "linkAccounts").mockImplementation(
+            async () => {
+              // An explicit canonical marker for another method makes the
+              // original email a retired alias that sign-in rejects.
+              await UserMetadata.updateUserMetadata(scenario.account.userId, {
+                rownd_email_recipe_user_ids: { public: "retired-elsewhere" },
+              });
+              return { status: "INPUT_USER_IS_NOT_A_PRIMARY_USER" };
+            },
+          );
+
+          await expectClientSessionCleared(
+            await scenario.verify(),
+            scenario.account.userId,
+            "email cannot be used for this account",
+          );
+        });
+
+        it("clears the client session when destructive cleanup is incomplete, even if revoking again fails", async () => {
           const scenario = await startEmailChange("recover-destructive");
           vi.spyOn(
             MultiTenancy,
             "disassociateUserFromTenant",
           ).mockRejectedValueOnce(new Error("tenant cleanup failed"));
+          const originalRevokeAll = Session.revokeAllSessionsForUser;
+          let revokeAllCalls = 0;
+          vi.spyOn(Session, "revokeAllSessionsForUser").mockImplementation(
+            async (...args) => {
+              revokeAllCalls += 1;
+              // The first call fences sessions before the swap; fail the
+              // follow-up revoke issued while handling the cleanup failure.
+              if (revokeAllCalls > 1) throw new Error("core unavailable");
+              return originalRevokeAll(...args);
+            },
+          );
 
-          const response = await scenario.verify();
+          await expectClientSessionCleared(
+            await scenario.verify(),
+            scenario.account.userId,
+            "email change cleanup incomplete; account reconciliation is required",
+          );
+          expect(revokeAllCalls).toBeGreaterThan(1);
+        });
 
-          expect(response.status).toBe(200);
-          await expect(response.json()).resolves.toEqual({
-            status: "GENERAL_ERROR",
-            message:
-              "email change cleanup incomplete; account reconciliation is required",
+        it("clears the client session when the replacement session cannot be created", async () => {
+          const scenario = await startEmailChange("recover-replacement");
+          let replacementAttempted = false;
+          vi.spyOn(Session, "createNewSession").mockImplementation(async () => {
+            replacementAttempted = true;
+            throw new Error("session storage unavailable");
           });
-          expect(response.headers.get("front-token")).toBe("remove");
-          expect(response.headers.get("st-access-token")).toBeFalsy();
-          await expect(
-            Session.getAllSessionHandlesForUser(scenario.account.userId),
-          ).resolves.toEqual([]);
+          const originalRevokeAll = Session.revokeAllSessionsForUser;
+          const revokeAll = vi
+            .spyOn(Session, "revokeAllSessionsForUser")
+            .mockImplementation(async (...args) => {
+              if (replacementAttempted) throw new Error("core unavailable");
+              return originalRevokeAll(...args);
+            });
+
+          await expectClientSessionCleared(
+            await scenario.verify(),
+            scenario.account.userId,
+            "email change completed; sign in again with the verified email",
+          );
+          expect(revokeAll).toHaveBeenCalledTimes(3);
+          const user = await SuperTokens.getUser(scenario.account.userId);
+          expect(
+            user?.loginMethods
+              .filter((method) => method.recipeId === "passwordless")
+              .map((method) => method.email),
+          ).toEqual([scenario.targetEmail]);
         });
 
         it("keeps the session and surfaces errors thrown before the revoke", async () => {
@@ -13913,7 +13983,13 @@ describe("rownd-nodejs plugin", () => {
         );
         createNewSession.mockRestore();
 
-        expect(verifyRes.status).toBe(500);
+        expect(verifyRes.status).toBe(200);
+        await expect(verifyRes.json()).resolves.toEqual({
+          status: "GENERAL_ERROR",
+          message:
+            "email change completed; sign in again with the verified email",
+        });
+        expect(verifyRes.headers.get("front-token")).toBe("remove");
         const user = await SuperTokens.getUser(thirdPartyUser.userId);
         expect(user?.loginMethods).toEqual(
           expect.arrayContaining([

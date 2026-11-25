@@ -816,7 +816,9 @@ async def test_cookie_replacement_adoption_and_refresh(core_url, rownd_client):
     assert refreshed.cookies["sAccessToken"]
 
 
-async def _start_email_change(core_url, rownd_client, raise_server_exceptions=False):
+async def _start_email_change(
+    core_url, rownd_client, raise_server_exceptions=False, plugin_config=None
+):
     links: list[str] = []
     client = make_client(
         core_url,
@@ -824,6 +826,7 @@ async def _start_email_change(core_url, rownd_client, raise_server_exceptions=Fa
         enable_email_verification=True,
         email_verification_links=links,
         raise_server_exceptions=raise_server_exceptions,
+        plugin_config=plugin_config,
     )
     suffix = uuid4().hex
     old_email, new_email = f"a-{suffix}@example.com", f"b-{suffix}@example.com"
@@ -902,6 +905,40 @@ async def test_failed_completion_after_revoke_restores_original_session(
     )
     stored = await metadata.get_user_metadata(scenario.old.user.id)
     assert stored.metadata.get("rownd_pending_verification") == []
+
+
+async def test_failed_completion_does_not_restore_a_credential_enforce_mode_rejects(
+    core_url, rownd_client, monkeypatch
+):
+    scenario = await _start_email_change(
+        core_url,
+        rownd_client,
+        plugin_config={"email_change": {"retirement_mode": "enforce"}},
+    )
+
+    async def link_accounts(*_args: Any, **_kwargs: Any):
+        # An explicit canonical marker for another method makes the original
+        # email a retired alias that enforce-mode sign-in rejects.
+        await metadata.update_user_metadata(
+            scenario.old.user.id, {"rownd_email_recipe_user_ids": {"public": "retired-elsewhere"}}
+        )
+        return SimpleNamespace(status="INPUT_USER_IS_NOT_A_PRIMARY_USER")
+
+    monkeypatch.setattr(repository.accountlinking_asyncio, "link_accounts", link_accounts)
+
+    response = scenario.verify()
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "status": "GENERAL_ERROR",
+        "message": "email cannot be used for this account",
+    }
+    assert response.headers.get("front-token") == "remove"
+    assert not response.headers.get("st-access-token")
+    assert (
+        await sessions.get_all_session_handles_for_user(scenario.old.user.id, True, None, {})
+        == []
+    )
 
 
 async def test_failed_completion_during_cleanup_clears_client_session(

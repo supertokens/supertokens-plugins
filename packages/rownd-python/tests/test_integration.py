@@ -5473,7 +5473,13 @@ async def test_route_replacement_session_failure_keeps_verified_email_change(
         json={"method": "token", "token": delivered_query["token"][0]},
     )
 
-    assert verify_res.status_code == 500
+    assert verify_res.status_code == 200
+    assert verify_res.json() == {
+        "status": "GENERAL_ERROR",
+        "message": "email change completed; sign in again with the verified email",
+    }
+    assert verify_res.headers.get("front-token") == "remove"
+    assert not verify_res.headers.get("st-access-token")
     user = await get_user(sign_in.user.id)
     assert user is not None
     assert {method.email for method in user.login_methods if method.recipe_id == "passwordless"} == {
