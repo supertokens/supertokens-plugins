@@ -392,6 +392,14 @@ email preserves the phone method. Verification must use the same active session
 that started the change. Completion revokes every account session and returns a
 replacement for that initiating session.
 
+If completion fails after those sessions are revoked but before replaced-email
+cleanup starts, the plugin rolls back the new credential and returns
+`GENERAL_ERROR` together with a new session for the original sign-in method, so
+the client stays signed in without the email change. It does this only when the
+original method still belongs to the same user and tenant. If rollback fails or
+cleanup has already started, the response clears the client's session instead,
+and the user must sign in again.
+
 Completion creates and links the verified target method, then publishes it as
 canonical together with a `COMMITTING` cleanup plan. Once replaced-email cleanup
 starts, failures roll forward: the target method is retained, all sessions are

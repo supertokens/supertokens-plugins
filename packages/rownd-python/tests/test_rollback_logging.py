@@ -153,11 +153,16 @@ async def test_email_change_rollback_logs_safe_warning(
         if replacement_session
         else "email_change_rollback_failed"
     )
-    assert caplog.record_tuples == [
+    assert [record for record in caplog.record_tuples if record[1] >= logging.WARNING] == [
         (
             "supertokens_rownd",
             logging.WARNING,
             f"RowndMigrationPlugin: {code} reconciliation_required=true",
         )
     ]
+    if enable_debug_logs and not replacement_session:
+        assert (
+            "email_change_completion_failed step=link-accounts pending_verification_id=none "
+            "sessions_revoked=true outcome=rollback-failed error_type=RuntimeError"
+        ) in caplog.text
     assert all(record.exc_info is None and record.stack_info is None for record in caplog.records)

@@ -31,6 +31,24 @@ export class RowndEmailChangeError extends Error {
   }
 }
 
+// Email change completion revokes every session for the user before it commits.
+// Callers must not assume the client still holds a usable session after this error.
+export class RowndEmailChangeSessionsRevokedError extends Error {
+  readonly sessionsRevoked = true as const;
+
+  constructor(
+    public readonly cause: unknown,
+    public readonly userId: string,
+    public readonly step: string,
+    // Set only when the identity graph was restored, so a session for this
+    // recipe user grants exactly what the revoked initiating session granted.
+    public readonly recoverableRecipeUserId: string | undefined,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "RowndEmailChangeSessionsRevokedError";
+  }
+}
+
 export class RowndConfigResolutionError extends Error {
   readonly cause!: unknown;
 

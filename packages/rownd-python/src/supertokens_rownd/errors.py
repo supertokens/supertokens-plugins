@@ -147,13 +147,45 @@ class RowndPluginError(Exception):
     pass
 
 
+EmailChangeErrorCode = Literal["CONFLICT", "AMBIGUOUS", "INVALID_EMAIL", "EMAIL_CHANGE_DISABLED"]
+
+
 class RowndEmailChangeError(Exception):
     def __init__(
         self,
-        code: Literal["CONFLICT", "AMBIGUOUS", "INVALID_EMAIL", "EMAIL_CHANGE_DISABLED"],
+        code: EmailChangeErrorCode,
         http_status: int,
         message: str,
     ):
         super().__init__(message)
-        self.code = code
+        self.code: EmailChangeErrorCode = code
         self.http_status = http_status
+
+
+EMAIL_CHANGE_COMPLETION_FAILED_MESSAGE = "email change could not be completed; try again"
+
+
+class RowndEmailChangeSessionsRevokedError(RowndEmailChangeError):
+    """Email change completion failed after it revoked every session for the user.
+
+    Callers must not assume the client still holds a usable session.
+    ``recoverable_recipe_user_id`` is set only when the identity graph was restored,
+    so a session for it grants exactly what the revoked initiating session granted.
+    """
+
+    sessions_revoked = True
+
+    def __init__(
+        self,
+        code: EmailChangeErrorCode,
+        http_status: int,
+        message: str,
+        *,
+        user_id: str,
+        step: str,
+        recoverable_recipe_user_id: Optional[str],
+    ):
+        super().__init__(code, http_status, message)
+        self.user_id = user_id
+        self.step = step
+        self.recoverable_recipe_user_id = recoverable_recipe_user_id

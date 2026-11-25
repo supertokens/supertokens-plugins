@@ -91,7 +91,12 @@ from .config import (
     assert_app_variant_is_configured,
     set_active_rownd_config,
 )
-from .errors import RowndEmailChangeError, RowndPluginError
+from .email_change_session_recovery import restore_session_after_failed_email_change
+from .errors import (
+    RowndEmailChangeError,
+    RowndEmailChangeSessionsRevokedError,
+    RowndPluginError,
+)
 from .logger import log_warning
 from .plugin_implementation import (
     handle_app_config,
@@ -1649,6 +1654,14 @@ def _emailverification_api_override():
                             cast(str, pending_token["pending_verification_id"]),
                             cast(str, pending_token["user_id"]),
                         )
+                    except RowndEmailChangeSessionsRevokedError as error:
+                        if session is not None and not (
+                            await restore_session_after_failed_email_change(
+                                error, session, api_options.request, user_context
+                            )
+                        ):
+                            _append_clear_session_response_mutator(session)
+                        return GeneralErrorResponse(str(error))
                     except RowndEmailChangeError as error:
                         if session is not None:
                             _append_clear_session_response_mutator(session)

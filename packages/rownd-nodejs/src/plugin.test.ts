@@ -12727,6 +12727,176 @@ describe("rownd-nodejs plugin", () => {
         );
       });
 
+      describe("when completion fails after the initiating session is revoked", () => {
+        async function startEmailChange(prefix: string) {
+          const emailVerificationLinks: string[] = [];
+          const { server: s, port } = await setup(
+            coreConnectionURI,
+            undefined,
+            { enableEmailVerification: true, emailVerificationLinks },
+          );
+          server = s;
+          testPORT = port;
+          const currentEmail = `${prefix}-current@example.com`;
+          const targetEmail = `${prefix}-target@example.com`;
+          const account = await createPasswordlessSessionForUser(currentEmail);
+          expect(
+            await requestEmailChange(account.accessToken, targetEmail),
+          ).toMatchObject({ status: 200 });
+          expect(emailVerificationLinks).toHaveLength(1);
+          const link = new URL(emailVerificationLinks[0]);
+          const verify = () =>
+            verifyEmailToken(
+              link.searchParams.get("token")!,
+              account.accessToken,
+              link.searchParams.get("rowndPendingVerificationId")!,
+            );
+          return { account, currentEmail, targetEmail, verify };
+        }
+
+        async function expectOriginalIdentityRestored(
+          response: Response,
+          scenario: Awaited<ReturnType<typeof startEmailChange>>,
+          message: string,
+        ) {
+          const { account, currentEmail, targetEmail } = scenario;
+          expect(response.status).toBe(200);
+          await expect(response.json()).resolves.toEqual({
+            status: "GENERAL_ERROR",
+            message,
+          });
+          await expect(
+            Session.getSessionInformation(account.sessionHandle),
+          ).resolves.toBeUndefined();
+
+          const restoredAccessToken = response.headers.get("st-access-token");
+          expect(restoredAccessToken).toBeTruthy();
+          const restored = await Session.getSessionWithoutRequestResponse(
+            restoredAccessToken!,
+          );
+          expect(restored.getUserId()).toBe(account.userId);
+          expect(restored.getRecipeUserId().getAsString()).toBe(
+            account.recipeUserId.getAsString(),
+          );
+          const profile = await fetch(
+            `http://localhost:${testPORT}/auth/plugin/rownd/user`,
+            { headers: getAuthedHeaders(restoredAccessToken!) },
+          );
+          expect(profile.status).toBe(200);
+
+          const user = await SuperTokens.getUser(account.userId);
+          expect(
+            user?.loginMethods
+              .filter((method) => method.recipeId === "passwordless")
+              .map((method) => method.email),
+          ).toEqual([currentEmail]);
+          await expect(
+            SuperTokens.listUsersByAccountInfo("public", { email: targetEmail }),
+          ).resolves.toEqual([]);
+          const metadata = await UserMetadata.getUserMetadata(account.userId);
+          expect((metadata.metadata as any).rownd_pending_verification).toEqual(
+            [],
+          );
+          expect(
+            (metadata.metadata as any).original_rownd_user.data.email,
+          ).toBe(currentEmail);
+        }
+
+        it("restores the original session when the target sign-up is rejected", async () => {
+          const scenario = await startEmailChange("recover-signinup");
+          const originalSignInUp = Passwordless.signInUp;
+          vi.spyOn(Passwordless, "signInUp").mockImplementation(
+            async (input) =>
+              "email" in input && input.email === scenario.targetEmail
+                ? ({ status: "SIGN_IN_UP_NOT_ALLOWED" } as never)
+                : originalSignInUp(input),
+          );
+
+          await expectOriginalIdentityRestored(
+            await scenario.verify(),
+            scenario,
+            "email cannot be used for this account",
+          );
+        });
+
+        it("restores the original session when linking the new email fails", async () => {
+          const scenario = await startEmailChange("recover-link");
+          vi.spyOn(AccountLinking, "linkAccounts").mockResolvedValue({
+            status: "INPUT_USER_IS_NOT_A_PRIMARY_USER",
+          });
+
+          await expectOriginalIdentityRestored(
+            await scenario.verify(),
+            scenario,
+            "email cannot be used for this account",
+          );
+        });
+
+        it("restores the original session when publishing the replacement plan throws", async () => {
+          const scenario = await startEmailChange("recover-metadata");
+          const originalUpdateUserMetadata = UserMetadata.updateUserMetadata;
+          vi.spyOn(UserMetadata, "updateUserMetadata").mockImplementation(
+            async (...input) => {
+              const pending = (input[1] as any).rownd_pending_verification;
+              if (
+                Array.isArray(pending) &&
+                pending.some((entry) => entry.status === "COMMITTING")
+              ) {
+                throw new Error("metadata write failed");
+              }
+              return originalUpdateUserMetadata(...input);
+            },
+          );
+
+          await expectOriginalIdentityRestored(
+            await scenario.verify(),
+            scenario,
+            "email change could not be completed; try again",
+          );
+        });
+
+        it("clears the client session when destructive cleanup is incomplete", async () => {
+          const scenario = await startEmailChange("recover-destructive");
+          vi.spyOn(
+            MultiTenancy,
+            "disassociateUserFromTenant",
+          ).mockRejectedValueOnce(new Error("tenant cleanup failed"));
+
+          const response = await scenario.verify();
+
+          expect(response.status).toBe(200);
+          await expect(response.json()).resolves.toEqual({
+            status: "GENERAL_ERROR",
+            message:
+              "email change cleanup incomplete; account reconciliation is required",
+          });
+          expect(response.headers.get("front-token")).toBe("remove");
+          expect(response.headers.get("st-access-token")).toBeFalsy();
+          await expect(
+            Session.getAllSessionHandlesForUser(scenario.account.userId),
+          ).resolves.toEqual([]);
+        });
+
+        it("keeps the session and surfaces errors thrown before the revoke", async () => {
+          const scenario = await startEmailChange("recover-before-revoke");
+          const revokeSession = vi.spyOn(Session, "revokeSession");
+          const originalValidateClaims = Session.validateClaimsForSessionHandle;
+          // The first check resolves the pending token; the second runs
+          // inside completion, before the initiating session is revoked.
+          vi.spyOn(Session, "validateClaimsForSessionHandle")
+            .mockImplementationOnce(originalValidateClaims)
+            .mockRejectedValueOnce(new Error("core unavailable"));
+
+          const response = await scenario.verify();
+
+          expect(response.status).toBe(500);
+          expect(revokeSession).not.toHaveBeenCalled();
+          await expect(
+            Session.getSessionInformation(scenario.account.sessionHandle),
+          ).resolves.toBeDefined();
+        });
+      });
+
       it("allows ordinary Core verification when the pending marker is removed without changing the login method", async () => {
         const emailVerificationLinks: string[] = [];
         const { server: s, port } = await setup(coreConnectionURI, undefined, {

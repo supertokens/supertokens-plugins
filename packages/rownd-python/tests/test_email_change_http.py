@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 import pytest
-from supertokens_python.asyncio import get_user, get_user_id_mapping
+from supertokens_python.asyncio import get_user, get_user_id_mapping, list_users_by_account_info
 from supertokens_python.recipe.passwordless import asyncio as passwordless
 from supertokens_python.recipe.accountlinking import asyncio as linking
 from supertokens_python.recipe.multitenancy import asyncio as tenants
@@ -18,6 +18,7 @@ from supertokens_python.recipe.thirdparty import asyncio as thirdparty
 from supertokens_python.recipe.thirdparty.interfaces import ManuallyCreateOrUpdateUserOkResult
 from supertokens_python.recipe.thirdparty.types import UserInfo, UserInfoEmail
 from supertokens_python.recipe.usermetadata import asyncio as metadata
+from supertokens_python.types.base import AccountInfoInput
 from supertokens_python.utils import resolve
 
 from conftest import PersistentCore, auth_headers, make_client, reset_st, session_headers
@@ -813,3 +814,131 @@ async def test_cookie_replacement_adoption_and_refresh(core_url, rownd_client):
     )
     assert refreshed.status_code == 200, refreshed.text
     assert refreshed.cookies["sAccessToken"]
+
+
+async def _start_email_change(core_url, rownd_client, raise_server_exceptions=False):
+    links: list[str] = []
+    client = make_client(
+        core_url,
+        rownd_client,
+        enable_email_verification=True,
+        email_verification_links=links,
+        raise_server_exceptions=raise_server_exceptions,
+    )
+    suffix = uuid4().hex
+    old_email, new_email = f"a-{suffix}@example.com", f"b-{suffix}@example.com"
+    old = await passwordless.signinup("public", old_email, None)
+    session = await sessions.create_new_session_without_request_response(
+        "public", old.recipe_user_id, {}, {}, True
+    )
+    update = client.put(
+        "/auth/plugin/rownd/user",
+        headers=auth_headers(session.get_access_token()),
+        json={"data": {"email": new_email}},
+    )
+    assert update.status_code == 200, update.text
+    query = parse_qs(urlparse(links[-1]).query)
+
+    def verify():
+        return client.post(
+            "/auth/user/email/verify",
+            params={"rowndPendingVerificationId": query["rowndPendingVerificationId"][0]},
+            headers={**auth_headers(session.get_access_token()), "rid": "emailverification"},
+            json={"method": "token", "token": query["token"][0]},
+        )
+
+    return SimpleNamespace(
+        client=client,
+        old=old,
+        session=session,
+        old_email=old_email,
+        new_email=new_email,
+        verify=verify,
+    )
+
+
+@pytest.mark.parametrize("failure", ["link_rejected", "primary_user_error"])
+async def test_failed_completion_after_revoke_restores_original_session(
+    core_url, rownd_client, monkeypatch, failure
+):
+    scenario = await _start_email_change(core_url, rownd_client)
+    if failure == "link_rejected":
+
+        async def link_accounts(*_args: Any, **_kwargs: Any):
+            return SimpleNamespace(status="INPUT_USER_IS_NOT_A_PRIMARY_USER")
+
+        monkeypatch.setattr(repository.accountlinking_asyncio, "link_accounts", link_accounts)
+        message = "email cannot be used for this account"
+    else:
+
+        async def ensure_stable_primary_user(*_args: Any, **_kwargs: Any):
+            raise RuntimeError("core unavailable")
+
+        monkeypatch.setattr(repository, "ensure_stable_primary_user", ensure_stable_primary_user)
+        message = "email change could not be completed; try again"
+
+    response = scenario.verify()
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "GENERAL_ERROR", "message": message}
+    assert await sessions.get_session_information(scenario.session.get_handle()) is None
+    restored_access = response.headers.get("st-access-token")
+    assert restored_access
+    restored = await sessions.get_session_without_request_response(restored_access)
+    assert restored is not None
+    assert restored.get_user_id() == scenario.old.user.id
+    assert (
+        restored.get_recipe_user_id().get_as_string()
+        == scenario.old.recipe_user_id.get_as_string()
+    )
+    profile = scenario.client.get("/auth/plugin/rownd/user", headers=auth_headers(restored_access))
+    assert profile.status_code == 200, profile.text
+    owner = await get_user(scenario.old.user.id)
+    assert owner is not None
+    assert [method.email for method in owner.login_methods] == [scenario.old_email]
+    assert (
+        await list_users_by_account_info("public", AccountInfoInput(email=scenario.new_email))
+        == []
+    )
+    stored = await metadata.get_user_metadata(scenario.old.user.id)
+    assert stored.metadata.get("rownd_pending_verification") == []
+
+
+async def test_failed_completion_during_cleanup_clears_client_session(
+    core_url, rownd_client, monkeypatch
+):
+    scenario = await _start_email_change(core_url, rownd_client)
+
+    async def reconcile(*_args: Any, **_kwargs: Any):
+        raise RuntimeError("tenant cleanup failed")
+
+    monkeypatch.setattr(repository, "reconcile_committing_email_verification", reconcile)
+
+    response = scenario.verify()
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "status": "GENERAL_ERROR",
+        "message": "email change cleanup incomplete; retry sign-in with the verified email",
+    }
+    assert response.headers.get("front-token") == "remove"
+    assert not response.headers.get("st-access-token")
+    assert (
+        await sessions.get_all_session_handles_for_user(scenario.old.user.id, True, None, {})
+        == []
+    )
+
+
+async def test_failed_completion_before_revoke_keeps_session_and_raises(
+    core_url, rownd_client, monkeypatch
+):
+    scenario = await _start_email_change(core_url, rownd_client, raise_server_exceptions=True)
+
+    async def inspect_linked_user_metadata(*_args: Any, **_kwargs: Any):
+        raise RuntimeError("core unavailable")
+
+    monkeypatch.setattr(repository, "inspect_linked_user_metadata", inspect_linked_user_metadata)
+
+    with pytest.raises(RuntimeError, match="core unavailable"):
+        scenario.verify()
+    assert await sessions.get_session_information(scenario.session.get_handle()) is not None

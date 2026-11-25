@@ -41,7 +41,15 @@ import {
   setSuperTokensConfig,
   validateDynamicConfig,
 } from "./config";
-import { RowndEmailChangeError, RowndPasswordlessCleanupError } from "./errors";
+import {
+  RowndEmailChangeError,
+  RowndEmailChangeSessionsRevokedError,
+  RowndPasswordlessCleanupError,
+} from "./errors";
+import {
+  EMAIL_CHANGE_COMPLETION_FAILED_ERROR,
+  restoreSessionAfterFailedEmailChange,
+} from "./email-change-session-recovery";
 import {
   applyRowndOAuthResourceParams,
   buildRowndOAuthPayload,
@@ -1344,6 +1352,22 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       },
                     );
                   } catch (error) {
+                    if (error instanceof RowndEmailChangeSessionsRevokedError) {
+                      await restoreSessionAfterFailedEmailChange({
+                        error,
+                        session: input.session,
+                        req: input.options.req,
+                        res: input.options.res,
+                        userContext: input.userContext,
+                      });
+                      return {
+                        status: "GENERAL_ERROR" as const,
+                        message:
+                          error.cause instanceof RowndEmailChangeError
+                            ? error.cause.message
+                            : EMAIL_CHANGE_COMPLETION_FAILED_ERROR,
+                      };
+                    }
                     if (error instanceof RowndEmailChangeError) {
                       return {
                         status: "GENERAL_ERROR" as const,

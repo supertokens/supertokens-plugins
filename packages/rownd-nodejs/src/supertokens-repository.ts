@@ -48,7 +48,7 @@ import {
   PENDING_EMAIL_VERIFICATION_QUERY_PARAM,
   PUBLIC_TENANT_ID,
 } from "./constants";
-import { RowndEmailChangeError, RowndPluginError } from "./errors";
+import { RowndEmailChangeError, RowndEmailChangeSessionsRevokedError, RowndPluginError } from "./errors";
 import { logDebugMessage } from "./logger";
 import { resolveEmailForAuthentication } from "./canonical-email";
 import {
@@ -2304,7 +2304,22 @@ export async function completePendingEmailVerification(input: {
     input.userContext,
   );
   const userId = user?.id ?? input.recipeUserId.getAsString();
+  const logFailure = (
+    step: string,
+    sessionsRevoked: boolean,
+    error?: unknown,
+    outcome?: string,
+  ) =>
+    logEmailChangeCompletionFailure({
+      step,
+      userId,
+      pendingVerificationId: input.pendingVerificationId,
+      sessionsRevoked,
+      error,
+      outcome,
+    });
   if (input.pendingUserId && userId !== input.pendingUserId) {
+    logFailure("pending-owner-mismatch", false);
     if (input.pendingVerificationId) {
       await removePendingEmailVerification(
         input.pendingUserId,
@@ -2338,6 +2353,7 @@ export async function completePendingEmailVerification(input: {
 
   if (!pendingVerification) {
     if (input.pendingVerificationId) {
+      logFailure("pending-verification-missing", false);
       try {
         await EmailVerification.unverifyEmail(
           input.recipeUserId,
@@ -2365,6 +2381,7 @@ export async function completePendingEmailVerification(input: {
     pendingVerification.purpose !== "UPDATE_PASSWORDLESS" &&
     pendingVerification.purpose !== "ADD_PASSWORDLESS"
   ) {
+    logFailure("unsupported-purpose", false);
     return rejectInactivePendingEmailVerification(
       userId,
       pendingVerification,
@@ -2380,6 +2397,7 @@ export async function completePendingEmailVerification(input: {
     !initiatingSessionHandle ||
     initiatingSessionHandle !== input.sessionHandle
   ) {
+    logFailure("initiating-session-mismatch", false);
     return rejectInactivePendingEmailVerification(
       userId,
       pendingVerification,
@@ -2391,6 +2409,9 @@ export async function completePendingEmailVerification(input: {
 
   let rollbackCredentialChange: (() => Promise<void>) | undefined;
   let destructiveCleanupStarted = false;
+  let sessionsRevoked = false;
+  let initiatingRecipeUserId: SuperTokensLoginMethod["recipeUserId"] | undefined;
+  let step = "check-target-email-available";
   try {
     await assertEmailAvailableForUser(
       normalizedEmail,
@@ -2398,6 +2419,7 @@ export async function completePendingEmailVerification(input: {
       input.userContext,
     );
 
+    step = "load-initiating-session";
     const initiatingSession = await Session.getSessionInformation(
       initiatingSessionHandle,
       input.userContext,
@@ -2407,6 +2429,7 @@ export async function completePendingEmailVerification(input: {
       !(await sdkUserIdMatchesInternalTarget(userId, initiatingSession.userId, userContext)) ||
       initiatingSession.tenantId !== tenantId
     ) {
+      step = "initiating-session-inactive";
       return rejectInactivePendingEmailVerification(
         userId,
         pendingVerification,
@@ -2415,7 +2438,9 @@ export async function completePendingEmailVerification(input: {
         input.userContext,
       );
     }
+    step = "initiating-session-claims";
     await assertEmailChangeSessionClaims(initiatingSessionHandle, userContext);
+    step = "load-initiating-method";
     const currentUser = await SuperTokens.getUser(userId, input.userContext);
     // Session information contains literal Core IDs; the SDK user graph exposes
     // mapped recipe IDs. Compare the same namespace without accepting another owner.
@@ -2432,6 +2457,7 @@ export async function completePendingEmailVerification(input: {
         method.tenantIds.includes(tenantId),
     );
     if (!currentUser || !initiatingLoginMethod) {
+      step = "initiating-method-missing";
       return rejectInactivePendingEmailVerification(
         userId,
         pendingVerification,
@@ -2459,6 +2485,7 @@ export async function completePendingEmailVerification(input: {
       (pendingVerification.purpose === "ADD_PASSWORDLESS" &&
         !canAddPasswordless)
     ) {
+      step = "target-method-ineligible";
       return rejectInactivePendingEmailVerification(
         userId,
         pendingVerification,
@@ -2468,9 +2495,13 @@ export async function completePendingEmailVerification(input: {
       );
     }
 
+    step = "revoke-initiating-session";
     if (
       !(await Session.revokeSession(initiatingSessionHandle, input.userContext))
     ) {
+      // Another completion (or a sign-out) won the revoke, so this request
+      // never held the completion lock and must not mint a session.
+      step = "initiating-session-already-revoked";
       return rejectInactivePendingEmailVerification(
         userId,
         pendingVerification,
@@ -2479,14 +2510,17 @@ export async function completePendingEmailVerification(input: {
         input.userContext,
       );
     }
+    sessionsRevoked = true;
     user = currentUser;
-    const initiatingRecipeUserId = initiatingLoginMethod.recipeUserId;
+    initiatingRecipeUserId = initiatingLoginMethod.recipeUserId;
+    step = "revoke-all-sessions";
     await Session.revokeAllSessionsForUser(
       userId,
       true,
       undefined,
       input.userContext,
     );
+    step = "reload-pending-verification";
     const committingMetadata = await getPrimaryUserMetadata(
       userId,
       input.userContext,
@@ -2502,6 +2536,7 @@ export async function completePendingEmailVerification(input: {
       committingVerification?.id !== pendingVerification.id ||
       (committingVerification.status ?? "PENDING") !== "PENDING"
     ) {
+      step = "pending-verification-changed";
       return rejectInactivePendingEmailVerification(
         userId,
         pendingVerification,
@@ -2511,6 +2546,7 @@ export async function completePendingEmailVerification(input: {
       );
     }
 
+    step = "passwordless-sign-in-up";
     const operationContext = createDerivedUserContext(userContext, {
       rowndDisableAutomaticAccountLinking: true,
     });
@@ -2522,12 +2558,14 @@ export async function completePendingEmailVerification(input: {
     if (passwordlessUser.status !== "OK") {
       throw emailOwnershipConflict();
     }
+    step = "verify-passwordless-target";
     await assertVerifiedPasswordlessTarget({
       recipeUserId: passwordlessUser.recipeUserId.getAsString(),
       email: normalizedEmail,
       tenantId,
       userContext: input.userContext,
     });
+    step = "check-target-ownership";
     const targetMethodBeforeSignInUp = currentUser.loginMethods.find(
       (method) =>
         method.recipeUserId.getAsString() ===
@@ -2553,11 +2591,13 @@ export async function completePendingEmailVerification(input: {
           input.userContext,
         );
       };
+      step = "check-created-target-email-available";
       await assertEmailAvailableForUser(
         normalizedEmail,
         [userId, passwordlessUser.user.id],
         input.userContext,
       );
+      step = "ensure-primary-user";
       const primaryUserId = await ensureStablePrimaryUser(
         currentUser,
         initiatingRecipeUserId,
@@ -2570,6 +2610,7 @@ export async function completePendingEmailVerification(input: {
           "the account changed before email verification completed",
         );
       }
+      step = "link-accounts";
       const linkResult = await AccountLinking.linkAccounts(
         passwordlessUser.recipeUserId,
         primaryUserId,
@@ -2595,11 +2636,13 @@ export async function completePendingEmailVerification(input: {
         }
       };
     }
+    step = "check-linked-target-email-available";
     await assertEmailAvailableForUser(
       normalizedEmail,
       userId,
       input.userContext,
     );
+    step = "verify-linked-target";
     const canonicalEmailRecipeUserId =
       passwordlessUser.recipeUserId.getAsString();
     const linkedUser = await SuperTokens.getUser(userId, input.userContext);
@@ -2637,12 +2680,14 @@ export async function completePendingEmailVerification(input: {
         ).values(),
       ],
     };
+    step = "publish-replacement-plan";
     await publishEmailReplacementPlan(
       userId,
       committingPlan,
       input.userContext,
     );
     destructiveCleanupStarted = true;
+    step = "reconcile-committing-verification";
     await reconcileCommittingEmailVerification({
       userId,
       pendingVerification: committingPlan,
@@ -2664,13 +2709,18 @@ export async function completePendingEmailVerification(input: {
           input.userContext,
         ),
       ]);
-      logDebugMessage(
-        `Email change cleanup incomplete for user ${userId}; reconciliation required. Error: ${getErrorMessage(error)}`,
-      );
-      throw new RowndEmailChangeError(
-        "CONFLICT",
-        409,
-        "email change cleanup incomplete; account reconciliation is required",
+      logFailure(step, true, error, "cleanup-incomplete");
+      // Retired methods may already be gone, possibly including the initiating
+      // one, so no identity is known to be safe to re-issue a session for.
+      throw new RowndEmailChangeSessionsRevokedError(
+        new RowndEmailChangeError(
+          "CONFLICT",
+          409,
+          "email change cleanup incomplete; account reconciliation is required",
+        ),
+        userId,
+        step,
+        undefined,
       );
     }
     let rollbackError: unknown;
@@ -2682,16 +2732,19 @@ export async function completePendingEmailVerification(input: {
       }
     }
     if (rollbackError !== undefined) {
-      logDebugMessage(
-        `Email change rollback failed for user ${userId}; reconciliation required. Error: ${getErrorMessage(rollbackError)}`,
-      );
-      throw new RowndEmailChangeError(
-        "CONFLICT",
-        409,
-        "email change rollback failed; account reconciliation is required",
+      logFailure(step, sessionsRevoked, rollbackError, "rollback-failed");
+      throw new RowndEmailChangeSessionsRevokedError(
+        new RowndEmailChangeError(
+          "CONFLICT",
+          409,
+          "email change rollback failed; account reconciliation is required",
+        ),
+        userId,
+        step,
+        undefined,
       );
     }
-    await Promise.allSettled([
+    const [pendingCleanup] = await Promise.allSettled([
       cleanupPendingEmailVerification(
         userId,
         pendingVerification,
@@ -2700,7 +2753,19 @@ export async function completePendingEmailVerification(input: {
         input.userContext,
       ),
     ]);
-    throw error;
+    logFailure(
+      step,
+      sessionsRevoked,
+      error,
+      `${rollbackCredentialChange ? "rolled-back" : "nothing-to-roll-back"},pending-cleanup-${pendingCleanup.status}`,
+    );
+    if (!sessionsRevoked) throw error;
+    throw new RowndEmailChangeSessionsRevokedError(
+      error,
+      userId,
+      step,
+      initiatingRecipeUserId?.getAsString(),
+    );
   }
 }
 
@@ -3731,6 +3796,28 @@ function emailReconciliationRequired() {
     "CONFLICT",
     409,
     "email change cleanup incomplete; account reconciliation is required",
+  );
+}
+
+// Error messages are not logged: Core and SDK errors can echo emails back.
+function logEmailChangeCompletionFailure(details: {
+  step: string;
+  userId: string;
+  pendingVerificationId?: string;
+  sessionsRevoked: boolean;
+  error?: unknown;
+  outcome?: string;
+}) {
+  const errorType =
+    details.error instanceof RowndEmailChangeError
+      ? `RowndEmailChangeError:${details.error.code}`
+      : details.error instanceof Error
+        ? details.error.name
+        : details.error === undefined
+          ? "none"
+          : typeof details.error;
+  logDebugMessage(
+    `email_change_completion_failed step=${details.step} userId=${details.userId} pendingVerificationId=${details.pendingVerificationId ?? "none"} sessionsRevoked=${details.sessionsRevoked} outcome=${details.outcome ?? "rejected"} errorType=${errorType}`,
   );
 }
 

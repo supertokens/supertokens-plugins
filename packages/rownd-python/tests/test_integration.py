@@ -5563,9 +5563,17 @@ async def test_marked_email_change_fails_closed_when_target_becomes_owned_before
     assert not await emailverification_asyncio.is_email_verified(
         sign_in.recipe_user_id, target_email
     )
+    # Completion revoked every session, then restored only the initiating identity.
+    restored_access = verify_res.headers.get("st-access-token")
+    assert restored_access
+    restored = await session_asyncio.get_session_without_request_response(restored_access)
+    assert restored is not None
+    assert restored.get_recipe_user_id().get_as_string() == (
+        sign_in.recipe_user_id.get_as_string()
+    )
     assert await session_asyncio.get_all_session_handles_for_user(
         sign_in.user.id, True, None, {}
-    ) == []
+    ) == [restored.get_handle()]
 
 
 async def test_add_passwordless_finalization_failure_removes_created_method_and_cleans_security_state(
@@ -5637,7 +5645,11 @@ async def test_add_passwordless_finalization_failure_removes_created_method_and_
         json={"method": "token", "token": delivered_query["token"][0]},
     )
 
-    assert verify_res.status_code == 500
+    assert verify_res.status_code == 200
+    assert verify_res.json() == {
+        "status": "GENERAL_ERROR",
+        "message": "email change could not be completed; try again",
+    }
     assert linked_method_seen is True
     compensated_user = await get_user(third_party.user.id)
     assert compensated_user is not None
@@ -5651,9 +5663,16 @@ async def test_add_passwordless_finalization_failure_removes_created_method_and_
     assert not await emailverification_asyncio.is_email_verified(
         third_party.recipe_user_id, target_email
     )
+    restored_access = verify_res.headers.get("st-access-token")
+    assert restored_access
+    restored = await session_asyncio.get_session_without_request_response(restored_access)
+    assert restored is not None
+    assert restored.get_recipe_user_id().get_as_string() == (
+        third_party.recipe_user_id.get_as_string()
+    )
     assert await session_asyncio.get_all_session_handles_for_user(
         third_party.user.id, True, None, {}
-    ) == []
+    ) == [restored.get_handle()]
 
 
 @pytest.mark.parametrize("callback_session", ["missing", "revoked", "different"])
