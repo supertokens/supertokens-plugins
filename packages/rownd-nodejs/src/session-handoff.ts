@@ -3,7 +3,6 @@ import SuperTokens from "supertokens-node";
 import Session, { type SessionInformation } from "supertokens-node/recipe/session";
 import type { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import type { PluginRouteHandler, SuperTokensPublicConfig } from "supertokens-node/types";
-import { withRequestHandler } from "@shared/nodejs";
 import { z } from "zod";
 import { bufferSessionResponse } from "./buffer-session-response";
 import {
@@ -64,6 +63,7 @@ const targetBody = z.object({
   redirectToPath: z.string().min(1).optional(),
   appVariantId: z.string().min(1).optional(),
 });
+const consumeBody = targetBody.extend({ confirmSwitch: z.boolean().optional() });
 
 const carrierData = z.object({
   kind: z.literal(SESSION_HANDOFF_KIND),
@@ -120,16 +120,44 @@ function hashSecret(secret: string) {
   return createHash("sha256").update(secret).digest();
 }
 
-async function matchesIdentity(info: SessionInformation, identity: SessionIdentity, userContext: JsonRecord) {
-  if (info.tenantId !== identity.tenantId) return false;
-  // Session information can expose literal Core IDs while SDK sessions expose external IDs.
-  const matchesId = async (coreId: string, sdkId: string) => {
-    if (coreId === sdkId) return true;
-    const mapping = await SuperTokens.getUserIdMapping({ userId: sdkId, userIdType: "EXTERNAL", userContext });
-    return mapping.status === "OK" && mapping.superTokensUserId === coreId;
+async function sameUserId(first: string, second: string, userContext: JsonRecord) {
+  if (first === second) return true;
+  // Browser and Core sessions can expose IDs from different sides of a Rownd mapping.
+  const coreId = async (userId: string) => {
+    const mapping = await SuperTokens.getUserIdMapping({ userId, userIdType: "EXTERNAL", userContext });
+    return mapping.status === "OK" ? mapping.superTokensUserId : userId;
   };
-  return await matchesId(info.userId, identity.userId) &&
-    await matchesId(info.recipeUserId.getAsString(), identity.recipeUserId);
+  const [firstCoreId, secondCoreId] = await Promise.all([coreId(first), coreId(second)]);
+  return firstCoreId === secondCoreId;
+}
+
+async function matchesIdentity(info: SessionInformation, identity: SessionIdentity, userContext: JsonRecord) {
+  return info.tenantId === identity.tenantId && await sameUserId(info.userId, identity.userId, userContext) &&
+    await sameUserId(info.recipeUserId.getAsString(), identity.recipeUserId, userContext);
+}
+
+async function getBrowserSession(req: Request, res: Parameters<PluginRouteHandler["handler"]>[1], userContext: JsonRecord) {
+  try {
+    // This probe identifies a browser session; it does not authorize a protected operation.
+    const session = await Session.getSession(req, bufferSessionResponse(res).response, {
+      sessionRequired: false, checkDatabase: true, antiCsrfCheck: false,
+      overrideGlobalClaimValidators: () => [],
+    }, userContext);
+    return { session, needsRefresh: false };
+  } catch (error) {
+    if (error instanceof Session.Error) {
+      if (error.type === Session.Error.TRY_REFRESH_TOKEN) return { needsRefresh: true };
+      if (error.type === Session.Error.UNAUTHORISED || error.type === Session.Error.INVALID_CLAIMS) return { needsRefresh: false };
+    }
+    throw error;
+  }
+}
+
+async function isSamePrimaryUser(session: SessionContainerInterface, targetUserId: string, userContext: JsonRecord) {
+  const userId = session.getUserId(userContext);
+  if (await sameUserId(userId, targetUserId, userContext)) return true;
+  const user = await SuperTokens.getUser(userId, userContext);
+  return user !== undefined && await sameUserId(user.id, targetUserId, userContext);
 }
 
 async function checkSource(identity: SessionIdentity, context: JsonRecord) {
@@ -282,7 +310,7 @@ export function handleSessionHandoffConsume(deps: RowndRouteHandlerDeps): Plugin
     let token = "";
     let secret: string | undefined;
     res.setHeader("Cache-Control", "no-store", false);
-    const consume = withRequestHandler(async () => {
+    const consume = async () => {
       const body = await getJsonBody(req).catch(() => { throw new HandoffRejected("invalid_body"); });
       token = isRecord(body) && typeof body.token === "string" ? body.token : "";
       const [, handle, tokenSecret] = TOKEN_PATTERN.exec(token) ?? [];
@@ -303,7 +331,7 @@ export function handleSessionHandoffConsume(deps: RowndRouteHandlerDeps): Plugin
         }
         if (Math.min(info.expiry, data.expiresAt) <= Date.now()) throw new HandoffRejected("expired");
         if (!await matchesIdentity(info, data, userContext)) throw new HandoffRejected("invalid_carrier");
-        const bodyTarget = targetBody.safeParse(body);
+        const bodyTarget = consumeBody.safeParse(body);
         if (!bodyTarget.success) throw new HandoffRejected("invalid_body");
         const target = await resolveTarget(deps.pluginConfig, deps.stConfig, bodyTarget.data, data.tenantId, req, userContext)
           .catch((error: unknown) => {
@@ -316,7 +344,17 @@ export function handleSessionHandoffConsume(deps: RowndRouteHandlerDeps): Plugin
         }
         const context = createDerivedUserContext(target.userContext, { rowndAppVariantId: data.appVariantId });
         const recipeUserId = await checkSource(data, context);
-        if (data.expiresAt <= Date.now()) throw new HandoffRejected("expired");
+        const browser = await getBrowserSession(req, res, userContext);
+        const previousSession = browser.session && !await isSamePrimaryUser(browser.session, data.userId, context)
+          ? browser.session : undefined;
+        if (Math.min(info.expiry, data.expiresAt) <= Date.now()) throw new HandoffRejected("expired");
+        if (browser.needsRefresh || (previousSession && bodyTarget.data.confirmSwitch !== true)) {
+          revokeOnFailure = false;
+          logDebugMessage("Session handoff confirmation required");
+          emit(deps.telemetryClient.recordEvent, startedAt, "confirmation_required");
+          return { status: "CONFIRMATION_REQUIRED" };
+        }
+
         // Core's revoke result is the single-use gate across concurrent callers.
         const revoked = await Session.revokeSession(handle, context);
         revokeOnFailure = false;
@@ -338,14 +376,23 @@ export function handleSessionHandoffConsume(deps: RowndRouteHandlerDeps): Plugin
           throw error;
         }
         buffered.flush();
+        if (previousSession) {
+          // Once the new credentials are published, a cleanup failure must not turn success into a 401.
+          await Session.revokeSession(previousSession.getHandle(userContext), userContext).catch(() => {
+            logDebugMessage("Could not revoke the previous browser session after handoff");
+          });
+        }
         emit(deps.telemetryClient.recordEvent, startedAt, "consume_ok");
         return { status: "OK", redirectToPath: data.redirectToPath };
       } finally {
         if (revokeOnFailure) await Session.revokeSession(handle, userContext);
       }
-    });
+    };
     try {
-      return await consume(req, res, undefined, userContext);
+      const result = await consume();
+      res.setStatusCode(200);
+      res.sendJSONResponse(result);
+      return null;
     } catch (error) {
       const reason = error instanceof HandoffRejected ? error.reason
         : error instanceof RowndSessionHandoffError ? "invalid_source" : "internal_error";

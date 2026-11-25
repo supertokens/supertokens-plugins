@@ -6,7 +6,7 @@ import { migrationPhoneAccountInfos, sameCorePhoneNumber } from "./migration-pho
 import { backfillAdministrativeMetadata } from "./migration-admin-metadata";
 import { getAdministrativeRepairMetadata, prepareAdministrativeCanonicalEmail } from "./migration-admin-email";
 import { RowndMigrationPolicyError } from "./errors";
-import { sessionAuthenticationOrigin, assertEmailChangeSessionClaims, isAnonymousSessionUser, SESSION_AUTHENTICATION_KEY } from "./session-authentication";
+import { sessionAuthenticationOrigin, assertEmailChangeSessionClaims, isAnonymousSessionUser, readSessionAuthenticationOrigin, SESSION_AUTHENTICATION_KEY } from "./session-authentication";
 import { isSessionHandoffCarrier } from "./session-handoff-carrier";
 import { assertMigrationPostconditions, assertMigrationOwnerGraph, reconcileAdministrativeEmailVerification } from "./migration-postconditions";
 import { assertCurrentRowndProviders, checkpointProviderIntroduction, finishProviderIntroductions, prepareRowndProviderRetirement, recoverProviderRevocations, type ProviderIntroduction } from "./migration-provider";
@@ -1638,7 +1638,7 @@ export async function getUserById(
     const inspection = await inspectUserPresentationMetadata(userId, context, undefined, operation.read);
     if (!inspection.user) throw new RowndPluginError("ROWND_USER_NOT_FOUND");
     const activity = mode === "active-sessions"
-      ? await getLatestSessionInfo(inspection.user.id, tenantId, context, operation.read)
+      ? await getSessionActivity(inspection.user.id, tenantId, context, operation.read)
       : undefined;
     const profile = assembleUserProfile(userId, tenantId, inspection.user, inspection.combinedMetadata, pluginConfig, mode, activity);
     failed = false;
@@ -1648,6 +1648,9 @@ export async function getUserById(
   }
 }
 
+type SessionInfo = NonNullable<Awaited<ReturnType<typeof Session.getSessionInformation>>>;
+type SessionActivity = { latestSession?: SessionInfo; latestSignIn?: SessionInfo };
+
 // Presentation only: callers supply authoritative identity/metadata and resolved config.
 export function assembleUserProfile(
   userId: string,
@@ -1656,7 +1659,7 @@ export function assembleUserProfile(
   metadata: RowndMetadata,
   pluginConfig: ReturnType<typeof getConfigForUserContext>,
   mode: ProfileReadMode,
-  latestSessionInfo?: Awaited<ReturnType<typeof Session.getSessionInformation>>,
+  activity?: SessionActivity,
 ): RowndCompatUserResponse {
 
   const originalRowndUser = metadata.original_rownd_user;
@@ -1806,14 +1809,15 @@ export function assembleUserProfile(
   );
   const firstMethod = sortedByJoined[0];
   const latestSessionRecipeUserId =
-    latestSessionInfo?.recipeUserId.getAsString();
+    activity?.latestSignIn?.recipeUserId.getAsString();
   const lastMethod = latestSessionRecipeUserId
     ? stUser.loginMethods.find(
       (method) =>
         method.recipeUserId.getAsString() === latestSessionRecipeUserId,
     )
     : [...tenantLoginMethods].sort((a, b) => b.timeJoined - a.timeJoined)[0];
-  const lastSignInAt = latestSessionInfo?.timeCreated ?? stUser.timeJoined;
+  const lastSignInAt = activity?.latestSignIn?.timeCreated ?? stUser.timeJoined;
+  const lastActiveAt = activity?.latestSession?.timeCreated ?? stUser.timeJoined;
 
   const metadataMeta = Object.fromEntries(
     Object.entries(metadata).filter(
@@ -1826,7 +1830,7 @@ export function assembleUserProfile(
     created: new Date(stUser.timeJoined).toISOString(),
     first_sign_in: new Date(stUser.timeJoined).toISOString(),
     last_sign_in: new Date(lastSignInAt).toISOString(),
-    last_active: new Date(lastSignInAt).toISOString(),
+    last_active: new Date(lastActiveAt).toISOString(),
     first_sign_in_method: firstMethod ? mapMethod(firstMethod) : "email",
     last_sign_in_method: lastMethod ? mapMethod(lastMethod) : "email",
   };
@@ -1883,7 +1887,7 @@ export function assembleUserProfile(
   };
 }
 
-async function getLatestSessionInfo(
+async function getSessionActivity(
   userId: string,
   tenantId: string,
   userContext?: JsonRecord,
@@ -1895,7 +1899,7 @@ async function getLatestSessionInfo(
     tenantId,
     userContext,
   ));
-  const sessionInfos: Awaited<ReturnType<typeof Session.getSessionInformation>>[] = new Array(sessionHandles.length);
+  const sessionInfos: (SessionInfo | undefined)[] = new Array(sessionHandles.length);
   let nextIndex = 0;
   let failure: { error: unknown } | undefined;
   // Preserve handle ordering for ties while containing per-request Core bursts.
@@ -1912,18 +1916,19 @@ async function getLatestSessionInfo(
   }));
   if (failure) throw failure.error;
 
-  let latestSessionInfo: (typeof sessionInfos)[number];
+  const activity: SessionActivity = {};
   for (const sessionInfo of sessionInfos) {
-    if (
-      sessionInfo && !isSessionHandoffCarrier(sessionInfo) &&
-      (!latestSessionInfo ||
-        sessionInfo.timeCreated > latestSessionInfo.timeCreated)
-    ) {
-      latestSessionInfo = sessionInfo;
+    if (!sessionInfo || isSessionHandoffCarrier(sessionInfo)) continue;
+    if (!activity.latestSession || sessionInfo.timeCreated > activity.latestSession.timeCreated) {
+      activity.latestSession = sessionInfo;
+    }
+    if (readSessionAuthenticationOrigin(sessionInfo.customClaimsInAccessTokenPayload ?? {}) !== "handoff" &&
+        (!activity.latestSignIn || sessionInfo.timeCreated > activity.latestSignIn.timeCreated)) {
+      activity.latestSignIn = sessionInfo;
     }
   }
 
-  return latestSessionInfo;
+  return activity;
 }
 
 export async function updateUserData(

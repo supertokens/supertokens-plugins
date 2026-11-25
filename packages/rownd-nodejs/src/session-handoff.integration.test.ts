@@ -146,10 +146,17 @@ async function expectRejected(response: Response) {
   expect(response.headers.get("set-cookie")).toBeNull();
 }
 
-it("hands off an Apple-only user without using the existing browser session or a contact", async () => {
+async function expectConfirmation(response: Response) {
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ status: "CONFIRMATION_REQUIRED" });
+  for (const header of ["st-access-token", "st-refresh-token", "front-token", "set-cookie"]) {
+    expect(response.headers.get(header)).toBeNull();
+  }
+}
+
+it("hands off an Apple-only user with no existing browser session or contact", async () => {
   const source = await seed();
   expect(isSessionHandoff(source)).toBe(false);
-  const otherUser = await seed();
   const { url, token, handle } = await mint(source);
   expect(url.origin + url.pathname).toBe("https://browser.example.com/account/login");
   expect(Object.fromEntries(url.searchParams)).toEqual({
@@ -167,7 +174,7 @@ it("hands off an Apple-only user without using the existing browser session or a
   expect(carrier?.customClaimsInAccessTokenPayload[SESSION_HANDOFF_CARRIER_CLAIM]).toBe(true);
   expect(carrier?.customClaimsInAccessTokenPayload.auth_level).toBeUndefined();
 
-  const response = await consume(token, { redirectToPath: "https://browser.example.com/profile" }, otherUser.getAccessToken());
+  const response = await consume(token, { redirectToPath: "https://browser.example.com/profile" });
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ status: "OK", redirectToPath: "/profile" });
   const web = await verify(response.headers.get("st-access-token")!);
@@ -183,9 +190,95 @@ it("hands off an Apple-only user without using the existing browser session or a
   });
   expect(await web.getClaimValue(RowndIsAnonymousClaim)).toBe(false);
   expect(await verify(source.getAccessToken())).toBeDefined();
-  expect(await verify(otherUser.getAccessToken())).toBeDefined();
   await expectRejected(await consume(token));
   expect(events.map((event) => event.handoffEvent)).toEqual(["mint", "consume_ok", "reject"]);
+});
+
+it("hands off without confirmation when a different session belongs to the same primary user", async () => {
+  const source = await seed();
+  const browser = await Session.createNewSessionWithoutRequestResponse("public", source.getRecipeUserId());
+  const { token } = await mint(source);
+  const response = await consume(token, {}, browser.getAccessToken());
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ status: "OK" });
+  expect((await verify(response.headers.get("st-access-token")!)).getUserId()).toBe(source.getUserId());
+  expect(await Session.getSessionInformation(browser.getHandle())).toBeDefined();
+});
+
+it("leaves a mismatched cookie session and link intact until the browser confirms a switch", async () => {
+  const source = await seed();
+  const browser = await seed();
+  const { token, handle } = await mint(source);
+  const submit = (extra: { confirmSwitch?: boolean } = {}) => fetch(`${baseUrl}${route}`, {
+    method: "POST",
+    headers: {
+      ...headerMode, "st-auth-mode": "cookie", "content-type": "application/json",
+      cookie: `sAccessToken=${browser.getAccessToken()}`,
+    },
+    body: JSON.stringify({ token, ...destination, ...extra }),
+  });
+  await expectConfirmation(await submit());
+  expect(await Session.getSessionInformation(handle)).toBeDefined();
+  expect(await verify(browser.getAccessToken())).toBeDefined();
+  expect(events).toContainEqual(expect.objectContaining({ handoffEvent: "confirmation_required", outcome: "success" }));
+
+  const confirmed = await submit({ confirmSwitch: true });
+  expect(confirmed.status).toBe(200);
+  expect(await confirmed.json()).toEqual({ status: "OK", redirectToPath: "/profile" });
+  const accessTokenCookie = confirmed.headers.getSetCookie().find((cookie) => cookie.startsWith("sAccessToken="));
+  const accessToken = accessTokenCookie?.split(";")[0]?.slice("sAccessToken=".length);
+  expect((await verify(accessToken!)).getUserId()).toBe(source.getUserId());
+  expect(await Session.getSessionInformation(browser.getHandle())).toBeUndefined();
+  expect(await verify(source.getAccessToken())).toBeDefined();
+  await expectRejected(await submit({ confirmSwitch: true }));
+});
+
+it("leaves the current browser session valid if a switch is cancelled and the link expires", async () => {
+  const browser = await seed();
+  const { token, handle } = await mint(await seed());
+  const before = await Session.getSessionInformation(handle);
+  await expectConfirmation(await consume(token, { confirmSwitch: false }, browser.getAccessToken()));
+  const prompted = await Session.getSessionInformation(handle);
+  expect(prompted?.sessionDataInDatabase).toEqual(before?.sessionDataInDatabase);
+
+  const now = vi.spyOn(Date, "now").mockReturnValue(before!.sessionDataInDatabase.expiresAt + 1);
+  try {
+    await expectRejected(await consume(token, { confirmSwitch: true }, browser.getAccessToken()));
+  } finally {
+    now.mockRestore();
+  }
+  expect(await verify(browser.getAccessToken())).toBeDefined();
+});
+
+it("returns the uniform 401 without probing the browser session for an invalid link or confirmation flag", async () => {
+  const browser = await seed();
+  const { token } = await mint(await seed());
+  const probe = vi.spyOn(Session, "getSession");
+  await expectRejected(await consume("invalid", {}, browser.getAccessToken()));
+  await expectRejected(await consume(token, { confirmSwitch: "true" }, browser.getAccessToken()));
+  expect(probe).not.toHaveBeenCalled();
+  expect(await verify(browser.getAccessToken())).toBeDefined();
+});
+
+it("requires a browser session refresh if the SDK cannot identify the account", async () => {
+  const browser = await seed();
+  const { token, handle } = await mint(await seed());
+  vi.spyOn(Session, "getSession").mockImplementationOnce(async (_req, res) => {
+    res.setHeader("front-token", "discarded", false);
+    throw new Session.Error({ type: Session.Error.TRY_REFRESH_TOKEN, message: "Access token expired" });
+  });
+  await expectConfirmation(await consume(token, { confirmSwitch: true }, browser.getAccessToken()));
+  expect(await Session.getSessionInformation(handle)).toBeDefined();
+  await expectConfirmation(await consume(token, {}, browser.getAccessToken()));
+  expect((await consume(token, { confirmSwitch: true }, browser.getAccessToken())).status).toBe(200);
+});
+
+it("ignores a revoked browser session", async () => {
+  const browser = await seed();
+  const { token } = await mint(await seed());
+  await browser.revokeSession();
+  const response = await consume(token, {}, browser.getAccessToken());
+  expect(await response.json()).toMatchObject({ status: "OK" });
 });
 
 it("publishes cookies when the browser requests cookie mode", async () => {
@@ -202,18 +295,41 @@ it("publishes cookies when the browser requests cookie mode", async () => {
 });
 
 it("preserves the SDK identity of a user with a Rownd ID mapping", async () => {
-  const { user } = await socialUser();
+  const { user, recipeUserId } = await socialUser();
+  const browser = await Session.createNewSessionWithoutRequestResponse("public", recipeUserId);
   const alias = `rownd-${randomUUID()}`;
   expect(await SuperTokens.createUserIdMapping({
     superTokensUserId: user.id, externalUserId: alias, force: true,
   })).toMatchObject({ status: "OK" });
   const source = await Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(alias));
   const { token } = await mint(await verify(source.getAccessToken()));
-  const response = await consume(token);
+  const response = await consume(token, {}, browser.getAccessToken());
   expect(response.status).toBe(200);
   const web = await verify(response.headers.get("st-access-token")!);
   expect(web.getUserId()).toBe(alias);
   expect(web.getRecipeUserId().getAsString()).toBe(alias);
+});
+
+it("keeps the previous real sign-in time and method when a handoff becomes the latest activity", async () => {
+  const source = await seed();
+  const profile = (session: SessionContainerInterface) => fetch(`${baseUrl}${userRoute}?include_activity=true`, {
+    headers: { ...headerMode, authorization: `Bearer ${session.getAccessToken()}` },
+  });
+  const before = await (await profile(source)).json();
+  const { token } = await mint(source);
+  const response = await consume(token);
+  const web = await verify(response.headers.get("st-access-token")!);
+  expect(await Session.getAllSessionHandlesForUser(source.getUserId())).toEqual(
+    expect.arrayContaining([source.getHandle(), web.getHandle()]),
+  );
+  expect(Date.parse(before.meta.last_sign_in)).toBeLessThan(await web.getTimeCreated());
+  expect(await (await profile(web)).json()).toMatchObject({
+    meta: {
+      last_sign_in: before.meta.last_sign_in,
+      last_sign_in_method: before.meta.last_sign_in_method,
+      last_active: new Date(await web.getTimeCreated()).toISOString(),
+    },
+  });
 });
 
 it("allows exactly one concurrent consumer", async () => {
