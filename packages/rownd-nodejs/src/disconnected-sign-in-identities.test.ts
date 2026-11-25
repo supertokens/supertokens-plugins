@@ -79,6 +79,10 @@ describe("owner-scoped disconnected sign-in policy", () => {
         (accountInfo.email ? method.email === accountInfo.email : accountInfo.thirdParty ?
           method.thirdParty?.id === accountInfo.thirdParty.id && method.thirdParty.userId === accountInfo.thirdParty.userId : false))));
     vi.spyOn(UserMetadata, "getUserMetadata").mockImplementation(async (id) => ({ status: "OK", metadata: structuredClone(records.get(id) ?? {}) }));
+    vi.spyOn(UserMetadata, "clearUserMetadata").mockImplementation(async (id) => {
+      records.delete(id);
+      return { status: "OK" };
+    });
     vi.spyOn(UserMetadata, "updateUserMetadata").mockImplementation(async (id, update) => {
       const metadata = { ...records.get(id), ...structuredClone(update) };
       for (const [key, value] of Object.entries(metadata)) if (value === null) delete metadata[key];
