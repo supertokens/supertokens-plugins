@@ -609,6 +609,10 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       return { status: "OK" as const };
     } catch (error) {
       await republish?.();
+      if (error instanceof DisconnectedSignInMethodError) {
+        telemetry.emit("terminal", "disconnect_policy_denied", "error", error);
+        return { status: "ERROR" as const, error_code: error.code, message: error.message };
+      }
       if (error instanceof RowndLegacyUserNotFoundError) {
         telemetry.emit("terminal", "rownd_user_not_found", "error", error);
         return { status: "ERROR" as const, code: error.code, message: error.message };

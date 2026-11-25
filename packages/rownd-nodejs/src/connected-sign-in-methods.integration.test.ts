@@ -14,8 +14,10 @@ import { getUserContext } from "supertokens-node/lib/build/utils";
 import Multitenancy from "supertokens-node/recipe/multitenancy";
 import { init } from "./plugin";
 import { getPluginConfig } from "./config";
-import { assertSignInIdentityNotIndexed, getDisconnectedSignInMethods, isDisconnectedSignInMethodMetadataKey } from "./disconnected-sign-in-identities";
+import { assertSignInIdentityNotIndexed, getDisconnectedSignInMethods, inspectSignInMethodPolicy,
+  isDisconnectedSignInMethodMetadataKey, repairSignInMethodPolicy } from "./disconnected-sign-in-identities";
 import { republishAfterMigration } from "./canonical-republish";
+import { setRowndTokenValidator } from "./rownd-repository";
 import { configureConnectedSignInMethodsTestLicense, startConnectedSignInMethodsCore } from "./connected-sign-in-methods-core.test-fixture";
 
 describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
@@ -37,8 +39,8 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
       appInfo: { appName: "Connected methods", apiDomain: "http://localhost:3001", websiteDomain: "http://localhost:3000" },
       recipeList: [AccountLinking.init({ shouldDoAutomaticAccountLinking: async () => ({ shouldAutomaticallyLink: false }) }),
         Session.init(), UserMetadata.init(), UserRoles.init(), EmailVerification.init({ mode: "OPTIONAL" }),
-        Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" }), ThirdParty.init({ signInAndUpFeature: { providers: [{
-          config: { thirdPartyId: "budget-sso", authorizationEndpoint: "https://provider.invalid/authorize",
+        Passwordless.init({ contactMethod: "EMAIL", flowType: "MAGIC_LINK" }), ThirdParty.init({ signInAndUpFeature: { providers: ["google", "budget-sso"].map((thirdPartyId) => ({
+          config: { thirdPartyId, thirdPartyImplementation: "custom", authorizationEndpoint: "https://provider.invalid/authorize",
             tokenEndpoint: "https://provider.invalid/token", userInfoEndpoint: "https://provider.invalid/user",
             clients: [{ clientId: "test", clientSecret: "test" }] },
           override: (original) => {
@@ -47,8 +49,8 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
               thirdPartyUserId: oAuthTokens.subject!, email: { id: oAuthTokens.email!, isVerified: true }, rawUserInfoFromProvider: {},
             }) };
           },
-        }] } })],
-      experimental: { plugins: [init({ disableRowndUserMigration: true, connectedSignInMethods: { enabled: true },
+        })) } })],
+      experimental: { plugins: [init({ rowndAppId: "connected-methods-test", connectedSignInMethods: { enabled: true },
         appConfig: { signInMethods: [{ method: "email" }, { method: "google" }] } })] },
     });
   }, 120000);
@@ -60,7 +62,8 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
   async function request(url: string, options: RequestInit = {}) {
     const parsed = new URL(url);
     const req = new PreParsedRequest({
-      url, method: options.method === "POST" ? "post" : "get", headers: new Headers(options.headers), cookies: {},
+      url, method: options.method === "POST" ? "post" : options.method === "DELETE" ? "delete" : "get",
+      headers: new Headers(options.headers), cookies: {},
       query: Object.fromEntries(parsed.searchParams),
       getJSONBody: async () => typeof options.body === "string" ? JSON.parse(options.body) : {},
       getFormBody: async () => ({}),
@@ -109,6 +112,120 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     return { rowndId, internalId, subject, oldEmail, email, ssoSession, passwordless };
   }
 
+  async function disconnect(f: Awaited<ReturnType<typeof fixture>>) {
+    const { token } = await emailSignIn(f.email);
+    const headers = { authorization: `Bearer ${token}`, "st-auth-mode": "header", "content-type": "application/json" };
+    const listed = await (await request(`${origin}/plugin/rownd/user/sign-in-methods`, { headers })).json();
+    const method = listed.methods.find((entry: { kind: string }) => entry.kind === "sso");
+    const response = await request(`${origin}/plugin/rownd/user/sign-in-methods/disconnect`, { method: "POST", headers,
+      body: JSON.stringify({ method_id: method.id, expected_user_id: f.rowndId, expected_tenant_id: "public" }) });
+    expect(await response.json()).toEqual({ status: "OK", signed_out: true });
+  }
+
+  async function googleSignIn(f: Awaited<ReturnType<typeof fixture>>, accessToken?: string) {
+    return request(`${origin}/signinup`, { method: "POST",
+      headers: { rid: "thirdparty", "content-type": "application/json", "fdi-version": "1.18", "st-auth-mode": "header",
+        ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}) },
+      body: JSON.stringify({ thirdPartyId: "google", oAuthTokens: { subject: f.subject, email: f.oldEmail },
+        ...(accessToken ? { shouldTryLinkingWithSessionUser: true } : {}) }),
+    });
+  }
+
+  it.each(["route", "sdk"] as const)("erases owner and index metadata on full-account deletion via %s, then allows new Google sign-up", async (path) => {
+    const f = await fixture();
+    await disconnect(f);
+    const before = await inspectSignInMethodPolicy({ userId: f.internalId });
+    expect(before.indexes).toHaveLength(1);
+    expect(before.indexes[0]?.ownerEntryKeys).toHaveLength(1);
+    const indexId = before.indexes[0]!.indexId;
+    if (path === "route") {
+      const { token } = await emailSignIn(f.email);
+      const deleted = await request(`${origin}/plugin/rownd/user`, { method: "DELETE",
+        headers: { authorization: `Bearer ${token}`, "st-auth-mode": "header" },
+      });
+      expect(deleted.status).toBe(200);
+      expect(await deleted.json()).toEqual({ status: "OK" });
+    } else {
+      await expect(SuperTokens.deleteUser(f.rowndId, true)).resolves.toEqual({ status: "OK" });
+    }
+    expect(await SuperTokens.getUser(f.internalId)).toBeUndefined();
+    expect((await UserMetadata.getUserMetadata(f.internalId)).metadata).toEqual({});
+    expect((await UserMetadata.getUserMetadata(indexId)).metadata).toEqual({});
+    const fresh = await googleSignIn(f);
+    expect(await fresh.json()).toMatchObject({ status: "OK", createdNewRecipeUser: true });
+    const session = await Session.getSessionWithoutRequestResponse(fresh.headers.get("st-access-token")!);
+    expect(session.getUserId()).not.toBe(f.rowndId);
+  });
+
+  it("denies Add-method and migration with stable codes without replacing the retained session", async () => {
+    const f = await fixture();
+    await disconnect(f);
+    const retained = await emailSignIn(f.email);
+    const denied = await googleSignIn(f, retained.token);
+    expect(denied.status).toBe(200);
+    expect(await denied.json()).toEqual({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_DISCONNECTED" });
+    expect(denied.headers.get("st-access-token")).toBeNull();
+    expect(await Session.getSessionInformation(retained.session.getHandle())).toBeDefined();
+    setRowndTokenValidator(async () => ({ user_id: f.rowndId }));
+    try {
+      const migration = await request(`${origin}/plugin/rownd/migrate`, { method: "POST",
+        headers: { authorization: "Bearer test-rownd-token" },
+      });
+      expect(migration.status).toBe(400);
+      expect(await migration.json()).toEqual({ status: "ERROR", error_code: "DISCONNECT_RESTORATION_BLOCKED",
+        message: "Migration and reconciliation are unavailable for accounts with disconnected sign-in methods" });
+      expect(migration.headers.get("st-access-token")).toBeNull();
+    } finally {
+      setRowndTokenValidator(undefined);
+    }
+  });
+
+  it("fails closed on an owner lookup outage, but lets operators erase only a confirmed deleted owner", async () => {
+    const f = await fixture();
+    await disconnect(f);
+    const input = { userId: f.internalId, remove: ["deleted-owner" as const] };
+    const live = await inspectSignInMethodPolicy(input);
+    expect(live.ownerAbsent).toBe(false);
+    await expect(repairSignInMethodPolicy({ ...input, dryRun: false })).rejects.toMatchObject({ code: "DISCONNECT_OWNER_CHANGED" });
+    const transport = await import("supertokens-node/lib/build/querier");
+    const doFetch = transport.doFetch;
+    const outage = vi.spyOn(transport, "doFetch").mockImplementation(async (url, options) => {
+      const parsed = new URL(String(url));
+      if (parsed.pathname === "/user/id" && parsed.searchParams.get("userId") === f.internalId) {
+        throw new Error("Injected owner lookup outage");
+      }
+      return doFetch(url, options);
+    });
+    const writes = vi.spyOn(UserMetadata, "updateUserMetadata");
+    try {
+      const response = await googleSignIn(f);
+      expect(await response.json()).toEqual({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_DISCONNECTED" });
+      expect(response.headers.get("st-access-token")).toBeNull();
+      expect(writes).not.toHaveBeenCalled();
+    } finally {
+      outage.mockRestore();
+      writes.mockRestore();
+    }
+    // Simulate a deletion outside the Node plugin using the existing Core fixture.
+    const deleted = await fetch(`${coreFixture!.connectionURI}/user/remove`, { method: "POST",
+      headers: { "content-type": "application/json", "cdi-version": "5.1" },
+      body: JSON.stringify({ userId: f.rowndId, removeAllLinkedAccounts: true }),
+    });
+    expect(await deleted.json()).toMatchObject({ status: "OK" });
+    const indexId = live.indexes[0]!.indexId;
+    expect((await inspectSignInMethodPolicy({ ...input, indexId })).ownerAbsent).toBe(true);
+    const indexBefore = (await UserMetadata.getUserMetadata(indexId)).metadata;
+    expect(Object.keys(indexBefore)).toHaveLength(1);
+    const fresh = await googleSignIn(f);
+    expect(await fresh.json()).toMatchObject({ status: "OK", createdNewRecipeUser: true });
+    expect((await UserMetadata.getUserMetadata(indexId)).metadata).toEqual(indexBefore);
+    await expect(repairSignInMethodPolicy({ ...input, indexId, dryRun: true })).resolves.toMatchObject({ indexIds: [indexId] });
+    expect((await UserMetadata.getUserMetadata(indexId)).metadata).toEqual(indexBefore);
+    await expect(repairSignInMethodPolicy({ ...input, indexId, dryRun: false })).resolves.toMatchObject({ indexIds: [indexId] });
+    expect((await UserMetadata.getUserMetadata(indexId)).metadata).toEqual({});
+    expect((await UserMetadata.getUserMetadata(f.internalId)).metadata).toEqual({});
+  });
+
   it("removes a mapped PRIMARY SSO anchor without changing the surviving account or canonical email", async () => {
     const f = await fixture();
     const role = `role-${randomUUID()}`;
@@ -137,7 +254,7 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     const after = (await UserMetadata.getUserMetadata(f.internalId)).metadata;
     for (const [key, value] of Object.entries(before)) expect(after[key]).toEqual(value);
     expect(await UserRoles.getRolesForUser("public", f.rowndId)).toMatchObject({ status: "OK", roles: [role] });
-    expect(await getDisconnectedSignInMethods(f.internalId)).toMatchObject([{ providerId: "google", providerUserId: f.subject, completed: true }]);
+    expect(await getDisconnectedSignInMethods(f.internalId)).toMatchObject([{ providerId: "google", completed: true }]);
     expect(await Session.getAllSessionHandlesForUser(f.internalId, true)).toEqual([]);
     for (const [index, old] of [f.ssoSession, signedIn.session, otherSession].entries()) {
       expect(await Session.getSessionInformation(old.getHandle()) === undefined, `session ${index} was revoked`).toBe(true);
@@ -282,7 +399,7 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     });
     const retried = await request(`${origin}/plugin/rownd/user/sign-in-methods/disconnect`, { method: "POST", headers: retryHeaders, body });
     expect(await retried.json()).toEqual({ status: "OK", signed_out: true });
-    expect(await getDisconnectedSignInMethods(f.internalId)).toMatchObject([{ providerId: "google", providerUserId: f.subject, completed: true }]);
+    expect(await getDisconnectedSignInMethods(f.internalId)).toMatchObject([{ providerId: "google", completed: true }]);
     const retained = await emailSignIn(f.email);
     const retainedHeaders = { ...headers, authorization: `Bearer ${retained.token}` };
     const completed = await (await request(`${origin}/plugin/rownd/user/sign-in-methods`, { headers: retainedHeaders })).json() as any;
@@ -313,7 +430,19 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     try {
       const appConfig = await (await request(`${origin}/plugin/rownd/app-config`)).json() as any;
       expect(appConfig).not.toHaveProperty("plugin_capabilities");
-      await expect(Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(f.rowndId))).rejects.toBeDefined();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        for (const id of [f.rowndId, f.internalId]) {
+          await expect(Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(id)))
+            .rejects.toMatchObject({ type: Session.Error.UNAUTHORISED, message: "SIGN_IN_METHOD_DISCONNECTED" });
+        }
+        expect(warn.mock.calls.filter(([message]) => String(message).includes('"code":"SIGN_IN_METHOD_DISCONNECTED"'))).toHaveLength(2);
+        expect(error).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+        error.mockRestore();
+      }
       const suppressed = await ThirdPartyRecipe.getInstanceOrThrowError().recipeInterfaceImpl.signInUp({
         thirdPartyId: "google", thirdPartyUserId: f.subject, email: f.oldEmail, isVerified: false,
         tenantId: "public", session: undefined, shouldTryLinkingWithSessionUser: undefined,

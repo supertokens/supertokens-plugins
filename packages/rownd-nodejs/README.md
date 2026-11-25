@@ -6,7 +6,10 @@ This plugin facilitates the migration of users and sessions from Rownd to SuperT
 
 ### Rollout and rollback
 
-1. Deploy this plugin version to **every backend instance** with management disabled (the default).
+The current npm release is `2.1.0`. The pending minor changeset releases this
+feature in `2.2.0`.
+
+1. Deploy the feature release to **every backend instance** with management disabled (the default).
 2. Deploy the compatible Hub. It uses the capability below and does not call endpoints on older plugins.
 3. Enable `connectedSignInMethods: { enabled: true }`, optionally per tenant through `resolveConfig`.
 
@@ -21,13 +24,6 @@ enforces both records is deployed. Use `rownd_disconnect_completed`
 and `rownd_disconnect_step_failed` (tenant, provider, hashed owner ID) to scope an
 incident: Core UserMetadata cannot enumerate all affected owners. Do not clear
 policy or index records during rollback.
-
-This rollout assumes no disconnects were completed on the prerelease that wrote
-owner policy but not the index. If that prerelease was enabled, audit its affected
-accounts before rollout and escalate completed records to engineering for index
-backfill while affected SSO traffic is paused. Without an index, a deleted
-provider subject cannot be located from owner policy alone at SSO sign-in.
-Incomplete disconnects can be retried to rebuild their indexes.
 
 ### API and enforcement
 
@@ -66,7 +62,8 @@ create this receipt.
 Management errors include `{ status: "ERROR", code, error_code, message, reauthentication? }`:
 404 for unavailable management, 403 for missing proof, and 409 for ownership,
 eligibility, policy or incomplete cleanup. A disconnected subject signing in
-with SSO in its original tenant gets exactly
+with SSO in its original tenant, including a signed-in user trying to add it,
+gets HTTP 200 with exactly
 `{ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_DISCONNECTED" }`.
 A sign-in racing the removal can leave a standalone recipe user, but the
 denied attempt does not issue a session. See the cleanup procedure below.
@@ -76,14 +73,32 @@ Neither is rolled back. After interrupted cleanup, sign in with the retained ema
 and retry the pending row. This also rebuilds the index if Core committed intent
 but the index write failed. Completion hides the row but does not lift suppression.
 The primary ID, Rownd mapping, canonical email, profile, tenant roles and backend
-TOTP are preserved. Undo is not supported. Accounts with policy cannot be migrated
-from Rownd or reconciled; use the native retained-email sign-in.
+TOTP are preserved. **A disconnect is permanent for that identity on the account.**
+The user cannot re-add it, and support cannot undo it on a live account. Once the
+whole account is deleted, the identity can sign up again as a new account.
+Accounts with policy cannot be migrated from Rownd or reconciled; use the native
+retained-email sign-in. A policy-blocked `/plugin/rownd/migrate` or
+`/plugin/migrate-session` returns HTTP 400 with `status: "ERROR"`,
+`error_code: "DISCONNECT_RESTORATION_BLOCKED"` and a human-readable `message`.
+
+Custom session issuance must use a **live recipe user ID**. When a disconnected
+SSO recipe was the primary anchor, the account's internal primary ID and mapped
+Rownd ID still identify the account but not a live credential. Passing that
+anchor to session creation returns `UNAUTHORISED` with message
+`SIGN_IN_METHOD_DISCONNECTED` (warn level). Use the retained Passwordless
+recipe's ID; the plugin does not silently change which factor a session represents.
 
 Enforcement stays on at sign-in, session issuance and refresh, linking and tenant
 association, regardless of the management flag. The plugin adds **no policy lookup
 to `getSession`**. A previously issued access token can still pass stateless
 verification until expiry (by default one hour). For immediate revocation checks
 on sensitive application endpoints, use `checkDatabase: true` with SuperTokens.
+For an ordinary account, refresh adds one external-ID mapping GET and one owner
+metadata GET. A confirmed disconnected credential is revoked on refresh; an
+ownership or policy error clears client credentials without revoking the Core
+session. The only auth-path write added by this feature is the receipt in session
+data after eligible Passwordless email sign-in with management enabled. Policy
+and index checks themselves are read-only.
 This applies in all metadata modes. Dual-write republishing copies profile
 presentation only: disconnect records stay on the internal owner and the subject
 index stays at its separate key. Keep both when switching to canonical mode.
@@ -101,15 +116,30 @@ index stays at its separate key. Keep both when switching to canonical mode.
    writers (Core metadata does not support compare-and-swap), preview
    `repairSignInMethodPolicy({ userId, remove: ["fences", "invalid"], dryRun: true })`,
    review the exact keys, and repeat with `dryRun: false`. Re-inspect before
-   resuming traffic. Repair does not change the graph, index, valid intents or
-   completions, or records of unknown versions. Escalate ambiguous ownership,
-   orphaned completions, unknown formats, and live completed identities.
+   resuming traffic. For a live account, repair does not change the graph, index,
+   valid intents or completions, or records of unknown versions. It cannot undo a
+   disconnect. Escalate ambiguous ownership, orphaned completions, unknown formats,
+   and live completed identities.
 4. If a racing SSO sign-in left a standalone recipe, pause affected writes and
-   look up the exact tenant, provider and subject from `inspectSignInMethodPolicy`.
-   In Core, verify the result is a single, unlinked recipe with no active
+   match the `recipeUserId` or identity hash from `inspectSignInMethodPolicy`
+   against trusted Core records. In Core, verify the result is a single, unlinked recipe with no active
    sessions. Check the application for associated customer data. Delete only
    the verified orphan recipe, not the mapped
    owner or its policy/index. Escalate if ownership or provenance is unclear.
+5. The plugin's `DELETE /plugin/rownd/user` and full-account SDK `deleteUser`
+   erase the owner's index entries and leftover metadata. Recipe-only deletion
+   used to disconnect a method does not erase policy. Core-direct deletions
+   bypass cleanup; sign-in treats entries as lapsed only after a fresh owner
+   absence check succeeds. Mapping conflicts and lookup errors fail closed.
+   For erasure after Core-direct deletion or a failed cleanup, use the **original
+   internal owner ID**: preview `repairSignInMethodPolicy({ userId, remove:
+   ["deleted-owner"], dryRun: true })`, review the metadata keys and index IDs,
+   then apply with `dryRun: false`. This removes leftover literal owner metadata
+   and only the index entries belonging to that deleted owner. If the metadata
+   was already removed, pass the `indexId` (`rownd_dsi:<hash>`) from prior
+   inspection to both calls. Pause writers while running repair, and record the
+   IDs before Core-direct deletion: Core has no metadata enumeration. New
+   disconnect policy stores hashes, not raw provider subjects.
 
 Policy denials from SDK linking and association calls are also SuperTokens
 `BAD_INPUT_ERROR`s. Use the SuperTokens error handler for app-defined routes, or

@@ -8,6 +8,7 @@ import { buildRowndSessionClaimPayload } from "./rownd-compatibility";
 import {
   checkSignInMethodAuthentication,
   assertSignInIdentityNotIndexed,
+  assertIdentityAllowedByOwner,
   assertSignInMethodLinkAllowed,
   assertSignInMethodTenantAssociationAllowed,
   readPolicyGate,
@@ -18,6 +19,7 @@ vi.mock("./disconnected-sign-in-identities", () => ({
   assertNoDisconnectedSignInMethods: vi.fn(),
   checkSignInMethodAuthentication: vi.fn(),
   assertSignInIdentityNotIndexed: vi.fn(),
+  assertIdentityAllowedByOwner: vi.fn(),
   assertSignInMethodLinkAllowed: vi.fn(),
   assertSignInMethodTenantAssociationAllowed: vi.fn(),
   readPolicyGate: vi.fn(),
@@ -99,6 +101,7 @@ describe("durable policy recipe seams", () => {
 
   it("denies automatic linking before the application's permissive fallback", async () => {
     vi.mocked(readPolicyGate).mockResolvedValueOnce({ ...gate, policy: { identities: [identity] } } as any);
+    vi.mocked(assertIdentityAllowedByOwner).mockImplementationOnce(() => { throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED"); });
     const fallback = vi.fn(async () => ({ shouldAutomaticallyLink: true }));
     const config = overrides.accountlinking.config({ shouldDoAutomaticAccountLinking: fallback });
     expect(await config.shouldDoAutomaticAccountLinking({ recipeId: "thirdparty", thirdParty: { id: "google", userId: "subject" } },
@@ -108,6 +111,7 @@ describe("durable policy recipe seams", () => {
 
   it("rejects native SSO authentication even when the SDK would reuse a retained-email session", async () => {
     vi.mocked(readPolicyGate).mockResolvedValueOnce({ ...gate, policy: { identities: [identity] } } as any);
+    vi.mocked(assertIdentityAllowedByOwner).mockImplementationOnce(() => { throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED"); });
     const original = { signInUp: vi.fn() };
     expect(await overrides.thirdparty.functions(original).signInUp({ thirdPartyId: "google", thirdPartyUserId: "subject", session,
       tenantId: "public", userContext: {} })).toMatchObject({ status: "SIGN_IN_UP_NOT_ALLOWED" });

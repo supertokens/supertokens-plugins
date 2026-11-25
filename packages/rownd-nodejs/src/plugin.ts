@@ -44,6 +44,9 @@ import {
 import { RowndEmailChangeError, RowndPasswordlessCleanupError, RowndSignInMethodError } from "./errors";
 import {
   assertSignInIdentityNotIndexed,
+  assertIdentityAllowedByOwner,
+  assertNotRetiredPrimaryRecipe,
+  deleteUserAndSignInMethodPolicy,
   assertSignInMethodLinkAllowed,
   assertSignInMethodTenantAssociationAllowed,
   checkSignInMethodAuthentication,
@@ -1277,10 +1280,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     await assertSignInIdentityNotIndexed(identity, input.userContext);
                     if (ownerId) {
                       const { policy } = await readPolicyGate(ownerId, input.userContext, { scope: "signin" });
-                      if (policy?.identities.some((entry) => entry.tenantId === identity.tenantId &&
-                        entry.providerId === identity.providerId && entry.providerUserId === identity.providerUserId)) {
-                        throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED");
-                      }
+                      if (policy) assertIdentityAllowedByOwner(identity, policy.identities, ownerId);
                     }
                   }
                   const result = await originalImplementation.signInUp(input);
@@ -1341,10 +1341,22 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const buffered = bufferAuthenticationResponse(input.options.res);
                 let response;
                 try {
+                  let provider = withAppleJwksRetry(input.provider);
+                  if (input.session && input.shouldTryLinkingWithSessionUser !== false && provider.type === "oauth2") {
+                    const oauthProvider = provider;
+                    provider = { ...oauthProvider, getUserInfo: async (providerInput: Parameters<typeof oauthProvider.getUserInfo>[0]) => {
+                      const userInfo = await oauthProvider.getUserInfo(providerInput);
+                      // SDK linking preflight can otherwise replace the policy denial
+                      // with a generic link or verification error.
+                      await assertSignInIdentityNotIndexed({ tenantId: input.tenantId,
+                        providerId: oauthProvider.id, providerUserId: userInfo.thirdPartyUserId }, operationContext);
+                      return userInfo;
+                    } };
+                  }
                   response = await originalImplementation.signInUpPOST({
                     ...input,
                     // Retry verification only: an OAuth authorization code may already be consumed.
-                    provider: withAppleJwksRetry(input.provider),
+                    provider,
                     userContext: operationContext,
                   });
                   if (response.status === "OK") {
@@ -1395,6 +1407,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
             recipeInitRequired: true,
             functions: (originalImplementation) => ({
               ...originalImplementation,
+              deleteUser: (input) => deleteUserAndSignInMethodPolicy(input, (request) => originalImplementation.deleteUser(request)),
               linkAccounts: async (input) => {
                 try {
                   await assertSignInMethodLinkAllowed(input.primaryUserId, input.recipeUserId, input.userContext);
@@ -1432,13 +1445,13 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     if (ownerId) {
                       try {
                         const { policy } = await readPolicyGate(ownerId, input[4], { scope: "signin", user: input[1] });
-                        if (policy?.identities.some((entry) => entry.tenantId === input[3] &&
-                          entry.providerId === candidate.id && entry.providerUserId === candidate.userId)) {
-                          logPolicyDenial(new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED"), "automatic_link", ownerId);
-                          return { shouldAutomaticallyLink: false, shouldRequireVerification: false };
-                        }
+                        if (policy) assertIdentityAllowedByOwner({ tenantId: input[3], providerId: candidate.id,
+                          providerUserId: candidate.userId }, policy.identities, ownerId);
                       } catch (error) {
                         if (error instanceof DisconnectedSignInMethodError) logPolicyDenial(error, "automatic_link", ownerId);
+                        if (error instanceof DisconnectedSignInMethodError && error.code === "SIGN_IN_METHOD_DISCONNECTED") {
+                          return { shouldAutomaticallyLink: false, shouldRequireVerification: false };
+                        }
                         throw error;
                       }
                     }
@@ -1476,7 +1489,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 const initialGate = authentication?.gate?.reference === input.userId &&
                   authentication.actual?.recipeUserId === input.recipeUserId.getAsString() ? authentication.gate : undefined;
                 const check = async (userId: string, recipeId: typeof input.recipeUserId, tenantId: string,
-                  context: typeof input.userContext, previous = initialGate, reuse = false, freshContext = false) => {
+                  context: typeof input.userContext,
+                  { previous = initialGate, reuse = false, freshContext = false }: {
+                    previous?: typeof initialGate; reuse?: boolean; freshContext?: boolean;
+                  } = {}) => {
                   try {
                     const gate = reuse && previous ? previous : (await checkSignInMethodAuthentication(userId, recipeId,
                       tenantId, context, { scope: "signin", previous, freshContext })).gate;
@@ -1486,12 +1502,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     return gate;
                   } catch (error) {
                     if (!(error instanceof DisconnectedSignInMethodError)) throw error;
-                    if (authentication || Reflect.has(context, passwordlessHistoryOwner)) throw error;
+                    if (authentication || input.userContext.rowndMigrationRequestId || Reflect.has(context, passwordlessHistoryOwner)) throw error;
                     logPolicyDenial(error, "create_session", userId);
                     throw unauthorizedPolicy(error);
                   }
                 };
-                const gate = await check(input.userId, input.recipeUserId, input.tenantId, input.userContext, initialGate, true);
+                const gate = await check(input.userId, input.recipeUserId, input.tenantId, input.userContext, { reuse: true });
                 const resolved = await resolvePluginConfigSnapshot(
                   pluginConfig,
                   {
@@ -1541,11 +1557,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   if (passwordlessIssuance && gate.reference === userId) {
                     passwordlessIssuance.pending = {
                       session,
-                      confirm: () => check(userId, recipeId, tenantId, resolved.userContext, gate, false, true),
+                      confirm: () => check(userId, recipeId, tenantId, resolved.userContext, { previous: gate, freshContext: true }),
                     };
                   } else if (!checkedAtPublication) {
                     clearSuperTokensCoreCallCache(resolved.userContext);
-                    await check(userId, recipeId, tenantId, resolved.userContext, gate, false, true);
+                    await check(userId, recipeId, tenantId, resolved.userContext, { previous: gate, freshContext: true });
                   }
                 } catch (error) {
                   await Promise.allSettled([session.revokeSession(resolved.userContext)]);
@@ -1597,6 +1613,24 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
 
               return {
                 ...config,
+                getEmailForRecipeUserId: async (recipeUserId, userContext) => {
+                  const supplied = await config.getEmailForRecipeUserId?.(recipeUserId, userContext);
+                  if (supplied && supplied.status !== "UNKNOWN_USER_ID_ERROR") return supplied;
+                  const id = recipeUserId.getAsString();
+                  const user = await supertokens.getUser(id, userContext);
+                  // EmailVerification builds its claim before the SDK session hook.
+                  // Recognize the retired anchor without lending it another factor's email.
+                  if (user && !user.loginMethods.some((method) => method.recipeUserId.getAsString() === id)) {
+                    try {
+                      await assertNotRetiredPrimaryRecipe(id, user, userContext);
+                    } catch (error) {
+                      if (!(error instanceof DisconnectedSignInMethodError) || error.code !== "SIGN_IN_METHOD_DISCONNECTED") throw error;
+                      logPolicyDenial(error, "email_verification_recipe", user.id);
+                      throw unauthorizedPolicy(error);
+                    }
+                  }
+                  return { status: "UNKNOWN_USER_ID_ERROR" as const };
+                },
                 emailDelivery: {
                   ...config.emailDelivery,
                   override: (originalImplementation, builder) => {

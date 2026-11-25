@@ -14,6 +14,7 @@ import { reconcileUser } from "./reconcile-user";
 import {
   assertNoDisconnectedSignInMethodsAtInternalOwner,
   recordDisconnectedSignInMethod,
+  signInIdentityHash,
 } from "./disconnected-sign-in-identities";
 import { inspectSignInMethodPolicy, repairSignInMethodPolicy } from "./index";
 import { configureConnectedSignInMethodsTestLicense, startConnectedSignInMethodsCore } from "./connected-sign-in-methods-core.test-fixture";
@@ -269,7 +270,8 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
     }
     const inspected = await inspectSignInMethodPolicy({ userId: destination.ownerId, tenantId: "public" });
     const protectedRow = expect.objectContaining({ ownerId, reassociated: true,
-      intents: [expect.objectContaining(factor)] });
+      intents: [expect.objectContaining({ userId: ownerId, tenantId: "public", recipeUserId: factor.recipeUserId,
+        providerId: factor.providerId, identityHash: signInIdentityHash(factor) })] });
     expect(inspected.rows).toContainEqual(protectedRow);
     await expect(assertNoDisconnectedSignInMethodsAtInternalOwner(ownerId, {}, destination.ownerId))
       .rejects.toMatchObject({ code: "DISCONNECT_RESTORATION_BLOCKED" });

@@ -7,7 +7,8 @@ import type { SessionContainerInterface } from "supertokens-node/recipe/session/
 import { isEmailSignInEnabled } from "./config";
 import { isSyntheticEmail, resolveCanonicalEmailForTenant } from "./canonical-email";
 import { getPrimaryUserMetadata, type SuperTokensLoginMethod } from "./rownd-compatibility";
-import { completeDisconnectedSignInMethod, DisconnectedSignInMethodError, getDisconnectedSignInMethods, recordDisconnectedSignInMethod } from "./disconnected-sign-in-identities";
+import { completeDisconnectedSignInMethod, DisconnectedSignInMethodError, getDisconnectedSignInMethods,
+  recordDisconnectedSignInMethod, signInIdentityHash } from "./disconnected-sign-in-identities";
 import { assertRetainedPasswordlessAuthentication, assertRetainedPasswordlessAuthenticationFresh, immutableRecipeUserId, SIGN_IN_METHOD_AUTHENTICATION_MAX_AGE_MS } from "./session-authentication";
 import { logSignInMethodPolicy, signInMethodPolicyFailureLevel } from "./sign-in-method-policy-log";
 import { RowndSignInMethodError } from "./errors";
@@ -43,6 +44,10 @@ function methodId(owner: string, tenant: string, identity: string[]) {
 function isRealSSO(method: SuperTokensLoginMethod) {
   return method.recipeId === "thirdparty" && !!method.thirdParty &&
     !["guest", "instant"].includes(method.thirdParty.id);
+}
+
+function ssoIdentityHash(tenantId: string, provider: NonNullable<SuperTokensLoginMethod["thirdParty"]>) {
+  return signInIdentityHash({ tenantId, providerId: provider.id, providerUserId: provider.userId });
 }
 
 export function connectedSignInMethodsAreAvailable(config: RowndPluginNormalisedConfig) {
@@ -97,7 +102,7 @@ type State = Awaited<ReturnType<typeof readState>>;
 function blockReason(state: State, method: SuperTokensLoginMethod) {
   if (!isRealSSO(method)) return "SIGN_IN_METHOD_READ_ONLY";
   if (state.records.some((record) => record.tenantId === state.tenantId && record.providerId === method.thirdParty!.id &&
-    record.providerUserId === method.thirdParty!.userId && record.completed === true)) return "SIGN_IN_METHOD_ALREADY_DISCONNECTED";
+    record.identityHash === ssoIdentityHash(state.tenantId, method.thirdParty!) && record.completed === true)) return "SIGN_IN_METHOD_ALREADY_DISCONNECTED";
   if (!isPendingDisconnect(state, method) && (method.tenantIds.length !== 1 || method.tenantIds[0] !== state.tenantId)) {
     return "SIGN_IN_METHOD_MULTIPLE_TENANTS";
   }
@@ -112,12 +117,12 @@ function retainedFactorBlockReason(state: State) {
 
 function isPendingDisconnect(state: State, method: SuperTokensLoginMethod) {
   return isRealSSO(method) && method.tenantIds.length === 0 && state.records.some((record) => record.tenantId === state.tenantId &&
-    record.providerId === method.thirdParty!.id && record.providerUserId === method.thirdParty!.userId);
+    record.identityHash === ssoIdentityHash(state.tenantId, method.thirdParty!));
 }
 
 function idForMethod(state: State, method: SuperTokensLoginMethod, kind: ConnectedSignInMethod["kind"]) {
   return methodId(state.owner, state.tenantId, isRealSSO(method)
-    ? ["thirdparty", method.thirdParty!.id, method.thirdParty!.userId]
+    ? ["thirdparty", ssoIdentityHash(state.tenantId, method.thirdParty!)]
     : [method.recipeId, method.recipeUserId.getAsString(), kind]);
 }
 
@@ -148,7 +153,7 @@ export async function listConnectedSignInMethods(input: Input) {
       ...(reason ? { disconnect_block_reason: reason } : {}) };
     if (isRealSSO(method)) {
       const pending = state.records.some((record) => record.tenantId === state.tenantId && !record.completed &&
-        record.providerId === method.thirdParty!.id && record.providerUserId === method.thirdParty!.userId);
+        record.identityHash === ssoIdentityHash(state.tenantId, method.thirdParty!));
       return [{ ...base, verified: pending || method.verified, id: idForMethod(state, method, "sso"), kind: "sso", provider: method.thirdParty!.id,
         ...(pending ? { pending_disconnect: true } : {}),
         ...(method.email && !isSyntheticEmail(method.email) ? { identifier: method.email } : {}) }];
@@ -164,10 +169,10 @@ export async function listConnectedSignInMethods(input: Input) {
   });
   for (const record of state.records) {
     if (record.tenantId !== state.tenantId || record.completed === true) continue;
-    const id = methodId(state.owner, state.tenantId, ["thirdparty", record.providerId, record.providerUserId]);
+    const id = methodId(state.owner, state.tenantId, ["thirdparty", record.identityHash]);
     if (methods.some((method) => method.id === id)) continue;
     const live = state.user.loginMethods.find((method) => isRealSSO(method) &&
-      method.thirdParty!.id === record.providerId && method.thirdParty!.userId === record.providerUserId);
+      ssoIdentityHash(state.tenantId, method.thirdParty!) === record.identityHash);
     const reason = (live ? blockReason(state, live) : retainedFactorBlockReason(state)) ?? reauthReason;
     // A deleted recipe can still owe revocation or final verification. Only
     // unfinished checkpoints become recovery rows; permanent suppression stays.
@@ -193,7 +198,7 @@ export async function disconnectConnectedSignInMethod(input: Input & { body: unk
       !!method.email && idForMethod(state, method, "email") === body.method_id ||
       !!method.phoneNumber && idForMethod(state, method, "phone") === body.method_id));
   const checkpoint = state.records.find((record) => record.tenantId === state.tenantId &&
-    methodId(state.owner, state.tenantId, ["thirdparty", record.providerId, record.providerUserId]) === body.method_id);
+    methodId(state.owner, state.tenantId, ["thirdparty", record.identityHash]) === body.method_id);
   if (!selected && !checkpoint) {
     throw new RowndSignInMethodError("SIGN_IN_METHOD_NOT_FOUND", 409, "This sign-in method does not belong to the current account.");
   }
@@ -214,7 +219,7 @@ export async function disconnectConnectedSignInMethod(input: Input & { body: unk
     userId: state.owner, tenantId: state.tenantId,
     recipeUserId: checkpoint?.recipeUserId ?? await immutableRecipeUserId(selected!.recipeUserId.getAsString(), userContext),
     providerId: checkpoint?.providerId ?? selected!.thirdParty!.id,
-    providerUserId: checkpoint?.providerUserId ?? selected!.thirdParty!.userId,
+    identityHash: checkpoint?.identityHash ?? ssoIdentityHash(state.tenantId, selected!.thirdParty!),
   };
   const verify = async () => {
     const fresh = await readState(input);
@@ -222,7 +227,7 @@ export async function disconnectConnectedSignInMethod(input: Input & { body: unk
       JSON.stringify(fresh.mapping) !== mappingSnapshot || fresh.retained?.recipeUserId !== retainedRecipe ||
       fresh.retained?.email !== retainedEmail || fresh.pendingEmail) conflict();
     const matching = fresh.user.loginMethods.filter((method) => isRealSSO(method) &&
-      method.thirdParty!.id === target.providerId && method.thirdParty!.userId === target.providerUserId);
+      ssoIdentityHash(state.tenantId, method.thirdParty!) === target.identityHash);
     if (matching.length > 1) conflict();
     const method = matching[0];
     if (method && (method.tenantIds.some((tenant) => tenant !== state.tenantId) ||

@@ -4,7 +4,7 @@ import Session from "supertokens-node/recipe/session";
 import Multitenancy from "supertokens-node/recipe/multitenancy";
 import { listConnectedSignInMethods, disconnectConnectedSignInMethod } from "./connected-sign-in-methods";
 import { getPrimaryUserMetadata } from "./rownd-compatibility";
-import { completeDisconnectedSignInMethod, getDisconnectedSignInMethods, recordDisconnectedSignInMethod } from "./disconnected-sign-in-identities";
+import { completeDisconnectedSignInMethod, getDisconnectedSignInMethods, recordDisconnectedSignInMethod, signInIdentityHash } from "./disconnected-sign-in-identities";
 import { assertRetainedPasswordlessAuthentication, assertRetainedPasswordlessAuthenticationFresh } from "./session-authentication";
 import { RowndSignInMethodError } from "./errors";
 
@@ -27,6 +27,7 @@ vi.mock("./session-authentication", () => ({ assertRetainedPasswordlessAuthentic
   immutableRecipeUserId: async (id: string) => id === "rownd" ? "owner" : id }));
 
 const recipe = (id: string) => ({ getAsString: () => id });
+const googleHash = signInIdentityHash({ tenantId: "public", providerId: "google", providerUserId: "subject" });
 let user: any;
 let metadata: any;
 let records: any[];
@@ -52,11 +53,11 @@ beforeEach(() => {
     email: "new@example.com", sessionHandle: "handle", authenticatedAt: Date.now(), sessionExpiresAt: Date.now() + 3600_000 }));
   vi.mocked(recordDisconnectedSignInMethod).mockImplementation(async (record, _context, beforeCommit) => {
     await beforeCommit?.();
-    const existing = records.find((entry) => entry.tenantId === record.tenantId && entry.providerId === record.providerId && entry.providerUserId === record.providerUserId);
+    const existing = records.find((entry) => "identityHash" in record && entry.identityHash === record.identityHash);
     if (!existing) records.push({ ...record, version: 1 });
   });
   vi.mocked(completeDisconnectedSignInMethod).mockImplementation(async (record) => {
-    const existing = records.find((entry) => entry.tenantId === record.tenantId && entry.providerId === record.providerId && entry.providerUserId === record.providerUserId);
+    const existing = records.find((entry) => "identityHash" in record && entry.identityHash === record.identityHash);
     if (!existing) throw new Error("Missing disconnect checkpoint");
     existing.completed = true;
   });
@@ -180,7 +181,7 @@ describe("connected sign-in method management", () => {
   it("checkpoints first, removes only the SSO recipe, then revokes every account session", async () => {
     expect(await disconnectConnectedSignInMethod({ ...input, body: await body() })).toEqual({ status: "OK", signed_out: true });
     expect(recordDisconnectedSignInMethod).toHaveBeenCalledWith({ userId: "owner", tenantId: "public", recipeUserId: "owner",
-      providerId: "google", providerUserId: "subject" }, {}, expect.any(Function));
+      providerId: "google", identityHash: googleHash }, {}, expect.any(Function));
     expect(vi.mocked(recordDisconnectedSignInMethod).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(Session.revokeAllSessionsForUser).mock.invocationCallOrder[0]!);
     expect(vi.mocked(Session.revokeAllSessionsForUser).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(SuperTokens.deleteUser).mock.invocationCallOrder[0]!);
     expect(Multitenancy.disassociateUserFromTenant).not.toHaveBeenCalled();
@@ -242,7 +243,7 @@ describe("connected sign-in method management", () => {
 
   it("resumes revocation when recipe deletion already committed", async () => {
     const request = await body();
-    records.push({ version: 1, userId: "owner", tenantId: "public", recipeUserId: "owner", providerId: "google", providerUserId: "subject" });
+    records.push({ version: 1, userId: "owner", tenantId: "public", recipeUserId: "owner", providerId: "google", identityHash: googleHash });
     user.loginMethods.shift();
     await expect(disconnectConnectedSignInMethod({ ...input, body: request })).resolves.toMatchObject({ signed_out: true });
     expect(SuperTokens.deleteUser).not.toHaveBeenCalled();
@@ -280,8 +281,9 @@ describe("connected sign-in method management", () => {
   it("does not expose pending recovery from another tenant or without an enabled retained factor", async () => {
     const request = await body();
     user.loginMethods.shift();
-    records.push({ version: 1, userId: "owner", tenantId: "public", recipeUserId: "owner", providerId: "google", providerUserId: "subject" });
-    records.push({ version: 1, userId: "owner", tenantId: "other", recipeUserId: "other", providerId: "apple", providerUserId: "other" });
+    records.push({ version: 1, userId: "owner", tenantId: "public", recipeUserId: "owner", providerId: "google", identityHash: googleHash });
+    records.push({ version: 1, userId: "owner", tenantId: "other", recipeUserId: "other", providerId: "apple",
+      identityHash: signInIdentityHash({ tenantId: "other", providerId: "apple", providerUserId: "other" }) });
     user.loginMethods[0].verified = false;
     const listed = await listConnectedSignInMethods(input);
     expect(listed.methods.filter((method) => method.kind === "sso")).toEqual([{
@@ -292,7 +294,7 @@ describe("connected sign-in method management", () => {
 
   it("does not reopen monotonic completion when Core shows a live suppressed recipe", async () => {
     const request = await body();
-    records.push({ version: 1, userId: "owner", tenantId: "public", recipeUserId: "owner", providerId: "google", providerUserId: "subject", completed: true });
+    records.push({ version: 1, userId: "owner", tenantId: "public", recipeUserId: "owner", providerId: "google", identityHash: googleHash, completed: true });
     expect((await listConnectedSignInMethods(input)).methods.find((method) => method.id === request.method_id)).toMatchObject({
       can_disconnect: false, disconnect_block_reason: "SIGN_IN_METHOD_ALREADY_DISCONNECTED",
     });

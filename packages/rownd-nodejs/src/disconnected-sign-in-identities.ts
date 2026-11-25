@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import SuperTokens from "supertokens-node";
 import SuperTokensError from "supertokens-node/lib/build/error";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
+import type { RecipeInterface as AccountLinkingRecipe } from "supertokens-node/recipe/accountlinking/types";
 import { reconciliationSuperTokens as ReconciliationCore, reconciliationUserMetadata as PolicyMetadata } from "./reconciliation-sdk";
 import { assertReconciliationWritesAllowed } from "./reconciliation-reads";
 import { clearSuperTokensCoreCallCache, isRecord } from "./utils";
@@ -20,7 +21,7 @@ export type DisconnectedSignInMethod = {
   tenantId: string;
   recipeUserId: string;
   providerId: string;
-  providerUserId: string;
+  identityHash: string;
   completed?: true;
 };
 
@@ -28,6 +29,8 @@ const prefix = "rownd_disconnected_sign_in_identity_";
 const conflictPrefix = `${prefix}owner_transition_conflict_`;
 const completionPrefix = `${prefix}completion_`;
 const indexField = "rownd_disconnected_sign_in_identity_index";
+const indexPrefix = "rownd_dsi:";
+const isHash = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 
 export class DisconnectedSignInMethodError extends SuperTokensError {
   constructor(
@@ -48,42 +51,64 @@ export function isDisconnectedSignInMethodMetadataKey(key: string) {
   return key.startsWith(prefix);
 }
 
-type Identity = Pick<DisconnectedSignInMethod, "tenantId" | "providerId" | "providerUserId">;
+type Identity = { tenantId: string; providerId: string; providerUserId: string };
+type DisconnectInput = Omit<DisconnectedSignInMethod, "version" | "completed" | "identityHash"> &
+  ({ providerUserId: string } | { identityHash: string });
 
-function checkpointKey(method: Identity) {
-  return prefix + createHash("sha256")
+export function signInIdentityHash(method: Identity) {
+  return createHash("sha256")
     .update(JSON.stringify([method.tenantId, method.providerId, method.providerUserId]))
     .digest("hex");
 }
 
-function completionKey(method: Pick<DisconnectedSignInMethod, "tenantId" | "providerId" | "providerUserId">) {
-  return completionPrefix + checkpointKey(method).slice(prefix.length);
+function checkpointKey({ identityHash }: Pick<DisconnectedSignInMethod, "identityHash">) {
+  return prefix + identityHash;
 }
 
-function identityIndexId(identity: Identity) {
-  return `rownd_dsi:${checkpointKey(identity).slice(prefix.length)}`;
+function completionKey({ identityHash }: Pick<DisconnectedSignInMethod, "identityHash">) {
+  return completionPrefix + identityHash;
+}
+
+function ownerIndexKey(ownerId: string) {
+  return `${indexField}:${createHash("sha256").update(ownerId).digest("hex")}`;
+}
+
+function readIndexEntries(metadata: Record<string, unknown>) {
+  return Object.entries(metadata ?? {}).filter(([key]) => key === indexField || key.startsWith(`${indexField}:`))
+    .map(([key, value]) => ({
+      key,
+      entry: isRecord(value) && value.version === 1 && nonempty(value.ownerId) &&
+        nonempty(value.tenantId) && realProvider(value.providerId) &&
+        (key === indexField || key === ownerIndexKey(value.ownerId))
+        ? { ownerId: value.ownerId, tenantId: value.tenantId, providerId: value.providerId } : undefined,
+    }));
 }
 
 export async function assertSignInIdentityNotIndexed(identity: Identity, userContext?: Context) {
   if (!realProvider(identity.providerId)) return;
-  const { metadata } = await UserMetadata.getUserMetadata(identityIndexId(identity), userContext);
-  if (!Object.prototype.hasOwnProperty.call(metadata ?? {}, indexField)) return;
-  const entry = metadata[indexField];
-  logSignInMethodPolicy("warn", "rownd_disconnect_index_denied", {
-    code: "SIGN_IN_METHOD_DISCONNECTED", step: "signin", tenantId: identity.tenantId,
-    providerId: identity.providerId, ownerId: isRecord(entry) && nonempty(entry.ownerId) ? entry.ownerId : undefined,
-  });
-  throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED",
-    isRecord(entry) && nonempty(entry.ownerId) ? entry.ownerId : undefined);
+  const { metadata } = await UserMetadata.getUserMetadata(indexPrefix + signInIdentityHash(identity), userContext);
+  for (const { entry } of readIndexEntries(metadata)) {
+    if (entry && entry.tenantId === identity.tenantId && entry.providerId === identity.providerId &&
+      await confirmedAbsentOwner(entry.ownerId, userContext).catch(() => false)) continue;
+    logSignInMethodPolicy("warn", "rownd_disconnect_index_denied", {
+      code: "SIGN_IN_METHOD_DISCONNECTED", step: "signin", tenantId: identity.tenantId,
+      providerId: identity.providerId, ownerId: entry?.ownerId,
+    });
+    throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED", entry?.ownerId);
+  }
 }
 
 async function writeIdentityIndex(method: DisconnectedSignInMethod, userContext?: Context) {
   const { userId: ownerId, tenantId, providerId } = method;
-  const id = identityIndexId(method);
+  const id = indexPrefix + method.identityHash;
+  const key = ownerIndexKey(ownerId);
   const { metadata } = await UserMetadata.getUserMetadata(id, uncachedContext(userContext));
-  if (Object.prototype.hasOwnProperty.call(metadata ?? {}, indexField)) return;
+  if (readIndexEntries(metadata).some(({ entry }) => entry?.ownerId === ownerId &&
+    entry.tenantId === tenantId && entry.providerId === providerId)) return;
+  // A new account can later disconnect the same subject. Its entry must not
+  // share a key with a deleted owner's cleanup, since Core has no compare-and-swap.
   const result = await PolicyMetadata.updateUserMetadata(id, {
-    [indexField]: { version: 1, ownerId, tenantId, providerId, at: Date.now() },
+    [key]: { version: 1, ownerId, tenantId, providerId, at: Date.now() },
   }, userContext);
   if (result.status !== "OK") throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
 }
@@ -116,6 +141,16 @@ async function mappingFor(id: string, userContext?: Context) {
     throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
   }
   return internal.status === "OK" ? internal : external.status === "OK" ? external : undefined;
+}
+
+async function confirmedAbsentOwner(ownerId: string, userContext?: Context) {
+  const context = uncachedContext(userContext);
+  // A live primary still resolves by its internal anchor after recipe-only deletion.
+  if (await SuperTokens.getUser(ownerId, context)) return false;
+  if (await mappingFor(ownerId, context)) return false;
+  const { metadata } = await UserMetadata.getUserMetadata(ownerId, context);
+  return [metadata?.rownd_migration_canonical_target, metadata?.rownd_migration_target]
+    .every((target) => target === undefined || target === ownerId);
 }
 
 type Owner = { id: string; user: User | undefined; mapping: Awaited<ReturnType<typeof mappingFor>> };
@@ -159,15 +194,22 @@ function inspectPolicyRow(userId: string, metadata: Record<string, unknown>) {
   const completions = new Map<string, DisconnectedSignInMethod>();
   const fences: Array<{ key: string; previousOwnerId: string }> = [];
   const invalid: Array<{ key: string; reason: string; removable: boolean }> = [];
-  const unknown: Array<{ key: string; identity?: Identity }> = [];
+  const unknown: Array<{ key: string; identity?: { tenantId: string; identityHash: string } }> = [];
   const malformed = (key: string, reason: string, removable = true) => invalid.push({ key, reason, removable });
   for (const [key, value] of Object.entries(metadata)) {
     if (!isDisconnectedSignInMethodMetadataKey(key)) continue;
     if (isRecord(value) && "version" in value && value.version !== 1) {
-      const identity = (value.userId === userId || value.userId === undefined) && nonempty(value.tenantId) &&
-        realProvider(value.providerId) && nonempty(value.providerUserId)
-        ? { tenantId: value.tenantId, providerId: value.providerId, providerUserId: value.providerUserId }
-        : undefined;
+      let identity: { tenantId: string; identityHash: string } | undefined;
+      if ((value.userId === userId || value.userId === undefined) && nonempty(value.tenantId) && realProvider(value.providerId)) {
+        if (nonempty(value.providerUserId)) {
+          identity = { tenantId: value.tenantId, identityHash: signInIdentityHash({
+            tenantId: value.tenantId, providerId: value.providerId, providerUserId: value.providerUserId,
+          }) };
+        } else if (isHash(value.identityHash) && (key === checkpointKey({ identityHash: value.identityHash }) ||
+          key === completionKey({ identityHash: value.identityHash }))) {
+          identity = { tenantId: value.tenantId, identityHash: value.identityHash };
+        }
+      }
       unknown.push({ key, identity });
       continue;
     }
@@ -182,12 +224,20 @@ function inspectPolicyRow(userId: string, metadata: Record<string, unknown>) {
     }
     if (!isRecord(value) || value.version !== 1 || value.userId !== userId ||
       !nonempty(value.tenantId) || !nonempty(value.recipeUserId) ||
-      !realProvider(value.providerId) || !nonempty(value.providerUserId)) {
+       !realProvider(value.providerId)) {
       malformed(key, "Invalid version 1 record fields");
       continue;
     }
+    const identityHash = isHash(value.identityHash) && !("providerUserId" in value) ? value.identityHash :
+      value.identityHash === undefined && nonempty(value.providerUserId) ? signInIdentityHash({
+        tenantId: value.tenantId, providerId: value.providerId, providerUserId: value.providerUserId,
+      }) : undefined;
+    if (!identityHash) {
+      malformed(key, "Invalid sign-in identity hash");
+      continue;
+    }
     const identity: DisconnectedSignInMethod = { version: 1, userId: value.userId, tenantId: value.tenantId,
-      recipeUserId: value.recipeUserId, providerId: value.providerId, providerUserId: value.providerUserId };
+      recipeUserId: value.recipeUserId, providerId: value.providerId, identityHash };
     if (key.startsWith(completionPrefix)) {
       if (key !== completionKey(identity) || value.completed !== true) {
         malformed(key, "Invalid completion key or marker");
@@ -206,7 +256,7 @@ function inspectPolicyRow(userId: string, metadata: Record<string, unknown>) {
     const intentKey = checkpointKey(completion);
     const intent = methods.get(intentKey);
     if (!intent || intent.userId !== completion.userId || intent.tenantId !== completion.tenantId ||
-      intent.providerId !== completion.providerId || intent.providerUserId !== completion.providerUserId ||
+      intent.providerId !== completion.providerId || intent.identityHash !== completion.identityHash ||
       intent.recipeUserId !== completion.recipeUserId) {
       if (!unknown.some((entry) => entry.key === intentKey)) {
         malformed(key, "Completion has no matching version 1 intent", false);
@@ -346,10 +396,18 @@ function assertPrimaryReference(owner: Owner, userId: string) {
   }
 }
 
-function assertMethodAllowed(method: User["loginMethods"][number], tenantId: string, policy: Identity[], ownerId: string) {
-  if (policy.some((entry) => entry.tenantId === tenantId && method.recipeId === "thirdparty" &&
-    entry.providerId === method.thirdParty?.id && entry.providerUserId === method.thirdParty.userId)) {
+type PolicyIdentities = ReadonlyArray<{ tenantId: string; identityHash: string }>;
+
+export function assertIdentityAllowedByOwner(identity: Identity, policy: PolicyIdentities, ownerId: string) {
+  const hash = signInIdentityHash(identity);
+  if (policy.some((entry) => entry.tenantId === identity.tenantId && entry.identityHash === hash)) {
     throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED", ownerId);
+  }
+}
+
+function assertMethodAllowed(method: User["loginMethods"][number], tenantId: string, policy: PolicyIdentities, ownerId: string) {
+  if (method.recipeId === "thirdparty" && method.thirdParty) {
+    assertIdentityAllowedByOwner({ tenantId, providerId: method.thirdParty.id, providerUserId: method.thirdParty.userId }, policy, ownerId);
   }
 }
 
@@ -367,12 +425,14 @@ export async function getDisconnectedSignInMethods(userId: string, userContext?:
 }
 
 export async function recordDisconnectedSignInMethod(
-  input: Omit<DisconnectedSignInMethod, "version" | "completed">,
+  input: DisconnectInput,
   userContext?: Context,
   beforeCommit?: () => Promise<void>,
 ): Promise<void> {
+  const identityHash = "identityHash" in input ? input.identityHash :
+    nonempty(input.providerUserId) ? signInIdentityHash(input) : undefined;
   if (!nonempty(input.userId) || !nonempty(input.tenantId) || !nonempty(input.recipeUserId) ||
-    !realProvider(input.providerId) || !nonempty(input.providerUserId)) {
+    !realProvider(input.providerId) || !isHash(identityHash)) {
     throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
   }
   fresh(userContext);
@@ -381,14 +441,15 @@ export async function recordDisconnectedSignInMethod(
   const policy = await readPolicy(owner, userContext);
   const recipeMapping = await mappingFor(input.recipeUserId, userContext);
   const recipeId = recipeMapping?.superTokensUserId ?? input.recipeUserId;
-  const existing = policy.find((entry) => checkpointKey(entry) === checkpointKey(input));
+  const existing = policy.find((entry) => entry.identityHash === identityHash && entry.tenantId === input.tenantId &&
+    entry.providerId === input.providerId);
   if (existing) {
     if (existing.recipeUserId !== recipeId) throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED");
     fresh(userContext);
     const currentOwner = await ownerFor(input.userId, userContext);
     assertSameOwner(owner, currentOwner);
     if (!(await readPolicy(currentOwner, userContext)).some((entry) =>
-      checkpointKey(entry) === checkpointKey(input) && entry.recipeUserId === recipeId)) {
+      entry.identityHash === identityHash && entry.recipeUserId === recipeId)) {
       throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
     }
     await beforeCommit?.();
@@ -399,11 +460,11 @@ export async function recordDisconnectedSignInMethod(
   const method = await recipeMethod(owner, SuperTokens.convertToRecipeUserId(input.recipeUserId), userContext);
   if (!owner.user || candidate.id !== owner.id || method.recipeId !== "thirdparty" ||
     !method.tenantIds.includes(input.tenantId) || method.thirdParty?.id !== input.providerId ||
-    method.thirdParty.userId !== input.providerUserId) {
+    signInIdentityHash({ tenantId: input.tenantId, providerId: method.thirdParty.id, providerUserId: method.thirdParty.userId }) !== identityHash) {
     throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
   }
   const checkpoint: DisconnectedSignInMethod = { version: 1, userId: owner.id, recipeUserId: recipeId,
-    tenantId: input.tenantId, providerId: input.providerId, providerUserId: input.providerUserId };
+    tenantId: input.tenantId, providerId: input.providerId, identityHash };
   // Independent top-level fields avoid lost updates between different identities.
   await beforeCommit?.();
   const result = await PolicyMetadata.updateUserMetadata(owner.id, { [checkpointKey(checkpoint)]: checkpoint }, userContext);
@@ -420,7 +481,7 @@ export async function recordDisconnectedSignInMethod(
 }
 
 export async function completeDisconnectedSignInMethod(
-  input: Omit<DisconnectedSignInMethod, "version" | "completed">,
+  input: DisconnectInput,
   userContext?: Context,
 ): Promise<void> {
   fresh(userContext);
@@ -428,7 +489,9 @@ export async function completeDisconnectedSignInMethod(
   assertPrimaryReference(owner, input.userId);
   if (!owner.user) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
   const recipeId = (await mappingFor(input.recipeUserId, userContext))?.superTokensUserId ?? input.recipeUserId;
-  const existing = (await readPolicy(owner, userContext)).find((entry) => checkpointKey(entry) === checkpointKey(input));
+  const hash = "identityHash" in input ? input.identityHash : signInIdentityHash(input);
+  const existing = (await readPolicy(owner, userContext)).find((entry) =>
+    entry.identityHash === hash && entry.tenantId === input.tenantId && entry.providerId === input.providerId);
   if (!existing || existing.recipeUserId !== recipeId) throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
   if (!existing.completed) {
     // A delayed first-time intent write must never replace completion state.
@@ -438,7 +501,7 @@ export async function completeDisconnectedSignInMethod(
   fresh(userContext);
   const current = await ownerFor(input.userId, userContext);
   assertSameOwner(owner, current);
-  if (!(await readPolicy(current, userContext)).some((entry) => checkpointKey(entry) === checkpointKey(input) &&
+  if (!(await readPolicy(current, userContext)).some((entry) => entry.identityHash === hash &&
     entry.recipeUserId === recipeId && entry.completed === true)) {
     throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
   }
@@ -472,6 +535,18 @@ type GateOptions = {
   // read with downstream work instead of creating a second cache.
   freshContext?: boolean;
 };
+
+function isRetiredPrimaryRecipe(gate: Gate, recipeId: string) {
+  return (recipeId === gate.owner.id || recipeId === gate.owner.mapping?.externalUserId) &&
+    gate.policy?.methods.some((entry) => entry.recipeUserId === gate.owner.id);
+}
+
+export async function assertNotRetiredPrimaryRecipe(recipeId: string, user: User, userContext: Context) {
+  const gate = await readPolicyGate(user.id, userContext, { scope: "signin", user });
+  if (isRetiredPrimaryRecipe(gate, recipeId)) {
+    throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED", gate.owner.id);
+  }
+}
 
 async function assertLiteralReferences(literalIds: string[], userContext?: Context) {
   for (const id of literalIds) {
@@ -557,6 +632,10 @@ export async function checkSignInMethodAuthentication(
       const user = gate.owner.user ?? await SuperTokens.getUser(userId, userContext);
       method = await lenientRecipeMethod({ ...gate.owner, user }, recipeUserId, userContext);
     } else {
+      if (isRetiredPrimaryRecipe(gate, recipeUserId.getAsString())) {
+        // A primary ID can survive as an account anchor, not as a credential.
+        throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED", gate.owner.id);
+      }
       method = await recipeMethod(gate.owner, recipeUserId, userContext);
       if (!method.tenantIds.includes(tenantId)) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
     }
@@ -650,9 +729,79 @@ export async function assertNoDisconnectedSignInMethodsAtInternalOwner(
   throw failure;
 }
 
-export async function inspectSignInMethodPolicy(input: { userId: string; tenantId?: string }) {
+function ownerIndexIds(metadata: Record<string, unknown>) {
+  return Object.keys(metadata ?? {}).flatMap((key) => {
+    if (!isDisconnectedSignInMethodMetadataKey(key)) return [];
+    const hash = key.slice(key.startsWith(completionPrefix) ? completionPrefix.length : prefix.length);
+    return isHash(hash) ? [indexPrefix + hash] : [];
+  });
+}
+
+async function readOwnedIndexKeys(indexId: string, ownerId: string, context: Context) {
+  const { metadata } = await UserMetadata.getUserMetadata(indexId, uncachedContext(context));
+  return readIndexEntries(metadata).filter(({ entry }) => entry?.ownerId === ownerId).map(({ key }) => key);
+}
+
+async function removePolicyKeys(id: string, keys: string[], context: Context) {
+  if (!keys.length) return;
+  const result = await PolicyMetadata.updateUserMetadata(id, Object.fromEntries(keys.map((key) => [key, null])), context);
+  if (result.status !== "OK") throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
+}
+
+type DeleteUser = AccountLinkingRecipe["deleteUser"];
+
+export async function deleteUserAndSignInMethodPolicy(input: Parameters<DeleteUser>[0], deleteUser: DeleteUser) {
+  if (!input.removeAllLinkedAccounts || !SuperTokens.isRecipeInitialized("usermetadata")) return deleteUser(input);
+  const context = uncachedContext(input.userContext);
+  const user = await SuperTokens.getUser(input.userId, context);
+  const mapping = await mappingFor(user?.id ?? input.userId, context);
+  const ownerId = mapping?.superTokensUserId ?? user?.id ?? input.userId;
+  const rows = [...new Set([ownerId, mapping?.externalUserId ?? user?.id ?? input.userId])];
+  const indexIds = new Set<string>();
+  let sawPolicy = false;
+  for (const id of rows) {
+    const { metadata } = await UserMetadata.getUserMetadata(id, context);
+    sawPolicy ||= hasPolicy(metadata);
+    for (const indexId of ownerIndexIds(metadata)) indexIds.add(indexId);
+  }
+  const result = await deleteUser(input);
+  try {
+    const remaining = await Promise.all(rows.map(async (id) => ({
+      id, metadata: (await UserMetadata.getUserMetadata(id, uncachedContext(context))).metadata,
+    })));
+    for (const { metadata } of remaining) {
+      sawPolicy ||= hasPolicy(metadata);
+      for (const indexId of ownerIndexIds(metadata)) indexIds.add(indexId);
+    }
+    if (sawPolicy) {
+      if (!await confirmedAbsentOwner(ownerId, context)) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED", ownerId);
+      for (const indexId of indexIds) {
+        await removePolicyKeys(indexId, await readOwnedIndexKeys(indexId, ownerId, context), context);
+      }
+      for (const { id, metadata } of remaining) {
+        if (id !== ownerId && !await confirmedAbsentOwner(id, context)) continue;
+        // Mapped deletes can leave the literal internal metadata, including old
+        // migration snapshots with provider subjects, behind in Core.
+        if (Object.keys(metadata ?? {}).length) await PolicyMetadata.clearUserMetadata(id, context);
+      }
+      logSignInMethodPolicy("info", "rownd_disconnect_policy_erased", { code: "OK", ownerId, step: "delete_user" });
+    }
+  } catch (error) {
+    logSignInMethodPolicy("error", "rownd_disconnect_policy_erasure_failed", {
+      code: "DISCONNECT_POLICY_INVALID", ownerId, step: "delete_user",
+    });
+    throw error;
+  }
+  return result;
+}
+
+export async function inspectSignInMethodPolicy(input: { userId: string; tenantId?: string; indexId?: string }) {
   const { userId, tenantId } = input;
   if (!nonempty(userId)) throw new TypeError("A user ID is required");
+  if (userId.startsWith(indexPrefix) || (input.indexId !== undefined &&
+    (!input.indexId.startsWith(indexPrefix) || !isHash(input.indexId.slice(indexPrefix.length))))) {
+    throw new TypeError("Use an owner ID and, optionally, a valid index ID");
+  }
   const context = {};
   const [internal, external, user] = await Promise.all([
     SuperTokens.getUserIdMapping({ userId, userIdType: "SUPERTOKENS", userContext: context }),
@@ -670,43 +819,60 @@ export async function inspectSignInMethodPolicy(input: { userId: string; tenantI
   const rows = await Promise.all([...ids].map(async (id) => {
     const { metadata: literal } = id === owner.id ? { metadata } : await UserMetadata.getUserMetadata(id, context);
     const parsed = inspectPolicyRow(id, literal ?? {});
-    const forTenant = (identity: Identity) => tenantId === undefined || identity.tenantId === tenantId;
+    const forTenant = (identity: { tenantId: string }) => tenantId === undefined || identity.tenantId === tenantId;
     return { ownerId: id, ...parsed, intents: parsed.intents.filter(forTenant), completions: parsed.completions.filter(forTenant),
+      indexIds: ownerIndexIds(literal),
       reassociated: linked.has(id) && Object.entries(literal ?? {}).some(([key, value]) =>
         isDisconnectedSignInMethodMetadataKey(key) && (linked.get(id) || (isRecord(value) && value.userId === id))) };
   }));
-  return { userId, ownerId: owner.id, dualMapping, pinnedOwnerIds: [...linked].filter(([, pinned]) => pinned).map(([id]) => id), rows };
+  const indexIds = new Set(rows.find((row) => row.ownerId === owner.id)?.indexIds);
+  if (input.indexId) indexIds.add(input.indexId);
+  const indexes = await Promise.all([...indexIds].map(async (indexId) => ({
+    indexId, ownerEntryKeys: await readOwnedIndexKeys(indexId, owner.id, context),
+  })));
+  const ownerAbsent = !dualMapping && !user && await confirmedAbsentOwner(owner.id, context);
+  return { userId, ownerId: owner.id, ownerAbsent, dualMapping, indexes,
+    pinnedOwnerIds: [...linked].filter(([, pinned]) => pinned).map(([id]) => id), rows };
 }
 
 export async function repairSignInMethodPolicy(input: {
   userId: string;
-  remove: Array<"fences" | "invalid">;
+  indexId?: string;
+  remove: Array<"fences" | "invalid" | "deleted-owner">;
   dryRun: boolean;
 }) {
   if (typeof input.dryRun !== "boolean" || !Array.isArray(input.remove) ||
-    input.remove.some((item) => item !== "fences" && item !== "invalid")) {
+    input.remove.some((item) => item !== "fences" && item !== "invalid" && item !== "deleted-owner")) {
     throw new TypeError("Specify dryRun and the policy record types to remove");
   }
   const state = await inspectSignInMethodPolicy(input);
+  const erase = input.remove.includes("deleted-owner");
   if (state.dualMapping || state.rows.some((row) => row.ownerId === input.userId && row.reassociated) ||
-    input.userId.startsWith("rownd_dsi:")) {
+    (erase && (!state.ownerAbsent || state.ownerId !== input.userId))) {
     throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
   }
   const context = {};
   const { metadata } = await UserMetadata.getUserMetadata(state.ownerId, context);
   const row = inspectPolicyRow(state.ownerId, metadata ?? {});
-  const keys = [
+  const keys = erase ? Object.keys(metadata ?? {}) : [
     ...(input.remove.includes("fences") ? row.fences.map(({ key }) => key) : []),
     ...(input.remove.includes("invalid") ? row.invalid.filter(({ removable }) => removable).map(({ key }) => key) : []),
   ];
-  if (!input.dryRun && keys.length) {
+  const indexIds = erase ? state.indexes.filter(({ ownerEntryKeys }) => ownerEntryKeys.length).map(({ indexId }) => indexId) : [];
+  if (!input.dryRun) {
     // Metadata has no compare-and-swap. Operators must pause writers while repairing.
-    const result = await PolicyMetadata.updateUserMetadata(state.ownerId,
-      Object.fromEntries(keys.map((key) => [key, null])), context);
-    if (result.status !== "OK") throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
+    if (erase && !await confirmedAbsentOwner(state.ownerId, context)) {
+      throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
+    }
+    for (const indexId of indexIds) {
+      await removePolicyKeys(indexId, await readOwnedIndexKeys(indexId, state.ownerId, context), context);
+    }
+    if (erase && keys.length) await PolicyMetadata.clearUserMetadata(state.ownerId, context);
+    if (!erase) await removePolicyKeys(state.ownerId, keys, context);
   }
   logSignInMethodPolicy("info", "rownd_disconnect_policy_repair", {
-    code: "OK", ownerId: state.ownerId, step: input.dryRun ? "preview" : "repair", count: keys.length,
+    code: "OK", ownerId: state.ownerId, step: input.dryRun ? "preview" : erase ? "deleted_owner" : "repair",
+    count: keys.length + indexIds.length,
   });
-  return { ownerId: state.ownerId, dryRun: input.dryRun, keys };
+  return { ownerId: state.ownerId, dryRun: input.dryRun, keys, ...(erase ? { indexIds } : {}) };
 }
