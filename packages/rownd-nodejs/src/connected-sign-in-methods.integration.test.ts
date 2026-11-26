@@ -366,6 +366,9 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     expect(retained.response.headers.get("st-access-token")).toBeTruthy();
     expect(retained.session.getUserId()).toBe(f.rowndId);
     expect(retained.session.getRecipeUserId().getAsString()).toBe(f.passwordless.recipeUserId.getAsString());
+    const fromRevokedEmailSession = await emailSignIn(f.email, signedIn.token);
+    expect(fromRevokedEmailSession.session.getHandle()).not.toBe(signedIn.session.getHandle());
+    expect(fromRevokedEmailSession.session.getUserId()).toBe(f.rowndId);
   });
 
   it("does not mint disconnect proof when email consumption reuses an SSO-bound session", async () => {

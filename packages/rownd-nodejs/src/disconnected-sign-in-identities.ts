@@ -654,7 +654,9 @@ export async function checkSignInMethodAuthentication(
       const user = gate.owner.user ?? await SuperTokens.getUser(userId, userContext);
       method = await lenientRecipeMethod({ ...gate.owner, user }, recipeUserId, userContext);
     } else {
-      if (isRetiredPrimaryRecipe(gate, recipeUserId.getAsString())) {
+      const recipeId = recipeUserId.getAsString();
+      if (isRetiredPrimaryRecipe(gate, recipeId) || gate.policy.methods.some((entry) =>
+        entry.tenantId === tenantId && entry.recipeUserId === recipeId)) {
         // A primary ID can survive as an account anchor, not as a credential.
         throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED", gate.owner.id);
       }

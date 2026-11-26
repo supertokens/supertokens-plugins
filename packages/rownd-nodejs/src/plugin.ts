@@ -1061,8 +1061,15 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 if (session && sessionOwner) {
                   const recipe = session.getRecipeUserId(operationContext);
                   try {
-                    await checkSignInMethodAuthentication(session.getUserId(operationContext), recipe, input.tenantId,
+                    const { gate } = await checkSignInMethodAuthentication(session.getUserId(operationContext), recipe, input.tenantId,
                       operationContext, { presence: sessionOwner });
+                    // Disconnect also revokes the retained factor's sessions, though the recipe remains live.
+                    if (gate.policy && !await Session.getSessionInformation(session.getHandle(operationContext), operationContext)) {
+                      if (input.shouldTryLinkingWithSessionUser === true) {
+                        throw new Session.Error({ type: Session.Error.UNAUTHORISED, message: "Session was revoked", payload: { clearTokens: true } });
+                      }
+                      session = undefined;
+                    }
                   } catch (error) {
                     if (!(error instanceof DisconnectedSignInMethodError)) throw error;
                     if (input.shouldTryLinkingWithSessionUser === true || error.code !== "SIGN_IN_METHOD_DISCONNECTED") {
@@ -1418,9 +1425,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       const user = await supertokens.getUser(input.primaryUserId, input.userContext);
                       const recipe = session.getRecipeUserId(input.userContext);
                       const method = user?.loginMethods.find((entry) => entry.recipeUserId.getAsString() === recipe.getAsString());
-                      if (!method || realProvider(method.thirdParty?.id)) {
-                        await checkSignInMethodAuthentication(input.primaryUserId, recipe, session.getTenantId(input.userContext),
+                      if (!method || !["guest", "instant"].includes(method.thirdParty?.id ?? "")) {
+                        const { gate } = await checkSignInMethodAuthentication(input.primaryUserId, recipe, session.getTenantId(input.userContext),
                           input.userContext, { user });
+                        if (gate.policy && !await Session.getSessionInformation(session.getHandle(input.userContext), input.userContext)) {
+                          throw new Session.Error({ type: Session.Error.UNAUTHORISED, message: "Session was revoked", payload: { clearTokens: true } });
+                        }
                       }
                     }
                     return originalImplementation.linkAccounts(input);
