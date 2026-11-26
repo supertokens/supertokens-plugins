@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from starlette.responses import Response
+from supertokens_python.framework.fastapi.fastapi_response import FastApiResponse
 from supertokens_python.types.response import GeneralErrorResponse
 from supertokens_python.recipe.accountlinking.types import (
     AccountInfoWithRecipeId,
@@ -3801,10 +3803,15 @@ async def test_replacement_session_failure_runs_email_change_rollback(
     async def create_new_session(*_args: Any, **_kwargs: Any):
         raise RuntimeError("replacement session failed")
 
+    revoke_session = AsyncMock(side_effect=RuntimeError("Core unavailable"))
+    response = FastApiResponse(Response(headers={"Access-Control-Expose-Headers": "x-app"}))
     session = SimpleNamespace(
         get_handle=lambda _context: "session-handle",
         get_tenant_id=lambda _context: "public",
+        revoke_session=revoke_session,
+        response_mutators=[lambda res, _: res.set_header("front-token", "replacement")],
     )
+    monkeypatch.setattr(plugin, "clear_session_response_mutator", None)
     monkeypatch.setattr(plugin, "resolve_pending_email_verification_token", resolve_pending)
     monkeypatch.setattr(plugin, "complete_pending_email_verification", complete_pending)
     monkeypatch.setattr(
@@ -3831,7 +3838,10 @@ async def test_replacement_session_failure_runs_email_change_rollback(
         "public",
         cast(
             Any,
-            SimpleNamespace(request=FakeRequest({"rowndPendingVerificationId": "pending-id"})),
+            SimpleNamespace(
+                request=FakeRequest({"rowndPendingVerificationId": "pending-id"}),
+                response=response,
+            ),
         ),
         {},
     )
@@ -3839,6 +3849,12 @@ async def test_replacement_session_failure_runs_email_change_rollback(
     assert isinstance(result, GeneralErrorResponse)
     assert result.message == "email change could not be completed; try again"
     assert rolled_back is True
+    revoke_session.assert_awaited_once()
+    assert response.get_header("front-token") == "remove"
+    for mutate in session.response_mutators:
+        mutate(response, {})
+    assert response.get_header("front-token") == "remove"
+    assert response.get_header("Access-Control-Expose-Headers") == "x-app,front-token"
 
 
 async def test_accountlinking_links_guest_session_without_verification(

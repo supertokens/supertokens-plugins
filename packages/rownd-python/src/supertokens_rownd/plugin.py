@@ -59,7 +59,6 @@ from supertokens_python.recipe.passwordless.utils import PasswordlessOverrideabl
 from supertokens_python.recipe.session import SessionContainer
 from supertokens_python.recipe.session import asyncio as session_asyncio
 from supertokens_python.recipe.session.claims import BooleanClaim
-from supertokens_python.recipe.session.cookie_and_header import clear_session_response_mutator
 from supertokens_python.recipe.session.interfaces import RecipeInterface as SessionRecipeInterface
 from supertokens_python.recipe.thirdparty.interfaces import (
     APIInterface as ThirdPartyAPIInterface,
@@ -99,7 +98,7 @@ from .errors import (
     RowndEmailChangeSessionsRevokedError,
     RowndPluginError,
 )
-from .logger import log_warning
+from .logger import log_debug, log_warning
 from .plugin_implementation import (
     handle_app_config,
     handle_delete_user,
@@ -373,15 +372,59 @@ async def _refresh_rownd_session_claims_or_revoke(
         raise
 
 
-def _clear_email_change_client_session(request: Any, initiating_session: SessionContainer) -> None:
+def _resolve_clear_session_response_mutator():
+    try:
+        from supertokens_python.recipe.session.cookie_and_header import (
+            clear_session_response_mutator as mutator,
+        )
+    except ImportError:
+        return None
+    return mutator if callable(mutator) else None
+
+
+clear_session_response_mutator = _resolve_clear_session_response_mutator()
+
+
+def _set_session_removal_headers(response: BaseResponse, _user_context: UserContext) -> None:
+    response.set_header("front-token", "remove")
+    header = "Access-Control-Expose-Headers"
+    exposed = response.get_header(header)
+    if not exposed:
+        response.set_header(header, "front-token")
+    elif "front-token" not in {name.strip().lower() for name in exposed.split(",")}:
+        response.set_header(header, exposed + ",front-token")
+
+
+async def _clear_email_change_client_session(
+    options: EmailVerificationAPIOptions,
+    initiating_session: Optional[SessionContainer],
+    user_context: UserContext,
+) -> None:
     # Session creation attaches its tokens to the request's session before it can
     # still fail, so clear whichever session the response will be built from.
-    current = request.get_session() if hasattr(request, "get_session") else None
+    current = options.request.get_session() if hasattr(options.request, "get_session") else None
+    fallback = initiating_session is None and current is None
     for candidate in {id(s): s for s in (initiating_session, current) if s is not None}.values():
-        _append_clear_session_response_mutator(candidate)
+        if _append_clear_session_response_mutator(candidate):
+            continue
+        fallback = True
+        with suppress(Exception):
+            await candidate.revoke_session(user_context)
+        # The middleware applies queued token writes after the API returns.
+        mutators = getattr(candidate, "response_mutators", None)
+        if isinstance(mutators, list):
+            mutators.append(_set_session_removal_headers)
+    if fallback:
+        log_debug(
+            rownd_config.get_active_rownd_config(),
+            "email_change_session_cleanup using public session fallback",
+        )
+        _set_session_removal_headers(options.response, user_context)
 
 
 def _append_clear_session_response_mutator(returned_session: Any) -> bool:
+    if clear_session_response_mutator is None:
+        return False
     req_res_info = getattr(returned_session, "req_res_info", None)
     response_mutators = getattr(returned_session, "response_mutators", None)
     config = getattr(returned_session, "config", None)
@@ -1665,16 +1708,18 @@ def _emailverification_api_override():
                             cast(str, pending_token["user_id"]),
                         )
                     except RowndEmailChangeSessionsRevokedError as error:
-                        if session is not None and not (
-                            await restore_session_after_failed_email_change(
-                                error, session, api_options.request, user_context
-                            )
+                        if session is None or not await restore_session_after_failed_email_change(
+                            error, session, api_options.request, user_context
                         ):
-                            _clear_email_change_client_session(api_options.request, session)
+                            await _clear_email_change_client_session(
+                                api_options, session, user_context
+                            )
                         return GeneralErrorResponse(str(error))
                     except RowndEmailChangeError as error:
                         if session is not None:
-                            _append_clear_session_response_mutator(session)
+                            await _clear_email_change_client_session(
+                                api_options, session, user_context
+                            )
                         return GeneralErrorResponse(str(error))
                     if session is not None and verification_result is not None:
                         should_replace_session = (
@@ -1702,7 +1747,9 @@ def _emailverification_api_override():
                                     )
                                 )
                                 if not authorization.allowed:
-                                    _append_clear_session_response_mutator(session)
+                                    await _clear_email_change_client_session(
+                                        api_options, session, user_context
+                                    )
                                     return GeneralErrorResponse(
                                         "verified email is no longer authorized"
                                     )
@@ -1720,7 +1767,9 @@ def _emailverification_api_override():
                             except Exception:
                                 # Every session is already revoked, so the client must
                                 # drop its dead session whatever happens next.
-                                _clear_email_change_client_session(api_options.request, session)
+                                await _clear_email_change_client_session(
+                                    api_options, session, user_context
+                                )
                                 rollback = verification_result.get(
                                     "rollback_on_session_replacement_failure"
                                 )

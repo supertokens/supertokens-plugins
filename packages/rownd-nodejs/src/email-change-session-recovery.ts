@@ -1,7 +1,6 @@
 import supertokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
-import SessionRecipe from "supertokens-node/lib/build/recipe/session/recipe";
-import { clearSessionFromAllTokenTransferMethods } from "supertokens-node/lib/build/recipe/session/cookieAndHeaders";
+import type { APIOptions } from "supertokens-node/recipe/emailverification";
 import type { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import type { UserContext } from "supertokens-node/types";
 import type { RowndEmailChangeSessionsRevokedError } from "./errors";
@@ -14,24 +13,74 @@ export const EMAIL_CHANGE_COMPLETION_FAILED_ERROR =
 export const EMAIL_CHANGE_REPLACEMENT_SESSION_FAILED_ERROR =
   "email change completed; sign in again with the verified email";
 
-type SessionRequest = Parameters<typeof Session.createNewSession>[0];
-type SessionResponse = Parameters<typeof Session.createNewSession>[1];
+type SessionRequest = APIOptions["req"];
+type SessionResponse = APIOptions["res"];
 
-// The callers have already revoked the sessions in Core, so only the response
-// needs changing. SessionContainer.revokeSession clears tokens only after its own
-// Core call succeeds, which would leave the client holding a dead session when
-// that call fails. This is the SDK's own helper for clearing tokens on an error.
-export function clearClientSession(
+type ClearSessionFromResponse = (
   req: SessionRequest,
   res: SessionResponse,
   userContext: UserContext,
-) {
-  clearSessionFromAllTokenTransferMethods(
-    SessionRecipe.getInstanceOrThrowError().config,
-    res,
-    req,
-    userContext,
-  );
+) => void;
+
+let responseClearer: Promise<ClearSessionFromResponse | undefined> | undefined;
+
+async function resolveResponseClearer(): Promise<ClearSessionFromResponse | undefined> {
+  try {
+    const [recipeModule, { clearSessionFromAllTokenTransferMethods }] = await Promise.all([
+      import("supertokens-node/lib/build/recipe/session/recipe"),
+      import("supertokens-node/lib/build/recipe/session/cookieAndHeaders"),
+    ]);
+    // Native ESM wraps the SDK's CommonJS default export in module.exports.
+    const recipeExport = recipeModule.default as
+      | typeof recipeModule.default
+      | { default: typeof recipeModule.default }
+      | undefined;
+    const recipe = recipeExport && "default" in recipeExport ? recipeExport.default : recipeExport;
+    if (
+      typeof recipe?.getInstanceOrThrowError !== "function" ||
+      typeof clearSessionFromAllTokenTransferMethods !== "function"
+    ) return undefined;
+
+    return (req, res, userContext) => clearSessionFromAllTokenTransferMethods(
+      recipe.getInstanceOrThrowError().config,
+      res,
+      req,
+      userContext,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+export async function clearClientSession(
+  req: SessionRequest,
+  res: SessionResponse,
+  userContext: UserContext,
+  session: SessionContainerInterface | undefined,
+): Promise<void> {
+  try {
+    try {
+      // The sessions were revoked in Core. Clear both transfer methods using the
+      // app's cookie config, without relying on another Core call to succeed.
+      const clearResponse = await (responseClearer ??= resolveResponseClearer());
+      if (clearResponse) {
+        clearResponse(req, res, userContext);
+        return;
+      }
+    } catch {
+      // The internal helper may also become incompatible at invocation time.
+    }
+
+    logDebugMessage("email_change_session_cleanup using public session fallback");
+    try {
+      await session?.revokeSession(userContext);
+    } catch {
+      // Revoke is best-effort; the response still signals removal below.
+    }
+  } finally {
+    res.setHeader("front-token", "remove", false);
+    res.setHeader("Access-Control-Expose-Headers", "front-token", true);
+  }
 }
 
 // Completion revokes the initiating session as its single-use lock, so a
@@ -53,7 +102,7 @@ export async function restoreSessionAfterFailedEmailChange(input: {
     `email_change_session_recovery step=${error.step} userId=${error.userId} recipeUserId=${error.recoverableRecipeUserId ?? "none"} outcome=${outcome}`,
   );
   if (outcome !== "restored") {
-    clearClientSession(input.req, input.res, input.userContext);
+    await clearClientSession(input.req, input.res, input.userContext, input.session);
   }
 }
 

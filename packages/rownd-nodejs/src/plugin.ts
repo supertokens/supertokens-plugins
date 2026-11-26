@@ -1408,10 +1408,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                           input.userContext,
                         ),
                       ]);
-                      clearClientSession(
+                      await clearClientSession(
                         input.options.req,
                         input.options.res,
                         input.userContext,
+                        input.session,
                       );
                       logDebugMessage(
                         `email_change_replacement_session_failed userId=${verificationResult.userId}`,
