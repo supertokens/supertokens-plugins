@@ -41,7 +41,17 @@ import {
   setSuperTokensConfig,
   validateDynamicConfig,
 } from "./config";
-import { RowndEmailChangeError, RowndPasswordlessCleanupError } from "./errors";
+import {
+  RowndEmailChangeError,
+  RowndEmailChangeSessionsRevokedError,
+  RowndPasswordlessCleanupError,
+} from "./errors";
+import {
+  clearClientSession,
+  EMAIL_CHANGE_COMPLETION_FAILED_ERROR,
+  EMAIL_CHANGE_REPLACEMENT_SESSION_FAILED_ERROR,
+  restoreSessionAfterFailedEmailChange,
+} from "./email-change-session-recovery";
 import {
   applyRowndOAuthResourceParams,
   buildRowndOAuthPayload,
@@ -1344,6 +1354,22 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       },
                     );
                   } catch (error) {
+                    if (error instanceof RowndEmailChangeSessionsRevokedError) {
+                      await restoreSessionAfterFailedEmailChange({
+                        error,
+                        session: input.session,
+                        req: input.options.req,
+                        res: input.options.res,
+                        userContext: input.userContext,
+                      });
+                      return {
+                        status: "GENERAL_ERROR" as const,
+                        message:
+                          error.cause instanceof RowndEmailChangeError
+                            ? error.cause.message
+                            : EMAIL_CHANGE_COMPLETION_FAILED_ERROR,
+                      };
+                    }
                     if (error instanceof RowndEmailChangeError) {
                       return {
                         status: "GENERAL_ERROR" as const,
@@ -1371,14 +1397,34 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                         {},
                         input.userContext,
                       );
-                    } catch (error) {
-                      await Session.revokeAllSessionsForUser(
-                        verificationResult.userId,
-                        true,
-                        undefined,
-                        input.userContext,
+                    } catch {
+                      // The change is committed and every session revoked; the
+                      // client must drop its dead session and sign in again.
+                      logDebugMessage(
+                        `email_change_replacement_session_failed userId=${verificationResult.userId}`,
                       );
-                      throw error;
+                      try {
+                        await Session.revokeAllSessionsForUser(
+                          verificationResult.userId,
+                          true,
+                          undefined,
+                          input.userContext,
+                        );
+                      } catch {
+                        logDebugMessage(
+                          `email_change_session_cleanup_failed step=revoke-all-sessions userId=${verificationResult.userId}`,
+                        );
+                      }
+                      await clearClientSession(
+                        input.options.req,
+                        input.options.res,
+                        input.userContext,
+                        input.session,
+                      );
+                      return {
+                        status: "GENERAL_ERROR" as const,
+                        message: EMAIL_CHANGE_REPLACEMENT_SESSION_FAILED_ERROR,
+                      };
                     }
                   }
                 }

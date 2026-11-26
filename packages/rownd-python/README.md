@@ -824,8 +824,17 @@ compare-and-swap this is not a cross-process guarantee. Before durable retiremen
 publication, failed completion rolls back the prepared credential. After a failed
 publication request, rollback requires a fresh Core read confirming the unchanged
 pre-publication state. Persisted or uncertain publication is forward-only: errors
-retain recovery state instead of restoring old access. If replacement-session creation fails after cleanup, the new
-verified email remains canonical; sign in with it to obtain a fresh session. Observe
+retain recovery state instead of restoring old access. When completion fails after it
+revoked the account's sessions and the prepared credential was rolled back, the
+`GENERAL_ERROR` response carries a new session for the original sign-in method, provided
+that method still belongs to the same user and tenant and, in enforce retirement mode,
+passwordless sign-in would still accept it; otherwise the response clears the client's
+session. If replacement-session creation fails after cleanup, the response is
+`GENERAL_ERROR` with the client's session cleared and the new verified email remains
+canonical; sign in with it to obtain a fresh session. Replacement and restored sessions
+are created with empty access token payloads and session data, so claims are rebuilt
+rather than copied: custom payload values are lost and apps using multi-factor
+authentication will prompt for the second factor again. Observe
 mode retains legacy replacement-session rollback.
 
 ### Passwordless Confirmation Bypass

@@ -7,6 +7,9 @@ from typing import Any, Dict, Optional, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from starlette.responses import Response
+from supertokens_python.framework.fastapi.fastapi_response import FastApiResponse
+from supertokens_python.types.response import GeneralErrorResponse
 from supertokens_python.recipe.accountlinking.types import (
     AccountInfoWithRecipeId,
     ShouldNotAutomaticallyLink,
@@ -3763,9 +3766,60 @@ async def test_pending_verification_binding_is_checked_before_token_use(
     assert result == {"status": "INVALID_PENDING"}
 
 
+async def test_email_change_rejection_before_revoke_keeps_client_session(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(plugin.rownd_config, "get_active_rownd_config", make_config)
+    monkeypatch.setattr(plugin, "clear_session_response_mutator", None)
+    monkeypatch.setattr(
+        plugin,
+        "resolve_pending_email_verification_token",
+        AsyncMock(return_value={
+            "status": "OK",
+            "core_token": "core-token",
+            "pending_verification_id": "pending-id",
+            "user_id": "user-id",
+        }),
+    )
+    message = "email change session is no longer active; start the email change again"
+    monkeypatch.setattr(
+        plugin,
+        "complete_pending_email_verification",
+        AsyncMock(side_effect=RowndEmailChangeError("CONFLICT", 409, message)),
+    )
+    original_verify = AsyncMock(return_value=SimpleNamespace(
+        status="OK", user=SimpleNamespace(recipe_user_id="recipe-id", email="target@example.com")
+    ))
+    overridden = plugin._emailverification_api_override()(
+        cast(Any, SimpleNamespace(email_verify_post=original_verify))
+    )
+    response = FastApiResponse(Response())
+    revoke_session = AsyncMock()
+    session = SimpleNamespace(
+        get_handle=lambda _context: "session-handle",
+        revoke_session=revoke_session,
+        response_mutators=[],
+    )
+
+    result = await overridden.email_verify_post(
+        "raw-token",
+        cast(Any, session),
+        "public",
+        cast(Any, SimpleNamespace(request=FakeRequest({}), response=response)),
+        {},
+    )
+
+    assert isinstance(result, GeneralErrorResponse)
+    assert result.message == message
+    revoke_session.assert_not_awaited()
+    assert response.get_header("front-token") is None
+    assert session.response_mutators == []
+
+
 async def test_replacement_session_failure_runs_email_change_rollback(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    monkeypatch.setattr(plugin.rownd_config, "get_active_rownd_config", make_config)
     rolled_back = False
 
     async def resolve_pending(*_args: Any, **_kwargs: Any):
@@ -3800,10 +3854,15 @@ async def test_replacement_session_failure_runs_email_change_rollback(
     async def create_new_session(*_args: Any, **_kwargs: Any):
         raise RuntimeError("replacement session failed")
 
+    revoke_session = AsyncMock(side_effect=RuntimeError("Core unavailable"))
+    response = FastApiResponse(Response(headers={"Access-Control-Expose-Headers": "x-app"}))
     session = SimpleNamespace(
         get_handle=lambda _context: "session-handle",
         get_tenant_id=lambda _context: "public",
+        revoke_session=revoke_session,
+        response_mutators=[lambda res, _: res.set_header("front-token", "replacement")],
     )
+    monkeypatch.setattr(plugin, "clear_session_response_mutator", None)
     monkeypatch.setattr(plugin, "resolve_pending_email_verification_token", resolve_pending)
     monkeypatch.setattr(plugin, "complete_pending_email_verification", complete_pending)
     monkeypatch.setattr(
@@ -3824,19 +3883,29 @@ async def test_replacement_session_failure_runs_email_change_rollback(
         cast(Any, SimpleNamespace(email_verify_post=email_verify_post))
     )
 
-    with pytest.raises(RuntimeError, match="replacement session failed"):
-        await overridden.email_verify_post(
-            "raw-token",
-            cast(Any, session),
-            "public",
-            cast(
-                Any,
-                SimpleNamespace(request=FakeRequest({"rowndPendingVerificationId": "pending-id"})),
+    result = await overridden.email_verify_post(
+        "raw-token",
+        cast(Any, session),
+        "public",
+        cast(
+            Any,
+            SimpleNamespace(
+                request=FakeRequest({"rowndPendingVerificationId": "pending-id"}),
+                response=response,
             ),
-            {},
-        )
+        ),
+        {},
+    )
 
+    assert isinstance(result, GeneralErrorResponse)
+    assert result.message == "email change could not be completed; try again"
     assert rolled_back is True
+    revoke_session.assert_awaited_once()
+    assert response.get_header("front-token") == "remove"
+    for mutate in session.response_mutators:
+        mutate(response, {})
+    assert response.get_header("front-token") == "remove"
+    assert response.get_header("Access-Control-Expose-Headers") == "x-app,front-token"
 
 
 async def test_accountlinking_links_guest_session_without_verification(

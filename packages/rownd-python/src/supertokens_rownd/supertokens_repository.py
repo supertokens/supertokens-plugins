@@ -76,12 +76,14 @@ from .config import (
     get_active_rownd_config,
 )
 from .errors import (
+    EMAIL_CHANGE_COMPLETION_FAILED_MESSAGE,
     MigrationError,
     MigrationErrorReason,
     RowndEmailChangeError,
+    RowndEmailChangeSessionsRevokedError,
     RowndPluginError,
 )
-from .logger import log_warning
+from .logger import log_debug, log_warning
 from .identity import core_phone_number
 from .provider_migration import checkpoint_introduction, confirm_introduction, repair_provider_lifecycle
 from .migration_authority import (
@@ -3681,7 +3683,19 @@ async def complete_pending_email_verification(
         )
     user = await get_user(recipe_user_id.get_as_string(), user_context)
     user_id = user.id if user else recipe_user_id.get_as_string()
+
+    def log_failure(
+        step: str,
+        sessions_revoked: bool,
+        error: Optional[BaseException] = None,
+        outcome: str = "rejected",
+    ) -> None:
+        _log_email_change_completion_failure(
+            step, pending_verification_id, sessions_revoked, error, outcome
+        )
+
     if pending_user_id and user_id != pending_user_id:
+        log_failure("pending-owner-mismatch", False)
         if pending_verification_id:
             await remove_pending_email_verification(
                 pending_user_id, pending_verification_id, user_context
@@ -3713,6 +3727,7 @@ async def complete_pending_email_verification(
     )
     if not pending_verification:
         if pending_verification_id:
+            log_failure("pending-verification-missing", False)
             try:
                 await emailverification_asyncio.unverify_email(
                     recipe_user_id, normalized_email, user_context
@@ -3730,6 +3745,7 @@ async def complete_pending_email_verification(
 
     purpose = pending_verification.get("purpose")
     if purpose != "UPDATE_PASSWORDLESS" and purpose != "ADD_PASSWORDLESS":
+        log_failure("unsupported-purpose", False)
         await reject_inactive_pending_email_verification(
             user_id, pending_verification, recipe_user_id, normalized_email, user_context
         )
@@ -3737,6 +3753,7 @@ async def complete_pending_email_verification(
     initiating_session_handle = optional_string(pending_verification.get("initiatingSessionHandle"))
     pending_status = pending_verification.get("status")
     if pending_status == "COMMITTING":
+        log_failure("pending-verification-committing", False)
         raise RowndEmailChangeError(
             "CONFLICT", 409, "email change cleanup incomplete; retry sign-in with the verified email"
         )
@@ -3745,6 +3762,7 @@ async def complete_pending_email_verification(
         or not initiating_session_handle
         or initiating_session_handle != session_handle
     ):
+        log_failure("initiating-session-mismatch", False)
         await reject_inactive_pending_email_verification(
             user_id, pending_verification, recipe_user_id, normalized_email, user_context
         )
@@ -3761,12 +3779,20 @@ async def complete_pending_email_verification(
         )
         or initiating_session.tenant_id != tenant_id
     ):
+        log_failure("initiating-session-inactive", False)
         await reject_inactive_pending_email_verification(
             user_id, pending_verification, recipe_user_id, normalized_email, user_context
         )
-    await assert_email_change_session_claims(cast(str, initiating_session_handle), user_context)
+    try:
+        await assert_email_change_session_claims(cast(str, initiating_session_handle), user_context)
+    except BaseException as error:
+        log_failure("initiating-session-claims", False, error)
+        raise
+    initiating_recipe_user_id: Optional[RecipeUserId] = None
+    step = "check-target-email-available"
     try:
         await assert_email_available_for_user(normalized_email, user_id, user_context)
+        step = "load-initiating-method"
         current_user = await get_user(user_id, user_context)
         initiating_login_method = (
             next(
@@ -3788,6 +3814,7 @@ async def complete_pending_email_verification(
             else None
         )
         if current_user is None or initiating_login_method is None:
+            step = "initiating-method-missing"
             await reject_inactive_pending_email_verification(
                 user_id, pending_verification, recipe_user_id, normalized_email, user_context
             )
@@ -3808,6 +3835,7 @@ async def complete_pending_email_verification(
         if (purpose == "UPDATE_PASSWORDLESS" and passwordless_method is None) or (
             purpose == "ADD_PASSWORDLESS" and not can_add_passwordless
         ):
+            step = "target-method-ineligible"
             await reject_inactive_pending_email_verification(
                 user_id, pending_verification, recipe_user_id, normalized_email, user_context
             )
@@ -3841,17 +3869,28 @@ async def complete_pending_email_verification(
             )
 
         # Validate the prospective profile before revoking sessions or adding credentials.
+        step = "validate-prospective-metadata"
         await inspect_verified_email_metadata(recipe_user_id.get_as_string())
 
-        completion_phase = "PREPARING"
+        completion_phase = "REVOKING_INITIATOR"
+        step = "revoke-initiating-session"
         if not await session_asyncio.revoke_session(
             cast(str, initiating_session_handle), user_context
         ):
-            await reject_inactive_pending_email_verification(
-                user_id, pending_verification, recipe_user_id, normalized_email, user_context
+            # Another completion (or a sign-out) won the revoke, so this request
+            # never held the lock and must not invalidate anyone else's session.
+            completion_phase = "PENDING"
+            step = "initiating-session-already-revoked"
+            raise RowndEmailChangeError(
+                "CONFLICT",
+                409,
+                "email change session is no longer active; start the email change again",
             )
+        completion_phase = "PREPARING"
         initiating_recipe_user_id = initiating_login_method.recipe_user_id
+        step = "revoke-all-sessions"
         await session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context)
+        step = "reload-pending-verification"
         committing_metadata = await get_raw_user_metadata(primary_metadata_user_id, user_context)
         committing_verification = next(
             (
@@ -3866,10 +3905,12 @@ async def complete_pending_email_verification(
             or committing_verification.get("id") != pending_verification.get("id")
             or committing_verification.get("status", "PENDING") != "PENDING"
         ):
+            step = "pending-verification-changed"
             await reject_inactive_pending_email_verification(
                 user_id, pending_verification, recipe_user_id, normalized_email, user_context
             )
 
+        step = "passwordless-sign-in-up"
         with verified_email_change_destination(tenant_id, normalized_email):
             passwordless_user = await passwordless_asyncio.signinup(
                 tenant_id,
@@ -3902,11 +3943,13 @@ async def complete_pending_email_verification(
                 )
 
             rollback_credential_change = rollback_add
+            step = "check-created-target-email-available"
             await assert_email_available_for_user(
                 normalized_email,
                 [user_id, passwordless_user.user.id],
                 user_context,
             )
+            step = "ensure-primary-user"
             primary_user_id = await ensure_stable_primary_user(
                 current_user, initiating_recipe_user_id, user_context
             )
@@ -3914,6 +3957,7 @@ async def complete_pending_email_verification(
                 raise RowndEmailChangeError(
                     "CONFLICT", 409, "the account changed before email verification completed"
                 )
+            step = "link-accounts"
             link_result = await accountlinking_asyncio.link_accounts(
                 passwordless_user.recipe_user_id, primary_user_id, user_context
             )
@@ -3922,6 +3966,7 @@ async def complete_pending_email_verification(
         canonical_email_recipe_user_id = passwordless_user.recipe_user_id.get_as_string()
 
         if get_active_rownd_config().email_change.get("retirement_mode", "enforce") == "enforce":
+            step = "validate-replacement-plan"
             linked_user = await get_user(user_id, user_context)
             if linked_user is None:
                 raise email_ownership_conflict()
@@ -3950,6 +3995,7 @@ async def complete_pending_email_verification(
             # A lost response is not proof that publication failed. Roll back only
             # when a fresh Core read confirms the unchanged pre-publication state.
             completion_phase = "COMMITTING"
+            step = "publish-replacement-plan"
             try:
                 await update_primary_user_metadata(
                     user_id,
@@ -3975,6 +4021,7 @@ async def complete_pending_email_verification(
                     if publication_state == target_metadata:
                         completion_phase = "PREPARING"
                 raise
+            step = "reconcile-committing-verification"
             await reconcile_committing_email_verification(user_id, plan, user_context)
             return {
                 "user_id": user_id,
@@ -3982,6 +4029,7 @@ async def complete_pending_email_verification(
                 "initiating_session_handle": initiating_session_handle,
                 "replace_session": True,
             }
+        step = "publish-verified-email-metadata"
         await session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context)
         target_metadata, updated_metadata = await inspect_verified_email_metadata(
             canonical_email_recipe_user_id,
@@ -4062,8 +4110,16 @@ async def complete_pending_email_verification(
                 session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context),
                 return_exceptions=True,
             )
-            raise RowndEmailChangeError(
-                "CONFLICT", 409, "email change cleanup incomplete; retry sign-in with the verified email"
+            log_failure(step, True, error, "cleanup-incomplete")
+            # Retired methods may already be gone, possibly including the initiating
+            # one, so no identity is known to be safe to re-issue a session for.
+            raise RowndEmailChangeSessionsRevokedError(
+                "CONFLICT",
+                409,
+                "email change cleanup incomplete; retry sign-in with the verified email",
+                user_id=user_id,
+                step=step,
+                recoverable_recipe_user_id=None,
             ) from error
         if completion_phase != "COMPLETED":
             rollback_error: Optional[Exception] = None
@@ -4072,7 +4128,9 @@ async def complete_pending_email_verification(
                     await rollback_credential_change()
                 except Exception as caught_rollback_error:
                     rollback_error = caught_rollback_error
-            if completion_phase == "PREPARING":
+            # A thrown revoke has an unknown outcome, unlike a confirmed loss.
+            needs_session_cleanup = completion_phase in ("REVOKING_INITIATOR", "PREPARING")
+            if needs_session_cleanup:
                 await asyncio.gather(
                     session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context),
                     return_exceptions=True,
@@ -4082,12 +4140,17 @@ async def complete_pending_email_verification(
                     get_active_rownd_config(),
                     "email_change_rollback_failed reconciliation_required=true",
                 )
-                raise RowndEmailChangeError(
+                log_failure(step, True, rollback_error, "rollback-failed")
+                raise RowndEmailChangeSessionsRevokedError(
                     "CONFLICT",
                     409,
                     "email change rollback failed; account reconciliation is required",
+                    user_id=user_id,
+                    step=step,
+                    recoverable_recipe_user_id=None,
                 ) from rollback_error
-            with suppress(Exception):
+            pending_cleanup = "fulfilled"
+            try:
                 await cleanup_pending_email_verification(
                     user_id,
                     pending_verification,
@@ -4095,6 +4158,38 @@ async def complete_pending_email_verification(
                     normalized_email,
                     user_context,
                 )
+            except Exception:
+                pending_cleanup = "rejected"
+            rolled_back = "rolled-back" if rollback_credential_change else "nothing-to-roll-back"
+            log_failure(
+                step,
+                needs_session_cleanup,
+                error,
+                f"{rolled_back},pending-cleanup-{pending_cleanup}",
+            )
+            if needs_session_cleanup:
+                recoverable_recipe_user_id = (
+                    initiating_recipe_user_id.get_as_string()
+                    if initiating_recipe_user_id is not None
+                    else None
+                )
+                if isinstance(error, RowndEmailChangeError):
+                    raise RowndEmailChangeSessionsRevokedError(
+                        error.code,
+                        error.http_status,
+                        str(error),
+                        user_id=user_id,
+                        step=step,
+                        recoverable_recipe_user_id=recoverable_recipe_user_id,
+                    ) from error
+                raise RowndEmailChangeSessionsRevokedError(
+                    "CONFLICT",
+                    500,
+                    EMAIL_CHANGE_COMPLETION_FAILED_MESSAGE,
+                    user_id=user_id,
+                    step=step,
+                    recoverable_recipe_user_id=recoverable_recipe_user_id,
+                ) from error
         raise error
 
 
@@ -4864,6 +4959,28 @@ async def cleanup_pending_email_verification(
     await emailverification_asyncio.unverify_email(recipe_user_id, email, user_context)
     await remove_pending_email_verification(
         user_id, cast(str, pending_verification["id"]), user_context
+    )
+
+
+def _log_email_change_completion_failure(
+    step: str,
+    pending_verification_id: Optional[str],
+    sessions_revoked: bool,
+    error: Optional[BaseException],
+    outcome: str,
+) -> None:
+    # Only opaque step and verification ids are logged: user ids are treated as
+    # sensitive here, and Core and SDK error messages can echo emails back.
+    if isinstance(error, RowndEmailChangeError):
+        error_type = f"RowndEmailChangeError:{error.code}"
+    else:
+        error_type = type(error).__name__ if error is not None else "none"
+    log_debug(
+        get_active_rownd_config(),
+        f"email_change_completion_failed step={step} "
+        f"pending_verification_id={pending_verification_id or 'none'} "
+        f"sessions_revoked={str(sessions_revoked).lower()} outcome={outcome} "
+        f"error_type={error_type}",
     )
 
 

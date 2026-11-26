@@ -328,10 +328,19 @@ export async function getPrimaryUserMetadata(
   userContext?: Record<string, any>,
   startingEmailChangeInTenant?: string,
 ): Promise<RowndMetadata> {
+  return (await inspectPrimaryUserMetadata(userId, userContext, startingEmailChangeInTenant)).metadata;
+}
+
+export async function inspectPrimaryUserMetadata(
+  userId: string,
+  userContext?: Record<string, any>,
+  startingEmailChangeInTenant?: string,
+) {
   const user = await SuperTokens.getUser(userId, userContext);
   const mapping = user ? await getPrimaryUserMapping(user.id, userContext) : undefined;
-  const primary = await getRawUserMetadata(mapping?.superTokensUserId ?? user?.id ?? userId, userContext);
-  if (!mapping || !user) return primary;
+  const primaryUserId = mapping?.superTokensUserId ?? user?.id ?? userId;
+  const primary = await getRawUserMetadata(primaryUserId, userContext);
+  if (!mapping || !user) return { primaryUserId, rawMetadata: primary, metadata: primary };
   const alias = await getRawUserMetadata(mapping.externalUserId, userContext);
   if (startingEmailChangeInTenant !== undefined && primary.rownd_email_metadata_version === undefined) {
     const pending = alias.rownd_pending_verification;
@@ -344,7 +353,11 @@ export async function getPrimaryUserMetadata(
         "email change cleanup incomplete; account reconciliation is required");
     }
   }
-  return { ...primary, ...getMappedEmailPointerFallback(primary, alias, user) } as RowndMetadata;
+  return {
+    primaryUserId,
+    rawMetadata: primary,
+    metadata: { ...primary, ...getMappedEmailPointerFallback(primary, alias, user) } as RowndMetadata,
+  };
 }
 
 export async function inspectLinkedUserMetadata(
