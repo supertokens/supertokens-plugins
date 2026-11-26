@@ -26,6 +26,7 @@ from supertokens_python.asyncio import (
     list_users_by_account_info as supertokens_list_users_by_account_info,
 )
 from supertokens_python.interfaces import GetUserIdMappingOkResult, UnknownMappingError
+from supertokens_python.framework.fastapi.fastapi_response import FastApiResponse
 from supertokens_python.recipe.accountlinking import asyncio as accountlinking_asyncio
 from supertokens_python.recipe.emailverification import (
     asyncio as emailverification_asyncio,
@@ -62,6 +63,7 @@ from supertokens_rownd.errors import (
     MigrationError,
     MigrationErrorReason,
     RowndEmailChangeError,
+    RowndEmailChangeSessionsRevokedError,
     RowndPluginError,
 )
 from supertokens_rownd.migration import (
@@ -5492,6 +5494,176 @@ async def test_route_replacement_session_failure_keeps_verified_email_change(
     assert "original_rownd_user" not in metadata.metadata
     assert target.verified
     assert await session_asyncio.get_all_session_handles_for_user(user.id) == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "stage"),
+    [
+        ("recovery-tenant", "tenant-lookup"),
+        ("immediate-header", "write-removal-headers"),
+        ("deferred-header", "write-deferred-removal-headers"),
+        ("queue-sdk", "queue-sdk-clear"),
+        ("deferred-sdk", "apply-sdk-clear"),
+        ("public-revoke-mutator", "apply-public-revoke-mutator"),
+        ("post-commit-tenant", "replacement-tenant-lookup"),
+        ("post-commit-authorization", "authorize-replacement"),
+    ],
+)
+async def test_email_change_faults_keep_http_json_error(
+    memory_core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+    stage: str,
+):
+    delivery_links: list[str] = []
+    client = make_client(
+        memory_core_url,
+        rownd_client,
+        enable_email_verification=True,
+        email_verification_links=delivery_links,
+    )
+    sign_in, initiating_session = await start_native_email_change(
+        client, f"{failure}-current@example.com", f"{failure}-target@example.com"
+    )
+    query = parse_qs(urlparse(delivery_links[0]).query)
+    original_set_header = FastApiResponse.set_header
+    original_complete = rownd_plugin.complete_pending_email_verification
+
+    def fail(*_args: Any, **_kwargs: Any):
+        raise RuntimeError("injected email change fault")
+
+    def fail_removal_header(response, name, value):
+        if name.lower() == "front-token" and value == "remove":
+            fail()
+        return original_set_header(response, name, value)
+
+    async def complete(recipe_user_id, _email, _context, _tenant, handle, *_args):
+        if failure.startswith("post-commit-"):
+            result = await original_complete(
+                recipe_user_id, _email, _context, _tenant, handle, *_args
+            )
+            assert result is not None
+            if failure == "post-commit-tenant":
+                monkeypatch.setattr(type(initiating_session), "get_tenant_id", fail)
+            else:
+                monkeypatch.setattr(
+                    impl, "authorize_passwordless_email", AsyncMock(side_effect=fail)
+                )
+            return result
+        assert await session_asyncio.revoke_session(handle)
+        if failure == "recovery-tenant":
+            monkeypatch.setattr(type(initiating_session), "get_tenant_id", fail)
+        elif failure == "queue-sdk":
+            monkeypatch.setattr(rownd_plugin, "clear_session_response_mutator", fail)
+        elif failure == "deferred-sdk":
+            monkeypatch.setattr(rownd_plugin, "clear_session_response_mutator", lambda *_: fail)
+        elif failure == "public-revoke-mutator":
+            monkeypatch.setattr(rownd_plugin, "clear_session_response_mutator", None)
+            monkeypatch.setattr(FastApiResponse, "set_header", fail_removal_header)
+        else:
+            monkeypatch.setattr(rownd_plugin, "clear_session_response_mutator", None)
+            monkeypatch.setattr(type(initiating_session), "revoke_session", AsyncMock())
+            if failure == "deferred-header":
+                def fail_on_second_removal(response, name, value):
+                    if name.lower() == "front-token" and value == "remove":
+                        monkeypatch.setattr(FastApiResponse, "set_header", fail_removal_header)
+                    return original_set_header(response, name, value)
+
+                monkeypatch.setattr(FastApiResponse, "set_header", fail_on_second_removal)
+            elif failure == "immediate-header":
+                monkeypatch.setattr(FastApiResponse, "set_header", fail_removal_header)
+        raise RowndEmailChangeSessionsRevokedError(
+            "CONFLICT",
+            500,
+            "email change could not be completed; try again",
+            user_id=sign_in.user.id,
+            step="injected-completion-failure",
+            recoverable_recipe_user_id=(
+                recipe_user_id.get_as_string() if failure == "recovery-tenant" else None
+            ),
+        )
+
+    monkeypatch.setattr(rownd_plugin, "complete_pending_email_verification", complete)
+    verify_res = client.post(
+        f"/auth/user/email/verify?rowndPendingVerificationId={query['rowndPendingVerificationId'][0]}",
+        headers={**auth_headers(initiating_session.get_access_token()), "rid": "emailverification"},
+        json={"method": "token", "token": query["token"][0]},
+    )
+
+    assert verify_res.status_code == 200
+    assert verify_res.headers["content-type"].split(";")[0] == "application/json"
+    assert verify_res.json() == {
+        "status": "GENERAL_ERROR",
+        "message": (
+            "email change completed; sign in again with the verified email"
+            if failure.startswith("post-commit-")
+            else "email change could not be completed; try again"
+        ),
+    }
+    assert f"stage={stage}" in caplog.text
+    assert not verify_res.headers.get("st-access-token")
+    if failure in {"recovery-tenant", "queue-sdk", "deferred-sdk"} or failure.startswith(
+        "post-commit-"
+    ):
+        assert verify_res.headers["front-token"] == "remove"
+
+
+@pytest.mark.parametrize("pending_cleanup_fails", [False, True])
+async def test_email_change_loser_does_not_revoke_other_sessions_or_clear_client(
+    memory_core_url: str,
+    rownd_client: MockRowndClient,
+    monkeypatch: pytest.MonkeyPatch,
+    pending_cleanup_fails: bool,
+):
+    delivery_links: list[str] = []
+    client = make_client(
+        memory_core_url,
+        rownd_client,
+        enable_email_verification=True,
+        email_verification_links=delivery_links,
+    )
+    sign_in, initiating_session = await start_native_email_change(
+        client,
+        f"revoke-loser-{pending_cleanup_fails}-current@example.com",
+        f"revoke-loser-{pending_cleanup_fails}-target@example.com",
+    )
+    other_session = await session_asyncio.create_new_session_without_request_response(
+        "public", sign_in.recipe_user_id, {}, {}, True
+    )
+    query = parse_qs(urlparse(delivery_links[0]).query)
+    original_revoke = session_asyncio.revoke_session
+
+    async def lose_revoke(handle, context):
+        assert handle == initiating_session.get_handle()
+        assert await original_revoke(handle, context)
+        return False
+
+    revoke = AsyncMock(side_effect=lose_revoke)
+    revoke_all = AsyncMock(wraps=session_asyncio.revoke_all_sessions_for_user)
+    monkeypatch.setattr(impl.session_asyncio, "revoke_session", revoke)
+    monkeypatch.setattr(impl.session_asyncio, "revoke_all_sessions_for_user", revoke_all)
+    if pending_cleanup_fails:
+        monkeypatch.setattr(
+            impl, "cleanup_pending_email_verification", AsyncMock(side_effect=RuntimeError)
+        )
+    verify_res = client.post(
+        f"/auth/user/email/verify?rowndPendingVerificationId={query['rowndPendingVerificationId'][0]}",
+        headers={**auth_headers(initiating_session.get_access_token()), "rid": "emailverification"},
+        json={"method": "token", "token": query["token"][0]},
+    )
+
+    revoke.assert_awaited_once()
+    revoke_all.assert_not_awaited()
+    assert verify_res.status_code == 200
+    assert verify_res.headers["content-type"].split(";")[0] == "application/json"
+    assert verify_res.json() == {
+        "status": "GENERAL_ERROR",
+        "message": "email change session is no longer active; start the email change again",
+    }
+    assert verify_res.headers.get("front-token") != "remove"
+    assert await session_asyncio.get_session_information(other_session.get_handle()) is not None
 
 
 async def test_marked_email_change_fails_closed_when_target_becomes_owned_before_completion(

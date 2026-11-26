@@ -3819,6 +3819,7 @@ async def test_email_change_rejection_before_revoke_keeps_client_session(
 async def test_replacement_session_failure_runs_email_change_rollback(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    monkeypatch.setattr(plugin.rownd_config, "get_active_rownd_config", make_config)
     rolled_back = False
 
     async def resolve_pending(*_args: Any, **_kwargs: Any):

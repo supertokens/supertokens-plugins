@@ -14078,6 +14078,61 @@ describe("rownd-nodejs plugin", () => {
         ).resolves.toBe(true);
       });
 
+      it("does not revoke other sessions or clear the client after losing the initiating revoke", async () => {
+        const emailVerificationLinks: string[] = [];
+        const { server: s, port } = await setup(coreConnectionURI, undefined, {
+          enableEmailVerification: true,
+          emailVerificationLinks,
+        });
+        server = s;
+        testPORT = port;
+        const initiating = await createPasswordlessSessionForUser(
+          "revoke-loser-current@example.com",
+        );
+        const updateRes = await requestEmailChange(
+          initiating.accessToken,
+          "revoke-loser-target@example.com",
+        );
+        expect(updateRes.status).toBe(200);
+        const otherSession = await Session.createNewSessionWithoutRequestResponse(
+          "public",
+          initiating.recipeUserId,
+          {},
+          {},
+          true,
+        );
+        const verificationUrl = new URL(emailVerificationLinks[0]);
+        const originalRevoke = Session.revokeSession;
+        const revoke = vi.spyOn(Session, "revokeSession").mockImplementation(
+          async (handle, context) => {
+            expect(handle).toBe(initiating.sessionHandle);
+            expect(await originalRevoke(handle, context)).toBe(true);
+            return false;
+          },
+        );
+        const revokeAll = vi.spyOn(Session, "revokeAllSessionsForUser");
+
+        const verifyRes = await verifyEmailToken(
+          verificationUrl.searchParams.get("token")!,
+          initiating.accessToken,
+          verificationUrl.searchParams.get("rowndPendingVerificationId")!,
+        );
+
+        expect(revoke).toHaveBeenCalledOnce();
+        expect(revokeAll).not.toHaveBeenCalled();
+        expect(verifyRes.status).toBe(200);
+        expect(verifyRes.headers.get("content-type")).toMatch(/^application\/json\b/);
+        await expect(verifyRes.json()).resolves.toEqual({
+          status: "GENERAL_ERROR",
+          message:
+            "email change session is no longer active; start the email change again",
+        });
+        expect(verifyRes.headers.get("front-token")).not.toBe("remove");
+        await expect(
+          Session.getSessionInformation(otherSession.getHandle()),
+        ).resolves.toBeDefined();
+      });
+
       it("does not unverify another account when its token is submitted with a pending marker", async () => {
         const emailVerificationLinks: string[] = [];
         const { server: s, port } = await setup(coreConnectionURI, undefined, {

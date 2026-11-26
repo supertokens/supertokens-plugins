@@ -3788,7 +3788,6 @@ async def complete_pending_email_verification(
     except BaseException as error:
         log_failure("initiating-session-claims", False, error)
         raise
-    sessions_revoked = False
     initiating_recipe_user_id: Optional[RecipeUserId] = None
     step = "check-target-email-available"
     try:
@@ -3873,18 +3872,21 @@ async def complete_pending_email_verification(
         step = "validate-prospective-metadata"
         await inspect_verified_email_metadata(recipe_user_id.get_as_string())
 
-        completion_phase = "PREPARING"
+        completion_phase = "REVOKING_INITIATOR"
         step = "revoke-initiating-session"
         if not await session_asyncio.revoke_session(
             cast(str, initiating_session_handle), user_context
         ):
             # Another completion (or a sign-out) won the revoke, so this request
-            # never held the completion lock and must not mint a session.
+            # never held the lock and must not invalidate anyone else's session.
+            completion_phase = "PENDING"
             step = "initiating-session-already-revoked"
-            await reject_inactive_pending_email_verification(
-                user_id, pending_verification, recipe_user_id, normalized_email, user_context
+            raise RowndEmailChangeError(
+                "CONFLICT",
+                409,
+                "email change session is no longer active; start the email change again",
             )
-        sessions_revoked = True
+        completion_phase = "PREPARING"
         initiating_recipe_user_id = initiating_login_method.recipe_user_id
         step = "revoke-all-sessions"
         await session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context)
@@ -4126,7 +4128,9 @@ async def complete_pending_email_verification(
                     await rollback_credential_change()
                 except Exception as caught_rollback_error:
                     rollback_error = caught_rollback_error
-            if completion_phase == "PREPARING":
+            # A thrown revoke has an unknown outcome, unlike a confirmed loss.
+            needs_session_cleanup = completion_phase in ("REVOKING_INITIATOR", "PREPARING")
+            if needs_session_cleanup:
                 await asyncio.gather(
                     session_asyncio.revoke_all_sessions_for_user(user_id, True, None, user_context),
                     return_exceptions=True,
@@ -4159,16 +4163,14 @@ async def complete_pending_email_verification(
             rolled_back = "rolled-back" if rollback_credential_change else "nothing-to-roll-back"
             log_failure(
                 step,
-                completion_phase == "PREPARING",
+                needs_session_cleanup,
                 error,
                 f"{rolled_back},pending-cleanup-{pending_cleanup}",
             )
-            # PREPARING revokes every session above even when this request lost
-            # the initiating-session revoke, so the client's session is gone either way.
-            if completion_phase == "PREPARING":
+            if needs_session_cleanup:
                 recoverable_recipe_user_id = (
                     initiating_recipe_user_id.get_as_string()
-                    if sessions_revoked and initiating_recipe_user_id is not None
+                    if initiating_recipe_user_id is not None
                     else None
                 )
                 if isinstance(error, RowndEmailChangeError):

@@ -395,6 +395,30 @@ def _set_session_removal_headers(response: BaseResponse, _user_context: UserCont
         response.set_header(header, exposed + ",front-token")
 
 
+_ResponseMutator = Callable[[BaseResponse, UserContext], None]
+
+
+def _log_email_change_session_failure(stage: str, error: Exception) -> None:
+    log_warning(
+        rownd_config.get_active_rownd_config(),
+        f"email_change_session_failed stage={stage} error_type={type(error).__name__}",
+    )
+
+
+def _guard_email_change_response_mutator(
+    mutate: _ResponseMutator, stage: str, *, fallback: Optional[_ResponseMutator] = None
+) -> _ResponseMutator:
+    def guarded(response: BaseResponse, user_context: UserContext) -> None:
+        try:
+            mutate(response, user_context)
+        except Exception as error:
+            _log_email_change_session_failure(stage, error)
+            if fallback is not None:
+                fallback(response, user_context)
+
+    return guarded
+
+
 async def _clear_email_change_client_session(
     options: EmailVerificationAPIOptions,
     initiating_session: Optional[SessionContainer],
@@ -402,43 +426,72 @@ async def _clear_email_change_client_session(
 ) -> None:
     # Session creation attaches its tokens to the request's session before it can
     # still fail, so clear whichever session the response will be built from.
-    current = options.request.get_session() if hasattr(options.request, "get_session") else None
+    current = None
+    try:
+        if hasattr(options.request, "get_session"):
+            current = options.request.get_session()
+    except Exception as error:
+        _log_email_change_session_failure("get-request-session", error)
     fallback = initiating_session is None and current is None
+    deferred_removal = _guard_email_change_response_mutator(
+        _set_session_removal_headers, "write-deferred-removal-headers"
+    )
     for candidate in {id(s): s for s in (initiating_session, current) if s is not None}.values():
-        if _append_clear_session_response_mutator(candidate):
-            continue
-        fallback = True
-        with suppress(Exception):
-            await candidate.revoke_session(user_context)
-        # The middleware applies queued token writes after the API returns.
+        # Don't send tokens already queued for a session we're clearing, even
+        # if the middleware's subsequent removal writes fail.
         mutators = getattr(candidate, "response_mutators", None)
         if isinstance(mutators, list):
-            mutators.append(_set_session_removal_headers)
+            mutators.clear()
+        if _append_clear_session_response_mutator(
+            candidate,
+            lambda mutate: _guard_email_change_response_mutator(
+                mutate, "apply-sdk-clear", fallback=deferred_removal
+            ),
+        ):
+            continue
+        fallback = True
+        try:
+            await candidate.revoke_session(user_context)
+        except Exception as error:
+            _log_email_change_session_failure("public-revoke", error)
+        mutators = getattr(candidate, "response_mutators", None)
+        if isinstance(mutators, list):
+            mutators[:] = [
+                _guard_email_change_response_mutator(mutate, "apply-public-revoke-mutator")
+                for mutate in mutators
+            ]
+            mutators.append(deferred_removal)
     if fallback:
         log_debug(
             rownd_config.get_active_rownd_config(),
             "email_change_session_cleanup using public session fallback",
         )
-        _set_session_removal_headers(options.response, user_context)
+        _guard_email_change_response_mutator(
+            _set_session_removal_headers, "write-removal-headers"
+        )(options.response, user_context)
 
 
-def _append_clear_session_response_mutator(returned_session: Any) -> bool:
+def _append_clear_session_response_mutator(
+    returned_session: Any,
+    wrap: Optional[Callable[[_ResponseMutator], _ResponseMutator]] = None,
+) -> bool:
     if clear_session_response_mutator is None:
         return False
-    req_res_info = getattr(returned_session, "req_res_info", None)
-    response_mutators = getattr(returned_session, "response_mutators", None)
-    config = getattr(returned_session, "config", None)
-    if req_res_info is None or not isinstance(response_mutators, list) or config is None:
-        return False
     try:
-        response_mutators.append(
-            clear_session_response_mutator(
-                config,
-                req_res_info.transfer_method,
-                req_res_info.request,
-            )
+        req_res_info = getattr(returned_session, "req_res_info", None)
+        response_mutators = getattr(returned_session, "response_mutators", None)
+        config = getattr(returned_session, "config", None)
+        if req_res_info is None or not isinstance(response_mutators, list) or config is None:
+            return False
+        mutate = clear_session_response_mutator(
+            config,
+            req_res_info.transfer_method,
+            req_res_info.request,
         )
-    except Exception:
+        response_mutators.append(wrap(mutate) if wrap is not None else mutate)
+    except Exception as error:
+        if wrap is not None:
+            _log_email_change_session_failure("queue-sdk-clear", error)
         return False
     return True
 
@@ -1718,15 +1771,19 @@ def _emailverification_api_override():
                     except RowndEmailChangeError as error:
                         return GeneralErrorResponse(str(error))
                     if session is not None and verification_result is not None:
-                        should_replace_session = (
-                            session.get_handle(user_context)
-                            == verification_result["initiating_session_handle"]
-                        )
-                        if should_replace_session:
+                        stage = "check-replacement-session"
+                        authorized = True
+                        try:
+                            if session.get_handle(user_context) != verification_result[
+                                "initiating_session_handle"
+                            ]:
+                                return result
+                            stage = "replacement-tenant-lookup"
                             tenant_id = session.get_tenant_id(user_context)
                             verified_recipe_user_id = cast(
                                 RecipeUserId, verification_result["recipe_user_id"]
                             )
+                            stage = "authorize-replacement"
                             if (
                                 rownd_config.get_active_rownd_config().email_change.get(
                                     "retirement_mode", "enforce"
@@ -1742,55 +1799,66 @@ def _emailverification_api_override():
                                         cast(str, verification_result["user_id"]),
                                     )
                                 )
-                                if not authorization.allowed:
-                                    await _clear_email_change_client_session(
-                                        api_options, session, user_context
+                                authorized = authorization.allowed
+                        except Exception as error:
+                            _log_email_change_session_failure(stage, error)
+                            await _clear_email_change_client_session(
+                                api_options, session, user_context
+                            )
+                            return GeneralErrorResponse(
+                                EMAIL_CHANGE_REPLACEMENT_SESSION_FAILED_MESSAGE
+                            )
+                        if not authorized:
+                            await _clear_email_change_client_session(
+                                api_options, session, user_context
+                            )
+                            return GeneralErrorResponse("verified email is no longer authorized")
+                        try:
+                            cast(
+                                Any, result
+                            ).new_session = await session_asyncio.create_new_session(
+                                api_options.request,
+                                tenant_id,
+                                verified_recipe_user_id,
+                                {},
+                                {},
+                                user_context,
+                            )
+                        except Exception as error:
+                            _log_email_change_session_failure("create-replacement-session", error)
+                            # The original session is already revoked.
+                            await _clear_email_change_client_session(
+                                api_options, session, user_context
+                            )
+                            rollback = verification_result.get(
+                                "rollback_on_session_replacement_failure"
+                            )
+                            if rollback is not None:
+                                try:
+                                    await cast(Callable[[], Any], rollback)()
+                                except RowndEmailChangeError as rollback_error:
+                                    return GeneralErrorResponse(str(rollback_error))
+                                except Exception as rollback_error:
+                                    _log_email_change_session_failure(
+                                        "rollback-replacement", rollback_error
                                     )
-                                    return GeneralErrorResponse(
-                                        "verified email is no longer authorized"
-                                    )
+                                return GeneralErrorResponse(
+                                    EMAIL_CHANGE_COMPLETION_FAILED_MESSAGE
+                                )
                             try:
-                                cast(
-                                    Any, result
-                                ).new_session = await session_asyncio.create_new_session(
-                                    api_options.request,
-                                    tenant_id,
-                                    verified_recipe_user_id,
-                                    {},
-                                    {},
+                                await session_asyncio.revoke_all_sessions_for_user(
+                                    cast(str, verification_result["user_id"]),
+                                    True,
+                                    None,
                                     user_context,
                                 )
-                            except Exception:
-                                # Every session is already revoked, so the client must
-                                # drop its dead session whatever happens next.
-                                await _clear_email_change_client_session(
-                                    api_options, session, user_context
+                            except Exception as revoke_error:
+                                _log_email_change_session_failure(
+                                    "revoke-after-replacement-failure", revoke_error
                                 )
-                                rollback = verification_result.get(
-                                    "rollback_on_session_replacement_failure"
-                                )
-                                if rollback is not None:
-                                    try:
-                                        await cast(Callable[[], Any], rollback)()
-                                    except RowndEmailChangeError as rollback_error:
-                                        return GeneralErrorResponse(str(rollback_error))
-                                    return GeneralErrorResponse(
-                                        EMAIL_CHANGE_COMPLETION_FAILED_MESSAGE
-                                    )
-                                with suppress(Exception):
-                                    await session_asyncio.revoke_all_sessions_for_user(
-                                        cast(str, verification_result["user_id"]),
-                                        True,
-                                        None,
-                                        user_context,
-                                    )
-                                log_warning(
-                                    rownd_config.get_active_rownd_config(),
-                                    "email_change_replacement_session_failed",
-                                )
-                                return GeneralErrorResponse(
-                                    EMAIL_CHANGE_REPLACEMENT_SESSION_FAILED_MESSAGE
-                                )
+                            return GeneralErrorResponse(
+                                EMAIL_CHANGE_REPLACEMENT_SESSION_FAILED_MESSAGE
+                            )
             return result
 
         original.email_verify_post = email_verify_post
