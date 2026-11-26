@@ -169,8 +169,8 @@ function validateOwner(inspection: LinkedUserMetadataInspection, destination: Ro
 
 /**
  * Computes the patch that makes the SDK-visible record's presentation equal the
- * compatibility presentation. The patch only touches presentation keys: stale
- * keys are deleted with null, operational members of the record are preserved.
+ * compatibility presentation. Stale presentation keys are deleted with null.
+ * Disconnect policy is copied separately; other operational keys are preserved.
  */
 export function planCanonicalRepublish(inspection: LinkedUserMetadataInspection, destination: RowndMetadata): JsonRecord {
   validateOwner(inspection, destination);

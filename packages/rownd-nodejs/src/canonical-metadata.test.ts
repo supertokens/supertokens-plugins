@@ -158,7 +158,8 @@ describe("canonical presentation resolver and writer", () => {
   it.each(["sdk-owner", "internal-owner", "recipe"])("reads one literal SDK address for selector %s", async (selector) => {
     const context = { marker: "context" };
     expect(await inspectUserPresentationMetadata(selector, context)).toEqual({
-      user, combinedMetadata: { custom: "canonical" },
+      user, primaryUserId: "sdk-owner",
+      primaryMetadata: { custom: "canonical" }, combinedMetadata: { custom: "canonical" },
     });
     expect(vi.mocked(SuperTokens.getUser).mock.calls).toEqual([[selector, context]]);
     expect(vi.mocked(UserMetadata.getUserMetadata).mock.calls).toEqual([["sdk-owner", context]]);
@@ -197,7 +198,9 @@ describe("canonical presentation resolver and writer", () => {
 
   it("never follows references for a missing current user", async () => {
     records.set("retired", { rownd_migration_target: "sdk-owner", custom: "orphan" });
-    expect(await inspectUserPresentationMetadata("retired")).toEqual({ user: undefined, combinedMetadata: {} });
+    expect(await inspectUserPresentationMetadata("retired")).toEqual({
+      user: undefined, primaryUserId: "retired", primaryMetadata: {}, combinedMetadata: {},
+    });
     expect(UserMetadata.getUserMetadata).not.toHaveBeenCalled();
     expect(SuperTokens.getUser).toHaveBeenCalledTimes(1);
   });
