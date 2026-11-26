@@ -1057,11 +1057,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   { rowndAppVariantId: appVariantId },
                 );
                 let session = input.shouldTryLinkingWithSessionUser === false ? undefined : input.session;
-                const sessionOwner = session && authSnapshot?.inspections.get(session.getUserId(operationContext));
-                if (session && sessionOwner) {
+                const sessionUserId = session?.getUserId(operationContext);
+                const sessionOwner = sessionUserId && authSnapshot?.inspections.get(sessionUserId);
+                if (session && sessionUserId && sessionOwner) {
                   const recipe = session.getRecipeUserId(operationContext);
                   try {
-                    const { gate } = await checkSignInMethodAuthentication(session.getUserId(operationContext), recipe, input.tenantId,
+                    const { gate } = await checkSignInMethodAuthentication(sessionUserId, recipe, input.tenantId,
                       operationContext, { presence: sessionOwner });
                     // Disconnect also revokes the retained factor's sessions, though the recipe remains live.
                     if (gate.policy && !await Session.getSessionInformation(session.getHandle(operationContext), operationContext)) {
@@ -1073,7 +1074,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   } catch (error) {
                     if (!(error instanceof DisconnectedSignInMethodError)) throw error;
                     if (input.shouldTryLinkingWithSessionUser === true || error.code !== "SIGN_IN_METHOD_DISCONNECTED") {
-                      return policyFailure(error, "passwordless_existing_session", session.getUserId(operationContext));
+                      return policyFailure(error, "passwordless_existing_session", sessionUserId);
                     }
                     // A retained-email sign-in is independent of an incidental retired SSO token.
                     session = undefined;

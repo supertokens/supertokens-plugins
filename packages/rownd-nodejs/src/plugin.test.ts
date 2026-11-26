@@ -2919,6 +2919,7 @@ describe("rownd-nodejs plugin", () => {
         tenantId: "public",
         options: {
           req: makeVariantRequest("variant_123"),
+          res: new CollectingResponse(),
           recipeImplementation: {
             listCodesByPreAuthSessionId: vi.fn().mockResolvedValue(undefined),
           },
@@ -3518,6 +3519,7 @@ describe("rownd-nodejs plugin", () => {
           preAuthSessionId: targetCode.preAuthSessionId,
           options: {
             req: makeRequest({}),
+            res: new CollectingResponse(),
             recipeImplementation: {
               listCodesByPreAuthSessionId:
                 Passwordless.listCodesByPreAuthSessionId,
@@ -3603,6 +3605,7 @@ describe("rownd-nodejs plugin", () => {
           preAuthSessionId: "missing-intent",
           options: {
             req: makeRequest({}),
+            res: new CollectingResponse(),
             recipeImplementation: {
               listCodesByPreAuthSessionId: vi.fn().mockResolvedValue(undefined),
             },
