@@ -24,7 +24,7 @@ import {
 } from "./constants";
 import { RowndEmailChangeError, RowndLegacyUserNotFoundError, RowndPluginError, RowndSignInMethodError } from "./errors";
 import { assertConnectedSignInMethodsEnabled, connectedSignInMethodsAreAvailable, disconnectConnectedSignInMethod, listConnectedSignInMethods } from "./connected-sign-in-methods";
-import { assertNoDisconnectedSignInMethods, DisconnectedSignInMethodError } from "./disconnected-sign-in-identities";
+import { assertNoPolicyInMetadata, DisconnectedSignInMethodError } from "./disconnected-sign-in-identities";
 import { logSignInMethodPolicy, signInMethodPolicyFailureLevel } from "./sign-in-method-policy-log";
 import { logDebugMessage } from "./logger";
 import type {
@@ -396,7 +396,6 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       if (!deps.pluginConfig.rowndAppSecret) {
         telemetry.stage = "token_validation";
         rowndUserId = await authenticateExistingRowndMigration(parsed.token, tenantId, resolved.userContext);
-        await assertNoDisconnectedSignInMethods(rowndUserId, resolved.userContext);
         telemetry.stage = "completed_mapping_lookup";
         await migrateExistingMappedUser({
           rowndUserId, tenantId, appVariantId, req, res,
@@ -410,7 +409,6 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       telemetry.stage = "token_validation";
       const authenticated = await authenticateRowndMigration(parsed.token, tenantId, resolved.userContext);
       rowndUserId = authenticated.rowndUserId;
-      await assertNoDisconnectedSignInMethods(rowndUserId, resolved.userContext);
       const stUserImport = authenticated.source;
 
       if (!stUserImport) {
@@ -419,6 +417,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
 
       telemetry.stage = "supertokens_lookup";
       const discovery = await discoverMigrationById(rowndUserId, tenantId, resolved.userContext);
+      assertNoMigrationDisconnectPolicy(discovery);
       const plan = planMigration(discovery, stUserImport);
       if (plan.status === "BLOCKED") throw new Error(plan.reason);
       let ownerId = rowndUserId;
@@ -579,7 +578,6 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
         {},
         resolved.userContext,
       );
-      await assertNoDisconnectedSignInMethods(rowndUserId, resolved.userContext);
       const hasAuthenticatedMethod = stUserImport.loginMethods.some((method) => method.recipeId !== "thirdparty" ||
         !["instant", "guest"].includes(method.thirdPartyId));
       const createdSession = await (authenticatedSession && hasAuthenticatedMethod ? withProvenSessionAuthentication(createSession) : createSession());
@@ -591,7 +589,6 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
           throw new Error("Created session does not match the requested Rownd identity");
         }
         await assertMigrationMapping(internalUserId, rowndUserId, resolved.userContext);
-        await assertNoDisconnectedSignInMethods(internalUserId, resolved.userContext);
         if (consolidatedAlias && (await resolveConsolidatedTokenOwner(stUserImport, tenantId, resolved.userContext))?.canonicalRowndId !== consolidatedAlias.canonicalRowndId) {
           throw new Error("Consolidated Rownd alias ownership changed after session creation");
         }
@@ -629,6 +626,13 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
   };
 }
 
+function assertNoMigrationDisconnectPolicy(discovery: Awaited<ReturnType<typeof discoverMigrationById>>) {
+  const ownerId = discovery.mapping.status === "OK" ? discovery.mapping.superTokensUserId : discovery.user?.id ?? discovery.sourceId;
+  for (const id of new Set([ownerId, discovery.sourceId, discovery.user?.id ?? discovery.sourceId])) {
+    assertNoPolicyInMetadata(ownerId, discovery.metadataById.get(id) ?? {});
+  }
+}
+
 async function migrateExistingMappedUser(input: {
   rowndUserId: string;
   tenantId: string;
@@ -640,10 +644,10 @@ async function migrateExistingMappedUser(input: {
   telemetry: MigrationTelemetry;
 }) {
   const { rowndUserId, tenantId, appVariantId, req, res, config, userContext, telemetry } = input;
-  const checkOwner = async () => {
+  const checkOwner = async (checkDisconnectPolicy = false) => {
     clearSuperTokensCoreCallCache(userContext);
-    await assertNoDisconnectedSignInMethods(rowndUserId, userContext);
     const discovery = await discoverMigrationById(rowndUserId, tenantId, userContext);
+    if (checkDisconnectPolicy) assertNoMigrationDisconnectPolicy(discovery);
     const { mapping, reverse } = discovery;
     if (mapping.status !== "OK" || mapping.externalUserId !== rowndUserId ||
         reverse?.status !== "OK" || reverse.superTokensUserId !== mapping.superTokensUserId ||
@@ -674,7 +678,7 @@ async function migrateExistingMappedUser(input: {
     };
   };
 
-  const owner = await checkOwner();
+  const owner = await checkOwner(true);
   telemetry.superTokensUserId = owner.userId;
   telemetry.recipeUserId = owner.recipeUserId.getAsString();
   telemetry.stage = "session_creation";

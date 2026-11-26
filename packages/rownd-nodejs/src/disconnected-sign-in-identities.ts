@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import SuperTokens from "supertokens-node";
 import SuperTokensError from "supertokens-node/lib/build/error";
 import UserMetadata from "supertokens-node/recipe/usermetadata";
 import type { RecipeInterface as AccountLinkingRecipe } from "supertokens-node/recipe/accountlinking/types";
+import type { JSONObject } from "supertokens-node/types";
 import { reconciliationSuperTokens as ReconciliationCore, reconciliationUserMetadata as PolicyMetadata } from "./reconciliation-sdk";
 import { assertReconciliationWritesAllowed } from "./reconciliation-reads";
 import { clearSuperTokensCoreCallCache, isRecord } from "./utils";
@@ -10,6 +12,7 @@ import { GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID } from "./constants";
 import { readOwnerPlanCheckpoint } from "./migration-owner-plan";
 import { RowndMigrationPolicyError } from "./errors";
 import { logSignInMethodPolicy } from "./sign-in-method-policy-log";
+import { inspectUserPresentationMetadata, type PolicyPresence } from "./rownd-compatibility";
 
 type RecipeUserId = ReturnType<typeof SuperTokens.convertToRecipeUserId>;
 type User = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
@@ -102,7 +105,7 @@ async function writeIdentityIndex(method: DisconnectedSignInMethod, userContext?
   const { userId: ownerId, tenantId, providerId } = method;
   const id = indexPrefix + method.identityHash;
   const key = ownerIndexKey(ownerId);
-  const { metadata } = await UserMetadata.getUserMetadata(id, uncachedContext(userContext));
+  const { metadata } = await UserMetadata.getUserMetadata(id, userContext);
   if (readIndexEntries(metadata).some(({ entry }) => entry?.ownerId === ownerId &&
     entry.tenantId === tenantId && entry.providerId === providerId)) return;
   // A new account can later disconnect the same subject. Its entry must not
@@ -117,7 +120,7 @@ function nonempty(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function realProvider(value: unknown): value is string {
+export function realProvider(value: unknown): value is string {
   return nonempty(value) && value !== GUEST_AUTH_METHOD_ID && value !== INSTANT_AUTH_METHOD_ID;
 }
 
@@ -143,8 +146,7 @@ async function mappingFor(id: string, userContext?: Context) {
   return internal.status === "OK" ? internal : external.status === "OK" ? external : undefined;
 }
 
-async function confirmedAbsentOwner(ownerId: string, userContext?: Context) {
-  const context = uncachedContext(userContext);
+async function confirmedAbsentOwner(ownerId: string, context?: Context) {
   // A live primary still resolves by its internal anchor after recipe-only deletion.
   if (await SuperTokens.getUser(ownerId, context)) return false;
   if (await mappingFor(ownerId, context)) return false;
@@ -296,13 +298,14 @@ async function fenceOwnerTransition(userId: string, previousOwnerId: string, use
   }
   const key = conflictKey(previousOwnerId);
   const fence = { version: 1, userId, previousOwnerId };
-  const result = await PolicyMetadata.updateUserMetadata(userId, { [key]: fence }, userContext);
-  if (result.status !== "OK") throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
+  const owner = await ownerFor(userId, userContext);
+  if (!owner.user || owner.id !== userId) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED", userId);
+  await persistOwnerPolicy(owner, key, fence, userContext);
   logSignInMethodPolicy("warn", "rownd_disconnect_fence_written", {
     code: "DISCONNECT_OWNER_CHANGED", ownerId: userId, step: "fence",
   });
-  const { metadata } = await UserMetadata.getUserMetadata(userId, uncachedContext(userContext));
-  const saved = metadata?.[key];
+  // Re-read both rows after writing the fence.
+  const saved = (await readOwnerPolicyRows(owner, uncachedContext(userContext)))[key];
   if (!isRecord(saved) || saved.version !== 1 || saved.userId !== userId || saved.previousOwnerId !== previousOwnerId) {
     throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
   }
@@ -355,12 +358,74 @@ async function assertProtectedRows(ownerId: string, rows: ReadonlyMap<string, bo
 }
 
 async function readPolicy(owner: Owner, userContext?: Context): Promise<DisconnectedSignInMethod[]> {
-  const { metadata } = await UserMetadata.getUserMetadata(owner.id, userContext);
-  const policy = parsePolicy(owner.id, metadata ?? {});
+  const metadata = await readOwnerPolicyRows(owner, userContext);
   if (owner.mapping) await mappingFor(owner.mapping.externalUserId, userContext);
-  const readSecondary = await assertProtectedOwnerGraph(owner, metadata ?? {}, userContext, true);
-  if (!readSecondary) return policy.methods;
-  return parsePolicy(owner.id, (await UserMetadata.getUserMetadata(owner.id, uncachedContext(userContext))).metadata ?? {}).methods;
+  await assertProtectedOwnerGraph(owner, metadata, userContext, true);
+  return parsePolicy(owner.id, metadata).methods;
+}
+
+export function signInMethodPolicyFields(metadata: Record<string, unknown>) {
+  return Object.fromEntries(Object.entries(metadata ?? {}).filter(([key]) => isDisconnectedSignInMethodMetadataKey(key)));
+}
+
+export function mergeSignInMethodPolicy(ownerId: string, primary: Record<string, unknown>, published: Record<string, unknown>) {
+  const policy = signInMethodPolicyFields(primary);
+  for (const [key, value] of Object.entries(signInMethodPolicyFields(published))) {
+    if (Object.prototype.hasOwnProperty.call(policy, key) && !isDeepStrictEqual(policy[key], value)) {
+      throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID", ownerId);
+    }
+    policy[key] = value;
+  }
+  return policy;
+}
+
+async function readOwnerPolicyRows(owner: Owner, context?: Context) {
+  const { metadata } = await UserMetadata.getUserMetadata(owner.id, context);
+  const alias = owner.mapping?.externalUserId;
+  if (!alias || alias === owner.id) return metadata ?? {};
+  const published = (await UserMetadata.getUserMetadata(alias, context)).metadata;
+  return { ...metadata, ...mergeSignInMethodPolicy(owner.id, metadata, published) };
+}
+
+async function persistOwnerPolicy(owner: Owner, key: string, value: JSONObject, context?: Context) {
+  // Write the SDK row first: canonical readers do not consult the internal row.
+  for (const id of new Set([owner.mapping?.externalUserId ?? owner.id, owner.id])) {
+    const result = await PolicyMetadata.updateUserMetadata(id, { [key]: value }, context);
+    if (result.status !== "OK") throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
+  }
+}
+
+/** Backfills an earlier internal-only checkpoint before enabling canonical mode. */
+export async function publishSignInMethodPolicy(input: { userId: string; dryRun: boolean }) {
+  if (typeof input.dryRun !== "boolean") throw new TypeError("Specify dryRun");
+  const context = {};
+  const owner = await ownerFor(input.userId, context);
+  assertPrimaryReference(owner, input.userId);
+  if (!owner.user) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED", owner.id);
+  const { id, user } = owner;
+  if (id === user.id) return { userId: user.id, keys: [] };
+  const { metadata: legacy } = await UserMetadata.getUserMetadata(id, context);
+  const { metadata: canonical } = await UserMetadata.getUserMetadata(user.id, context);
+  const merged = mergeSignInMethodPolicy(id, legacy, canonical);
+  const keys = Object.keys(merged).filter((key) => !Object.prototype.hasOwnProperty.call(canonical, key));
+  if (!keys.length) return { userId: user.id, keys };
+  if (keys.some((key) => merged[key] === null || (isRecord(merged[key]) && "providerUserId" in merged[key]))) {
+    throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID", id);
+  }
+  await assertProtectedOwnerGraph(owner, legacy, context, true);
+  if (!input.dryRun) {
+    const patch = Object.fromEntries(keys.map((key) => [key, merged[key]])) as JSONObject;
+    const result = await PolicyMetadata.updateUserMetadata(user.id, patch, context);
+    if (result.status !== "OK") throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID", id);
+    // Verify the exact copied values and mapping after publication.
+    const verification = uncachedContext(context);
+    assertSameOwner(owner, await ownerFor(input.userId, verification));
+    const { metadata } = await UserMetadata.getUserMetadata(user.id, verification);
+    if (keys.some((key) => !isDeepStrictEqual(metadata[key], patch[key]))) {
+      throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID", id);
+    }
+  }
+  return { userId: user.id, keys };
 }
 
 async function recipeMethod(owner: Owner, recipeUserId: RecipeUserId, userContext?: Context) {
@@ -453,6 +518,17 @@ export async function recordDisconnectedSignInMethod(
       throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
     }
     await beforeCommit?.();
+    if (currentOwner.mapping) {
+      const fields = signInMethodPolicyFields(await readOwnerPolicyRows(currentOwner, userContext));
+      for (const id of [currentOwner.mapping.externalUserId, currentOwner.id]) {
+        const { metadata } = await UserMetadata.getUserMetadata(id, userContext);
+        const missing = Object.fromEntries(Object.entries(fields).filter(([key]) => !Object.prototype.hasOwnProperty.call(metadata, key)));
+        if (Object.keys(missing).length) {
+          const result = await PolicyMetadata.updateUserMetadata(id, missing as JSONObject, userContext);
+          if (result.status !== "OK") throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
+        }
+      }
+    }
     await writeIdentityIndex(existing, userContext);
     return;
   }
@@ -467,9 +543,9 @@ export async function recordDisconnectedSignInMethod(
     tenantId: input.tenantId, providerId: input.providerId, identityHash };
   // Independent top-level fields avoid lost updates between different identities.
   await beforeCommit?.();
-  const result = await PolicyMetadata.updateUserMetadata(owner.id, { [checkpointKey(checkpoint)]: checkpoint }, userContext);
-  if (result.status !== "OK") throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
+  await persistOwnerPolicy(owner, checkpointKey(checkpoint), checkpoint, userContext);
   await writeIdentityIndex(checkpoint, userContext);
+  // Verify the intent and owner after publishing both metadata rows and the index.
   fresh(userContext);
   const currentOwner = await ownerFor(input.userId, userContext);
   assertSameOwner(owner, currentOwner);
@@ -495,9 +571,9 @@ export async function completeDisconnectedSignInMethod(
   if (!existing || existing.recipeUserId !== recipeId) throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
   if (!existing.completed) {
     // A delayed first-time intent write must never replace completion state.
-    const result = await PolicyMetadata.updateUserMetadata(owner.id, { [completionKey(existing)]: { ...existing, completed: true } }, userContext);
-    if (result.status !== "OK") throw new DisconnectedSignInMethodError("DISCONNECT_POLICY_INVALID");
+    await persistOwnerPolicy(owner, completionKey(existing), { ...existing, completed: true }, userContext);
   }
+  // Verify completion and ownership after the write.
   fresh(userContext);
   const current = await ownerFor(input.userId, userContext);
   assertSameOwner(owner, current);
@@ -507,7 +583,7 @@ export async function completeDisconnectedSignInMethod(
   }
 }
 
-function hasPolicy(metadata: Record<string, unknown>) {
+export function hasSignInMethodPolicy(metadata: Record<string, unknown>) {
   return Object.keys(metadata ?? {}).some(isDisconnectedSignInMethodMetadataKey);
 }
 
@@ -518,22 +594,13 @@ async function lenientOwner(id: string, userContext: Context | undefined, user?:
 }
 
 type Gate = {
-  reference: string;
   owner: Owner;
-  literalIds: string[];
-  ownerMetadata: Record<string, unknown>;
   policy?: ReturnType<typeof parsePolicy>;
 };
 
 type GateOptions = {
-  scope: "session" | "signin";
   user?: User;
-  // Only pass a snapshot from an earlier check in the same auth operation.
-  // The commit check reuses its row addresses, never its policy contents.
-  previous?: Gate;
-  // A caller that just cleared its request cache can share the fresh policy
-  // read with downstream work instead of creating a second cache.
-  freshContext?: boolean;
+  presence?: PolicyPresence;
 };
 
 function isRetiredPrimaryRecipe(gate: Gate, recipeId: string) {
@@ -542,88 +609,43 @@ function isRetiredPrimaryRecipe(gate: Gate, recipeId: string) {
 }
 
 export async function assertNotRetiredPrimaryRecipe(recipeId: string, user: User, userContext: Context) {
-  const gate = await readPolicyGate(user.id, userContext, { scope: "signin", user });
+  const gate = await readPolicyGate(user.id, userContext, { user });
   if (isRetiredPrimaryRecipe(gate, recipeId)) {
     throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED", gate.owner.id);
   }
 }
 
-async function assertLiteralReferences(literalIds: string[], userContext?: Context) {
-  for (const id of literalIds) {
-    const { metadata } = await UserMetadata.getUserMetadata(id, userContext);
-    if (!hasPolicy(metadata)) continue;
-    const internal = await SuperTokens.getUserIdMapping({ userId: id, userIdType: "SUPERTOKENS", userContext });
-    if (internal.status === "OK" || Object.entries(metadata).some(([key, value]) =>
-      isDisconnectedSignInMethodMetadataKey(key) && isRecord(value) && value.userId === id)) {
-      throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
-    }
-  }
-}
-
 export async function readPolicyGate(
   reference: string, userContext: Context | undefined,
-  options: GateOptions,
+  options: GateOptions = {},
 ): Promise<Gate> {
-  const previous = options.previous?.reference === reference ? options.previous : undefined;
-  let owner = previous?.owner ?? await lenientOwner(reference, userContext);
-  const literalIds = new Set(previous?.literalIds);
-  let activeContext = previous && !options.freshContext ? uncachedContext(userContext) : userContext;
-  // Refresh checks the canonical internal owner row. Sign-in and issuance also
-  // check literal aliases for a conflicting internal owner after a relink.
-  if (options.scope === "signin") {
-    if (reference !== owner.id) literalIds.add(reference);
-    await assertLiteralReferences([...literalIds], activeContext);
-  }
-  if (!previous && options.scope === "signin") {
-    const user = options.user ?? await SuperTokens.getUser(reference, userContext);
-    if (user && user.id !== reference) {
-      const primary = await lenientOwner(user.id, userContext, user);
-      if (primary.id !== owner.id) {
-        if (hasPolicy((await UserMetadata.getUserMetadata(owner.id, userContext)).metadata)) {
-          throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
-        }
-        literalIds.add(owner.id);
-      }
-      owner = primary;
-    } else {
-      owner = { ...owner, user };
-    }
-    literalIds.delete(owner.id);
-    const liveRows = await protectedOwnerRows(owner, {}, userContext);
-    await assertProtectedRows(owner.id, liveRows, userContext);
-    if (liveRows.size) activeContext = uncachedContext(userContext);
-  }
-  let { metadata } = await UserMetadata.getUserMetadata(owner.id, activeContext);
-  if (!previous && options.scope === "signin") {
-    // Read the owner after the live rows, not both before and after. A checkpoint
-    // can name additional, pinned rows that only become known on this read.
-    const pinned = pinnedOwners(owner.id, metadata ?? {}).filter((id) => id !== owner.id);
-    if (pinned.length) {
-      await assertProtectedRows(owner.id, new Map(pinned.map((id) => [id, true])), userContext);
-      activeContext = uncachedContext(userContext);
-      ({ metadata } = await UserMetadata.getUserMetadata(owner.id, activeContext));
+  const { user, primaryUserId, primaryMetadata, linkedMetadata = [] } = options.presence ??
+    await inspectUserPresentationMetadata(reference, userContext, options.user);
+  const sdkId = user?.id ?? reference;
+  const published = linkedMetadata.find(({ userId }) => userId === sdkId)?.metadata ?? {};
+  for (const { userId, metadata } of linkedMetadata) {
+    if (userId !== sdkId && Object.values(signInMethodPolicyFields(metadata)).some((value) =>
+      isRecord(value) && value.userId === userId)) {
+      throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED", primaryUserId);
     }
   }
-  if (hasPolicy(metadata)) {
-    const policy = parsePolicy(owner.id, metadata ?? {}, "auth");
-    // Unknown versions alone must never turn legacy graph anomalies into lockouts.
-    if (policy.methods.length || !policy.unknown) {
-      const strict = await ownerFor(reference, activeContext);
-      if (strict.id !== owner.id || !strict.user) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
-      await assertProtectedOwnerGraph(strict, metadata ?? {}, activeContext, true);
-      owner = strict;
-    }
-    return { reference, owner, literalIds: [...literalIds], ownerMetadata: metadata ?? {}, policy };
+  if (!hasSignInMethodPolicy(primaryMetadata) && !hasSignInMethodPolicy(published)) {
+    return { owner: { id: primaryUserId, user, mapping: undefined } };
   }
-  if (!previous && options.scope === "session" && pinnedOwners(owner.id, metadata ?? {}).length) {
-    await assertProtectedOwnerGraph(owner, metadata, userContext);
+  const owner = await ownerFor(reference, userContext);
+  if (!owner.user || owner.user.id !== sdkId) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED", owner.id);
+  const ownerMetadata = { ...primaryMetadata, ...mergeSignInMethodPolicy(owner.id, primaryMetadata, published) };
+  const policy = parsePolicy(owner.id, ownerMetadata, "auth");
+  // Unknown versions alone must never turn legacy graph anomalies into lockouts.
+  if (policy.methods.length || !policy.unknown) {
+    await assertProtectedOwnerGraph(owner, ownerMetadata, userContext, true);
   }
-  return { reference, owner, literalIds: [...literalIds], ownerMetadata: metadata ?? {} };
+  return { owner, policy };
 }
 
 export async function checkSignInMethodAuthentication(
   userId: string, recipeUserId: RecipeUserId, tenantId: string, userContext?: Context,
-  options: GateOptions = { scope: "signin" },
+  options: GateOptions = {},
 ) {
   const gate = await readPolicyGate(userId, userContext, options);
   let method: User["loginMethods"][number] | undefined;
@@ -646,29 +668,45 @@ export async function checkSignInMethodAuthentication(
 
 export async function assertSignInMethodLinkAllowed(
   primaryUserId: string, recipeUserId: RecipeUserId, userContext?: Context,
-): Promise<void> {
-  const owner = await readPolicyGate(primaryUserId, userContext, { scope: "signin" });
-  const candidate = await readPolicyGate(recipeUserId.getAsString(), userContext, { scope: "signin" });
-  if (candidate.owner.id !== owner.owner.id && candidate.policy) {
+): Promise<boolean> {
+  const recipeId = recipeUserId.getAsString();
+  const candidateUser = await SuperTokens.getUser(recipeId, userContext);
+  if (!candidateUser) return false;
+  const methods = candidateUser.loginMethods.filter((method) => method.recipeId === "thirdparty" &&
+    realProvider(method.thirdParty?.id));
+  const couldCarryPolicy = candidateUser.isPrimaryUser;
+  if (!methods.length && !couldCarryPolicy) return false;
+  const owner = await readPolicyGate(primaryUserId, userContext);
+  const sameOwner = candidateUser.id === owner.owner.user?.id;
+  if (sameOwner && isRetiredPrimaryRecipe(owner, recipeId)) {
+    throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED", owner.owner.id);
+  }
+  if (!sameOwner && couldCarryPolicy && (await readPolicyGate(recipeId, userContext, { user: candidateUser })).policy) {
     throw new DisconnectedSignInMethodError("DISCONNECT_RESTORATION_BLOCKED");
   }
-  const { policy } = await readPolicyGate(primaryUserId, userContext, { scope: "signin", previous: owner });
-  const sameOwner = candidate.owner.id === owner.owner.id;
-  const linkedMethod = sameOwner ? await lenientRecipeMethod(candidate.owner, recipeUserId, userContext) : undefined;
-  const methods = sameOwner ? (linkedMethod ? [linkedMethod] : []) : candidate.owner.user?.loginMethods ?? [];
-  if (!methods.length && policy && !policy.unknown) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
+  const { policy } = owner;
   for (const method of methods) {
+    if (sameOwner && method.recipeUserId.getAsString() !== recipeId) continue;
     for (const tenantId of method.tenantIds) {
       if (policy) assertMethodAllowed(method, tenantId, policy.identities, owner.owner.id);
       if (!sameOwner) await assertRecipeIdentityNotIndexed(method, tenantId, userContext);
     }
   }
+  return !!policy || methods.length > 0;
 }
 
 export async function assertSignInMethodTenantAssociationAllowed(
   recipeUserId: RecipeUserId, tenantId: string, userContext?: Context,
 ): Promise<void> {
-  const gate = await readPolicyGate(recipeUserId.getAsString(), userContext, { scope: "signin" });
+  const id = recipeUserId.getAsString();
+  const user = await SuperTokens.getUser(id, userContext);
+  if (!user) return;
+  const exact = user.loginMethods.find((candidate) => candidate.recipeUserId.getAsString() === id);
+  if (exact && !realProvider(exact.thirdParty?.id)) return;
+  const gate = await readPolicyGate(id, userContext, { user });
+  if (isRetiredPrimaryRecipe(gate, id)) {
+    throw new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED", gate.owner.id);
+  }
   const method = gate.policy && !gate.policy.unknown ? await recipeMethod(gate.owner, recipeUserId, userContext)
     : await lenientRecipeMethod(gate.owner, recipeUserId, userContext);
   if (!method) return;
@@ -691,7 +729,7 @@ export async function assertNoDisconnectedSignInMethods(userId: string, userCont
 }
 
 export function assertNoPolicyInMetadata(ownerId: string, metadata: Record<string, unknown>) {
-  if (!hasPolicy(metadata)) return;
+  if (!hasSignInMethodPolicy(metadata)) return;
   parsePolicy(ownerId, metadata ?? {});
   throw new DisconnectedSignInMethodError("DISCONNECT_RESTORATION_BLOCKED");
 }
@@ -703,7 +741,7 @@ export async function assertNoDisconnectedSignInMethodsAtInternalOwner(
   const { metadata } = options.fresh
     ? await UserMetadata.getUserMetadata(internalOwnerId, uncachedContext(userContext))
     : await PolicyMetadata.getUserMetadata(internalOwnerId, userContext);
-  if (!hasPolicy(metadata)) return;
+  if (!hasSignInMethodPolicy(metadata)) return;
   let failure: DisconnectedSignInMethodError;
   try {
     parsePolicy(internalOwnerId, metadata ?? {});
@@ -761,7 +799,7 @@ export async function deleteUserAndSignInMethodPolicy(input: Parameters<DeleteUs
   let sawPolicy = false;
   for (const id of rows) {
     const { metadata } = await UserMetadata.getUserMetadata(id, context);
-    sawPolicy ||= hasPolicy(metadata);
+    sawPolicy ||= hasSignInMethodPolicy(metadata);
     for (const indexId of ownerIndexIds(metadata)) indexIds.add(indexId);
   }
   const result = await deleteUser(input);
@@ -770,16 +808,18 @@ export async function deleteUserAndSignInMethodPolicy(input: Parameters<DeleteUs
       id, metadata: (await UserMetadata.getUserMetadata(id, uncachedContext(context))).metadata,
     })));
     for (const { metadata } of remaining) {
-      sawPolicy ||= hasPolicy(metadata);
+      sawPolicy ||= hasSignInMethodPolicy(metadata);
       for (const indexId of ownerIndexIds(metadata)) indexIds.add(indexId);
     }
     if (sawPolicy) {
-      if (!await confirmedAbsentOwner(ownerId, context)) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED", ownerId);
+      // Do not reuse the owner lookup from before deletion.
+      const verification = uncachedContext(context);
+      if (!await confirmedAbsentOwner(ownerId, verification)) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED", ownerId);
       for (const indexId of indexIds) {
         await removePolicyKeys(indexId, await readOwnedIndexKeys(indexId, ownerId, context), context);
       }
       for (const { id, metadata } of remaining) {
-        if (id !== ownerId && !await confirmedAbsentOwner(id, context)) continue;
+        if (id !== ownerId && !await confirmedAbsentOwner(id, verification)) continue;
         // Mapped deletes can leave the literal internal metadata, including old
         // migration snapshots with provider subjects, behind in Core.
         if (Object.keys(metadata ?? {}).length) await PolicyMetadata.clearUserMetadata(id, context);
@@ -813,25 +853,26 @@ export async function inspectSignInMethodPolicy(input: { userId: string; tenantI
   const owner = await lenientOwner(user?.id ?? userId, context, user);
   const { metadata } = await UserMetadata.getUserMetadata(owner.id, context);
   const linked = await protectedOwnerRows(owner, metadata ?? {}, context);
-  const ids = new Set([owner.id, userId, ...linked.keys(),
+  const ids = new Set([owner.id, userId, ...(user ? [user.id] : []), ...linked.keys(),
     ...(external.status === "OK" ? [external.superTokensUserId] : []),
     ...(internal.status === "OK" ? [internal.superTokensUserId] : [])]);
   const rows = await Promise.all([...ids].map(async (id) => {
     const { metadata: literal } = id === owner.id ? { metadata } : await UserMetadata.getUserMetadata(id, context);
-    const parsed = inspectPolicyRow(id, literal ?? {});
+    const parsed = inspectPolicyRow(id === user?.id ? owner.id : id, literal ?? {});
     const forTenant = (identity: { tenantId: string }) => tenantId === undefined || identity.tenantId === tenantId;
     return { ownerId: id, ...parsed, intents: parsed.intents.filter(forTenant), completions: parsed.completions.filter(forTenant),
       indexIds: ownerIndexIds(literal),
       reassociated: linked.has(id) && Object.entries(literal ?? {}).some(([key, value]) =>
         isDisconnectedSignInMethodMetadataKey(key) && (linked.get(id) || (isRecord(value) && value.userId === id))) };
   }));
-  const indexIds = new Set(rows.find((row) => row.ownerId === owner.id)?.indexIds);
+  const indexIds = new Set(rows.filter((row) => row.ownerId === owner.id || row.ownerId === user?.id)
+    .flatMap((row) => row.indexIds));
   if (input.indexId) indexIds.add(input.indexId);
   const indexes = await Promise.all([...indexIds].map(async (indexId) => ({
     indexId, ownerEntryKeys: await readOwnedIndexKeys(indexId, owner.id, context),
   })));
   const ownerAbsent = !dualMapping && !user && await confirmedAbsentOwner(owner.id, context);
-  return { userId, ownerId: owner.id, ownerAbsent, dualMapping, indexes,
+  return { userId, ownerId: owner.id, sdkUserId: user?.id, ownerAbsent, dualMapping, indexes,
     pinnedOwnerIds: [...linked].filter(([, pinned]) => pinned).map(([id]) => id), rows };
 }
 
@@ -852,12 +893,17 @@ export async function repairSignInMethodPolicy(input: {
     throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
   }
   const context = {};
-  const { metadata } = await UserMetadata.getUserMetadata(state.ownerId, context);
-  const row = inspectPolicyRow(state.ownerId, metadata ?? {});
-  const keys = erase ? Object.keys(metadata ?? {}) : [
-    ...(input.remove.includes("fences") ? row.fences.map(({ key }) => key) : []),
-    ...(input.remove.includes("invalid") ? row.invalid.filter(({ removable }) => removable).map(({ key }) => key) : []),
-  ];
+  const addresses = new Set([state.ownerId, state.sdkUserId ?? state.ownerId]);
+  const removals = await Promise.all([...addresses].map(async (id) => {
+    const { metadata } = await UserMetadata.getUserMetadata(id, context);
+    const row = inspectPolicyRow(state.ownerId, metadata ?? {});
+    const keys = erase ? Object.keys(metadata ?? {}) : [
+      ...(input.remove.includes("fences") ? row.fences.map(({ key }) => key) : []),
+      ...(input.remove.includes("invalid") ? row.invalid.filter(({ removable }) => removable).map(({ key }) => key) : []),
+    ];
+    return { id, keys };
+  }));
+  const keys = [...new Set(removals.flatMap((row) => row.keys))];
   const indexIds = erase ? state.indexes.filter(({ ownerEntryKeys }) => ownerEntryKeys.length).map(({ indexId }) => indexId) : [];
   if (!input.dryRun) {
     // Metadata has no compare-and-swap. Operators must pause writers while repairing.
@@ -868,7 +914,9 @@ export async function repairSignInMethodPolicy(input: {
       await removePolicyKeys(indexId, await readOwnedIndexKeys(indexId, state.ownerId, context), context);
     }
     if (erase && keys.length) await PolicyMetadata.clearUserMetadata(state.ownerId, context);
-    if (!erase) await removePolicyKeys(state.ownerId, keys, context);
+    if (!erase) {
+      for (const row of removals) await removePolicyKeys(row.id, row.keys, context);
+    }
   }
   logSignInMethodPolicy("info", "rownd_disconnect_policy_repair", {
     code: "OK", ownerId: state.ownerId, step: input.dryRun ? "preview" : erase ? "deleted_owner" : "repair",

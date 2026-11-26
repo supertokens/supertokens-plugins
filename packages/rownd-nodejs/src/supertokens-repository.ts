@@ -7,7 +7,7 @@ import { backfillAdministrativeMetadata } from "./migration-admin-metadata";
 import { getAdministrativeRepairMetadata, prepareAdministrativeCanonicalEmail } from "./migration-admin-email";
 import { RowndMigrationPolicyError } from "./errors";
 import { sessionAuthenticationOrigin, assertEmailChangeSessionClaims } from "./session-authentication";
-import { assertNoDisconnectedSignInMethods, assertNoDisconnectedSignInMethodsAtInternalOwner, assertNoPolicyInMetadata, assertSignInIdentityNotIndexed, DisconnectedSignInMethodError, isDisconnectedSignInMethodMetadataKey } from "./disconnected-sign-in-identities";
+import { assertNoDisconnectedSignInMethods, assertNoDisconnectedSignInMethodsAtInternalOwner, assertSignInIdentityNotIndexed, DisconnectedSignInMethodError, isDisconnectedSignInMethodMetadataKey } from "./disconnected-sign-in-identities";
 import { assertMigrationPostconditions, assertMigrationOwnerGraph, reconcileAdministrativeEmailVerification } from "./migration-postconditions";
 import { assertCurrentRowndProviders, checkpointProviderIntroduction, finishProviderIntroductions, prepareRowndProviderRetirement, recoverProviderRevocations, type ProviderIntroduction } from "./migration-provider";
 import { finishAdministrativeProviderIntroductions, inspectAdministrativeProviderIntroductions } from "./migration-admin-provider";
@@ -866,7 +866,6 @@ async function reconcileRowndUserOnce(
   const repairMetadata = currentUser
     ? await getAdministrativeRepairMetadata(currentUser.id, stUser.externalUserId, userContext)
     : undefined;
-  if (currentOwner && repairMetadata) assertNoPolicyInMetadata(currentOwner, repairMetadata);
   const originalRowndUserId = repairMetadata?.original_rownd_user?.data?.user_id;
   if (mappedUser && pinnedId === undefined && originalRowndUserId !== stUser.externalUserId &&
       !mappedUser.loginMethods.some((method) => stUser.loginMethods.some(
@@ -1499,15 +1498,11 @@ export async function buildRowndSessionAndAnonymousClaims(
   userContext: UserContext,
   recipeUserId?: string,
   creating = false,
-  options?: { userSnapshot?: SuperTokensUser; canonicalMetadata?: { userId: string; value: RowndMetadata } },
+  options?: { userSnapshot?: SuperTokensUser },
 ) {
   const pluginConfig = getConfigForUserContext(userContext);
   const canonical = pluginConfig?.metadataMode === "canonical";
-  const snapshot = options?.userSnapshot;
-  const metadata = options?.canonicalMetadata;
-  const inspection = canonical && snapshot && metadata?.userId === snapshot.id
-    ? { user: snapshot, combinedMetadata: metadata.value }
-    : await inspectUserPresentationMetadata(userId, userContext, canonical ? snapshot : undefined);
+  const inspection = await inspectUserPresentationMetadata(userId, userContext, canonical ? options?.userSnapshot : undefined);
   const user = inspection.user;
   const rowndSessionClaims = buildRowndSessionClaimPayload({
     userId,
@@ -1522,6 +1517,7 @@ export async function buildRowndSessionAndAnonymousClaims(
     rowndSessionClaims.auth_level,
   );
   return {
+    inspection,
     rowndSessionClaims,
     rowndIsAnonymousClaim: RowndIsAnonymousClaim.addToPayload_internal(
       {},

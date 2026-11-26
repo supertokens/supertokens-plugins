@@ -26,9 +26,8 @@ import { buildConfiguredSessionClaims, getAuthoritativeProfileFields, getCanonic
   ROWND_APP_VARIANTS_KEY, ROWND_PROFILE_AUTHORITY_PREFIX, type RowndCompatUserResponse, type RowndMetadata } from "./rownd-compatibility";
 import { getPluginConfig, setPluginConfig } from "./config";
 import { logDebugMessage } from "./logger";
-import { createHash } from "node:crypto";
 import type { JsonRecord } from "./utils";
-import { mappedVariantSignInBudgets } from "./sign-in-variant-budget.test-fixture";
+import { signInIdentityHash } from "./disconnected-sign-in-identities";
 
 vi.mock("./logger", () => ({ logDebugMessage: vi.fn(), enableDebugLogs: vi.fn() }));
 
@@ -84,6 +83,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
   let mapped: boolean;
   let revoked: boolean;
   let attempts: Attempt[];
+  let indexReads: number;
   let unexpected: string[];
   let metadata: Map<string, RowndMetadata>;
   let metadataFailure: boolean;
@@ -159,6 +159,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     signInRecipe = undefined;
     attempts = [];
     unexpected = [];
+    indexReads = 0;
     metadata = new Map([
       [internalId, { first_name: "Profile", preference: "preserved", ...storedActivity }],
       [externalId, { first_name: "Alias", alias_only: "fallback" }],
@@ -169,6 +170,15 @@ describe("complete protected route Core budgets (installed SDK)", () => {
       for await (const chunk of req) chunks.push(Buffer.from(chunk));
       const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) as Json : {};
       const attempt = { method: req.method!, path: url.pathname, params: url.searchParams, body };
+      if (signInRecipe === "thirdparty" && attempt.method === "GET" && attempt.path === "/recipe/user/metadata" &&
+        attempt.params.get("userId") === `rownd_dsi:${signInIdentityHash({
+          tenantId: "public", providerId: provider.id, providerUserId: provider.userId,
+        })}`) {
+        indexReads++;
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ status: "OK", metadata: {} }));
+        return;
+      }
       attempts.push(attempt);
       res.setHeader("content-type", "application/json");
       const reply = (value: unknown) => res.end(JSON.stringify(value));
@@ -215,7 +225,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
           return reply({ status: "OK", session: session(payload), accessToken: await token(payload) });
         }
         case "POST /recipe/session/remove": {
-          if (signInRecipe !== "thirdparty" || !metadataWriteFailureId || !Array.isArray(body.sessionHandles)) return reject();
+          if (!metadataWriteFailureId || !Array.isArray(body.sessionHandles)) return reject();
           return reply({ status: "OK", sessionHandlesRevoked: body.sessionHandles });
         }
         case "GET /user/id":
@@ -260,10 +270,6 @@ describe("complete protected route Core budgets (installed SDK)", () => {
         }
         case "GET /recipe/user/metadata": {
           const id = url.searchParams.get("userId")!;
-          if (signInRecipe === "thirdparty" && thirdParty && id === `rownd_dsi:${createHash("sha256")
-            .update(JSON.stringify(["public", thirdParty.id, thirdParty.userId])).digest("hex")}`) {
-            return reply({ status: "OK", metadata: {} });
-          }
           if (![internalId, externalId].includes(id)) return reject();
           if (metadataFailure) {
             res.statusCode = 500;
@@ -405,7 +411,16 @@ describe("complete protected route Core budgets (installed SDK)", () => {
       key === "rownd_profile_authoritative_fields")).toBe(false);
   }
 
-  it.each(mappedVariantSignInBudgets)("budgets $recipe sign-in with $variant variant in $mode mode", async ({ mode, recipe, variant, baseline, policy }) => {
+  it.each([
+    { mode: "compatibility", recipe: "passwordless", variant: "existing", userReads: 2, mappings: 6, metadataReads: 7 },
+    { mode: "compatibility", recipe: "passwordless", variant: "added", userReads: 3, mappings: 8, metadataReads: 9 },
+    { mode: "compatibility", recipe: "thirdparty", variant: "existing", userReads: 2, mappings: 4, metadataReads: 5 },
+    { mode: "compatibility", recipe: "thirdparty", variant: "added", userReads: 3, mappings: 6, metadataReads: 7 },
+    { mode: "canonical", recipe: "passwordless", variant: "existing", userReads: 2, mappings: 4, metadataReads: 6 },
+    { mode: "canonical", recipe: "passwordless", variant: "added", userReads: 2, mappings: 4, metadataReads: 7 },
+    { mode: "canonical", recipe: "thirdparty", variant: "existing", userReads: 1, mappings: 0, metadataReads: 2 },
+    { mode: "canonical", recipe: "thirdparty", variant: "added", userReads: 1, mappings: 0, metadataReads: 3 },
+  ] as const)("budgets $recipe sign-in with $variant variant in $mode mode", async ({ mode, recipe, variant, userReads, mappings, metadataReads }) => {
     mapped = true;
     signInRecipe = recipe;
     initSDK(false, mode);
@@ -434,7 +449,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
       userDataInJWT: { rownd_session_authentication: "authenticated" },
     });
     expect(calls.slice(authIndex + 1, createIndex).filter(({ path }) => path === "/recipe/userid/map")
-      .map(({ params }) => params.get("userIdType"))).toEqual(canonical ? ["EXTERNAL"] : ["EXTERNAL", "SUPERTOKENS"]);
+      .map(({ params }) => params.get("userIdType"))).toEqual(canonical ? [] : ["SUPERTOKENS", "EXTERNAL"]);
     const variants = write ? ["existing", "added"] : ["existing"];
     expect(metadata.get(sdkId())).toMatchObject({ original_rownd_user: { attributes: {
       "rownd:app_variants": canonical ? ["existing"] : variants, other: "retained",
@@ -442,7 +457,6 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     expect(metadata.get(sdkId())?.[ROWND_APP_VARIANTS_KEY])
       .toEqual(canonical && write ? { public: variants } : undefined);
 
-    const [userReads, mappings, metadataReads] = baseline.map((count, index) => count + policy[index]!);
     expect(countCoreCalls(calls)).toEqual({
       "GET /public/recipe/multitenancy/tenant/v2": 1,
       "GET /public/users/by-accountinfo": passwordless ? 2 : canonical ? 4 : 5,
@@ -464,11 +478,14 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     const body = passwordless
       ? { preAuthSessionId: device.preAuthSessionId, linkCode: loginCode }
       : { thirdPartyId: provider.id, oAuthTokens: { thirdPartyUserId: provider.userId, email } };
-    return fetch(`${appUrl}/auth/${path}?app_variant_id=${variant}`, {
+    const before = indexReads;
+    const response = await fetch(`${appUrl}/auth/${path}?app_variant_id=${variant}`, {
       method: "POST",
       headers: { rid: recipe, "fdi-version": "1.18", "st-auth-mode": "header", "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+    expect(indexReads - before).toBe(passwordless ? 0 : 1);
+    return response;
   }
 
   it.each((["passwordless", "thirdparty"] as const).flatMap((recipe) =>

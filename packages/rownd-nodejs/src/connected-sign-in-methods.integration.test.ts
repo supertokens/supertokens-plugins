@@ -15,7 +15,7 @@ import Multitenancy from "supertokens-node/recipe/multitenancy";
 import { init } from "./plugin";
 import { getPluginConfig } from "./config";
 import { assertSignInIdentityNotIndexed, getDisconnectedSignInMethods, inspectSignInMethodPolicy,
-  isDisconnectedSignInMethodMetadataKey, repairSignInMethodPolicy } from "./disconnected-sign-in-identities";
+  isDisconnectedSignInMethodMetadataKey, publishSignInMethodPolicy, repairSignInMethodPolicy } from "./disconnected-sign-in-identities";
 import { republishAfterMigration } from "./canonical-republish";
 import { setRowndTokenValidator } from "./rownd-repository";
 import { configureConnectedSignInMethodsTestLicense, startConnectedSignInMethodsCore } from "./connected-sign-in-methods-core.test-fixture";
@@ -279,7 +279,7 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     expect((await SuperTokens.getUser(f.internalId))?.loginMethods).toHaveLength(1);
   });
 
-  it("keeps disconnect authority on the internal owner across dual-write republish and the canonical switch", async () => {
+  it("mirrors new policy and republishes an internal-only checkpoint for canonical enforcement", async () => {
     const config = getPluginConfig()!;
     const previous = { metadataMode: config.metadataMode, connectedSignInMethods: config.connectedSignInMethods };
     Object.assign(config, { metadataMode: "dual-write" });
@@ -298,14 +298,28 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
       );
       const before = await policyOn(f.internalId);
       expect(Object.keys(before)).toHaveLength(2); // intent and completion
+      expect(await policyOn(f.rowndId)).toEqual(before);
+      // Simulate a mapped owner disconnected on an earlier test build.
+      const clearPublishedPolicy = () =>
+        UserMetadata.updateUserMetadata(f.rowndId, Object.fromEntries(Object.keys(before).map((key) => [key, null])));
+      await clearPublishedPolicy();
       expect(await policyOn(f.rowndId)).toEqual({});
+      const publish = { userId: f.internalId };
+      const preview = await publishSignInMethodPolicy({ ...publish, dryRun: true });
+      expect(preview.userId).toBe(f.rowndId);
+      expect(preview.keys.sort()).toEqual(Object.keys(before).sort());
+      expect(await policyOn(f.rowndId)).toEqual({});
+      await publishSignInMethodPolicy({ ...publish, dryRun: false });
+      expect(await policyOn(f.rowndId)).toEqual(before);
+      expect(await publishSignInMethodPolicy({ ...publish, dryRun: true })).toEqual({ userId: f.rowndId, keys: [] });
+      await clearPublishedPolicy();
       await expect(republishAfterMigration({ userId: f.rowndId, userContext: {}, config })).resolves
         .toMatchObject({ status: "PUBLISHED" });
       expect((await UserMetadata.getUserMetadata(f.rowndId)).metadata).toMatchObject({
         customer_value: "preserved", rownd_email_recipe_user_ids: { public: f.passwordless.recipeUserId.getAsString() },
       });
       expect(await policyOn(f.internalId)).toEqual(before);
-      expect(await policyOn(f.rowndId)).toEqual({});
+      expect(await policyOn(f.rowndId)).toEqual(before);
       const identity = { tenantId: "public", providerId: "google", providerUserId: f.subject };
       await expect(assertSignInIdentityNotIndexed(identity)).rejects.toMatchObject({ code: "SIGN_IN_METHOD_DISCONNECTED", ownerId: f.internalId });
 
@@ -314,6 +328,8 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
         config.metadataMode = metadataMode;
         const writes = vi.spyOn(UserMetadata, "updateUserMetadata");
         try {
+          await expect(Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(f.rowndId)))
+            .rejects.toMatchObject({ type: Session.Error.UNAUTHORISED, message: "SIGN_IN_METHOD_DISCONNECTED" });
           const oldSignIn = await ThirdPartyRecipe.getInstanceOrThrowError().recipeInterfaceImpl.signInUp({
             thirdPartyId: identity.providerId, thirdPartyUserId: identity.providerUserId, email: f.oldEmail, isVerified: false,
             tenantId: identity.tenantId, session: undefined, shouldTryLinkingWithSessionUser: undefined,

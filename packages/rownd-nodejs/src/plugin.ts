@@ -51,6 +51,7 @@ import {
   assertSignInMethodTenantAssociationAllowed,
   checkSignInMethodAuthentication,
   readPolicyGate,
+  realProvider,
   DisconnectedSignInMethodError,
 } from "./disconnected-sign-in-identities";
 import { logSignInMethodPolicy, signInMethodPolicyFailureLevel } from "./sign-in-method-policy-log";
@@ -65,7 +66,7 @@ import {
   linkHistoricalPasswordlessUser,
   type HistoricalPasswordlessScope,
   type PasswordlessAuthSnapshot,
-  type RowndMetadata,
+  type PolicyPresence,
   shouldLinkRowndAccounts,
 } from "./rownd-compatibility";
 import { setRowndClient, setRowndTokenValidator } from "./rownd-repository";
@@ -90,7 +91,6 @@ import {
   rewriteLinkToBaseUrl,
   rewriteLinkPath,
   createDerivedUserContext,
-  clearSuperTokensCoreCallCache,
 } from "./utils";
 import {
   handleDeleteUser,
@@ -108,7 +108,7 @@ import {
   handleValidatePasswordlessConfirmationBypass,
 } from "./pluginImplementation";
 
-import { recordPasswordlessAuthentication, withProvenSessionAuthentication } from "./session-authentication";
+import { passwordlessSessionReceipt, withProvenSessionAuthentication } from "./session-authentication";
 import { withAppleJwksRetry } from "./apple-jwks-retry";
 
 const DISABLED_MIGRATION_ROWND_APP_KEY = "migration-disabled";
@@ -117,12 +117,15 @@ const PENDING_EMAIL_VERIFICATION_SESSION_ERROR =
 const INACTIVE_PASSWORDLESS_EMAIL_REASON = "No existing account found";
 const THIRD_PARTY_AUTHENTICATION = Symbol("rownd.thirdPartyAuthentication");
 const PASSWORDLESS_ISSUANCE = Symbol("rownd.passwordlessIssuance");
+const PASSWORDLESS_LINK_CANDIDATE = Symbol("rownd.passwordlessLinkCandidate");
 type PasswordlessIssuance = {
-  pending?: { session: SessionContainerInterface; confirm: () => Promise<unknown>; confirmed?: true };
+  consumed?: { recipeUserId: string; email: string; authenticatedAt: number };
+  session?: SessionContainerInterface;
+  linkingSession?: SessionContainerInterface;
+  candidates?: PasswordlessAuthSnapshot["inspections"];
 };
 type ThirdPartyAuthenticationOperation = {
-  actual?: { userId: string; recipeUserId: string; tenantId: string; providerId: string; providerUserId: string };
-  gate?: Awaited<ReturnType<typeof readPolicyGate>>;
+  actual?: { user: User; recipeUserId: string; tenantId: string; providerId: string; providerUserId: string };
   sessions: Set<SessionContainerInterface>;
 };
 
@@ -162,23 +165,19 @@ function bufferAuthenticationResponse(res: Parameters<PluginRouteHandler["handle
 }
 
 async function withBufferedPasswordlessIssuance<T extends { status: string }>(
-  issuance: PasswordlessIssuance | undefined,
+  issuance: PasswordlessIssuance,
   response: Parameters<PluginRouteHandler["handler"]>[1],
   context: UserContext,
   authenticate: () => Promise<T>,
 ) {
-  if (!issuance) return authenticate();
   const buffered = bufferAuthenticationResponse(response);
   try {
     const result = await authenticate();
-    if (result.status === "OK" && issuance.pending && !issuance.pending.confirmed) {
-      throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
-    }
-    if (result.status === "OK" || !issuance.pending) buffered.publish();
-    else await Promise.allSettled([issuance.pending.session.revokeSession(context)]);
+    if (result.status === "OK") buffered.publish();
+    else if (issuance.session) await Promise.allSettled([issuance.session.revokeSession(context)]);
     return result;
   } catch (error) {
-    const session = issuance.pending?.session;
+    const session = issuance.session;
     if (session) await Promise.allSettled([session.revokeSession(context)]);
     if (error instanceof DisconnectedSignInMethodError) return policyFailure(error, "passwordless", session?.getUserId(context));
     throw error;
@@ -193,7 +192,7 @@ async function refreshRowndSessionClaims(input: {
   appVariantId?: string;
   userContext: UserContext;
   provenAuthentication: boolean;
-  beforeUpdatingPayload?: () => Promise<void>;
+  beforeUpdatingPayload?: (presence: PolicyPresence) => Promise<void>;
 }) {
   const currentPayload = input.session.getAccessTokenPayload();
   const buildClaims = () => buildRowndSessionAndAnonymousClaims(
@@ -205,9 +204,9 @@ async function refreshRowndSessionClaims(input: {
     input.provenAuthentication,
     { userSnapshot: input.userSnapshot },
   );
-  const { rowndSessionClaims, rowndIsAnonymousClaim } = await (input.provenAuthentication
+  const { rowndSessionClaims, rowndIsAnonymousClaim, inspection } = await (input.provenAuthentication
     ? withProvenSessionAuthentication(buildClaims) : buildClaims());
-  await input.beforeUpdatingPayload?.();
+  await input.beforeUpdatingPayload?.(inspection);
   delete rowndSessionClaims.aud;
   await input.session.mergeIntoAccessTokenPayload(
     {
@@ -1016,7 +1015,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     ? requestedIntent
                     : undefined;
                 let consumedEmail: string | undefined;
-                const passwordlessAuthentication: { value?: { recipeUserId: string; email: string; authenticatedAt: number } } = {};
+                const issuance: PasswordlessIssuance = {};
                 let authSnapshot: PasswordlessAuthSnapshot | undefined;
                 try {
                   const device =
@@ -1036,6 +1035,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       userContext: resolved.userContext,
                     });
                     authSnapshot = "snapshot" in preparation ? preparation.snapshot : undefined;
+                    issuance.candidates = authSnapshot?.inspections;
                     if (preparation.status === "REJECT_CLEANUP_METHOD") {
                       return {
                         status: "SIGN_IN_UP_NOT_ALLOWED" as const,
@@ -1057,12 +1057,20 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   { rowndAppVariantId: appVariantId },
                 );
                 let session = input.shouldTryLinkingWithSessionUser === false ? undefined : input.session;
-                if (session && !await Session.getSessionInformation(session.getHandle(operationContext), operationContext)) {
-                  if (input.shouldTryLinkingWithSessionUser === true) {
-                    throw new Session.Error({ type: Session.Error.UNAUTHORISED, message: "Session was revoked", payload: { clearTokens: true } });
+                const sessionOwner = session && authSnapshot?.inspections.get(session.getUserId(operationContext));
+                if (session && sessionOwner) {
+                  const recipe = session.getRecipeUserId(operationContext);
+                  try {
+                    await checkSignInMethodAuthentication(session.getUserId(operationContext), recipe, input.tenantId,
+                      operationContext, { presence: sessionOwner });
+                  } catch (error) {
+                    if (!(error instanceof DisconnectedSignInMethodError)) throw error;
+                    if (input.shouldTryLinkingWithSessionUser === true || error.code !== "SIGN_IN_METHOD_DISCONNECTED") {
+                      return policyFailure(error, "passwordless_existing_session", session.getUserId(operationContext));
+                    }
+                    // A retained-email sign-in is independent of an incidental retired SSO token.
+                    session = undefined;
                   }
-                  // An optional stateless token may outlive a revoked session or removed recipe.
-                  session = undefined;
                 }
                 const historicalOwner = consumedEmail
                   ? await findHistoricalEmailOwner({
@@ -1080,21 +1088,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   tenantId: input.tenantId,
                   ownerRecipeUserIds: historicalOwner.loginMethods.map((method) => method.recipeUserId.getAsString()),
                 } : undefined;
-                const issuance: PasswordlessIssuance | undefined = resolved.config.metadataMode === "canonical" &&
-                  consumedEmail && !historicalScope ? {} : undefined;
+                issuance.linkingSession = historicalScope ? undefined : session;
                 const consumeContext = createDerivedUserContext(operationContext, {
                   [passwordlessHistoryOwner]: historicalScope,
                   [PASSWORDLESS_ISSUANCE]: issuance,
                 });
-                if (session && !historicalScope && input.shouldTryLinkingWithSessionUser === true) {
-                  const id = session.getUserId(consumeContext);
-                  try {
-                    await checkSignInMethodAuthentication(id, session.getRecipeUserId(consumeContext), input.tenantId, consumeContext);
-                  } catch (error) {
-                    if (error instanceof DisconnectedSignInMethodError) return policyFailure(error, "passwordless_existing_session", id);
-                    throw error;
-                  }
-                }
                 return withBufferedPasswordlessIssuance(issuance, input.options.res, consumeContext, async () => {
                   const response = await consumeCodePOST({
                     ...input,
@@ -1113,10 +1111,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                             return { status: "RESTART_FLOW_ERROR" as const };
                           }
                           const result = await input.options.recipeImplementation.consumeCode({
-                            ...consumeInput, userContext: consumeContext,
+                            ...consumeInput, userContext: createDerivedUserContext(consumeContext, {
+                              [PASSWORDLESS_LINK_CANDIDATE]: issuance,
+                            }),
                           });
                           if (result.status !== "OK") return result;
-                          if (result.consumedDevice?.email) passwordlessAuthentication.value = {
+                          if (result.consumedDevice?.email) issuance.consumed = {
                             recipeUserId: result.recipeUserId.getAsString(), email: result.consumedDevice.email, authenticatedAt: Date.now(),
                           };
                           historicalScope.recipeUserId = result.recipeUserId.getAsString();
@@ -1135,7 +1135,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                           let user;
                           try {
                             user = await linkHistoricalPasswordlessUser(
-                              historicalScope, accountLinkingDecision, consumeContext,
+                              historicalScope, accountLinkingDecision, createDerivedUserContext(consumeContext, {
+                                [PASSWORDLESS_LINK_CANDIDATE]: issuance,
+                              }),
                             );
                           } catch (error) {
                             historicalScope.denied = true;
@@ -1158,8 +1160,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       recipeImplementation: {
                         ...input.options.recipeImplementation,
                         consumeCode: async (consumeInput) => {
-                          const result = await input.options.recipeImplementation.consumeCode(consumeInput);
-                          if (result.status === "OK" && result.consumedDevice?.email) passwordlessAuthentication.value = {
+                          const result = await input.options.recipeImplementation.consumeCode({
+                            ...consumeInput, userContext: createDerivedUserContext(consumeInput.userContext, {
+                              [PASSWORDLESS_LINK_CANDIDATE]: issuance,
+                            }),
+                          });
+                          if (result.status === "OK" && result.consumedDevice?.email) issuance.consumed = {
                             recipeUserId: result.recipeUserId.getAsString(), email: result.consumedDevice.email, authenticatedAt: Date.now(),
                           };
                           return result;
@@ -1180,18 +1186,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     return { status: "SIGN_IN_UP_NOT_ALLOWED" as const, reason: INACTIVE_PASSWORDLESS_EMAIL_REASON };
                   }
                   if (response.status === "OK") {
-                    if (session && !historicalScope && response.session.getHandle(consumeContext) === session.getHandle(consumeContext)) {
-                      const id = session.getUserId(consumeContext);
-                      try {
-                        await checkSignInMethodAuthentication(id, session.getRecipeUserId(consumeContext), input.tenantId, consumeContext);
-                      } catch (error) {
-                        if (error instanceof DisconnectedSignInMethodError) return policyFailure(error, "passwordless_reused_session", id);
-                        throw error;
-                      }
-                    }
                     if (consumedEmail) {
-                      const pending = issuance?.pending;
-                      if (pending && response.session.getHandle(consumeContext) !== pending.session.getHandle(consumeContext)) {
+                      if (issuance.session && response.session.getHandle(consumeContext) !== issuance.session.getHandle(consumeContext)) {
                         throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
                       }
                       try {
@@ -1206,7 +1202,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                           userContext: consumeContext,
                         });
                         if (disposition.status !== "ALLOW") {
-                          if (!pending) await response.session.revokeSession(operationContext);
+                          if (!issuance.session) await response.session.revokeSession(operationContext);
                           if (disposition.status === "REJECT_AND_DELETE") {
                             await deleteRejectedConsumedPasswordlessUser({
                               userId: response.user.id,
@@ -1221,15 +1217,9 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                             reason: INACTIVE_PASSWORDLESS_EMAIL_REASON,
                           };
                         }
-                        if (pending) {
-                        // The consumed-email check freshly read the owner after
-                        // session creation. Share those reads with the policy gate.
-                          await pending.confirm();
-                          pending.confirmed = true;
-                        }
                       } catch (error) {
                         if (error instanceof DisconnectedSignInMethodError) throw error;
-                        if (!pending) await response.session.revokeSession(operationContext);
+                        if (!issuance.session) await response.session.revokeSession(operationContext);
                         logDebugMessage(
                           `Passwordless consumed identity validation failed. Error: ${error instanceof Error ? error.message : String(error)}`,
                         );
@@ -1254,13 +1244,10 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       appVariantId,
                       userContext: operationContext,
                       provenAuthentication: true,
-                      beforeUpdatingPayload: async () => {
-                        const consumed = passwordlessAuthentication.value;
-                        if (consumed && resolved.config.connectedSignInMethods?.enabled === true) {
-                          await recordPasswordlessAuthentication(response.session, consumed.recipeUserId,
-                            input.tenantId, operationContext, consumed.email, consumed.authenticatedAt);
-                        }
-                      },
+                      beforeUpdatingPayload: (presence) => checkSignInMethodAuthentication(
+                        response.user.id, response.session.getRecipeUserId(operationContext),
+                        input.tenantId, operationContext, { presence },
+                      ).then(() => undefined),
                     });
                   }
 
@@ -1279,7 +1266,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     const identity = { tenantId: input.tenantId, providerId: input.thirdPartyId, providerUserId: input.thirdPartyUserId };
                     await assertSignInIdentityNotIndexed(identity, input.userContext);
                     if (ownerId) {
-                      const { policy } = await readPolicyGate(ownerId, input.userContext, { scope: "signin" });
+                      const { policy } = await readPolicyGate(ownerId, input.userContext);
                       if (policy) assertIdentityAllowedByOwner(identity, policy.identities, ownerId);
                     }
                   }
@@ -1290,14 +1277,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       await assertSignInIdentityNotIndexed({ tenantId: input.tenantId,
                         providerId: input.thirdPartyId, providerUserId: input.thirdPartyUserId }, input.userContext);
                     }
-                    const { gate } = await checkSignInMethodAuthentication(ownerId, result.recipeUserId, input.tenantId, input.userContext,
-                      { scope: "signin", user: result.user });
                     const operation = thirdPartyAuthenticationOperation(input.userContext);
                     if (operation) {
                       if (operation.actual) throw new RowndSignInMethodError("SIGN_IN_METHOD_AUTHENTICATION_UNPROVEN", 403, "The authenticated sign-in method changed.");
-                      operation.gate = gate;
-                      operation.actual = Object.freeze({ userId: ownerId, recipeUserId: result.recipeUserId.getAsString(),
+                      operation.actual = Object.freeze({ user: result.user, recipeUserId: result.recipeUserId.getAsString(),
                         tenantId: input.tenantId, providerId: input.thirdPartyId, providerUserId: input.thirdPartyUserId });
+                    } else {
+                      await checkSignInMethodAuthentication(ownerId, result.recipeUserId, input.tenantId, input.userContext,
+                        { user: result.user });
                     }
                   }
                   return result;
@@ -1364,23 +1351,28 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     const actual = authentication.actual;
                     if ((!actual && !["instant", "guest"].includes(input.provider.id)) || (actual &&
                       (actual.tenantId !== input.tenantId || actual.providerId !== input.provider.id ||
-                        actual.userId !== authenticatedResponse.user.id || authenticatedResponse.session.getUserId(operationContext) !== authenticatedResponse.user.id ||
+                        actual.user.id !== authenticatedResponse.user.id || authenticatedResponse.session.getUserId(operationContext) !== authenticatedResponse.user.id ||
                         authenticatedResponse.session.getTenantId(operationContext) !== input.tenantId))) {
                       throw new RowndSignInMethodError("SIGN_IN_METHOD_AUTHENTICATION_UNPROVEN", 403, "The authenticated sign-in method could not be confirmed.");
                     }
                     await recordRowndAppVariantForUser(response.user.id, appVariantId, operationContext, input.tenantId,
                       { userSnapshot: response.user });
                     await refreshRowndSessionClaims({ session: response.session, userSnapshot: response.user, appVariantId,
-                      userContext: operationContext, provenAuthentication: !["instant", "guest"].includes(input.provider.id) });
-                    if (actual) {
-                      const { method, gate } = await checkSignInMethodAuthentication(actual.userId,
-                        supertokens.convertToRecipeUserId(actual.recipeUserId), input.tenantId, operationContext,
-                        { scope: "signin", previous: authentication.gate });
-                      if ((gate.policy?.methods.length && !method) || (method && (method.recipeId !== "thirdparty" ||
-                        method.thirdParty?.id !== actual.providerId || method.thirdParty.userId !== actual.providerUserId))) {
-                        throw new RowndSignInMethodError("SIGN_IN_METHOD_AUTHENTICATION_UNPROVEN", 403, "The authenticated sign-in method changed.");
-                      }
-                    }
+                      userContext: operationContext, provenAuthentication: realProvider(input.provider.id),
+                      beforeUpdatingPayload: async (presence) => {
+                        if (!actual) return;
+                        const recipe = supertokens.convertToRecipeUserId(actual.recipeUserId);
+                        const { method, gate } = await checkSignInMethodAuthentication(actual.user.id, recipe, input.tenantId,
+                          operationContext, { presence });
+                        if ((gate.policy?.methods.length && !method) || (method && (method.recipeId !== "thirdparty" ||
+                          method.thirdParty?.id !== actual.providerId || method.thirdParty.userId !== actual.providerUserId))) {
+                          throw new RowndSignInMethodError("SIGN_IN_METHOD_AUTHENTICATION_UNPROVEN", 403, "The authenticated sign-in method changed.");
+                        }
+                        const sessionRecipe = authenticatedResponse.session.getRecipeUserId(operationContext);
+                        if (sessionRecipe.getAsString() !== actual.recipeUserId) {
+                          await checkSignInMethodAuthentication(actual.user.id, sessionRecipe, input.tenantId, operationContext, { presence });
+                        }
+                      } });
                   } else if (authentication.sessions.size) {
                     // A custom SDK override can fail after creating a buffered session.
                     await Promise.allSettled([...authentication.sessions].map((session) =>
@@ -1394,7 +1386,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     authentication.sessions.add(response.session);
                   }
                   await Promise.allSettled([...authentication.sessions].map((session) => Session.revokeSession(session.getHandle(operationContext), operationContext)));
-                  if (error instanceof DisconnectedSignInMethodError) return policyFailure(error, "thirdparty_post", authentication.actual?.userId);
+                  if (error instanceof DisconnectedSignInMethodError) return policyFailure(error, "thirdparty_post", authentication.actual?.user.id);
                   if (error instanceof RowndSignInMethodError) return { status: "SIGN_IN_UP_NOT_ALLOWED" as const, reason: error.errorCode };
                   throw error;
                 } finally {
@@ -1410,9 +1402,32 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               deleteUser: (input) => deleteUserAndSignInMethodPolicy(input, (request) => originalImplementation.deleteUser(request)),
               linkAccounts: async (input) => {
                 try {
-                  await assertSignInMethodLinkAllowed(input.primaryUserId, input.recipeUserId, input.userContext);
+                  const passwordless = Reflect.get(input.userContext, PASSWORDLESS_LINK_CANDIDATE) as PasswordlessIssuance | undefined;
+                  if (passwordless) {
+                    // The consume recipe links its Passwordless candidate; Core won't reparent an existing primary.
+                    for (const [id, presence] of passwordless.candidates ?? []) {
+                      if (presence.user?.loginMethods.some((method) =>
+                        method.recipeUserId.getAsString() === input.recipeUserId.getAsString()) &&
+                        (await readPolicyGate(id, input.userContext, { presence })).policy && id !== input.primaryUserId) {
+                        throw new DisconnectedSignInMethodError("DISCONNECT_RESTORATION_BLOCKED");
+                      }
+                    }
+                    const session = passwordless.linkingSession;
+                    if (session?.getUserId(input.userContext) === input.primaryUserId) {
+                      // The SDK has already read this graph while deciding whether to link.
+                      const user = await supertokens.getUser(input.primaryUserId, input.userContext);
+                      const recipe = session.getRecipeUserId(input.userContext);
+                      const method = user?.loginMethods.find((entry) => entry.recipeUserId.getAsString() === recipe.getAsString());
+                      if (!method || realProvider(method.thirdParty?.id)) {
+                        await checkSignInMethodAuthentication(input.primaryUserId, recipe, session.getTenantId(input.userContext),
+                          input.userContext, { user });
+                      }
+                    }
+                    return originalImplementation.linkAccounts(input);
+                  }
+                  const recheck = await assertSignInMethodLinkAllowed(input.primaryUserId, input.recipeUserId, input.userContext);
                   const result = await originalImplementation.linkAccounts(input);
-                  if (result.status === "OK") {
+                  if (recheck && result.status === "OK") {
                     await assertSignInMethodLinkAllowed(input.primaryUserId, input.recipeUserId, input.userContext);
                   }
                   return result;
@@ -1440,11 +1455,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     };
                   }
                   const candidate = input[0]?.thirdParty;
-                  if (candidate) {
+                  if (candidate && realProvider(candidate.id)) {
                     const ownerId = input[1]?.id ?? input[2]?.getUserId(input[4]);
                     if (ownerId) {
                       try {
-                        const { policy } = await readPolicyGate(ownerId, input[4], { scope: "signin", user: input[1] });
+                        const { policy } = await readPolicyGate(ownerId, input[4], { user: input[1] });
                         if (policy) assertIdentityAllowedByOwner({ tenantId: input[3], providerId: candidate.id,
                           providerUserId: candidate.userId }, policy.identities, ownerId);
                       } catch (error) {
@@ -1485,29 +1500,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               createNewSession: async (input) => {
                 const authentication = thirdPartyAuthenticationOperation(input.userContext);
                 const passwordlessIssuance = Reflect.get(input.userContext, PASSWORDLESS_ISSUANCE) as PasswordlessIssuance | undefined;
-                if (passwordlessIssuance?.pending) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
-                const initialGate = authentication?.gate?.reference === input.userId &&
-                  authentication.actual?.recipeUserId === input.recipeUserId.getAsString() ? authentication.gate : undefined;
-                const check = async (userId: string, recipeId: typeof input.recipeUserId, tenantId: string,
-                  context: typeof input.userContext,
-                  { previous = initialGate, reuse = false, freshContext = false }: {
-                    previous?: typeof initialGate; reuse?: boolean; freshContext?: boolean;
-                  } = {}) => {
-                  try {
-                    const gate = reuse && previous ? previous : (await checkSignInMethodAuthentication(userId, recipeId,
-                      tenantId, context, { scope: "signin", previous, freshContext })).gate;
-                    if (input.userContext.rowndMigrationRequestId && gate.policy) {
-                      throw new DisconnectedSignInMethodError("DISCONNECT_RESTORATION_BLOCKED");
-                    }
-                    return gate;
-                  } catch (error) {
-                    if (!(error instanceof DisconnectedSignInMethodError)) throw error;
-                    if (authentication || input.userContext.rowndMigrationRequestId || Reflect.has(context, passwordlessHistoryOwner)) throw error;
-                    logPolicyDenial(error, "create_session", userId);
-                    throw unauthorizedPolicy(error);
-                  }
-                };
-                const gate = await check(input.userId, input.recipeUserId, input.tenantId, input.userContext, { reuse: true });
+                if (passwordlessIssuance?.session) throw new DisconnectedSignInMethodError("DISCONNECT_OWNER_CHANGED");
                 const resolved = await resolvePluginConfigSnapshot(
                   pluginConfig,
                   {
@@ -1519,7 +1512,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                   typeof resolved.userContext.rowndAppVariantId === "string"
                     ? resolved.userContext.rowndAppVariantId
                     : undefined;
-                const { rowndSessionClaims, rowndIsAnonymousClaim } =
+                const { rowndSessionClaims, rowndIsAnonymousClaim, inspection } =
                   await buildRowndSessionAndAnonymousClaims(
                     input.userId,
                     input.accessTokenPayload,
@@ -1527,62 +1520,30 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     resolved.userContext,
                     input.recipeUserId.getAsString(),
                     true,
-                    resolved.config.metadataMode === "canonical" && gate.owner.user?.id === input.userId
-                      ? { userSnapshot: gate.owner.user,
-                        ...(gate.owner.id === input.userId ? {
-                          canonicalMetadata: { userId: input.userId, value: gate.ownerMetadata as RowndMetadata },
-                        } : {}) }
-                      : undefined,
                   );
-                input.accessTokenPayload = {
-                  ...input.accessTokenPayload,
-                  ...rowndSessionClaims,
-                  ...rowndIsAnonymousClaim,
-                };
-
+                try {
+                  const { gate } = await checkSignInMethodAuthentication(input.userId, input.recipeUserId,
+                    input.tenantId, resolved.userContext, { presence: inspection });
+                  if (input.userContext.rowndMigrationRequestId && gate.policy) {
+                    throw new DisconnectedSignInMethodError("DISCONNECT_RESTORATION_BLOCKED");
+                  }
+                } catch (error) {
+                  if (!(error instanceof DisconnectedSignInMethodError) || authentication || passwordlessIssuance ||
+                    input.userContext.rowndMigrationRequestId) throw error;
+                  logPolicyDenial(error, "create_session", input.userId);
+                  throw unauthorizedPolicy(error);
+                }
+                const consumed = passwordlessIssuance?.consumed;
+                const receipt = resolved.config.connectedSignInMethods?.enabled && consumed
+                  ? passwordlessSessionReceipt(inspection, input.recipeUserId.getAsString(), input.tenantId, consumed) : undefined;
                 const session = await originalImplementation.createNewSession({
                   ...input,
+                  accessTokenPayload: { ...input.accessTokenPayload, ...rowndSessionClaims, ...rowndIsAnonymousClaim, ...receipt?.accessTokenPayload },
+                  sessionDataInDatabase: { ...input.sessionDataInDatabase, ...receipt?.sessionDataInDatabase },
                   userContext: resolved.userContext,
                 });
                 authentication?.sessions.add(session);
-                try {
-                  const userId = session.getUserId(resolved.userContext);
-                  const recipeId = session.getRecipeUserId(resolved.userContext);
-                  const tenantId = session.getTenantId(resolved.userContext);
-                  // The buffered Thirdparty API rechecks this exact factor immediately
-                  // before publication. Other callers still check at SDK session issuance.
-                  const checkedAtPublication = authentication?.actual && initialGate &&
-                    authentication.actual.userId === userId && authentication.actual.tenantId === tenantId &&
-                    authentication.actual.recipeUserId === recipeId.getAsString();
-                  if (passwordlessIssuance && gate.reference === userId) {
-                    passwordlessIssuance.pending = {
-                      session,
-                      confirm: () => check(userId, recipeId, tenantId, resolved.userContext, { previous: gate, freshContext: true }),
-                    };
-                  } else if (!checkedAtPublication) {
-                    clearSuperTokensCoreCallCache(resolved.userContext);
-                    await check(userId, recipeId, tenantId, resolved.userContext, { previous: gate, freshContext: true });
-                  }
-                } catch (error) {
-                  await Promise.allSettled([session.revokeSession(resolved.userContext)]);
-                  throw error;
-                }
-                return session;
-              },
-              refreshSession: async (input) => {
-                const session = await originalImplementation.refreshSession(input);
-                const userId = session.getUserId(input.userContext);
-                try {
-                  await checkSignInMethodAuthentication(userId, session.getRecipeUserId(input.userContext),
-                    session.getTenantId(input.userContext), input.userContext, { scope: "session" });
-                } catch (error) {
-                  if (!(error instanceof DisconnectedSignInMethodError)) throw error;
-                  logPolicyDenial(error, "refresh", userId);
-                  if (error.code === "SIGN_IN_METHOD_DISCONNECTED") {
-                    await Promise.allSettled([session.revokeSession(input.userContext)]);
-                  }
-                  throw unauthorizedPolicy(error);
-                }
+                if (passwordlessIssuance) passwordlessIssuance.session = session;
                 return session;
               },
             }),

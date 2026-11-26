@@ -50,7 +50,7 @@ import {
   type RowndMetadata,
 } from "./rownd-compatibility";
 import { setRowndTokenValidator } from "./rownd-repository";
-import { mappedVariantSignInBudgets } from "./sign-in-variant-budget.test-fixture";
+import { signInIdentityHash } from "./disconnected-sign-in-identities";
 import { buildRowndSessionClaims, getUserById, recordRowndAppVariantForUser, updateUserData, updateUserMetadata } from "./supertokens-repository";
 import type { RowndPluginConfig, RowndUser } from "./types";
 
@@ -608,7 +608,16 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
     });
   }
 
-  it.each(mappedVariantSignInBudgets)("budgets $recipe sign-in with $variant variant in $mode mode", async ({ mode, recipe, variant, baseline, policy }) => {
+  it.each([
+    { mode: "compatibility", recipe: "passwordless", variant: "existing", userReads: 2, mappings: 6, metadataReads: 7 },
+    { mode: "compatibility", recipe: "passwordless", variant: "added", userReads: 3, mappings: 8, metadataReads: 9 },
+    { mode: "compatibility", recipe: "thirdparty", variant: "existing", userReads: 2, mappings: 4, metadataReads: 5 },
+    { mode: "compatibility", recipe: "thirdparty", variant: "added", userReads: 3, mappings: 6, metadataReads: 7 },
+    { mode: "canonical", recipe: "passwordless", variant: "existing", userReads: 2, mappings: 4, metadataReads: 6 },
+    { mode: "canonical", recipe: "passwordless", variant: "added", userReads: 2, mappings: 4, metadataReads: 7 },
+    { mode: "canonical", recipe: "thirdparty", variant: "existing", userReads: 1, mappings: 0, metadataReads: 2 },
+    { mode: "canonical", recipe: "thirdparty", variant: "added", userReads: 1, mappings: 0, metadataReads: 3 },
+  ] as const)("budgets $recipe sign-in with $variant variant in $mode mode", async ({ mode, recipe, variant, userReads, mappings, metadataReads }) => {
     blockNonLoopbackRequests();
     initialize(mode);
     const passwordless = recipe === "passwordless";
@@ -641,7 +650,12 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
       : await request(`/signinup${suffix}`, {
         rid: recipe, body: { thirdPartyId: OFFLINE_PROVIDER_ID, oAuthTokens: { thirdPartyUserId: providerId, email } },
       });
-    const calls = coreCalls.slice(start);
+    const measured = coreCalls.slice(start);
+    const indexId = `rownd_dsi:${signInIdentityHash({ tenantId: "public", providerId: OFFLINE_PROVIDER_ID, providerUserId: providerId })}`;
+    const indexReads = measured.filter(({ url, params }) =>
+      new URL(url).pathname === "/recipe/user/metadata" && params?.userId === indexId);
+    expect(indexReads).toHaveLength(passwordless ? 0 : 1);
+    const calls = measured.filter((call) => !indexReads.includes(call));
     expect({ status: response.status, body: await response.json() }).toMatchObject({
       status: 200, body: { status: "OK", createdNewRecipeUser: false, user: { id: sdkId } },
     });
@@ -655,7 +669,7 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
     expect(createIndex).toBeGreaterThan(authIndex);
     expect(calls[createIndex]?.body).toMatchObject({ userDataInJWT: { rownd_session_authentication: "authenticated" } });
     expect(calls.slice(authIndex + 1, createIndex).filter(({ url }) => new URL(url).pathname === "/recipe/userid/map")
-      .map(({ params }) => params?.userIdType)).toEqual(canonical ? ["EXTERNAL"] : ["EXTERNAL", "SUPERTOKENS"]);
+      .map(({ params }) => params?.userIdType)).toEqual(canonical ? [] : ["SUPERTOKENS", "EXTERNAL"]);
     const stored = (await UserMetadata.getUserMetadata(sdkId)).metadata;
     const variants = write ? ["existing", "added"] : ["existing"];
     expect(stored).toMatchObject({ original_rownd_user: { attributes: {
@@ -663,7 +677,6 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
     } } });
     expect(stored[ROWND_APP_VARIANTS_KEY]).toEqual(canonical && write ? { public: variants } : undefined);
 
-    const [userReads, mappings, metadataReads] = baseline.map((count, index) => count + policy[index]!);
     expect(countCoreCalls(calls)).toEqual({
       "GET /public/recipe/multitenancy/tenant/v2": 1,
       "GET /public/users/by-accountinfo": passwordless ? 2 : canonical ? 4 : 5,

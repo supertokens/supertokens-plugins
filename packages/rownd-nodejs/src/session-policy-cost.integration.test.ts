@@ -45,7 +45,7 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
           },
         }] } })],
       experimental: { plugins: [init({ disableRowndUserMigration: true,
-        appConfig: { signInMethods: [{ method: "email" }, { method: "test-sso" }] } })] },
+        appConfig: { signInMethods: [{ method: "email" }, { method: "test-sso" }, { method: "anonymous" }] } })] },
     });
   }, 120000);
 
@@ -53,7 +53,7 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
 
   async function request(path: string, recipe: string, body: object, accessToken?: string, fdiVersion = "1.18") {
     const req = new PreParsedRequest({ url: `${origin}${path}`, method: "post", cookies: {}, query: {},
-      headers: new Headers({ rid: recipe, "content-type": "application/json", "fdi-version": fdiVersion, "st-auth-mode": "header",
+      headers: new Headers({ ...(recipe ? { rid: recipe } : {}), "content-type": "application/json", "fdi-version": fdiVersion, "st-auth-mode": "header",
         ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}) }),
       getJSONBody: async () => body, getFormBody: async () => ({}) });
     const res = new CollectingResponse();
@@ -84,7 +84,7 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
 
   const metadataModes = ["compatibility", "dual-write", "canonical"] as const;
   it.each(metadataModes.flatMap((metadataMode) => [false, true].map((enabled) => ({ metadataMode, enabled }))))(
-    "bounds the extra Core GETs ($metadataMode, management enabled=$enabled)", async ({ metadataMode, enabled }) => {
+    "holds main's no-policy Core budget ($metadataMode, management enabled=$enabled)", async ({ metadataMode, enabled }) => {
     const config = getPluginConfig()!;
     const previous = { metadataMode: config.metadataMode, connectedSignInMethods: config.connectedSignInMethods };
     Object.assign(config, { metadataMode, connectedSignInMethods: { enabled } });
@@ -93,46 +93,55 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
     const session = await Session.createNewSessionWithoutRequestResponse("public", f.passwordless.recipeUserId);
     const transport = await import("supertokens-node/lib/build/querier");
     const fetchCore = vi.spyOn(transport, "doFetch");
-    const extra = async (operation: () => Promise<unknown>) => {
+    const measure = async (operation: () => Promise<unknown>) => {
       fetchCore.mockClear();
       await operation();
-      return fetchCore.mock.calls.filter(([, options]) => options?.method === "GET").length;
+      const gets = fetchCore.mock.calls.filter(([, options]) => options?.method === "GET");
+      const indexReads = gets.filter(([url]) => new URL(String(url)).searchParams.get("userId")?.startsWith("rownd_dsi:")).length;
+      return [gets.length - indexReads, fetchCore.mock.calls.length - gets.length, indexReads];
     };
+    const google = (subject: string, email: string) => request("/signinup", "thirdparty", {
+      thirdPartyId: "test-sso", oAuthTokens: { subject, email },
+    });
+    const canonical = metadataMode === "canonical";
     try {
       const token = session.getAccessToken();
       const counts = [
-        await extra(async () => expect(await Session.getSessionWithoutRequestResponse(token, undefined, { checkDatabase: false })).toBeDefined()),
-        await extra(async () => expect(await Session.getSessionWithoutRequestResponse(token, undefined, { checkDatabase: true })).toBeDefined()),
-        await extra(async () => expect(await Session.refreshSessionWithoutRequestResponse(session.getAllSessionTokensDangerously().refreshToken!, true)).toBeDefined()),
-        await extra(async () => expect((await consume()).body).toMatchObject({ status: "OK", user: { id: f.ownerId } })),
-        await extra(async () => expect((await request("/signinup", "thirdparty", {
-          thirdPartyId: "test-sso", oAuthTokens: { subject: f.subject, email: f.oauthEmail },
-        })).body).toMatchObject({ status: "OK", user: { id: f.ownerId } })),
+        await measure(async () => expect(await Session.getSessionWithoutRequestResponse(token, undefined, { checkDatabase: false })).toBeDefined()),
+        await measure(async () => expect(await Session.getSessionWithoutRequestResponse(token, undefined, { checkDatabase: true })).toBeDefined()),
+        await measure(async () => expect(await Session.refreshSessionWithoutRequestResponse(session.getAllSessionTokensDangerously().refreshToken!, true)).toBeDefined()),
+        await measure(async () => expect((await consume()).body).toMatchObject({ status: "OK", user: { id: f.ownerId } })),
+        await measure(async () => expect((await google(f.subject, f.oauthEmail)).body).toMatchObject({ status: "OK", user: { id: f.ownerId } })),
+        await measure(async () => expect((await google(randomUUID(), `${randomUUID()}@example.com`)).body).toMatchObject({ status: "OK", createdNewRecipeUser: true })),
       ];
-      console.info("session policy GET counts [stateless, database, refresh, passwordless, SSO]", { metadataMode, enabled, counts });
-      // Same fixture and flows run against main (1768970); the management setting does not exist there.
-      const main = metadataMode === "canonical" ? [0, 0, 0, 15, 9] : [0, 0, 0, 18, 16];
-      const budget = [0, 0, 2, 4, 5];
-      counts.forEach((count, i) => expect.soft(count - main[i]!, `flow ${i} delta`).toBeLessThanOrEqual(budget[i]!));
+      // Tuples are [ordinary GETs, writes, SSO index GETs]. The first two columns match 1768970.
+      expect.soft(counts).toEqual([[0, 0, 0], [0, 1, 0], [0, 1, 0], [canonical ? 15 : 18, 3, 0],
+        [canonical ? 9 : 16, 3, 1], [canonical ? 9 : 15, 3, 2]]);
 
       for (const explicitLink of [false, true]) {
         const activeSession = await Session.createNewSessionWithoutRequestResponse("public", f.passwordless.recipeUserId);
         const activeToken = activeSession.getAccessToken();
         const consumeWithSession = await emailSignIn(f.email, activeToken, explicitLink);
-        fetchCore.mockClear();
-        const response = await consumeWithSession();
-        expect(response.body).toMatchObject({ status: "OK", user: { id: f.ownerId } });
-        const gets = fetchCore.mock.calls.filter(([, options]) => options?.method === "GET");
-        const sessionReads = gets.filter(([url]) => new URL(String(url)).pathname === "/recipe/session").length;
-        console.info("passwordless with session Core GETs", { metadataMode, enabled, explicitLink, reads: gets.length, sessionReads });
-        const mainWithSession = 12;
-        const extraBudget = (explicitLink ? 9 : 7) + Number(enabled);
-        expect.soft(gets.length - mainWithSession, "passwordless consume with an active session").toBeLessThanOrEqual(extraBudget);
-        // One liveness read, plus a session-data read when issuing the retained-email receipt.
-        expect(sessionReads).toBeGreaterThanOrEqual(1);
-        expect(sessionReads).toBeLessThanOrEqual(enabled ? 2 : 1);
-        const retained = await Session.getSessionWithoutRequestResponse(response.headers.get("st-access-token") ?? activeToken);
+        let refreshedToken = activeToken;
+        expect.soft(await measure(async () => {
+          const response = await consumeWithSession();
+          expect(response.body).toMatchObject({ status: "OK", user: { id: f.ownerId } });
+          refreshedToken = response.headers.get("st-access-token") ?? activeToken;
+        })).toEqual([12, 2, 0]);
+        expect(fetchCore.mock.calls.some(([url, options]) => options?.method === "GET" &&
+          new URL(String(url)).pathname === "/recipe/session")).toBe(false);
+        const retained = await Session.getSessionWithoutRequestResponse(refreshedToken);
         expect(retained.getHandle()).toBe(activeSession.getHandle());
+      }
+
+      for (const exists of [false, true]) {
+        const guest = await request("/plugin/rownd/guest", "", {});
+        expect(guest.body).toMatchObject({ status: "OK" });
+        const upgrade = await emailSignIn(exists ? f.email : `${randomUUID()}@example.com`, guest.headers.get("st-access-token")!);
+        expect.soft(await measure(async () => {
+          const response = await upgrade();
+          expect(response.body.status).toBe(exists && !canonical ? "SIGN_IN_UP_NOT_ALLOWED" : "OK");
+        })).toEqual(exists ? [canonical ? 17 : 9, 3, 0] : canonical ? [11, 3, 0] : [12, 4, 0]);
       }
 
       const rowndId = `rownd-${randomUUID()}`;
@@ -141,11 +150,47 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
       const mappedSession = await Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(rowndId));
       expect(mappedSession.getUserId()).toBe(rowndId);
       const refreshToken = mappedSession.getAllSessionTokensDangerously().refreshToken!;
-      const mappedRefresh = await extra(async () => {
+      expect.soft(await measure(async () => {
         expect((await Session.refreshSessionWithoutRequestResponse(refreshToken, true)).getUserId()).toBe(rowndId);
+      })).toEqual([0, 1, 0]);
+      const mappedConsume = await emailSignIn(f.email);
+      expect.soft(await measure(async () => expect((await mappedConsume()).body).toMatchObject({ status: "OK", user: { id: rowndId } })))
+        .toEqual([canonical ? 17 : 21, 3, 0]);
+      expect.soft(await measure(async () => expect((await google(f.subject, f.oauthEmail)).body).toMatchObject({ status: "OK", user: { id: rowndId } })))
+        .toEqual([canonical ? 9 : 18, 3, 1]);
+
+      const linkPasswordless = async () => {
+        const extra = await Passwordless.signInUp({ tenantId: "public", email: `${randomUUID()}@example.com` });
+        return measure(async () => expect(await AccountLinking.linkAccounts(extra.recipeUserId, rowndId)).toMatchObject({ status: "OK" }));
+      };
+      expect.soft(await linkPasswordless()).toEqual([2, 1, 0]);
+      const emailSelector = { rownd_email_recipe_user_ids: { public: rowndId } };
+      await UserMetadata.updateUserMetadata(f.ownerId, emailSelector);
+      await UserMetadata.updateUserMetadata(rowndId, emailSelector);
+      const allowedSubject = randomUUID();
+      const allowedEmail = `${randomUUID()}@example.com`;
+      const allowed = await ThirdParty.manuallyCreateOrUpdateUser("public", "test-sso", allowedSubject, allowedEmail, true);
+      if (allowed.status !== "OK") throw new Error("SSO seed failed");
+      expect(await AccountLinking.linkAccounts(allowed.recipeUserId, rowndId)).toMatchObject({ status: "OK" });
+      await recordDisconnectedSignInMethod({ userId: f.ownerId, tenantId: "public", recipeUserId: f.sso.recipeUserId.getAsString(),
+        providerId: "test-sso", providerUserId: f.subject });
+      const keptEmail = await emailSignIn(f.email);
+      const retainedSession = await Session.createNewSessionWithoutRequestResponse("public", SuperTokens.convertToRecipeUserId(rowndId));
+      const recordCounts = {
+        linking: await linkPasswordless(),
+        passwordless: await measure(async () => expect((await keptEmail()).body).toMatchObject({ status: "OK", user: { id: rowndId } })),
+        differentSSO: await measure(async () => expect((await google(allowedSubject, allowedEmail)).body).toMatchObject({ status: "OK", user: { id: rowndId } })),
+        blockedSSO: await measure(async () => expect((await google(f.subject, f.oauthEmail)).body)
+          .toEqual({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_DISCONNECTED" })),
+        refresh: await measure(async () => expect(await Session.refreshSessionWithoutRequestResponse(
+          retainedSession.getAllSessionTokensDangerously().refreshToken!, true,
+        )).toBeDefined()),
+      };
+      console.info("mapped owner with a disconnect intent [ordinary GETs, writes, index GETs]", { metadataMode, enabled, recordCounts });
+      expect(recordCounts).toEqual({
+        linking: [2, 1, 0], passwordless: [canonical ? 45 : 46, 3, 0],
+        differentSSO: [canonical ? 38 : 40, 3, 1], blockedSSO: [3, 0, 1], refresh: [0, 1, 0],
       });
-      console.info("mapped session refresh Core GET count", { metadataMode, enabled, mappedRefresh });
-      expect(mappedRefresh).toBeLessThanOrEqual(2);
     } finally {
       fetchCore.mockRestore();
       Object.assign(config, previous);
@@ -198,7 +243,7 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
     expect(await reconcileUser({ supertokens_user_id: f.ownerId })).toMatchObject({ status: "BLOCKED", message: expect.stringContaining("EXTERNAL_ALIAS_AMBIGUOUS") });
   });
 
-  it("turns malformed policy into authentication denials without revoking on refresh", async () => {
+  it("denies issuance for malformed policy without changing SDK refresh", async () => {
     const f = await seed();
     const session = await Session.createNewSessionWithoutRequestResponse("public", f.passwordless.recipeUserId);
     await UserMetadata.updateUserMetadata(f.ownerId, { rownd_disconnected_sign_in_identity_invalid: true });
@@ -211,8 +256,7 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
         thirdPartyId: "test-sso", oAuthTokens: { subject: f.subject, email: f.oauthEmail },
       });
       expect(thirdParty.body).toMatchObject({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "DISCONNECT_POLICY_INVALID" });
-      await expect(Session.refreshSessionWithoutRequestResponse(session.getAllSessionTokensDangerously().refreshToken!, true))
-        .rejects.toMatchObject({ type: Session.Error.UNAUTHORISED, payload: { clearTokens: true } });
+      await expect(Session.refreshSessionWithoutRequestResponse(session.getAllSessionTokensDangerously().refreshToken!, true)).resolves.toBeDefined();
       expect(await Session.getSessionInformation(session.getHandle())).toBeDefined();
       expect(logs.mock.calls.some(([line]) => String(line).includes('"code":"DISCONNECT_POLICY_INVALID"'))).toBe(true);
     } finally {
@@ -231,7 +275,7 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
     try {
       await expect(Session.getSessionWithoutRequestResponse(token, undefined, { checkDatabase: false })).resolves.toBeDefined();
       expect(requests).not.toHaveBeenCalled();
-      requests.mockImplementation((url, options) => String(url).includes("/recipe/userid/map")
+      requests.mockImplementation((url, options) => String(url).includes("/recipe/session/refresh")
         ? Promise.reject(new Error("test Core outage")) : doFetch(url, options));
       await expect(Session.refreshSessionWithoutRequestResponse(session.getAllSessionTokensDangerously().refreshToken!, true)).rejects.toThrow("test Core outage");
       expect(requests.mock.calls.some(([url]) => String(url).includes("/session/remove"))).toBe(false);
@@ -260,8 +304,6 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
     const writes = vi.spyOn(UserMetadata, "updateUserMetadata");
     try {
       await expect(Session.getSessionWithoutRequestResponse(originalSession.getAccessToken(), undefined, { checkDatabase: false })).resolves.toBeDefined();
-      await expect(Session.refreshSessionWithoutRequestResponse(originalSession.getAllSessionTokensDangerously().refreshToken!, true))
-        .rejects.toMatchObject({ type: Session.Error.UNAUTHORISED });
       const signIn = await (await emailSignIn(destination.email))();
       expect(signIn.body).toMatchObject({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "DISCONNECT_OWNER_CHANGED" });
       expect(writes).not.toHaveBeenCalled();

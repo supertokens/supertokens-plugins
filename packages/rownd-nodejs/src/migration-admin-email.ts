@@ -32,10 +32,14 @@ import {
 import type { SuperTokensUserImport } from "./types";
 import { invalidateReconciliationReads } from "./reconciliation-reads";
 import { checkpointEmailPointer, getOwnerEmailPlan, hasCheckpointEmailHistory } from "./migration-owner-email";
+import { DisconnectedSignInMethodError, hasSignInMethodPolicy } from "./disconnected-sign-in-identities";
 
 export async function getAdministrativeRepairMetadata(userId: string, sourceId: string, context: JsonRecord) {
   const requested = await getRawUserMetadata(sourceId, context);
   const primary = await getUserMetadata(userId, context);
+  if (hasSignInMethodPolicy(requested) || hasSignInMethodPolicy(primary)) {
+    throw new DisconnectedSignInMethodError("DISCONNECT_RESTORATION_BLOCKED");
+  }
   const sourceMetadata = requested.original_rownd_user?.data.user_id === sourceId ? requested : {};
   const combined = { ...sourceMetadata, ...primary } as RowndMetadata;
   // Pending copies can be cleared independently. A primary [] must not hide a

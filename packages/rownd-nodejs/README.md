@@ -88,20 +88,41 @@ anchor to session creation returns `UNAUTHORISED` with message
 `SIGN_IN_METHOD_DISCONNECTED` (warn level). Use the retained Passwordless
 recipe's ID; the plugin does not silently change which factor a session represents.
 
-Enforcement stays on at sign-in, session issuance and refresh, linking and tenant
-association, regardless of the management flag. The plugin adds **no policy lookup
-to `getSession`**. A previously issued access token can still pass stateless
-verification until expiry (by default one hour). For immediate revocation checks
-on sensitive application endpoints, use `checkDatabase: true` with SuperTokens.
-For an ordinary account, refresh adds one external-ID mapping GET and one owner
-metadata GET. A confirmed disconnected credential is revoked on refresh; an
-ownership or policy error clears client credentials without revoking the Core
-session. The only auth-path write added by this feature is the receipt in session
-data after eligible Passwordless email sign-in with management enabled. Policy
-and index checks themselves are read-only.
-This applies in all metadata modes. Dual-write republishing copies profile
-presentation only: disconnect records stay on the internal owner and the subject
-index stays at its separate key. Keep both when switching to canonical mode.
+Enforcement stays on at sign-in, session issuance, linking and tenant association
+regardless of the management flag. `getSession` and refresh do not read policy;
+disconnect revokes Core sessions before and after removing the recipe. A
+previously issued access token can still pass stateless verification until expiry.
+For sensitive endpoints, use `checkDatabase: true` to check Core revocation.
+The issuance/publication checks and session revocation aren't one transaction.
+A disconnect racing a sign-in after the request's last policy read can briefly
+leave an issued token in flight; if Core revokes its session, it cannot refresh.
+If disconnect fails after persisting intent but before finishing revocation, an
+already-issued session may still refresh until cleanup is retried. Don't restore
+or move credentials directly in Core: those changes bypass the plugin's checks.
+
+Ordinary sign-in uses the existing owner metadata read. Real-provider SSO adds
+one identity-index read on return and a second after a new recipe is created.
+When management is enabled, a fresh retained-email session stores proof in
+its creation write. Reusing a session doesn't renew proof; sign out and sign in
+with the retained email to obtain a fresh receipt.
+
+New disconnects publish intent and completion on the SDK-visible `user.id` row
+and, when mapped, the literal internal owner row for compatibility and migration.
+Records remain bound to the immutable internal owner. Compatibility and
+dual-write recognize either copy and reject conflicting copies. Canonical
+sign-in reads only `user.id` on the no-policy path. Dual-write canonical
+republishing carries policy separately from public presentation; the index
+stays on its `rownd_dsi:<hash>` row.
+
+Before upgrading an earlier test deployment **in canonical mode**, or switching
+it to canonical, pause auth/policy writers and backfill every previously
+disconnected mapped owner. Use the original internal IDs from the test rollout
+records (Core cannot enumerate metadata). For each, call
+`publishSignInMethodPolicy({ userId, dryRun: true })`, review the keys and SDK ID,
+then apply with `dryRun: false`. Run the dry run again: no keys should remain.
+This helper copies only policy, not profile metadata, and refuses conflicting
+copies. Compatibility/dual-write can run without backfill; don't switch to
+canonical until every legacy mapped record is accounted for.
 
 ### Support procedure
 
@@ -390,7 +411,9 @@ Recommended procedure:
 1. Deploy with `metadataMode: "dual-write"`. Migration may stay enabled.
 2. Publish every owner: write the canonical presentation of its compatibility
    view (`getCanonicalPresentationMetadata`) to its SDK-visible `user.id`. Remove
-   presentation keys that are absent from that projection.
+   presentation keys that are absent from that projection. Separately publish
+   any legacy internal-only disconnect policy as described above; it is not a
+   presentation key.
 3. Pause and drain writers, including migration. Verify every owner's compatibility and canonical
    presentations match (profile per tenant, configured session claims, OAuth
    claims and email selection). Republish any owner that differs.

@@ -250,7 +250,6 @@ export async function disconnectConnectedSignInMethod(input: Input & { body: unk
   let step = "intent";
   try {
     // Intent precedes every destructive call and survives an ambiguous response.
-    await verify();
     await recordDisconnectedSignInMethod(target, userContext, async () => {
       await verify();
       proof = await assertRetainedPasswordlessAuthentication(proofInput);

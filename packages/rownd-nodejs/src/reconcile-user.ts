@@ -705,7 +705,6 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
     try {
       await assertAuthenticatedMigrationSource(source, tenantId);
       await orphanHandoff?.assertReady();
-      if (beforeId && !consolidation) await assertNoDisconnectedSignInMethodsAtInternalOwner(beforeId, userContext, undefined, { fresh: true });
       mutationStarted = true;
       if (restoreMapping) {
         await publishPinnedMapping(beforeId!, source, tenantId, userContext, input.overridePlaceholderProvenance);
@@ -778,7 +777,6 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
       if (input.overridePlaceholderProvenance) await completePlaceholderProvenanceOverride(id, source, tenantId, userContext);
       await completeMappingPublication(id, source, tenantId, userContext);
       await publishPublicMetadata({ source, tenantId, internalUserId: id, userContext });
-      if (!consolidation) await assertNoDisconnectedSignInMethodsAtInternalOwner(id, userContext, undefined, { fresh: true });
       result.status = "OK";
     } catch (error) {
       operationFailed = true;

@@ -302,13 +302,6 @@ async function getPrimaryUserMapping(
   return externalMapping.status === "OK" ? externalMapping : undefined;
 }
 
-export async function getInternalPrimaryUserId(userId: string, userContext?: Record<string, any>) {
-  const user = await SuperTokens.getUser(userId, userContext);
-  if (!user) return undefined;
-  const mapping = await getPrimaryUserMapping(user.id, userContext);
-  return mapping?.superTokensUserId ?? user.id;
-}
-
 function getMappedEmailPointerFallback(
   primary: RowndMetadata,
   alias: RowndMetadata | undefined,
@@ -462,19 +455,22 @@ export async function getCombinedUserMetadata(
     .combinedMetadata;
 }
 
+export type PolicyPresence = Pick<LinkedUserMetadataInspection, "user" | "primaryUserId" | "primaryMetadata"> &
+  Partial<Pick<LinkedUserMetadataInspection, "linkedMetadata">>;
+
 export async function inspectUserPresentationMetadata(
   userId: string,
   userContext?: Record<string, any>,
   userSnapshot?: SuperTokensUser,
   read: ProfileReader = (_kind, _key, load) => load(),
-): Promise<{ user?: SuperTokensUser; combinedMetadata: RowndMetadata }> {
+): Promise<PolicyPresence & { combinedMetadata: RowndMetadata }> {
   if (getPluginConfig()?.metadataMode !== "canonical") {
     return inspectLinkedUserMetadata(userId, userContext, userSnapshot, read);
   }
   const user = userSnapshot ?? await read("user", userId, () => SuperTokens.getUser(userId, userContext));
-  if (!user) return { user, combinedMetadata: {} };
+  if (!user) return { user, primaryUserId: userId, primaryMetadata: {}, combinedMetadata: {} };
   const combinedMetadata = await read("metadata", user.id, () => getRawUserMetadata(user.id, userContext));
-  return { user, combinedMetadata };
+  return { user, primaryUserId: user.id, primaryMetadata: combinedMetadata, combinedMetadata };
 }
 
 const PRESENTATION_EMAIL_STATE_FIELDS = [

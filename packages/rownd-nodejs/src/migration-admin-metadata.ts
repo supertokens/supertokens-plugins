@@ -23,6 +23,7 @@ import {
 import { clearSuperTokensCoreCallCache, type JsonRecord } from "./utils";
 import type { SuperTokensUserImport } from "./types";
 import { invalidateReconciliationReads } from "./reconciliation-reads";
+import { assertNoPolicyInMetadata } from "./disconnected-sign-in-identities";
 
 type MetadataBackfillInput = {
   source: SuperTokensUserImport;
@@ -77,6 +78,7 @@ export async function inspectAdministrativeMetadataBackfill(
   // Keep the primary read closest to the minimal write; existing top-level
   // values, including null and opaque objects, always take precedence.
   const latestPrimary = await getRawUserMetadata(internalUserId, userContext);
+  assertNoPolicyInMetadata(internalUserId, latestPrimary);
   for (const field of Object.keys(latestPrimary)) occupied.add(field);
   for (const field of getAuthoritativeProfileFields(latestPrimary)) occupied.add(field);
   // Core's patch API treats null as deletion; an absent null needs no addition.
@@ -146,6 +148,8 @@ export async function getPublicMetadataPublicationValues(input: MetadataBackfill
   if (!inspection.user || inspection.primaryUserId !== internalUserId) {
     throw new RowndMigrationPolicyError("Metadata backfill target is not the immutable owner");
   }
+  assertNoPolicyInMetadata(internalUserId, inspection.primaryMetadata);
+  assertNoPolicyInMetadata(internalUserId, inspection.linkedMetadata.find(({ userId }) => userId === inspection.user?.id)?.metadata ?? {});
   // Core reads metadata by literal ID even though user APIs return external IDs.
   // Publish application fields there; migration checkpoints retain one owner.
   // Recovery supplies the pre-publication source snapshot so new source fields cannot prove themselves.

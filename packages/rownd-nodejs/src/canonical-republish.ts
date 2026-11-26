@@ -30,6 +30,7 @@ import { assembleUserProfile } from "./supertokens-repository";
 import type { MigrationTelemetry } from "./telemetry/migrationTelemetry";
 import type { RowndPluginNormalisedConfig } from "./types";
 import { clearSuperTokensCoreCallCache, isJsonRecord, type JsonRecord } from "./utils";
+import { signInMethodPolicyFields, mergeSignInMethodPolicy, DisconnectedSignInMethodError } from "./disconnected-sign-in-identities";
 
 export type CanonicalRepublishResult =
   | { status: "UNCHANGED" }
@@ -175,6 +176,20 @@ export function planCanonicalRepublish(inspection: LinkedUserMetadataInspection,
   validateOwner(inspection, destination);
   const presentation = structuredClone(getCanonicalPresentationMetadata(inspection.combinedMetadata));
   const patch: JsonRecord = {};
+  try {
+    for (const { userId, metadata } of inspection.linkedMetadata) {
+      if (userId !== inspection.user?.id && Object.values(signInMethodPolicyFields(metadata)).some((value) =>
+        isJsonRecord(value) && value.userId === userId)) refuse("linked-sign-in-method-policy");
+    }
+    const policy = mergeSignInMethodPolicy(inspection.primaryUserId, inspection.primaryMetadata, destination);
+    for (const [key, value] of Object.entries(policy)) {
+      if (value === null || (isJsonRecord(value) && "providerUserId" in value)) refuse("unrepresentable-sign-in-method-policy");
+      patch[key] = structuredClone(value) as JsonRecord[string];
+    }
+  } catch (error) {
+    if (!(error instanceof DisconnectedSignInMethodError)) throw error;
+    refuse("conflicting-sign-in-method-policy");
+  }
   for (const [key, value] of Object.entries(presentation)) {
     // Core deletes a key written as null, so a literal null survives only if already stored.
     if (value === null) {

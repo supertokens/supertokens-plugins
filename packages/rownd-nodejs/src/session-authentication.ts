@@ -3,17 +3,19 @@ import Session from "supertokens-node/recipe/session";
 import { EmailVerificationClaim } from "supertokens-node/recipe/emailverification";
 import { RowndEmailChangeError, RowndSignInMethodError } from "./errors";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import type { User } from "supertokens-node/types";
 import type { JsonRecord } from "./utils";
 import { clearSuperTokensCoreCallCache, isRecord } from "./utils";
 import type { SessionContainerInterface } from "supertokens-node/recipe/session/types";
-import { getInternalPrimaryUserId, getPrimaryUserMetadata, getRawUserMetadata } from "./rownd-compatibility";
+import { getRawUserMetadata, type RowndMetadata } from "./rownd-compatibility";
 import { resolveCanonicalEmailForTenant } from "./canonical-email";
 import { readOwnerPlanCheckpoint, ambiguousOwnerSessionAliases } from "./migration-owner-plan";
 import { assertCompletedPlan } from "./migration-consolidation";
 
 export const SESSION_AUTHENTICATION_KEY = "rownd_session_authentication";
 const PASSWORDLESS_AUTHENTICATION_RECEIPT = "rownd_passwordless_authentication_receipt";
+const PASSWORDLESS_RECEIPT_BINDING = "rownd_passwordless_binding";
 export const SIGN_IN_METHOD_AUTHENTICATION_MAX_AGE_MS = 600_000;
 
 export type ValidatedPasswordlessAuthentication = Readonly<{
@@ -43,36 +45,30 @@ export async function immutableRecipeUserId(id: string, userContext: JsonRecord)
   return mapping.status === "OK" ? mapping.superTokensUserId : id;
 }
 
-// Only the successful code-consumption path calls this. Session creation and
-// migration can select a Passwordless recipe without proving its possession.
-export async function recordPasswordlessAuthentication(
-  session: SessionContainerInterface,
-  authenticatedRecipeUserId: string,
+// Core assigns the handle after creation. Bind the database proof to an opaque
+// value in the signed token instead of updating the newly created session.
+export function passwordlessSessionReceipt(
+  inspection: { user?: User; combinedMetadata: RowndMetadata },
+  sessionRecipeId: string,
   tenantId: string,
-  userContext: JsonRecord,
-  authenticatedEmail: string,
-  authenticatedAt = Date.now(),
+  { recipeUserId, email, authenticatedAt }: { recipeUserId: string; email: string; authenticatedAt: number },
 ) {
-  const owner = await getInternalPrimaryUserId(session.getUserId(userContext), userContext);
-  const recipe = await immutableRecipeUserId(authenticatedRecipeUserId, userContext);
-  const user = await SuperTokens.getUser(session.getUserId(userContext), userContext);
+  const { user, combinedMetadata } = inspection;
+  if (!user || sessionRecipeId !== recipeUserId) return undefined;
+  const normalizedEmail = email.trim().toLowerCase();
   const method = user?.loginMethods.find((entry) => entry.recipeId === "passwordless" &&
-    entry.recipeUserId.getAsString() === authenticatedRecipeUserId && entry.tenantIds.includes(tenantId));
-  if (!owner || !user || !method?.verified || !method.email || method.email.trim().toLowerCase() !== authenticatedEmail.trim().toLowerCase() ||
-    session.getTenantId(userContext) !== tenantId ||
-    await immutableRecipeUserId(session.getRecipeUserId(userContext).getAsString(), userContext) !== recipe) return;
-  const canonical = resolveCanonicalEmailForTenant({ user, metadata: await getPrimaryUserMetadata(user.id, userContext), tenantId, passwordlessOnly: true });
-  if (canonical.status !== "SELECTED" || canonical.recipeUserIds.length !== 1 ||
-    canonical.recipeUserIds[0] !== authenticatedRecipeUserId) return;
-  const data = await session.getSessionDataFromDatabase(userContext);
-  await session.updateSessionDataInDatabase({
-    ...(isRecord(data) ? data : {}),
-    [PASSWORDLESS_AUTHENTICATION_RECEIPT]: {
-      version: 1, userId: owner, tenantId, recipeUserId: recipe,
-      email: authenticatedEmail.trim().toLowerCase(),
-      sessionHandle: session.getHandle(userContext), authenticatedAt,
-    },
-  }, userContext);
+    entry.recipeUserId.getAsString() === recipeUserId && entry.tenantIds.includes(tenantId));
+  if (!method?.verified || method.email?.trim().toLowerCase() !== normalizedEmail) return undefined;
+  const canonical = resolveCanonicalEmailForTenant({ user, metadata: combinedMetadata, tenantId, passwordlessOnly: true });
+  if (canonical.status !== "SELECTED" || canonical.recipeUserIds.length !== 1 || canonical.recipeUserIds[0] !== recipeUserId) return undefined;
+  const binding = randomUUID();
+  return {
+    accessTokenPayload: { [PASSWORDLESS_RECEIPT_BINDING]: binding },
+    sessionDataInDatabase: { [PASSWORDLESS_AUTHENTICATION_RECEIPT]: {
+      version: 2, userId: user.id, tenantId, recipeUserId, email: normalizedEmail, authenticatedAt,
+      binding,
+    } },
+  };
 }
 
 export async function assertRetainedPasswordlessAuthentication(input: {
@@ -88,7 +84,8 @@ export async function assertRetainedPasswordlessAuthentication(input: {
   const liveRecipeUserId = await immutableRecipeUserId(session.getRecipeUserId(userContext).getAsString(), userContext);
   const sessionUserId = session.getUserId(userContext);
   const immutableSessionUserId = await immutableRecipeUserId(sessionUserId, userContext);
-  const owner = await getInternalPrimaryUserId(sessionUserId, userContext);
+  const owner = await SuperTokens.getUser(sessionUserId, userContext);
+  const expectedOwner = userId === sessionUserId ? owner : await SuperTokens.getUser(userId, userContext);
   // Read the database last: creation time and a still-valid stateless JWT cannot
   // prove that the initiating session survived the preceding graph reads.
   const information = await Session.getSessionInformation(session.getHandle(userContext), userContext);
@@ -97,9 +94,13 @@ export async function assertRetainedPasswordlessAuthentication(input: {
   // Core may return the internal primary ID while the container exposes its mapped alias.
   if (!information || (information.userId !== sessionUserId && information.userId !== immutableSessionUserId) || information.tenantId !== tenantId ||
     information.sessionHandle !== session.getHandle(userContext) ||
-    information.recipeUserId.getAsString() !== session.getRecipeUserId(userContext).getAsString() || owner !== userId ||
-    !isRecord(receipt) || receipt.version !== 1 || receipt.userId !== userId || receipt.tenantId !== tenantId ||
-    receipt.recipeUserId !== recipeUserId || receipt.email !== email.trim().toLowerCase() || receipt.sessionHandle !== session.getHandle(userContext) ||
+    information.recipeUserId.getAsString() !== session.getRecipeUserId(userContext).getAsString() ||
+    !owner || owner.id !== expectedOwner?.id ||
+    !isRecord(receipt) || receipt.tenantId !== tenantId || receipt.email !== email.trim().toLowerCase() ||
+    !(receipt.version === 1
+      ? receipt.userId === userId && receipt.recipeUserId === recipeUserId && receipt.sessionHandle === session.getHandle(userContext)
+      : receipt.version === 2 && receipt.userId === owner.id && receipt.recipeUserId === session.getRecipeUserId(userContext).getAsString() &&
+        typeof receipt.binding === "string" && receipt.binding === session.getAccessTokenPayload()[PASSWORDLESS_RECEIPT_BINDING]) ||
     typeof receipt.authenticatedAt !== "number" || session.getTenantId(userContext) !== tenantId || liveRecipeUserId !== recipeUserId) {
     retainedAuthenticationRequired(email);
   }

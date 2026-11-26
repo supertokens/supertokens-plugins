@@ -23,6 +23,7 @@ vi.mock("./disconnected-sign-in-identities", () => ({
   assertSignInMethodLinkAllowed: vi.fn(),
   assertSignInMethodTenantAssociationAllowed: vi.fn(),
   readPolicyGate: vi.fn(),
+  realProvider: (id: string) => !["instant", "guest"].includes(id),
   recordDisconnectedSignInMethod: vi.fn(),
   completeDisconnectedSignInMethod: vi.fn(),
   DisconnectedSignInMethodError: class extends Error {
@@ -48,7 +49,7 @@ beforeEach(() => {
   vi.mocked(checkSignInMethodAuthentication).mockResolvedValue({ policy: [], gate } as any);
   vi.mocked(buildRowndSessionAndAnonymousClaims).mockResolvedValue({ rowndSessionClaims: buildRowndSessionClaimPayload({
     userId: "owner", user: undefined, currentPayload: { auth_level: "verified" }, authenticationOrigin: "authenticated",
-  }), rowndIsAnonymousClaim: {} });
+  }), rowndIsAnonymousClaim: {}, inspection: { primaryUserId: "owner", primaryMetadata: {}, combinedMetadata: {} } });
 });
 afterEach(() => { vi.restoreAllMocks(); });
 
@@ -81,11 +82,11 @@ describe("durable policy recipe seams", () => {
     expect(original.getSessionInformation).not.toHaveBeenCalled();
   });
 
-  it("rechecks refreshed credentials and revokes a suppressed result", async () => {
-    vi.mocked(checkSignInMethodAuthentication).mockRejectedValueOnce(new DisconnectedSignInMethodError("SIGN_IN_METHOD_DISCONNECTED"));
+  it("leaves refresh to the SDK after disconnect-time revocation", async () => {
     const original = { refreshSession: vi.fn(async () => session) };
-    await expect(overrides.session.functions(original).refreshSession({ userContext: {} })).rejects.toMatchObject({ type: "UNAUTHORISED" });
-    expect(session.revokeSession).toHaveBeenCalled();
+    await expect(overrides.session.functions(original).refreshSession({ userContext: {} })).resolves.toBe(session);
+    expect(checkSignInMethodAuthentication).not.toHaveBeenCalled();
+    expect(session.revokeSession).not.toHaveBeenCalled();
   });
 
   it("blocks explicit linking and tenant reassociation before Core writes", async () => {
@@ -197,8 +198,8 @@ describe("durable policy recipe seams", () => {
     expect(await result).toMatchObject({ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_DISCONNECTED" });
     if (reused) expect(revoke).not.toHaveBeenCalled();
     else expect(revoke).toHaveBeenCalledWith("handle", expect.anything());
-    expect(session.mergeIntoAccessTokenPayload).toHaveBeenCalledTimes(1);
-    expect(checkSignInMethodAuthentication).toHaveBeenCalledTimes(2);
+    expect(session.mergeIntoAccessTokenPayload).not.toHaveBeenCalled();
+    expect(checkSignInMethodAuthentication).toHaveBeenCalledTimes(1);
     const checks = vi.mocked(checkSignInMethodAuthentication).mock.calls;
     const lastCheck = checks[checks.length - 1];
     expect(lastCheck?.[1].getAsString()).toBe("actual-sso");
