@@ -12,6 +12,7 @@ import { getAdministrativeRepairMetadata, inspectAdministrativeEmailPolicy } fro
 import { assertVerificationCellInheritance } from "./migration-verification";
 import type { SuperTokensUserImport } from "./types";
 import type { JsonRecord } from "./utils";
+import { assertNoDisconnectedSignInMethods, assertNoDisconnectedSignInMethodsAtInternalOwner, DisconnectedSignInMethodError } from "./disconnected-sign-in-identities";
 
 type User = NonNullable<Awaited<ReturnType<typeof SuperTokens.getUser>>>;
 type Method = SuperTokensUserImport["loginMethods"][number];
@@ -56,6 +57,15 @@ export async function previewReconciliation(input: {
   const verifiedEmail = getAuthenticatedMigrationEmail(source, tenantId);
   const inspections = await inspectMigrationMethods(source, source.loginMethods, tenantId, userContext);
   const owners = new Map(inspections.flatMap(({ owners }) => owners.map(({ user }) => [user.id, user] as const)));
+  try {
+    if (input.internalId) await assertNoDisconnectedSignInMethodsAtInternalOwner(input.internalId, userContext);
+    for (const id of new Set([input.internalId ? undefined : source.externalUserId, selected?.id, ...owners.keys()])) {
+      if (id && id !== input.internalId) await assertNoDisconnectedSignInMethods(id, userContext);
+    }
+  } catch (error) {
+    if (!(error instanceof DisconnectedSignInMethodError)) throw error;
+    return { ...result, status: "BLOCKED", blockers: [{ code: error.code }] };
+  }
   for (const user of owners.values()) await assertMigrationOwnerGraph(user, tenantId, userContext);
   const provider = inspections.find(({ importMethod, match }) => importMethod.recipeId === "thirdparty" && match)?.match;
   const match = provider ?? inspections.find(({ reconciliationMatch }) => reconciliationMatch)?.reconciliationMatch;

@@ -43,6 +43,10 @@
       ]
     },
     "test": {
+      "env": [
+        "CONNECTED_METHODS_TEST_CORE_STORAGE",
+        "CONNECTED_METHODS_TEST_CORE_URI"
+      ],
       "dependsOn": [
         "transit"
       ]

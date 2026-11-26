@@ -7,6 +7,7 @@ import { backfillAdministrativeMetadata } from "./migration-admin-metadata";
 import { getAdministrativeRepairMetadata, prepareAdministrativeCanonicalEmail } from "./migration-admin-email";
 import { RowndMigrationPolicyError } from "./errors";
 import { sessionAuthenticationOrigin, assertEmailChangeSessionClaims } from "./session-authentication";
+import { assertNoDisconnectedSignInMethods, assertNoDisconnectedSignInMethodsAtInternalOwner, assertSignInIdentityNotIndexed, DisconnectedSignInMethodError, isDisconnectedSignInMethodMetadataKey } from "./disconnected-sign-in-identities";
 import { assertMigrationPostconditions, assertMigrationOwnerGraph, reconcileAdministrativeEmailVerification } from "./migration-postconditions";
 import { assertCurrentRowndProviders, checkpointProviderIntroduction, finishProviderIntroductions, prepareRowndProviderRetirement, recoverProviderRevocations, type ProviderIntroduction } from "./migration-provider";
 import { finishAdministrativeProviderIntroductions, inspectAdministrativeProviderIntroductions } from "./migration-admin-provider";
@@ -159,12 +160,35 @@ export type CreateMagicLinkWithConfirmationBypassInput = {
 export async function importUser(
   stUser: SuperTokensUserImport,
   config: NonNullable<SuperTokensPublicConfig["supertokens"]>,
+  userContext: Record<string, any> = {},
 ): Promise<{
   id: string;
   loginMethods: Array<{
     recipeUserId: string;
   }>;
 }> {
+  // This direct Core endpoint bypasses the SDK's account-linking overrides.
+  if (Object.keys(stUser.userMetadata ?? {}).some(isDisconnectedSignInMethodMetadataKey)) {
+    throw new RowndMigrationPolicyError("Reserved sign-in method policy cannot be imported");
+  }
+  if (stUser.externalUserId) await assertNoDisconnectedSignInMethods(stUser.externalUserId, userContext);
+  const original = stUser.userMetadata?.original_rownd_user;
+  const sourceId = isRecord(original) && isRecord(original.data) ? original.data.user_id : undefined;
+  if (typeof sourceId === "string" && sourceId !== stUser.externalUserId) await assertNoDisconnectedSignInMethods(sourceId, userContext);
+  const owners = new Set<string>();
+  for (const method of stUser.loginMethods) {
+    for (const tenantId of method.tenantIds ?? [PUBLIC_TENANT_ID]) {
+      if (method.recipeId === "thirdparty") {
+        await assertSignInIdentityNotIndexed({ tenantId, providerId: method.thirdPartyId, providerUserId: method.thirdPartyUserId }, userContext);
+      }
+      for (const accountInfo of getImportMethodAccountInfos(method)) {
+        clearSuperTokensCoreCallCache(userContext);
+        invalidateReconciliationReads();
+        for (const owner of await SuperTokens.listUsersByAccountInfo(tenantId, accountInfo, false, userContext)) owners.add(owner.id);
+      }
+    }
+  }
+  for (const ownerId of owners) await assertNoDisconnectedSignInMethods(ownerId, userContext);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
@@ -200,6 +224,15 @@ export async function importUser(
     );
   }
 
+  // A disconnect may have committed while Core handled the import. Deny the
+  // result without rolling back an account graph that may have changed again.
+  invalidateReconciliationReads("mapping");
+  invalidateReconciliationReads("metadata");
+  clearSuperTokensCoreCallCache(userContext);
+  for (const id of new Set([stUser.externalUserId, typeof sourceId === "string" ? sourceId : undefined,
+    importResponse.user.id, ...owners])) {
+    if (id) await assertNoDisconnectedSignInMethods(id, userContext);
+  }
   return importResponse.user;
 }
 
@@ -431,6 +464,9 @@ export async function createMissingLoginMethod(
     rowndDisableAutomaticAccountLinking: true,
   });
   if (importMethod.recipeId === "thirdparty") {
+    await assertSignInIdentityNotIndexed({
+      tenantId, providerId: importMethod.thirdPartyId, providerUserId: importMethod.thirdPartyUserId,
+    }, operationContext);
     const result = await ThirdParty.manuallyCreateOrUpdateUser(
       tenantId,
       importMethod.thirdPartyId,
@@ -718,6 +754,7 @@ export async function reconcileRowndUserWithExistingLoginMethods(
   userContext: JsonRecord,
   options?: { repairUser?: SuperTokensUser; expectedInternalUserId?: string; onTargetSelected?: (id: string) => void; methodPlan?: MethodPlan },
 ) {
+  const administrative = isAdministrativeMigration(stUser, tenantId);
   let lastError: unknown;
   const targetBinding: { internalUserId?: string; retryMapping?: boolean; introduced: ProviderIntroduction[] } = { internalUserId: options?.expectedInternalUserId, introduced: [] };
   if (stUser.externalUserId) {
@@ -728,6 +765,7 @@ export async function reconcileRowndUserWithExistingLoginMethods(
       }
       targetBinding.internalUserId = mapping.superTokensUserId;
       options?.onTargetSelected?.(mapping.superTokensUserId);
+      if (!administrative) await assertNoDisconnectedSignInMethodsAtInternalOwner(mapping.superTokensUserId, userContext, undefined, { fresh: true });
       await assertAuthenticatedMigrationSource(stUser, tenantId);
       await recoverProviderRevocations(mapping.superTokensUserId, stUser.externalUserId, tenantId, userContext);
       if (isAdministrativeMigration(stUser, tenantId)) {
@@ -758,12 +796,15 @@ export async function reconcileRowndUserWithExistingLoginMethods(
         if (isAdministrativeMigration(stUser, tenantId)) await assertAuthenticatedMigrationSource(stUser, tenantId);
         if (isAdministrativeMigration(stUser, tenantId)) await finishAdministrativeProviderIntroductions(stUser, tenantId, targetBinding.internalUserId, userContext);
         else await finishProviderIntroductions(targetBinding.internalUserId, stUser.externalUserId!, userContext, false, targetBinding.introduced);
+        if (!administrative) await assertNoDisconnectedSignInMethodsAtInternalOwner(targetBinding.internalUserId, userContext, undefined, { fresh: true });
       }
       return result;
     } catch (error) {
+      if (error instanceof DisconnectedSignInMethodError) throw error;
       try {
         if (isAdministrativeMigration(stUser, tenantId)) await assertAuthenticatedMigrationSource(stUser, tenantId);
-        if (targetBinding.internalUserId && !isAdministrativeMigration(stUser, tenantId)) {
+        if (targetBinding.internalUserId && targetBinding.introduced.length > 0 && !isAdministrativeMigration(stUser, tenantId)) {
+          await assertNoDisconnectedSignInMethodsAtInternalOwner(targetBinding.internalUserId, userContext, undefined, { fresh: true });
           await finishProviderIntroductions(targetBinding.internalUserId, stUser.externalUserId!, userContext, true, targetBinding.introduced);
         }
       } catch (recoveryError) {
@@ -1000,6 +1041,10 @@ async function reconcileRowndUserOnce(
     preferred: preferredUser ? await SuperTokens.getUser(targetSuperTokensUserId, userContext) : undefined,
     inspections: await inspectMigrationMethods(stUser, importMethods, tenantId, userContext), currentEmailRepair: currentEmailReconciliation !== undefined }));
   if (freshMethods.status === "BLOCKED" || !methodPlanAllows(methodPlan, freshMethods)) throw new RowndMigrationPolicyError("Method reconciliation assumptions changed before execution");
+  if (!isAdministrativeMigration(stUser, tenantId)) {
+    await assertNoDisconnectedSignInMethodsAtInternalOwner(targetSuperTokensUserId, userContext, undefined, { fresh: true });
+    for (const owner of foreignOwners) await assertNoDisconnectedSignInMethodsAtInternalOwner(owner.superTokensUserId, userContext);
+  }
   const completionInvalidated = repairUser !== undefined && repairMetadata?.rownd_migration_complete === true &&
     (freshMethods.actions.length > 0 || migrationEmailPlan !== undefined || currentEmailReconciliation !== undefined || finishProviderRetirement !== undefined || administrativeCanonicalEmail?.changesCanonical === true);
   if (completionInvalidated) {
@@ -1456,9 +1501,8 @@ export async function buildRowndSessionAndAnonymousClaims(
   options?: { userSnapshot?: SuperTokensUser },
 ) {
   const pluginConfig = getConfigForUserContext(userContext);
-  const inspection = await inspectUserPresentationMetadata(
-    userId, userContext, pluginConfig?.metadataMode === "canonical" ? options?.userSnapshot : undefined,
-  );
+  const canonical = pluginConfig?.metadataMode === "canonical";
+  const inspection = await inspectUserPresentationMetadata(userId, userContext, canonical ? options?.userSnapshot : undefined);
   const user = inspection.user;
   const rowndSessionClaims = buildRowndSessionClaimPayload({
     userId,
@@ -1473,6 +1517,7 @@ export async function buildRowndSessionAndAnonymousClaims(
     rowndSessionClaims.auth_level,
   );
   return {
+    inspection,
     rowndSessionClaims,
     rowndIsAnonymousClaim: RowndIsAnonymousClaim.addToPayload_internal(
       {},

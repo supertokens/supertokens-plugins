@@ -58,3 +58,15 @@ export class RowndMigrationPolicyError extends Error {
     this.name = "RowndMigrationPolicyError";
   }
 }
+
+export class RowndSignInMethodError extends Error {
+  constructor(
+    public readonly errorCode: string,
+    public readonly httpStatus: 403 | 409 | 404,
+    message: string,
+    public readonly reauthentication?: { method: "email"; identifier: string },
+  ) {
+    super(message);
+    this.name = "RowndSignInMethodError";
+  }
+}

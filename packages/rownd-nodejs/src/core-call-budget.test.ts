@@ -27,6 +27,7 @@ import { buildConfiguredSessionClaims, getAuthoritativeProfileFields, getCanonic
 import { getPluginConfig, setPluginConfig } from "./config";
 import { logDebugMessage } from "./logger";
 import type { JsonRecord } from "./utils";
+import { signInIdentityHash } from "./disconnected-sign-in-identities";
 
 vi.mock("./logger", () => ({ logDebugMessage: vi.fn(), enableDebugLogs: vi.fn() }));
 
@@ -82,6 +83,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
   let mapped: boolean;
   let revoked: boolean;
   let attempts: Attempt[];
+  let indexReads: number;
   let unexpected: string[];
   let metadata: Map<string, RowndMetadata>;
   let metadataFailure: boolean;
@@ -157,6 +159,7 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     signInRecipe = undefined;
     attempts = [];
     unexpected = [];
+    indexReads = 0;
     metadata = new Map([
       [internalId, { first_name: "Profile", preference: "preserved", ...storedActivity }],
       [externalId, { first_name: "Alias", alias_only: "fallback" }],
@@ -167,6 +170,15 @@ describe("complete protected route Core budgets (installed SDK)", () => {
       for await (const chunk of req) chunks.push(Buffer.from(chunk));
       const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) as Json : {};
       const attempt = { method: req.method!, path: url.pathname, params: url.searchParams, body };
+      if (signInRecipe === "thirdparty" && attempt.method === "GET" && attempt.path === "/recipe/user/metadata" &&
+        attempt.params.get("userId") === `rownd_dsi:${signInIdentityHash({
+          tenantId: "public", providerId: provider.id, providerUserId: provider.userId,
+        })}`) {
+        indexReads++;
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ status: "OK", metadata: {} }));
+        return;
+      }
       attempts.push(attempt);
       res.setHeader("content-type", "application/json");
       const reply = (value: unknown) => res.end(JSON.stringify(value));
@@ -211,6 +223,10 @@ describe("complete protected route Core budgets (installed SDK)", () => {
           if (!signInRecipe || typeof body.accessToken !== "string") return reject();
           const payload = body.userDataInJWT as Json;
           return reply({ status: "OK", session: session(payload), accessToken: await token(payload) });
+        }
+        case "POST /recipe/session/remove": {
+          if (!metadataWriteFailureId || !Array.isArray(body.sessionHandles)) return reject();
+          return reply({ status: "OK", sessionHandlesRevoked: body.sessionHandles });
         }
         case "GET /user/id":
           if (![internalId, sdkId()].includes(url.searchParams.get("userId")!)) return reject();
@@ -462,11 +478,14 @@ describe("complete protected route Core budgets (installed SDK)", () => {
     const body = passwordless
       ? { preAuthSessionId: device.preAuthSessionId, linkCode: loginCode }
       : { thirdPartyId: provider.id, oAuthTokens: { thirdPartyUserId: provider.userId, email } };
-    return fetch(`${appUrl}/auth/${path}?app_variant_id=${variant}`, {
+    const before = indexReads;
+    const response = await fetch(`${appUrl}/auth/${path}?app_variant_id=${variant}`, {
       method: "POST",
       headers: { rid: recipe, "fdi-version": "1.18", "st-auth-mode": "header", "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+    expect(indexReads - before).toBe(passwordless ? 0 : 1);
+    return response;
   }
 
   it.each((["passwordless", "thirdparty"] as const).flatMap((recipe) =>

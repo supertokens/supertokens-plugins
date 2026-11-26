@@ -243,7 +243,7 @@ it("requires fresh authentication for legacy verified sessions on relocated alia
     signInUpPOST: async () => ({ status: "GENERAL_ERROR", message: "credentials rejected" }),
   });
   expect(await failedSignIn.signInUpPOST({ provider: { id: "google" }, tenantId: "public", session: refreshed,
-    options: { req: { getKeyValueFromQuery: () => undefined } }, userContext: {} })).toMatchObject({ status: "GENERAL_ERROR" });
+    options: { req: { getKeyValueFromQuery: () => undefined }, res: new CollectingResponse() }, userContext: {} })).toMatchObject({ status: "GENERAL_ERROR" });
   expect(refreshed.getAccessTokenPayload()).not.toHaveProperty("rownd_session_authentication");
   for (const [session, expected] of [[refreshed, "instant"], [secondary, "verified"], [unaffected, "verified"]] as const) {
     const claims = await buildRowndSessionAndAnonymousClaims(session.getUserId(), session.getAccessTokenPayload(), undefined, {}, session.getRecipeUserId().getAsString());
@@ -294,3 +294,4 @@ it("retains ambiguous legacy-session alias provenance when a later election repl
     { ...replacement.legacySessionAliasHistory, aliases: [instant, instant] },
   ]) expect(() => readOwnerPlanCheckpoint({ rownd_migration_owner_consolidation: { ...replacement, legacySessionAliasHistory: invalid } })).toThrow();
 });
+import { CollectingResponse } from "supertokens-node/framework/custom";

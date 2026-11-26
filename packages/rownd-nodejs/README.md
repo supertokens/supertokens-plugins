@@ -2,6 +2,192 @@
 
 This plugin facilitates the migration of users and sessions from Rownd to SuperTokens.
 
+## Connected sign-in methods (opt-in)
+
+### Rollout and rollback
+
+The current npm release is `2.1.0`. The pending minor changeset releases this
+feature in `2.2.0`.
+
+1. Deploy the feature release to **every backend instance** with management disabled (the default).
+2. Deploy the compatible Hub. It uses the capability below and does not call endpoints on older plugins.
+3. Enable `connectedSignInMethods: { enabled: true }`, optionally per tenant through `resolveConfig`.
+
+After the first disconnect, **do not roll back to a binary that ignores owner
+policy or the disconnected-identity index**. Old instances can recreate and
+auto-link the removed recipe. To roll back the UI, set the flag to `false` on
+the supporting fleet. This removes the capability and returns 404 on the
+management routes; enforcement remains on. Binary rollback after a disconnect is
+unsupported. There is no enforcement-only backport. If a binary rollback is
+unavoidable, keep affected authentication traffic paused until a build that
+enforces both records is deployed. Use `rownd_disconnect_completed`
+and `rownd_disconnect_step_failed` (tenant, provider, hashed owner ID) to scope an
+incident: Core UserMetadata cannot enumerate all affected owners. Do not clear
+policy or index records during rollback.
+
+### API and enforcement
+
+When enabled and Session, UserMetadata, Passwordless, AccountLinking and
+Multitenancy are initialized, `GET /plugin/rownd/app-config` adds:
+
+```json
+{"plugin_capabilities":{"connected_sign_in_methods":{"version":1}}}
+```
+
+Authenticated, database-backed endpoints (relative to `apiBasePath`):
+
+- `GET /plugin/rownd/user/sign-in-methods`: returns `status`, `user_id`, `tenant_id`,
+  `methods` and `reauthentication` (`{ method: "email", identifier }` or `null`).
+  Methods have opaque `id`, `kind` (`email`, `phone`, `sso`), optional
+  `provider`/`identifier`, `verified`, `can_disconnect`, and optional
+  `disconnect_block_reason`. An email+phone Passwordless recipe yields two
+  rows with distinct IDs. Recovery rows have `pending_disconnect: true`.
+- `POST /plugin/rownd/user/sign-in-methods/disconnect`: accepts `method_id`,
+  `expected_user_id` and `expected_tenant_id`. The IDs are preconditions, not
+  account selectors. Success is `{"status":"OK","signed_out":true}` after
+  recipe removal and revocation of **all account sessions across tenants**.
+
+Only single-tenant SSO identities with an enabled, verified canonical Passwordless
+email can be removed. Pending email changes and ambiguous canonical methods block
+removal. The server requires a receipt from canonical-email code consumption less
+than 10 minutes ago, bound to the initiating session. Otherwise, eligible rows
+show `SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED`; sign out and sign in with the
+retained email. When fresh, the list returns `reauthentication_valid_until` (epoch
+milliseconds) and `reauthentication_valid_for_ms` (remaining milliseconds at
+response time). Use the latter for a client timer so device clock skew does not
+block disconnect. The server still validates proof at POST time.
+Refresh, SSO, migration and consumption that retains an SSO-bound session do not
+create this receipt.
+
+Management errors include `{ status: "ERROR", code, error_code, message, reauthentication? }`:
+404 for unavailable management, 403 for missing proof, and 409 for ownership,
+eligibility, policy or incomplete cleanup. A disconnected subject signing in
+with SSO in its original tenant, including a signed-in user trying to add it,
+gets HTTP 200 with exactly
+`{ status: "SIGN_IN_UP_NOT_ALLOWED", reason: "SIGN_IN_METHOD_DISCONNECTED" }`.
+A sign-in racing the removal can leave a standalone recipe user, but the
+denied attempt does not issue a session. See the cleanup procedure below.
+
+The plugin stores intent and the per-tenant identity index before destructive work.
+Neither is rolled back. After interrupted cleanup, sign in with the retained email
+and retry the pending row. This also rebuilds the index if Core committed intent
+but the index write failed. Completion hides the row but does not lift suppression.
+The primary ID, Rownd mapping, canonical email, profile, tenant roles and backend
+TOTP are preserved. **A disconnect is permanent for that identity on the account.**
+The user cannot re-add it, and support cannot undo it on a live account. Once the
+whole account is deleted, the identity can sign up again as a new account.
+Accounts with policy cannot be migrated from Rownd or reconciled; use the native
+retained-email sign-in. A policy-blocked `/plugin/rownd/migrate` or
+`/plugin/migrate-session` returns HTTP 400 with `status: "ERROR"`,
+`error_code: "DISCONNECT_RESTORATION_BLOCKED"` and a human-readable `message`.
+
+Custom session issuance must use a **live recipe user ID**. When a disconnected
+SSO recipe was the primary anchor, the account's internal primary ID and mapped
+Rownd ID still identify the account but not a live credential. Passing that
+anchor to session creation returns `UNAUTHORISED` with message
+`SIGN_IN_METHOD_DISCONNECTED` (warn level). Use the retained Passwordless
+recipe's ID; the plugin does not silently change which factor a session represents.
+
+Enforcement stays on at sign-in, session issuance, linking and tenant association
+regardless of the management flag. `getSession` and refresh do not read policy;
+disconnect revokes Core sessions before and after removing the recipe. A
+previously issued access token can still pass stateless verification until expiry.
+For sensitive endpoints, use `checkDatabase: true` to check Core revocation.
+The issuance/publication checks and session revocation aren't one transaction.
+The buffered Passwordless and ThirdParty HTTP APIs recheck policy after issuing
+a session and before returning its credentials. If that check misses a later
+disconnect, the session already exists for disconnect's revocation to find.
+Other `createNewSession` calls (including app code, guest issuance and
+`/migrate`) check policy before creating the session, not after. If one creates
+a session after a concurrent disconnect's final revocation, the session can
+continue to refresh until explicitly revoked or expired. Serialize custom
+issuance with disconnect where that race is unacceptable.
+If disconnect fails after persisting intent but before finishing revocation, an
+already-issued session may still refresh until cleanup is retried. Don't restore
+or move credentials directly in Core: those changes bypass the plugin's checks.
+
+Ordinary sign-in uses the existing owner metadata read. Real-provider SSO adds
+one identity-index read on return and a second after a new recipe is created.
+Automatic linking also checks the candidate's metadata for policy left behind
+by a previous unlink.
+When management is enabled, a fresh retained-email session stores proof in
+its creation write. Reusing a session doesn't renew proof; sign out and sign in
+with the retained email to obtain a fresh receipt.
+
+New disconnects publish intent and completion on the SDK-visible `user.id` row
+and, when mapped, the literal internal owner row for compatibility and migration.
+Records remain bound to the immutable internal owner. Compatibility and
+dual-write recognize either copy and reject conflicting copies. Canonical
+sign-in reads only `user.id` on the no-policy path. Dual-write canonical
+republishing carries policy separately from public presentation; the index
+stays on its `rownd_dsi:<hash>` row.
+
+**Required before enabling canonical mode if earlier internal-only disconnect
+records exist.** This also applies when upgrading a test deployment already in
+canonical mode. Pause auth/policy writers, and include policy backfill in the
+offline publication pass for every owner. Use the offline publisher's owner
+inventory or the internal IDs from the rollout (Core cannot enumerate metadata).
+For each affected owner, call
+`publishSignInMethodPolicy({ userId, dryRun: true })`, review the keys and SDK ID,
+then apply with `dryRun: false`. Run the dry run again: no keys should remain.
+This helper copies only policy, not profile metadata, and refuses conflicting
+copies. Compatibility/dual-write can run without backfill; don't switch to
+canonical until every legacy mapped record is accounted for.
+An unindexed internal-only record is invisible to canonical sign-in until this
+step completes.
+
+SDK `linkAccounts` does extra policy reads because it receives IDs without the
+SDK's sign-in snapshots. It refuses to move a policy-bearing recipe even if an
+earlier `unlinkAccount` made it a standalone Passwordless user. Unlinking a
+recipe is not a supported way to move or clear disconnect policy.
+
+### Support procedure
+
+1. For an incomplete disconnect, have the user sign in with the retained email and
+   finish the pending row. If it fails again, correlate the logged failure step
+   and code with the SHA-256 hash of the internal owner ID.
+2. For `DISCONNECT_OWNER_CHANGED` or `DISCONNECT_POLICY_INVALID`, run
+   `inspectSignInMethodPolicy({ userId, tenantId })` **server-side**. It reports
+   intents, completions, invalid records, fences, unknown versions, dual ID
+   mappings, and linked/pinned owners. Treat the output as sensitive.
+3. Resolve ownership conflicts before clearing a fence. Pause concurrent policy
+   writers (Core metadata does not support compare-and-swap), preview
+   `repairSignInMethodPolicy({ userId, remove: ["fences", "invalid"], dryRun: true })`,
+   review the exact keys, and repeat with `dryRun: false`. Re-inspect before
+   resuming traffic. For a live account, repair does not change the graph, index,
+   valid intents or completions, or records of unknown versions. It cannot undo a
+   disconnect. Escalate ambiguous ownership, orphaned completions, unknown formats,
+   and live completed identities.
+4. If a racing SSO sign-in left a standalone recipe, pause affected writes and
+   match the `recipeUserId` or identity hash from `inspectSignInMethodPolicy`
+   against trusted Core records. In Core, verify the result is a single, unlinked recipe with no active
+   sessions. Check the application for associated customer data. Delete only
+   the verified orphan recipe, not the mapped
+   owner or its policy/index. Escalate if ownership or provenance is unclear.
+5. The plugin's `DELETE /plugin/rownd/user` and full-account SDK `deleteUser`
+   erase the owner's index entries and leftover metadata. Recipe-only deletion
+   used to disconnect a method does not erase policy. Core-direct deletions
+   bypass cleanup; sign-in treats entries as lapsed only after a fresh owner
+   absence check succeeds. Mapping conflicts and lookup errors fail closed.
+   For erasure after Core-direct deletion or a failed cleanup, use the **original
+   internal owner ID**: preview `repairSignInMethodPolicy({ userId, remove:
+   ["deleted-owner"], dryRun: true })`, review the metadata keys and index IDs,
+   then apply with `dryRun: false`. This removes leftover literal owner metadata
+   and only the index entries belonging to that deleted owner. If the metadata
+   was already removed, pass the `indexId` (`rownd_dsi:<hash>`) from prior
+   inspection to both calls. Pause writers while running repair, and record the
+   IDs before Core-direct deletion: Core has no metadata enumeration. New
+   disconnect policy stores hashes, not raw provider subjects.
+
+Policy denials from SDK linking and association calls are also SuperTokens
+`BAD_INPUT_ERROR`s. Use the SuperTokens error handler for app-defined routes, or
+catch the exported `DisconnectedSignInMethodError` and map its `code` to a 4xx.
+
+Owner keys begin `rownd_disconnected_sign_in_identity_`; `completion_` and
+`owner_transition_conflict_` mark completions and fences. The identity index is
+stored separately on `rownd_dsi:<hash>` rows. For tests, see the real-Core
+integration suites and `session-policy-cost.integration.test.ts`.
+
 ## Installation
 
 ```bash
@@ -242,7 +428,9 @@ Recommended procedure:
 1. Deploy with `metadataMode: "dual-write"`. Migration may stay enabled.
 2. Publish every owner: write the canonical presentation of its compatibility
    view (`getCanonicalPresentationMetadata`) to its SDK-visible `user.id`. Remove
-   presentation keys that are absent from that projection.
+   presentation keys that are absent from that projection. Separately publish
+   any legacy internal-only disconnect policy as described above; it is not a
+   presentation key.
 3. Pause and drain writers, including migration. Verify every owner's compatibility and canonical
    presentations match (profile per tenant, configured session claims, OAuth
    claims and email selection). Republish any owner that differs.

@@ -31,6 +31,7 @@ import { clearSuperTokensCoreCallCache, getStringList, isJsonRecord } from "./ut
 import { invalidateReconciliationReads } from "./reconciliation-reads";
 import { readOwnerPlanCheckpoint } from "./migration-owner-plan";
 import { RowndEmailChangeError, RowndMigrationPolicyError, RowndPluginError } from "./errors";
+import { isDisconnectedSignInMethodMetadataKey } from "./disconnected-sign-in-identities";
 import type { ProfileReader } from "./profile-read";
 
 export type RowndMetadata = RowndUserMetadata & JsonRecord;
@@ -215,6 +216,7 @@ export function combineLinkedMetadata(input: {
   for (const { metadata } of linkedMetadata) {
     for (const [key, value] of Object.entries(metadata)) {
       if (LINKED_OPERATIONAL_METADATA_FIELDS.has(key) || isReservedMetadataField(key) ||
+          isDisconnectedSignInMethodMetadataKey(key) ||
           authoritativeFields.has(key)) {
         continue;
       }
@@ -453,19 +455,22 @@ export async function getCombinedUserMetadata(
     .combinedMetadata;
 }
 
+export type PolicyPresence = Pick<LinkedUserMetadataInspection, "user" | "primaryUserId" | "primaryMetadata"> &
+  Partial<Pick<LinkedUserMetadataInspection, "linkedMetadata">>;
+
 export async function inspectUserPresentationMetadata(
   userId: string,
   userContext?: Record<string, any>,
   userSnapshot?: SuperTokensUser,
   read: ProfileReader = (_kind, _key, load) => load(),
-): Promise<{ user?: SuperTokensUser; combinedMetadata: RowndMetadata }> {
+): Promise<PolicyPresence & { combinedMetadata: RowndMetadata }> {
   if (getPluginConfig()?.metadataMode !== "canonical") {
     return inspectLinkedUserMetadata(userId, userContext, userSnapshot, read);
   }
   const user = userSnapshot ?? await read("user", userId, () => SuperTokens.getUser(userId, userContext));
-  if (!user) return { user, combinedMetadata: {} };
+  if (!user) return { user, primaryUserId: userId, primaryMetadata: {}, combinedMetadata: {} };
   const combinedMetadata = await read("metadata", user.id, () => getRawUserMetadata(user.id, userContext));
-  return { user, combinedMetadata };
+  return { user, primaryUserId: user.id, primaryMetadata: combinedMetadata, combinedMetadata };
 }
 
 const PRESENTATION_EMAIL_STATE_FIELDS = [
@@ -484,7 +489,7 @@ function getCanonicalOriginalRowndUser(original: JsonValue) {
 // Offline publication preserves projection inputs, never migration or credential authority.
 export function getCanonicalPresentationMetadata(metadata: RowndMetadata): RowndMetadata {
   const presentation = Object.fromEntries(Object.entries(metadata).filter(([key]) =>
-    !INTERNAL_METADATA_FIELDS.has(key) || key === "rownd_profile_authoritative_fields" ||
+    (!INTERNAL_METADATA_FIELDS.has(key) && !isDisconnectedSignInMethodMetadataKey(key)) || key === "rownd_profile_authoritative_fields" ||
     (PRESENTATION_EMAIL_STATE_FIELDS as readonly string[]).includes(key))) as RowndMetadata;
   const original = metadata.original_rownd_user;
   if (original !== undefined) {
@@ -585,7 +590,8 @@ export async function updateUserPresentationMetadata(
   const profileFields = Object.keys(metadataUpdate).filter((key) =>
     !isInternalMetadataField(key) && !isIdentityField(key));
   const updates = Object.fromEntries(Object.entries(metadataUpdate).filter(([key]) =>
-    key !== "rownd_profile_authoritative_fields" && !isCanonicalReservedMetadataKey(key)));
+    key !== "rownd_profile_authoritative_fields" && !isCanonicalReservedMetadataKey(key) &&
+    !isDisconnectedSignInMethodMetadataKey(key)));
   // Core merges top-level keys atomically: independent edits must not replace a shared authority array.
   for (const field of profileFields) updates[`${ROWND_PROFILE_AUTHORITY_PREFIX}${field}`] = true;
   const result = await UserMetadata.updateUserMetadata(user.id, updates as JSONObject, userContext);
@@ -612,8 +618,8 @@ export async function updatePrimaryUserMetadata(
       ...profileFields,
     ])],
   } : {};
-  const updates = { ...metadataUpdate };
-  delete updates.rownd_profile_authoritative_fields;
+  const updates = Object.fromEntries(Object.entries(metadataUpdate).filter(([key]) =>
+    key !== "rownd_profile_authoritative_fields" && !isDisconnectedSignInMethodMetadataKey(key)));
   if (profileUpdate) {
     for (const key of Object.keys(updates)) if (isReservedMetadataField(key)) delete updates[key];
   }
@@ -675,7 +681,8 @@ export function isIdentityField(field: string) {
 }
 
 export function isInternalMetadataField(field: string, config = getPluginConfig()) {
-  return INTERNAL_METADATA_FIELDS.has(field) || isReservedMetadataField(field, config);
+  return INTERNAL_METADATA_FIELDS.has(field) || isReservedMetadataField(field, config) ||
+    isDisconnectedSignInMethodMetadataKey(field);
 }
 
 export function getAuthoritativeProfileFields(metadata: JsonRecord, config = getPluginConfig()): string[] {
@@ -693,6 +700,7 @@ export function mergeMissingProfileMetadata(primary: JsonRecord, secondary: Json
   const authoritativeFields = new Set(getAuthoritativeProfileFields(primary));
   return mergeMissingValues(primary, Object.fromEntries(Object.entries(secondary).filter(([key]) =>
     key !== "rownd_profile_authoritative_fields" && !isReservedMetadataField(key) &&
+    !isDisconnectedSignInMethodMetadataKey(key) &&
     !authoritativeFields.has(key))));
 }
 
@@ -798,10 +806,17 @@ export function mapRowndUserToSuperTokens(
 }
 
 export function buildRowndUserMetadata(rowndUser: RowndUser): JSONObject {
+  const withoutPolicy = (value: object | undefined) => Object.fromEntries(
+    Object.entries(value ?? {}).filter(([key]) => !isDisconnectedSignInMethodMetadataKey(key)),
+  );
   const metadata: JsonRecord = {
     ...Object.fromEntries(Object.entries((rowndUser.meta || {}) as JsonRecord)
       .filter(([key]) => !isInternalMetadataField(key))),
-    original_rownd_user: rowndUser as unknown as JsonValue,
+    original_rownd_user: {
+      ...rowndUser,
+      ...(isJsonRecord(rowndUser.data) ? { data: withoutPolicy(rowndUser.data) } : {}),
+      ...(isJsonRecord(rowndUser.meta) ? { meta: withoutPolicy(rowndUser.meta) } : {}),
+    } as unknown as JsonValue,
     rownd_migration_complete: true,
   };
 
@@ -1859,6 +1874,7 @@ export function canUpdateUserDataField(
   field: string,
   pluginConfig: RowndPluginNormalisedConfig | undefined = getPluginConfig(),
 ) {
+  if (isDisconnectedSignInMethodMetadataKey(field)) return false;
   // Dual-write rejects what canonical would, so no new owner becomes unpublishable.
   if ((pluginConfig?.metadataMode === "canonical" || isDualWriteMetadataMode(pluginConfig)) &&
       (INTERNAL_METADATA_FIELDS.has(field) || isCanonicalReservedMetadataKey(field))) {

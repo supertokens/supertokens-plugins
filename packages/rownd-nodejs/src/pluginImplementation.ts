@@ -22,7 +22,10 @@ import {
   INSTANT_AUTH_METHOD_ID,
   NATIVE_EMAIL_VERIFICATION_UPGRADE_REQUIRED_MESSAGE,
 } from "./constants";
-import { RowndEmailChangeError, RowndLegacyUserNotFoundError, RowndPluginError } from "./errors";
+import { RowndEmailChangeError, RowndLegacyUserNotFoundError, RowndPluginError, RowndSignInMethodError } from "./errors";
+import { assertConnectedSignInMethodsEnabled, connectedSignInMethodsAreAvailable, disconnectConnectedSignInMethod, listConnectedSignInMethods } from "./connected-sign-in-methods";
+import { assertNoPolicyInMetadata, DisconnectedSignInMethodError } from "./disconnected-sign-in-identities";
+import { logSignInMethodPolicy, signInMethodPolicyFailureLevel } from "./sign-in-method-policy-log";
 import { logDebugMessage } from "./logger";
 import type {
   RowndEmailChangeRequestContext,
@@ -101,10 +104,11 @@ export type RowndRouteHandlerDeps = {
 export function handleGetAppConfig(deps: RowndRouteHandlerDeps) {
   return async (
     req: SuperTokensRequest,
-    _res: SuperTokensResponse,
+    res: SuperTokensResponse,
     _session: SuperTokensSession,
     userContext: SuperTokensUserContext,
   ) => {
+    res.setHeader("Cache-Control", "no-store", false);
     const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, {
       tenantId: resolveTenantId(req),
       request: req,
@@ -127,7 +131,49 @@ export function handleGetAppConfig(deps: RowndRouteHandlerDeps) {
     return {
       status: "OK" as const,
       ...appConfig,
+      ...(connectedSignInMethodsAreAvailable(resolved.config) ? {
+        plugin_capabilities: { connected_sign_in_methods: { version: 1 as const } },
+      } : {}),
     };
+  };
+}
+
+export function handleConnectedSignInMethods(deps: RowndRouteHandlerDeps, disconnect = false) {
+  return async (req: SuperTokensRequest, res: SuperTokensResponse, session: SuperTokensSession, userContext: SuperTokensUserContext) => {
+    res.setHeader("Cache-Control", "no-store", false);
+    try {
+      const tenantId = session!.getTenantId(userContext);
+      const requestedTenant = req.getKeyValueFromQuery("tenantId");
+      if (requestedTenant !== undefined && requestedTenant !== tenantId) {
+        throw new RowndSignInMethodError("SIGN_IN_METHOD_ACCOUNT_CHANGED", 409, "The requested tenant does not match your session.");
+      }
+      const resolved = await resolvePluginConfigSnapshot(deps.pluginConfig, { tenantId, request: req, userContext });
+      assertConnectedSignInMethodsEnabled(resolved.config);
+      const appVariantId = getRequestedAppVariantIdFromRequest(req);
+      assertRowndAppVariantIsConfigured(resolved.config, appVariantId);
+      const input = { session: session!, config: resolved.config, appVariantId, userContext: resolved.userContext };
+      return disconnect
+        ? await disconnectConnectedSignInMethod({ ...input, body: await getJsonBody(req) })
+        : await listConnectedSignInMethods(input);
+    } catch (error) {
+      const code = error instanceof DisconnectedSignInMethodError ? error.code : error instanceof RowndSignInMethodError
+        ? error.errorCode : error instanceof RowndEmailChangeError ? "SIGN_IN_METHOD_EMAIL_CHANGE_PENDING" : "SIGN_IN_METHOD_OPERATION_INCOMPLETE";
+      logSignInMethodPolicy(signInMethodPolicyFailureLevel(code), "rownd_sign_in_methods_request_failed", {
+        code, step: disconnect ? "disconnect" : "list", ownerId: session?.getUserId?.(userContext),
+      });
+      if (error instanceof DisconnectedSignInMethodError) {
+        return { status: "ERROR" as const, code: 409, error_code: error.code, message: error.message };
+      }
+      if (error instanceof RowndEmailChangeError) {
+        return { status: "ERROR" as const, code: 409, error_code: "SIGN_IN_METHOD_EMAIL_CHANGE_PENDING", message: error.message };
+      }
+      if (!(error instanceof RowndSignInMethodError)) {
+        return { status: "ERROR" as const, code: 409, error_code: "SIGN_IN_METHOD_OPERATION_INCOMPLETE",
+          message: "The operation did not complete. Reload your sign-in methods and retry after signing in with email." };
+      }
+      return { status: "ERROR" as const, code: error.httpStatus, error_code: error.errorCode, message: error.message,
+        ...(error.reauthentication ? { reauthentication: error.reauthentication } : {}) };
+    }
   };
 }
 
@@ -371,6 +417,7 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
 
       telemetry.stage = "supertokens_lookup";
       const discovery = await discoverMigrationById(rowndUserId, tenantId, resolved.userContext);
+      assertNoMigrationDisconnectPolicy(discovery);
       const plan = planMigration(discovery, stUserImport);
       if (plan.status === "BLOCKED") throw new Error(plan.reason);
       let ownerId = rowndUserId;
@@ -559,6 +606,10 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
       return { status: "OK" as const };
     } catch (error) {
       await republish?.();
+      if (error instanceof DisconnectedSignInMethodError) {
+        telemetry.emit("terminal", "disconnect_policy_denied", "error", error);
+        return { status: "ERROR" as const, error_code: error.code, message: error.message };
+      }
       if (error instanceof RowndLegacyUserNotFoundError) {
         telemetry.emit("terminal", "rownd_user_not_found", "error", error);
         return { status: "ERROR" as const, code: error.code, message: error.message };
@@ -575,6 +626,13 @@ export function handleMigrate(deps: RowndRouteHandlerDeps) {
   };
 }
 
+function assertNoMigrationDisconnectPolicy(discovery: Awaited<ReturnType<typeof discoverMigrationById>>) {
+  const ownerId = discovery.mapping.status === "OK" ? discovery.mapping.superTokensUserId : discovery.user?.id ?? discovery.sourceId;
+  for (const id of new Set([ownerId, discovery.sourceId, discovery.user?.id ?? discovery.sourceId])) {
+    assertNoPolicyInMetadata(ownerId, discovery.metadataById.get(id) ?? {});
+  }
+}
+
 async function migrateExistingMappedUser(input: {
   rowndUserId: string;
   tenantId: string;
@@ -586,9 +644,10 @@ async function migrateExistingMappedUser(input: {
   telemetry: MigrationTelemetry;
 }) {
   const { rowndUserId, tenantId, appVariantId, req, res, config, userContext, telemetry } = input;
-  const checkOwner = async () => {
+  const checkOwner = async (checkDisconnectPolicy = false) => {
     clearSuperTokensCoreCallCache(userContext);
     const discovery = await discoverMigrationById(rowndUserId, tenantId, userContext);
+    if (checkDisconnectPolicy) assertNoMigrationDisconnectPolicy(discovery);
     const { mapping, reverse } = discovery;
     if (mapping.status !== "OK" || mapping.externalUserId !== rowndUserId ||
         reverse?.status !== "OK" || reverse.superTokensUserId !== mapping.superTokensUserId ||
@@ -619,7 +678,7 @@ async function migrateExistingMappedUser(input: {
     };
   };
 
-  const owner = await checkOwner();
+  const owner = await checkOwner(true);
   telemetry.superTokensUserId = owner.userId;
   telemetry.recipeUserId = owner.recipeUserId.getAsString();
   telemetry.stage = "session_creation";

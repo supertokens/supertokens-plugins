@@ -50,6 +50,7 @@ import {
   type RowndMetadata,
 } from "./rownd-compatibility";
 import { setRowndTokenValidator } from "./rownd-repository";
+import { signInIdentityHash } from "./disconnected-sign-in-identities";
 import { buildRowndSessionClaims, getUserById, recordRowndAppVariantForUser, updateUserData, updateUserMetadata } from "./supertokens-repository";
 import type { RowndPluginConfig, RowndUser } from "./types";
 
@@ -649,7 +650,12 @@ describe("canonical metadata against disposable Core 12.4.0 / PostgreSQL 16.13",
       : await request(`/signinup${suffix}`, {
         rid: recipe, body: { thirdPartyId: OFFLINE_PROVIDER_ID, oAuthTokens: { thirdPartyUserId: providerId, email } },
       });
-    const calls = coreCalls.slice(start);
+    const measured = coreCalls.slice(start);
+    const indexId = `rownd_dsi:${signInIdentityHash({ tenantId: "public", providerId: OFFLINE_PROVIDER_ID, providerUserId: providerId })}`;
+    const indexReads = measured.filter(({ url, params }) =>
+      new URL(url).pathname === "/recipe/user/metadata" && params?.userId === indexId);
+    expect(indexReads).toHaveLength(passwordless ? 0 : 1);
+    const calls = measured.filter((call) => !indexReads.includes(call));
     expect({ status: response.status, body: await response.json() }).toMatchObject({
       status: 200, body: { status: "OK", createdNewRecipeUser: false, user: { id: sdkId } },
     });

@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { reconciliationSuperTokens as SuperTokens } from "./reconciliation-sdk";
-import { invalidateReconciliationReads, reconciliationProgress, withReconciliationReads, type ReconciliationProgress } from "./reconciliation-reads";
+import { invalidateReconciliationReads, reconciliationProgress, withReadOnlyReconciliationReads, withReconciliationReads, type ReconciliationProgress } from "./reconciliation-reads";
 import { getPluginConfig, getSuperTokensConfig, resolvePluginConfigSnapshot } from "./config";
 import { assertAuthenticatedMigrationSource, assertRowndSourcePayload, fetchAdministrativeMigrationSource, getAuthenticatedMigrationEmail, getMigrationContactEmail } from "./migration-email";
 import { assertMigrationPostconditions, assertMigrationOwnerGraph, reconcileAdministrativeEmailVerification } from "./migration-postconditions";
@@ -25,6 +25,7 @@ import type { MethodPlan } from "./migration-method-plan";
 import { resolveRowndProviderSubject } from "./provider-identity";
 import { recoverOrphanMapping } from "./migration-orphan-mapping";
 import { archivePlaceholderProvenance, completePlaceholderProvenanceOverride, inspectPlaceholderProvenanceOverride, isInternalIdPlaceholder } from "./migration-placeholder-provenance";
+import { assertNoDisconnectedSignInMethodsAtInternalOwner, assertNoPolicyInMetadata, DisconnectedSignInMethodError } from "./disconnected-sign-in-identities";
 
 export type ReconcileUserInput = (
   | { rownd_user_id: string; email?: never; supertokens_user_id?: never }
@@ -95,6 +96,7 @@ async function discover(users: User[], userContext: JsonRecord, provenRecovery?:
       }
       // Discovery must not merge away conflicting secondary provenance.
       const metadata = await getRawUserMetadata(alias, userContext);
+      assertNoPolicyInMetadata(alias, metadata);
       const rowndId = metadata.original_rownd_user?.data.user_id;
       if (rowndId) sources.add(rowndId);
     }
@@ -435,7 +437,8 @@ async function publishPinnedMapping(id: string, source: Source, tenantId: string
 
 /** Reconcile one live Rownd identity using the initialized server configuration. */
 export async function reconcileUser(input: ReconcileUserInput): Promise<ReconcileUserResult> {
-  const result = await withReconciliationReads(() => withFreshRowndReads(() => reconcileUserWithFreshSources(input)), input?.onProgress);
+  const run = () => withFreshRowndReads(() => reconcileUserWithFreshSources(input));
+  const result = await withReconciliationReads(() => input?.dryRun ? withReadOnlyReconciliationReads(run) : run(), input?.onProgress);
   if (isDualWriteMetadataMode() && input?.dryRun !== true && result.rownd_user_id !== undefined &&
       (result.changed !== false || result.partialProgress === true)) {
     await republishReconciledOwner(result.rownd_user_id, input);
@@ -548,12 +551,15 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
     }
     if (!input.dryRun) {
       const mapping = await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL", userContext });
-      if (mapping.status === "OK") await recoverProviderRevocations(mapping.superTokensUserId, rowndId, tenantId, userContext, () => {
-        mutationStarted = true;
-        result.changed = true;
-        if (!revocationProgress) result.actions.push("provider_revocations_recovered");
-        revocationProgress = true;
-      });
+      if (mapping.status === "OK") {
+        await assertNoDisconnectedSignInMethodsAtInternalOwner(mapping.superTokensUserId, userContext);
+        await recoverProviderRevocations(mapping.superTokensUserId, rowndId, tenantId, userContext, () => {
+          mutationStarted = true;
+          result.changed = true;
+          if (!revocationProgress) result.actions.push("provider_revocations_recovered");
+          revocationProgress = true;
+        });
+      }
     }
     if (discoveredEmail !== undefined && getMigrationContactEmail(source, tenantId) !== discoveredEmail) throw new RowndMigrationPolicyError("Rownd email discovery source changed");
     let sourceOwner = await SuperTokens.getUser(rowndId, userContext);
@@ -607,6 +613,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
       if (selectedOwner) {
         await inspectMappingPublication(selectedOwner, source, tenantId, userContext);
         const metadata = await getRawUserMetadata(selectedOwner, userContext);
+        assertNoPolicyInMetadata(selectedOwner, metadata);
         const mapping = await SuperTokens.getUserIdMapping({ userId: rowndId, userIdType: "EXTERNAL", userContext });
         const primaryProvider = selected?.loginMethods.find((method) => method.recipeUserId.getAsString() === selectedOwner)?.thirdParty;
         if (mapping.status !== "OK" && primaryProvider && metadata.original_rownd_user?.data.user_id === rowndId &&
@@ -653,6 +660,7 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
       mapping: await SuperTokens.getUserIdMapping({ userId: id, userIdType: "ANY", userContext }),
     } : undefined;
     const before = await snapshot(beforeId);
+    if (beforeId) assertNoPolicyInMetadata(beforeId, await getRawUserMetadata(beforeId, userContext));
     const restoreMapping = !consolidation?.managesMapping && beforeId !== undefined && beforeId !== rowndId && before?.mapping.status !== "OK";
     if (input.rownd_user_id && selected && !restoreMapping) {
       await assertUnambiguousSource(selected, rowndId, userContext, consolidation?.managesMapping && beforeId
@@ -822,9 +830,10 @@ async function reconcileUserWithFreshSources(input: ReconcileUserInput, orphanHa
       election: { candidates: error.candidates, basis: "latest_valid_activity" }, message: error.message };
     if (error instanceof AmbiguousReconciliationSource) return { ...result, status: "AMBIGUOUS", candidates: error.candidates.filter((candidate): candidate is ReconcileCandidate => candidate.supertokens_user_id !== undefined) };
     const message = error instanceof Error ? error.message : "Reconciliation failed";
-    return { ...result, status: error instanceof RowndMigrationPolicyError ? "BLOCKED" : "ERROR",
+    const policyBlocked = error instanceof RowndMigrationPolicyError || error instanceof DisconnectedSignInMethodError;
+    return { ...result, status: policyBlocked ? "BLOCKED" : "ERROR",
       ...(result.election ? { unresolved_owners: result.election.candidates } : {}),
-      ...(result.dryRun ? { blockers: [{ code: message === "CANONICAL_EMAIL_POLICY" ? message : error instanceof RowndMigrationPolicyError ? "POLICY_BLOCKED" : "OBSERVATION_FAILED" }] } : {}),
+      ...(result.dryRun ? { blockers: [{ code: error instanceof DisconnectedSignInMethodError ? error.code : message === "CANONICAL_EMAIL_POLICY" ? message : policyBlocked ? "POLICY_BLOCKED" : "OBSERVATION_FAILED" }] } : {}),
       message, partialProgress: mutationStarted };
   }
 }
