@@ -118,6 +118,15 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
       expect.soft(counts).toEqual([[0, 0, 0], [0, 1, 0], [0, 1, 0], [canonical ? 15 : 18, 3, 0],
         [canonical ? 9 : 16, 3, 1], [canonical ? 9 : 15, 3, 2]]);
 
+      const autoLinkEmail = `${randomUUID()}@example.com`;
+      const autoLinkOwner = await Passwordless.signInUp({ tenantId: "public", email: autoLinkEmail });
+      expect(await AccountLinking.createPrimaryUser(autoLinkOwner.recipeUserId)).toMatchObject({ status: "OK" });
+      expect.soft(await measure(async () => {
+        const response = await google(randomUUID(), autoLinkEmail);
+        expect(response.body).toMatchObject({ status: "OK", createdNewRecipeUser: true });
+        expect(response.body.user.id === autoLinkOwner.user.id).toBe(!canonical);
+      })).toEqual(canonical ? [9, 3, 2] : [26, 4, 2]);
+
       for (const explicitLink of [false, true]) {
         const activeSession = await Session.createNewSessionWithoutRequestResponse("public", f.passwordless.recipeUserId);
         const activeToken = activeSession.getAccessToken();
@@ -163,7 +172,7 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
         const extra = await Passwordless.signInUp({ tenantId: "public", email: `${randomUUID()}@example.com` });
         return measure(async () => expect(await AccountLinking.linkAccounts(extra.recipeUserId, rowndId)).toMatchObject({ status: "OK" }));
       };
-      expect.soft(await linkPasswordless()).toEqual([2, 1, 0]);
+      expect.soft(await linkPasswordless()).toEqual([4, 1, 0]);
       const emailSelector = { rownd_email_recipe_user_ids: { public: rowndId } };
       await UserMetadata.updateUserMetadata(f.ownerId, emailSelector);
       await UserMetadata.updateUserMetadata(rowndId, emailSelector);
@@ -188,8 +197,8 @@ describe("session policy Core read deltas", { timeout: 30000 }, () => {
       };
       console.info("mapped owner with a disconnect intent [ordinary GETs, writes, index GETs]", { metadataMode, enabled, recordCounts });
       expect(recordCounts).toEqual({
-        linking: [2, 1, 0], passwordless: [canonical ? 45 : 46, 3, 0],
-        differentSSO: [canonical ? 38 : 40, 3, 1], blockedSSO: [3, 0, 1], refresh: [0, 1, 0],
+        linking: [4, 1, 0], passwordless: [canonical ? 33 : 34, 3, 0],
+        differentSSO: [canonical ? 24 : 28, 3, 1], blockedSSO: [3, 0, 1], refresh: [0, 1, 0],
       });
     } finally {
       fetchCore.mockRestore();

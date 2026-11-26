@@ -112,7 +112,7 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
     return { rowndId, internalId, subject, oldEmail, email, ssoSession, passwordless };
   }
 
-  async function disconnect(f: Awaited<ReturnType<typeof fixture>>) {
+  async function disconnect(f: { rowndId: string; email: string }) {
     const { token } = await emailSignIn(f.email);
     const headers = { authorization: `Bearer ${token}`, "st-auth-mode": "header", "content-type": "application/json" };
     const listed = await (await request(`${origin}/plugin/rownd/user/sign-in-methods`, { headers })).json();
@@ -130,6 +130,39 @@ describe("connected sign-in methods against Core", { timeout: 30000 }, () => {
         ...(accessToken ? { shouldTryLinkingWithSessionUser: true } : {}) }),
     });
   }
+
+  it.each(["compatibility", "dual-write", "canonical"] as const)(
+    "refuses to move a detached policy-bearing Passwordless anchor in %s mode", async (metadataMode) => {
+      const config = getPluginConfig()!;
+      const previousMode = config.metadataMode;
+      config.metadataMode = metadataMode;
+      try {
+        const [email, recipientEmail, oldEmail] = Array.from({ length: 3 }, () => `${randomUUID()}@example.test`) as [string, string, string];
+        const subject = randomUUID();
+        const donor = await Passwordless.signInUp({ tenantId: "public", email });
+        const recipient = await Passwordless.signInUp({ tenantId: "public", email: recipientEmail });
+        const sso = await ThirdParty.manuallyCreateOrUpdateUser("public", "google", subject, oldEmail, true);
+        if (sso.status !== "OK") throw new Error("SSO seed failed");
+        for (const id of [donor.recipeUserId, recipient.recipeUserId]) {
+          expect(await AccountLinking.createPrimaryUser(id)).toMatchObject({ status: "OK" });
+        }
+        const rowndId = donor.user.id;
+        expect(await AccountLinking.linkAccounts(sso.recipeUserId, rowndId)).toMatchObject({ status: "OK" });
+        await disconnect({ rowndId, email });
+        await expect(getDisconnectedSignInMethods(rowndId)).resolves.toMatchObject([{ completed: true }]);
+
+        expect(await AccountLinking.unlinkAccount(donor.recipeUserId)).toMatchObject({ status: "OK" });
+        expect(await SuperTokens.getUser(rowndId)).toMatchObject({ isPrimaryUser: false });
+        await expect(AccountLinking.linkAccounts(donor.recipeUserId, recipient.user.id))
+          .rejects.toMatchObject({ code: "DISCONNECT_RESTORATION_BLOCKED" });
+        expect((await SuperTokens.getUser(recipient.user.id))?.loginMethods).toHaveLength(1);
+        expect((await emailSignIn(recipientEmail)).session.getUserId()).toBe(recipient.user.id);
+        expect((await emailSignIn(email)).session.getUserId()).toBe(rowndId);
+      } finally {
+        config.metadataMode = previousMode;
+      }
+    },
+  );
 
   it.each(["route", "sdk"] as const)("erases owner and index metadata on full-account deletion via %s, then allows new Google sign-up", async (path) => {
     const f = await fixture();

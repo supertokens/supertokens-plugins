@@ -94,14 +94,22 @@ disconnect revokes Core sessions before and after removing the recipe. A
 previously issued access token can still pass stateless verification until expiry.
 For sensitive endpoints, use `checkDatabase: true` to check Core revocation.
 The issuance/publication checks and session revocation aren't one transaction.
-A disconnect racing a sign-in after the request's last policy read can briefly
-leave an issued token in flight; if Core revokes its session, it cannot refresh.
+The buffered Passwordless and ThirdParty HTTP APIs recheck policy after issuing
+a session and before returning its credentials. If that check misses a later
+disconnect, the session already exists for disconnect's revocation to find.
+Other `createNewSession` calls (including app code, guest issuance and
+`/migrate`) check policy before creating the session, not after. If one creates
+a session after a concurrent disconnect's final revocation, the session can
+continue to refresh until explicitly revoked or expired. Serialize custom
+issuance with disconnect where that race is unacceptable.
 If disconnect fails after persisting intent but before finishing revocation, an
 already-issued session may still refresh until cleanup is retried. Don't restore
 or move credentials directly in Core: those changes bypass the plugin's checks.
 
 Ordinary sign-in uses the existing owner metadata read. Real-provider SSO adds
 one identity-index read on return and a second after a new recipe is created.
+Automatic linking also checks the candidate's metadata for policy left behind
+by a previous unlink.
 When management is enabled, a fresh retained-email session stores proof in
 its creation write. Reusing a session doesn't renew proof; sign out and sign in
 with the retained email to obtain a fresh receipt.
@@ -114,15 +122,24 @@ sign-in reads only `user.id` on the no-policy path. Dual-write canonical
 republishing carries policy separately from public presentation; the index
 stays on its `rownd_dsi:<hash>` row.
 
-Before upgrading an earlier test deployment **in canonical mode**, or switching
-it to canonical, pause auth/policy writers and backfill every previously
-disconnected mapped owner. Use the original internal IDs from the test rollout
-records (Core cannot enumerate metadata). For each, call
+**Required before enabling canonical mode if earlier internal-only disconnect
+records exist.** This also applies when upgrading a test deployment already in
+canonical mode. Pause auth/policy writers, and include policy backfill in the
+offline publication pass for every owner. Use the offline publisher's owner
+inventory or the internal IDs from the rollout (Core cannot enumerate metadata).
+For each affected owner, call
 `publishSignInMethodPolicy({ userId, dryRun: true })`, review the keys and SDK ID,
 then apply with `dryRun: false`. Run the dry run again: no keys should remain.
 This helper copies only policy, not profile metadata, and refuses conflicting
 copies. Compatibility/dual-write can run without backfill; don't switch to
 canonical until every legacy mapped record is accounted for.
+An unindexed internal-only record is invisible to canonical sign-in until this
+step completes.
+
+SDK `linkAccounts` does extra policy reads because it receives IDs without the
+SDK's sign-in snapshots. It refuses to move a policy-bearing recipe even if an
+earlier `unlinkAccount` made it a standalone Passwordless user. Unlinking a
+recipe is not a supported way to move or clear disconnect policy.
 
 ### Support procedure
 

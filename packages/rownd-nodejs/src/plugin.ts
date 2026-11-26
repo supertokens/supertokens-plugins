@@ -48,6 +48,7 @@ import {
   assertNotRetiredPrimaryRecipe,
   deleteUserAndSignInMethodPolicy,
   assertSignInMethodLinkAllowed,
+  assertStandaloneLinkCandidateHasNoPolicy,
   assertSignInMethodTenantAssociationAllowed,
   checkSignInMethodAuthentication,
   readPolicyGate,
@@ -123,10 +124,14 @@ type PasswordlessIssuance = {
   session?: SessionContainerInterface;
   linkingSession?: SessionContainerInterface;
   candidates?: PasswordlessAuthSnapshot["inspections"];
+  policyGate?: Awaited<ReturnType<typeof readPolicyGate>>;
 };
 type ThirdPartyAuthenticationOperation = {
   actual?: { user: User; recipeUserId: string; tenantId: string; providerId: string; providerUserId: string };
   sessions: Set<SessionContainerInterface>;
+  indexedIdentity?: { tenantId: string; providerId: string; providerUserId: string };
+  automaticLink?: { recipeId: string; ownerId: string };
+  policyGate?: Awaited<ReturnType<typeof readPolicyGate>>;
 };
 
 function thirdPartyAuthenticationOperation(context: Record<string, any>) {
@@ -1254,7 +1259,7 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       provenAuthentication: true,
                       beforeUpdatingPayload: (presence) => checkSignInMethodAuthentication(
                         response.user.id, response.session.getRecipeUserId(operationContext),
-                        input.tenantId, operationContext, { presence },
+                        input.tenantId, operationContext, { presence, previous: issuance.policyGate },
                       ).then(() => undefined),
                     });
                   }
@@ -1269,10 +1274,12 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
               ...originalImplementation,
               signInUp: async (input) => {
                 let ownerId = input.session?.getUserId(input.userContext);
+                const operation = thirdPartyAuthenticationOperation(input.userContext);
                 try {
-                  if (!["instant", "guest"].includes(input.thirdPartyId)) {
+                  if (realProvider(input.thirdPartyId)) {
                     const identity = { tenantId: input.tenantId, providerId: input.thirdPartyId, providerUserId: input.thirdPartyUserId };
                     await assertSignInIdentityNotIndexed(identity, input.userContext);
+                    if (operation) operation.indexedIdentity = identity;
                     if (ownerId) {
                       const { policy } = await readPolicyGate(ownerId, input.userContext);
                       if (policy) assertIdentityAllowedByOwner(identity, policy.identities, ownerId);
@@ -1285,7 +1292,6 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                       await assertSignInIdentityNotIndexed({ tenantId: input.tenantId,
                         providerId: input.thirdPartyId, providerUserId: input.thirdPartyUserId }, input.userContext);
                     }
-                    const operation = thirdPartyAuthenticationOperation(input.userContext);
                     if (operation) {
                       if (operation.actual) throw new RowndSignInMethodError("SIGN_IN_METHOD_AUTHENTICATION_UNPROVEN", 403, "The authenticated sign-in method changed.");
                       operation.actual = Object.freeze({ user: result.user, recipeUserId: result.recipeUserId.getAsString(),
@@ -1299,6 +1305,11 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 } catch (error) {
                   if (error instanceof DisconnectedSignInMethodError) return policyFailure(error, "thirdparty", ownerId);
                   throw error;
+                } finally {
+                  if (operation) {
+                    operation.indexedIdentity = undefined;
+                    operation.automaticLink = undefined;
+                  }
                 }
               },
             }),
@@ -1371,14 +1382,14 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                         if (!actual) return;
                         const recipe = supertokens.convertToRecipeUserId(actual.recipeUserId);
                         const { method, gate } = await checkSignInMethodAuthentication(actual.user.id, recipe, input.tenantId,
-                          operationContext, { presence });
+                          operationContext, { presence, previous: authentication.policyGate });
                         if ((gate.policy?.methods.length && !method) || (method && (method.recipeId !== "thirdparty" ||
                           method.thirdParty?.id !== actual.providerId || method.thirdParty.userId !== actual.providerUserId))) {
                           throw new RowndSignInMethodError("SIGN_IN_METHOD_AUTHENTICATION_UNPROVEN", 403, "The authenticated sign-in method changed.");
                         }
                         const sessionRecipe = authenticatedResponse.session.getRecipeUserId(operationContext);
                         if (sessionRecipe.getAsString() !== actual.recipeUserId) {
-                          await checkSignInMethodAuthentication(actual.user.id, sessionRecipe, input.tenantId, operationContext, { presence });
+                          await checkSignInMethodAuthentication(actual.user.id, sessionRecipe, input.tenantId, operationContext, { presence, previous: gate });
                         }
                       } });
                   } else if (authentication.sessions.size) {
@@ -1436,10 +1447,16 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     }
                     return originalImplementation.linkAccounts(input);
                   }
+                  const auto = thirdPartyAuthenticationOperation(input.userContext)?.automaticLink;
+                  if (auto?.ownerId === input.primaryUserId && auto.recipeId === input.recipeUserId.getAsString()) {
+                    // The SDK supplied the exact candidate and owner to the automatic-link hook.
+                    await assertStandaloneLinkCandidateHasNoPolicy(auto.recipeId, input.userContext);
+                    return originalImplementation.linkAccounts(input);
+                  }
                   const recheck = await assertSignInMethodLinkAllowed(input.primaryUserId, input.recipeUserId, input.userContext);
                   const result = await originalImplementation.linkAccounts(input);
                   if (recheck && result.status === "OK") {
-                    await assertSignInMethodLinkAllowed(input.primaryUserId, input.recipeUserId, input.userContext);
+                    await recheck.confirm(result.user);
                   }
                   return result;
                 } catch (error) {
@@ -1473,6 +1490,15 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                         const { policy } = await readPolicyGate(ownerId, input[4], { user: input[1] });
                         if (policy) assertIdentityAllowedByOwner({ tenantId: input[3], providerId: candidate.id,
                           providerUserId: candidate.userId }, policy.identities, ownerId);
+                        const operation = thirdPartyAuthenticationOperation(input[4]);
+                        const checked = operation?.indexedIdentity;
+                        const method = input[0];
+                        if (operation && checked?.tenantId === input[3] && checked.providerId === candidate.id &&
+                          checked.providerUserId === candidate.userId && input[1]?.id === ownerId &&
+                          method?.recipeUserId && "tenantIds" in method && Array.isArray(method.tenantIds) &&
+                          method.tenantIds.length === 1 && method.tenantIds[0] === checked.tenantId) {
+                          operation.automaticLink = { recipeId: method.recipeUserId.getAsString(), ownerId };
+                        }
                       } catch (error) {
                         if (error instanceof DisconnectedSignInMethodError) logPolicyDenial(error, "automatic_link", ownerId);
                         if (error instanceof DisconnectedSignInMethodError && error.code === "SIGN_IN_METHOD_DISCONNECTED") {
@@ -1535,6 +1561,8 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                 try {
                   const { gate } = await checkSignInMethodAuthentication(input.userId, input.recipeUserId,
                     input.tenantId, resolved.userContext, { presence: inspection });
+                  if (passwordlessIssuance && gate.policy) passwordlessIssuance.policyGate = gate;
+                  if (authentication && gate.policy) authentication.policyGate = gate;
                   if (input.userContext.rowndMigrationRequestId && gate.policy) {
                     throw new DisconnectedSignInMethodError("DISCONNECT_RESTORATION_BLOCKED");
                   }
