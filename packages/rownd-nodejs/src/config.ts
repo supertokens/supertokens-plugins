@@ -9,14 +9,21 @@ import type {
   RowndSubBrandConfigInput,
   RowndPluginDynamicConfig,
   RowndConfigResolverContext,
+  RowndTelemetryClient,
 } from "./types";
 import { RowndConfigResolutionError } from "./errors";
 import { logDebugMessage } from "./logger";
-import { createDerivedUserContext } from "./utils";
-import { isRecord } from "./utils";
+import {
+  assertAllowedBypassRedirectPath,
+  createDerivedUserContext,
+  isRecord,
+  normalizeRedirectToPathForClientDomain,
+  resolveAllowedClientDomain,
+} from "./utils";
 
 let pluginConfig: RowndPluginNormalisedConfig | undefined;
 let superTokensConfig: SuperTokensPublicConfig | undefined;
+let recordPluginEvent: RowndTelemetryClient["recordEvent"] | undefined;
 const RESOLVED_CONFIG = Symbol("rowndResolvedConfig");
 
 type ResolvedDynamicConfig = Pick<
@@ -34,12 +41,28 @@ type ResolvedConfigSnapshot = {
   config: ResolvedDynamicConfig;
 };
 
-export function setPluginConfig(config: RowndPluginNormalisedConfig) {
+export function setPluginConfig(config: RowndPluginNormalisedConfig, recordEvent?: RowndTelemetryClient["recordEvent"]) {
   pluginConfig = config;
+  recordPluginEvent = recordEvent;
 }
 
 export function getPluginConfig() {
   return pluginConfig;
+}
+
+export function getPluginTelemetryRecorder() {
+  return recordPluginEvent;
+}
+
+export function resolveConfirmationBypassTarget(input: Parameters<typeof resolveAllowedClientDomain>[0] & {
+  redirectToPath?: string;
+  appVariantId?: string;
+}) {
+  assertRowndAppVariantIsConfigured(input.pluginConfig, input.appVariantId);
+  const clientDomain = resolveAllowedClientDomain(input);
+  const redirectToPath = normalizeRedirectToPathForClientDomain(input.redirectToPath, clientDomain);
+  assertAllowedBypassRedirectPath(input.pluginConfig, redirectToPath);
+  return { clientDomain, redirectToPath };
 }
 
 export function setSuperTokensConfig(config: SuperTokensPublicConfig) {

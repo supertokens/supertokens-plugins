@@ -593,6 +593,50 @@ Before skipping the cross-device confirmation prompt, the frontend should valida
 
 If validation fails, the frontend should show the normal cross-device confirmation prompt.
 
+### Session Handoff Links
+
+Use `createSessionHandoffLink` to open your website in an in-app browser for a user already signed in to your mobile app. It works without a deliverable email or phone number, including when Sign in with Apple returned no email and SuperTokens used a placeholder.
+
+Configure `crossDeviceConfirmationBypass.allowedRedirectPaths` as above. The destination must match an allowed path after normalization, and the `clientDomain` key must resolve to an HTTPS website. If omitted, the helper uses the SuperTokens website domain. The handoff always uses the source session's tenant.
+
+For example, expose a backend endpoint protected by SuperTokens session verification:
+
+```typescript
+import { createSessionHandoffLink } from "@supertokens-plugins/rownd-nodejs";
+import { verifySession } from "supertokens-node/recipe/session/framework/express";
+import type { SessionRequest } from "supertokens-node/framework/express";
+
+app.post("/app/session-handoff", verifySession({ checkDatabase: true }), async (req: SessionRequest, res, next) => {
+  try {
+    const url = await createSessionHandoffLink({
+      session: req.session!,
+      clientDomain: "browser",
+      redirectToPath: "/profile",
+      displayContext: "customer_web_view",
+    });
+    res.set("Cache-Control", "no-store").json({ url });
+  } catch (error) {
+    next(error);
+  }
+});
+```
+
+Open the returned `/account/login?rownd_handoff=1&…#<token>` URL in the in-app browser. The Hub reads the token from the fragment and posts JSON to `{apiDomain}{apiBasePath}/plugin/rownd/session-handoff/consume` (by default `POST /auth/plugin/rownd/session-handoff/consume`). Send `{ token, redirectToPath, clientDomain?, appVariantId?, confirmSwitch? }` using the destination parameters from the link. `displayContext` is informational only. Success returns HTTP 200 `{ "status": "OK", "redirectToPath": "/profile" }`; when a new session is needed, it uses your configured token transfer method. Rejected links return HTTP 401 and `{ "status": "ERROR", "message": "Invalid or expired handoff link" }`.
+
+If the browser already has a non-anonymous session for a different account, consume returns HTTP 200 `{ "status": "CONFIRMATION_REQUIRED" }` without changing the session or extending the link's expiry. Resubmit with `confirmSwitch: true` only after the user agrees to switch. If the browser session needs refreshing, consume returns HTTP 200 `{ "status": "SESSION_REFRESH_REQUIRED" }` even with `confirmSwitch: true`, leaving the link untouched. Refresh the browser session before retrying.
+
+For the same non-anonymous account and tenant, consume uses the link but keeps the existing session. A session for the same account in another tenant, or a guest or instant session, can be replaced without confirmation. When replacing a session, consume revokes the previous one after publishing the new one. Requests must use `Content-Type: application/json`; cross-origin clients must pass CORS preflight.
+
+A signed-out visitor can still be signed into an attacker's account by opening a link the attacker minted. This is the same exposure as passwordless bypass magic links; the two-minute expiry and allowlisted redirect paths limit it.
+
+Links expire after two minutes and can be used only once. The token is fragment-only; treat the whole URL like a credential and never log it. Minting a replacement invalidates the previous pending link for that source session. The source session must still be active at consume time. Guest, instant, and handoff sessions cannot mint links. A handoff signs the user in but does not count as fresh authentication: changing email, linking login methods, or deleting the account requires signing in again.
+
+Handoff sessions carry the access-token claim `rownd_session_authentication: "handoff"`. `session.getTimeCreated()` reports when the web session was issued, not when the user last authenticated. Use `isSessionHandoff(session)` from `@supertokens-plugins/rownd-nodejs` to require re-authentication for sensitive app operations, in addition to any age check.
+
+When profile activity is requested, a handoff may advance `last_active`, but never counts as a sign-in. `last_sign_in` uses the latest remaining non-handoff session, falling back to the account's join time if only handoff sessions remain.
+
+Unused handoff carriers remain in SuperTokens Core until a later mint cleans them up or their refresh-token lifetime expires. They do not extend the two-minute link lifetime. The plugin hides carriers from profile activity, but raw `Session.getAllSessionHandlesForUser` results include them. Call `Session.getSessionInformation(handle)` and filter entries whose `sessionDataInDatabase.kind === "rownd_session_handoff"`. Custom `createNewSession` overrides also see carrier creation; use the same marker on the override's `sessionDataInDatabase` input to skip side effects intended only for real sign-ins.
+
 ## API Endpoints
 
 Routes are mounted under your SuperTokens `apiBasePath`, which defaults to `/auth`. The migration endpoint is the main Rownd-to-SuperTokens session handoff endpoint; the plugin also exposes Rownd-compatible app config, guest, user, metadata, field, and sign-out endpoints under `{apiBasePath}/plugin/rownd/...`.

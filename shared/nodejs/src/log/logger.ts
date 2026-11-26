@@ -124,7 +124,8 @@ const logger = setup(config);
 
 // Add custom formatters for object inspection
 if (logger.formatters) {
-  logger.formatters.o = function (this: any, value: any) {
+  const formatters: Record<string, (this: { useColors: boolean }, value: unknown) => string> = logger.formatters;
+  formatters.o = function (value) {
     return util
       .inspect(value, { colors: this.useColors, compact: true })
       .split("\n")
@@ -132,7 +133,7 @@ if (logger.formatters) {
       .join(" ");
   };
 
-  logger.formatters.O = function (this: any, value: any) {
+  formatters.O = function (value) {
     return util.inspect(value, { colors: this.useColors, compact: false });
   };
 }

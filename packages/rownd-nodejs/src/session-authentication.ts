@@ -1,36 +1,66 @@
 import SuperTokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
 import { EmailVerificationClaim } from "supertokens-node/recipe/emailverification";
+import type { SessionContainerInterface } from "supertokens-node/recipe/session/types";
 import { RowndEmailChangeError } from "./errors";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { User } from "supertokens-node/types";
 import type { JsonRecord } from "./utils";
-import { getRawUserMetadata } from "./rownd-compatibility";
+import { getEffectiveAuthLevel, getRawUserMetadata } from "./rownd-compatibility";
 import { readOwnerPlanCheckpoint, ambiguousOwnerSessionAliases } from "./migration-owner-plan";
 import { assertCompletedPlan } from "./migration-consolidation";
+import { GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID } from "./constants";
 
 export const SESSION_AUTHENTICATION_KEY = "rownd_session_authentication";
+export type SessionAuthenticationOrigin = "instant" | "authenticated" | "handoff";
 
 export async function assertEmailChangeSessionClaims(handle: string, userContext: JsonRecord) {
-  const result = await Session.validateClaimsForSessionHandle(handle, (validators) => validators.filter((validator) =>
-    !("claim" in validator) || validator.claim.key !== EmailVerificationClaim.key), userContext);
+  const result = await Session.validateClaimsForSessionHandle(handle, (validators, info) => {
+    if (readSessionAuthenticationOrigin(info.customClaimsInAccessTokenPayload) === "handoff") {
+      throw new RowndEmailChangeError("CONFLICT", 403, "Recent authentication is required to change email.");
+    }
+    return validators.filter((validator) => !("claim" in validator) || validator.claim.key !== EmailVerificationClaim.key);
+  }, userContext);
   if (result.status !== "OK" || result.invalidClaims.length) {
     throw new RowndEmailChangeError("CONFLICT", 403, "Session requirements are not satisfied.");
   }
 }
-const provenAuthentication = new AsyncLocalStorage<boolean>();
+const creationOrigin = new AsyncLocalStorage<"authenticated" | "handoff">();
 
 // Credential-success paths can attest authentication when account linking keeps
 // the session on the instant recipe. Metadata updates cannot mint this binding.
 export async function withProvenSessionAuthentication<T>(action: () => Promise<T>) {
-  return provenAuthentication.run(true, action);
+  return creationOrigin.run("authenticated", action);
+}
+
+export function withSessionHandoffAuthentication<T>(action: () => Promise<T>) {
+  return creationOrigin.run("handoff", action);
+}
+
+export function readSessionAuthenticationOrigin(payload: JsonRecord): SessionAuthenticationOrigin | undefined {
+  const origin = payload[SESSION_AUTHENTICATION_KEY];
+  if (origin === "instant" || origin === "authenticated" || origin === "handoff") return origin;
+}
+
+export function isSessionHandoff(session: SessionContainerInterface | undefined): boolean {
+  return session !== undefined && readSessionAuthenticationOrigin(session.getAccessTokenPayload()) === "handoff";
+}
+
+export function isAnonymousSessionUser(user: User | undefined, origin: SessionAuthenticationOrigin | undefined) {
+  return origin === "instant" ||
+    [GUEST_AUTH_METHOD_ID, INSTANT_AUTH_METHOD_ID].includes(getEffectiveAuthLevel(user));
 }
 
 export async function sessionAuthenticationOrigin(user: User | undefined, recipeUserId: string | undefined,
-  payload: JsonRecord, context: JsonRecord, creating = false): Promise<"instant" | "authenticated" | undefined> {
-  if (creating && provenAuthentication.getStore()) return "authenticated";
-  if (!creating && payload[SESSION_AUTHENTICATION_KEY] === "authenticated") return "authenticated";
-  if (!creating && (payload[SESSION_AUTHENTICATION_KEY] === "instant" || payload.auth_level === "instant")) return "instant";
+  payload: JsonRecord, context: JsonRecord, creating = false): Promise<SessionAuthenticationOrigin | undefined> {
+  if (creating) {
+    const origin = creationOrigin.getStore();
+    if (origin) return origin;
+  } else {
+    const origin = readSessionAuthenticationOrigin(payload);
+    if (origin) return origin;
+    if (payload.auth_level === "instant") return "instant";
+  }
   if (!user || !recipeUserId) return payload.auth_level === "instant" ? "instant" : undefined;
   const immutable = async (id: string) => {
     const mapping = await SuperTokens.getUserIdMapping({ userId: id, userIdType: "EXTERNAL", userContext: context });

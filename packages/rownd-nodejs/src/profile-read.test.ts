@@ -118,6 +118,23 @@ describe("profile read budgets and activity contracts", () => {
     expect(profile.meta).toMatchObject({ last_sign_in: new Date(1000).toISOString(), last_active: new Date(1000).toISOString() });
   });
 
+  it("uses the latest non-handoff session for sign-in time and method", async () => {
+    const phoneRecipe = SuperTokens.convertToRecipeUserId("phone");
+    vi.mocked(SuperTokens.getUser).mockResolvedValue({ ...user, loginMethods: [...user.loginMethods,
+      { ...user.loginMethods[0]!, recipeUserId: phoneRecipe, email: undefined, phoneNumber: "+15555550100" }] });
+    vi.mocked(Session.getAllSessionHandlesForUser).mockResolvedValue(["web", "sign-in"]);
+    vi.mocked(Session.getSessionInformation).mockImplementation(async (handle) => handle === "web"
+      ? { ...info(3000), recipeUserId: phoneRecipe, customClaimsInAccessTokenPayload: { rownd_session_authentication: "handoff" } }
+      : info(2000));
+    const profile = await getUserById("owner", "public", {}, { includeActivity: true, recordEvent });
+    expect(profile.meta).toMatchObject({
+      last_sign_in: new Date(2000).toISOString(),
+      last_sign_in_method: "email",
+      last_active: new Date(3000).toISOString(),
+    });
+    expect(events[0]?.sdkCalls.sessionDetail).toBe(2);
+  });
+
   it("reuses retired-alias raw reads only within one assembly", async () => {
     vi.mocked(SuperTokens.getUser).mockImplementation(async (id) => id === "retired" ? undefined : user);
     vi.mocked(UserMetadata.getUserMetadata).mockImplementation(async (id) => ({ status: "OK", metadata:
@@ -210,7 +227,9 @@ describe("profile read budgets and activity contracts", () => {
 
   it("assembles identical non-activity fields without SDK reads or input mutation", () => {
     const metadata = Object.freeze({ first_name: "Canonical", rownd_profile_authoritative_fields: ["last_name"] });
-    const enriched = assembleUserProfile("owner", "public", user, metadata, undefined, "active-sessions", info(2000));
+    const enriched = assembleUserProfile("owner", "public", user, metadata, undefined, "active-sessions", {
+      latestSession: info(2000), latestSignIn: info(2000),
+    });
     const profile = assembleUserProfile("owner", "public", user, metadata, undefined, "profile");
     enriched.meta.last_sign_in = null;
     enriched.meta.last_active = null;

@@ -9,7 +9,7 @@ export class OpenTelemetryClient implements RowndTelemetryClient {
     const profileEndTime = event.operation === "profile_read" ? Date.now() : undefined;
     const span = profileEndTime !== undefined
       ? tracer.startSpan("rownd.profile_read", { startTime: profileEndTime - event.durationMs })
-      : tracer.startSpan("rownd.migrate");
+      : tracer.startSpan(event.operation === "session_handoff" ? "rownd.session_handoff" : "rownd.migrate");
     span.setAttributes({
       "rownd.outcome": event.outcome,
       "rownd.duration_ms": event.durationMs,
@@ -40,6 +40,9 @@ export class OpenTelemetryClient implements RowndTelemetryClient {
       for (const [kind, count] of Object.entries(event.sdkCalls ?? {})) {
         span.setAttribute(`rownd.profile.sdk_calls.${kind}`, count);
       }
+    }
+    if (event.handoffEvent !== undefined) {
+      span.setAttribute("rownd.handoff.event", event.handoffEvent);
     }
 
     if (event.outcome === "error") {

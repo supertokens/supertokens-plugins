@@ -50,6 +50,7 @@ function setup(config: Partial<RowndPluginNormalisedConfig> = {}) {
     getRecipeUserId: vi.fn(() => recipeUserId),
     getHandle: vi.fn(() => "session-handle"),
     getTimeCreated: vi.fn(async () => Date.now()),
+    getAccessTokenPayload: vi.fn(() => ({})),
   };
   const userContext = { caller: "preserved" } as unknown as Parameters<Handler>[3];
   const request = (body: unknown, variant?: string) => ({
