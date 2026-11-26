@@ -1716,10 +1716,6 @@ def _emailverification_api_override():
                             )
                         return GeneralErrorResponse(str(error))
                     except RowndEmailChangeError as error:
-                        if session is not None:
-                            await _clear_email_change_client_session(
-                                api_options, session, user_context
-                            )
                         return GeneralErrorResponse(str(error))
                     if session is not None and verification_result is not None:
                         should_replace_session = (
