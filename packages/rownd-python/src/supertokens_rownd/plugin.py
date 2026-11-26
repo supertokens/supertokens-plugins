@@ -1762,7 +1762,7 @@ def _emailverification_api_override():
                         )
                     except RowndEmailChangeSessionsRevokedError as error:
                         if session is None or not await restore_session_after_failed_email_change(
-                            error, session, api_options.request, user_context
+                            error, session, api_options.request, api_options.response, user_context
                         ):
                             await _clear_email_change_client_session(
                                 api_options, session, user_context

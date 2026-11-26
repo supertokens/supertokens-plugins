@@ -5500,6 +5500,7 @@ async def test_route_replacement_session_failure_keeps_verified_email_change(
     ("failure", "stage"),
     [
         ("recovery-tenant", "tenant-lookup"),
+        ("deferred-recovery", "apply-recovery-tokens"),
         ("immediate-header", "write-removal-headers"),
         ("deferred-header", "write-deferred-removal-headers"),
         ("queue-sdk", "queue-sdk-clear"),
@@ -5530,9 +5531,18 @@ async def test_email_change_faults_keep_http_json_error(
     query = parse_qs(urlparse(delivery_links[0]).query)
     original_set_header = FastApiResponse.set_header
     original_complete = rownd_plugin.complete_pending_email_verification
+    original_create_session = session_asyncio.create_new_session
+    recovery_handles: list[str] = []
 
     def fail(*_args: Any, **_kwargs: Any):
         raise RuntimeError("injected email change fault")
+
+    async def fail_deferred_recovery(*args: Any, **kwargs: Any):
+        recovered = await original_create_session(*args, **kwargs)
+        recovery_handles.append(recovered.get_handle())
+        # Fail after SDK token writes to exercise cleanup of a partial response.
+        recovered.response_mutators.append(fail)
+        return recovered
 
     def fail_removal_header(response, name, value):
         if name.lower() == "front-token" and value == "remove":
@@ -5555,6 +5565,8 @@ async def test_email_change_faults_keep_http_json_error(
         assert await session_asyncio.revoke_session(handle)
         if failure == "recovery-tenant":
             monkeypatch.setattr(type(initiating_session), "get_tenant_id", fail)
+        elif failure == "deferred-recovery":
+            monkeypatch.setattr(session_asyncio, "create_new_session", fail_deferred_recovery)
         elif failure == "queue-sdk":
             monkeypatch.setattr(rownd_plugin, "clear_session_response_mutator", fail)
         elif failure == "deferred-sdk":
@@ -5581,7 +5593,9 @@ async def test_email_change_faults_keep_http_json_error(
             user_id=sign_in.user.id,
             step="injected-completion-failure",
             recoverable_recipe_user_id=(
-                recipe_user_id.get_as_string() if failure == "recovery-tenant" else None
+                recipe_user_id.get_as_string()
+                if failure in {"recovery-tenant", "deferred-recovery"}
+                else None
             ),
         )
 
@@ -5604,10 +5618,14 @@ async def test_email_change_faults_keep_http_json_error(
     }
     assert f"stage={stage}" in caplog.text
     assert not verify_res.headers.get("st-access-token")
-    if failure in {"recovery-tenant", "queue-sdk", "deferred-sdk"} or failure.startswith(
-        "post-commit-"
+    if failure in {"recovery-tenant", "deferred-recovery", "queue-sdk", "deferred-sdk"} or (
+        failure.startswith("post-commit-")
     ):
         assert verify_res.headers["front-token"] == "remove"
+    if failure == "deferred-recovery":
+        assert len(recovery_handles) == 1
+        assert not verify_res.headers.get("st-refresh-token")
+        assert await session_asyncio.get_session_information(recovery_handles[0]) is None
 
 
 @pytest.mark.parametrize("pending_cleanup_fails", [False, True])
