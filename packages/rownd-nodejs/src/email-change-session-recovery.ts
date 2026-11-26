@@ -59,27 +59,31 @@ export async function clearClientSession(
   session: SessionContainerInterface | undefined,
 ): Promise<void> {
   try {
-    try {
-      // The sessions were revoked in Core. Clear both transfer methods using the
-      // app's cookie config, without relying on another Core call to succeed.
-      const clearResponse = await (responseClearer ??= resolveResponseClearer());
-      if (clearResponse) {
-        clearResponse(req, res, userContext);
-        return;
-      }
-    } catch {
-      // The internal helper may also become incompatible at invocation time.
+    // Clear both transfer methods with the app's config without another Core call.
+    const clearResponse = await (responseClearer ??= resolveResponseClearer());
+    if (clearResponse) {
+      clearResponse(req, res, userContext);
+      return;
     }
+  } catch {
+    logDebugMessage("email_change_session_cleanup_failed step=clear-sdk-tokens");
+  }
 
-    logDebugMessage("email_change_session_cleanup using public session fallback");
+  logDebugMessage("email_change_session_cleanup using public session fallback");
+  try {
+    await session?.revokeSession(userContext);
+  } catch {
+    logDebugMessage("email_change_session_cleanup_failed step=revoke-session");
+  }
+  for (const [name, value, allowDuplicate] of [
+    ["front-token", "remove", false],
+    ["Access-Control-Expose-Headers", "front-token", true],
+  ] as const) {
     try {
-      await session?.revokeSession(userContext);
+      res.setHeader(name, value, allowDuplicate);
     } catch {
-      // Revoke is best-effort; the response still signals removal below.
+      logDebugMessage(`email_change_session_cleanup_failed step=set-header:${name}`);
     }
-  } finally {
-    res.setHeader("front-token", "remove", false);
-    res.setHeader("Access-Control-Expose-Headers", "front-token", true);
   }
 }
 
@@ -120,8 +124,10 @@ async function restoreOriginalSession(
   const recoverableRecipeUserId = error.recoverableRecipeUserId;
   if (!session) return "no-session";
   if (!recoverableRecipeUserId) return "not-recoverable";
-  const tenantId = session.getTenantId(userContext);
+  let stage = "read-tenant";
   try {
+    const tenantId = session.getTenantId(userContext);
+    stage = "read-original-identity";
     clearSuperTokensCoreCallCache(userContext);
     const owner = await supertokens.getUser(recoverableRecipeUserId, userContext);
     const method = owner?.loginMethods.find(
@@ -133,6 +139,7 @@ async function restoreOriginalSession(
       return "identity-changed";
     }
     if (method.recipeId === "passwordless" && method.email !== undefined) {
+      stage = "authorize-original-credential";
       const authorization = await validateConsumedPasswordlessEmail({
         userId: owner.id,
         email: method.email,
@@ -143,6 +150,7 @@ async function restoreOriginalSession(
       });
       if (authorization.status !== "ALLOW") return "credential-not-authorized";
     }
+    stage = "create-original-session";
     await Session.createNewSession(
       input.req,
       input.res,
@@ -153,6 +161,7 @@ async function restoreOriginalSession(
       userContext,
     );
   } catch {
+    logDebugMessage(`email_change_session_recovery_failed step=${error.step} stage=${stage}`);
     return "failed";
   }
   return "restored";

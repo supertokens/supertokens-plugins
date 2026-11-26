@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { reconciliationSuperTokens as SuperTokens, reconciliationAccountLinking as AccountLinking, reconciliationEmailVerification as EmailVerification, reconciliationUserMetadata as UserMetadata, reconciliationPasswordless as Passwordless, reconciliationThirdParty as ThirdParty, reconciliationMultitenancy as MultiTenancy } from "./reconciliation-sdk";
 import { classifyMethodOwner, resolveMethodInspection, selectMigrationMethods, planMethods, methodPlanAllows, type MethodRecipe, type MethodSnapshot, type MethodPlan } from "./migration-method-plan";
 import { recordAdministrativeMethodCreation } from "./migration-method-receipts";
@@ -77,6 +78,7 @@ import {
   getCombinedUserMetadata,
   getRawUserMetadata,
   getPrimaryUserMetadata,
+  inspectPrimaryUserMetadata,
   mergeMissingProfileMetadata,
   inspectLinkedUserMetadata,
   inspectUserPresentationMetadata,
@@ -2408,7 +2410,7 @@ export async function completePendingEmailVerification(input: {
   }
 
   let rollbackCredentialChange: (() => Promise<void>) | undefined;
-  let destructiveCleanupStarted = false;
+  let replacementPlanMayBePublished = false;
   let sessionsRevoked = false;
   let initiatingRecipeUserId: SuperTokensLoginMethod["recipeUserId"] | undefined;
   let step = "check-target-email-available";
@@ -2681,12 +2683,24 @@ export async function completePendingEmailVerification(input: {
       ],
     };
     step = "publish-replacement-plan";
-    await publishEmailReplacementPlan(
-      userId,
-      committingPlan,
-      input.userContext,
+    clearSuperTokensCoreCallCache(userContext);
+    const beforePublication = await inspectPrimaryUserMetadata(userId, userContext);
+    const replacementPatch = prepareEmailReplacementPlan(
+      beforePublication.metadata, userId, committingPlan, userContext,
     );
-    destructiveCleanupStarted = true;
+    // Core may apply the write even if the SDK never receives its response.
+    replacementPlanMayBePublished = true;
+    try {
+      await updatePrimaryUserMetadata(userId, replacementPatch, userContext);
+    } catch (publicationError) {
+      try {
+        const current = await inspectPrimaryUserMetadata(userId, createUncachedUserContext(userContext));
+        replacementPlanMayBePublished = !isDeepStrictEqual(current, beforePublication);
+      } catch (readError) {
+        logFailure("check-replacement-plan-publication", true, readError, "publication-unknown");
+      }
+      throw publicationError;
+    }
     step = "reconcile-committing-verification";
     await reconcileCommittingEmailVerification({
       userId,
@@ -2700,15 +2714,12 @@ export async function completePendingEmailVerification(input: {
       replaceSession: true,
     };
   } catch (error) {
-    if (destructiveCleanupStarted) {
-      await Promise.allSettled([
-        Session.revokeAllSessionsForUser(
-          userId,
-          true,
-          undefined,
-          input.userContext,
-        ),
-      ]);
+    if (replacementPlanMayBePublished) {
+      try {
+        await Session.revokeAllSessionsForUser(userId, true, undefined, input.userContext);
+      } catch (revokeError) {
+        logFailure("revoke-sessions-after-incomplete-cleanup", true, revokeError);
+      }
       logFailure(step, true, error, "cleanup-incomplete");
       // Retired methods may already be gone, possibly including the initiating
       // one, so no identity is known to be safe to re-issue a session for.
@@ -3092,17 +3103,14 @@ async function removePendingEmailVerification(
   );
 }
 
-async function publishEmailReplacementPlan(
+function prepareEmailReplacementPlan(
+  metadata: RowndMetadata,
   userId: string,
   plan: RowndPendingVerification,
   userContext?: Record<string, any>,
 ) {
   const canonical =
     getConfigForUserContext(userContext)?.metadataMode === "canonical";
-  if (canonical) {
-    clearSuperTokensCoreCallCache(userContext ?? {});
-  }
-  const metadata = await getPrimaryUserMetadata(userId, userContext);
   let found = false;
   const pendingVerifications = getPendingVerifications(metadata).map(
     (verification) => {
@@ -3137,11 +3145,7 @@ async function publishEmailReplacementPlan(
       plan.targetCanonicalRecipeUserId,
       tenantId,
     );
-  await updatePrimaryUserMetadata(
-    userId,
-    { ...emailMetadata, rownd_pending_verification: pendingVerifications },
-    userContext,
-  );
+  return { ...emailMetadata, rownd_pending_verification: pendingVerifications };
 }
 
 async function updateEmailReplacementPlan(

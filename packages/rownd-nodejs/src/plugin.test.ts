@@ -12730,10 +12730,11 @@ describe("rownd-nodejs plugin", () => {
       describe("when completion fails after the initiating session is revoked", () => {
         async function startEmailChange(prefix: string) {
           const emailVerificationLinks: string[] = [];
+          const requestErrors: unknown[] = [];
           const { server: s, port } = await setup(
             coreConnectionURI,
             undefined,
-            { enableEmailVerification: true, emailVerificationLinks },
+            { enableEmailVerification: true, emailVerificationLinks, requestErrors },
           );
           server = s;
           testPORT = port;
@@ -12745,12 +12746,19 @@ describe("rownd-nodejs plugin", () => {
           ).toMatchObject({ status: 200 });
           expect(emailVerificationLinks).toHaveLength(1);
           const link = new URL(emailVerificationLinks[0]);
-          const verify = () =>
-            verifyEmailToken(
+          const verify = async (expectedStatus = 200) => {
+            const response = await verifyEmailToken(
               link.searchParams.get("token")!,
               account.accessToken,
               link.searchParams.get("rowndPendingVerificationId")!,
             );
+            expect(response.status, String(requestErrors[0] ?? "")).toBe(expectedStatus);
+            if (expectedStatus === 200) {
+              expect(requestErrors).toEqual([]);
+              expect(response.headers.get("content-type")).toMatch(/^application\/json\b/i);
+            }
+            return response;
+          };
           return { account, currentEmail, targetEmail, verify };
         }
 
@@ -12872,6 +12880,41 @@ describe("rownd-nodejs plugin", () => {
           ).resolves.toEqual([]);
         }
 
+        it("keeps the replacement plan and target when Core writes the plan but loses the response", async () => {
+          const scenario = await startEmailChange("recover-published");
+          const originalUpdateUserMetadata = UserMetadata.updateUserMetadata;
+          const update = vi.spyOn(UserMetadata, "updateUserMetadata").mockImplementation(
+            async (...input) => {
+              const result = await originalUpdateUserMetadata(...input);
+              const pending = input[1].rownd_pending_verification;
+              if (
+                Array.isArray(pending) &&
+                pending.some((entry) => entry?.status === "COMMITTING")
+              ) {
+                throw new Error("metadata write response lost");
+              }
+              return result;
+            },
+          );
+
+          await expectClientSessionCleared(
+            await scenario.verify(),
+            scenario.account.userId,
+            "email change cleanup incomplete; account reconciliation is required",
+          );
+          update.mockRestore();
+          const user = await SuperTokens.getUser(scenario.account.userId);
+          const target = user?.loginMethods.find((method) => method.email === scenario.targetEmail);
+          expect(target).toBeDefined();
+          expect(user?.loginMethods.some((method) => method.email === scenario.currentEmail)).toBe(true);
+          const { metadata } = await UserMetadata.getUserMetadata(scenario.account.userId);
+          const targetId = target?.recipeUserId.getAsString();
+          expect(metadata.rownd_email_recipe_user_ids).toMatchObject({ public: targetId });
+          expect(metadata.rownd_pending_verification).toEqual([
+            expect.objectContaining({ status: "COMMITTING", targetCanonicalRecipeUserId: targetId }),
+          ]);
+        });
+
         it("clears the client session when passwordless sign-in would reject the original method", async () => {
           const scenario = await startEmailChange("recover-unauthorized");
           vi.spyOn(AccountLinking, "linkAccounts").mockImplementation(
@@ -12901,7 +12944,7 @@ describe("rownd-nodejs plugin", () => {
           const originalRevokeAll = Session.revokeAllSessionsForUser;
           let revokeAllCalls = 0;
           vi.spyOn(Session, "revokeAllSessionsForUser").mockImplementation(
-            async (...args) => {
+            (...args) => {
               revokeAllCalls += 1;
               // The first call fences sessions before the swap; fail the
               // follow-up revoke issued while handling the cleanup failure.
@@ -12928,7 +12971,7 @@ describe("rownd-nodejs plugin", () => {
           const originalRevokeAll = Session.revokeAllSessionsForUser;
           const revokeAll = vi
             .spyOn(Session, "revokeAllSessionsForUser")
-            .mockImplementation(async (...args) => {
+            .mockImplementation((...args) => {
               if (replacementAttempted) throw new Error("core unavailable");
               return originalRevokeAll(...args);
             });
@@ -12957,7 +13000,7 @@ describe("rownd-nodejs plugin", () => {
             .mockImplementationOnce(originalValidateClaims)
             .mockRejectedValueOnce(new Error("core unavailable"));
 
-          const response = await scenario.verify();
+          const response = await scenario.verify(500);
 
           expect(response.status).toBe(500);
           expect(revokeSession).not.toHaveBeenCalled();
@@ -13190,9 +13233,11 @@ describe("rownd-nodejs plugin", () => {
 
       it("allows one concurrent duplicate verification to complete", async () => {
         const emailVerificationLinks: string[] = [];
+        const requestErrors: unknown[] = [];
         const { server: s, port } = await setup(coreConnectionURI, undefined, {
           enableEmailVerification: true,
           emailVerificationLinks,
+          requestErrors,
         });
         server = s;
         testPORT = port;
@@ -13244,6 +13289,11 @@ describe("rownd-nodejs plugin", () => {
             pendingVerificationId,
           ),
         ]);
+        for (const response of responses) {
+          expect(response.status, String(requestErrors[0] ?? "")).toBe(200);
+          expect(response.headers.get("content-type")).toMatch(/^application\/json\b/i);
+        }
+        expect(requestErrors).toEqual([]);
         const bodies = await Promise.all(
           responses.map((response) => response.json()),
         );

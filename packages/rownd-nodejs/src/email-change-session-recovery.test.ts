@@ -3,6 +3,7 @@ import SuperTokens from "supertokens-node";
 import Session from "supertokens-node/recipe/session";
 import type { APIOptions } from "supertokens-node/recipe/emailverification";
 import type { SessionContainerInterface } from "supertokens-node/recipe/session/types";
+import { RowndEmailChangeSessionsRevokedError } from "./errors";
 import { logDebugMessage } from "./logger";
 
 vi.mock("./logger", () => ({ logDebugMessage: vi.fn() }));
@@ -84,3 +85,44 @@ it.each([true, false])(
     expect(logDebugMessage).toHaveBeenCalledWith(expect.stringContaining("fallback"));
   },
 );
+
+it.each(["front-token", "Access-Control-Expose-Headers"])(
+  "attempts both removal headers when setting %s throws",
+  async (failingHeader) => {
+    vi.doMock("supertokens-node/lib/build/recipe/session/cookieAndHeaders", () => ({}));
+    const { clearClientSession } = await import("./email-change-session-recovery");
+    const setHeader = vi.fn((name: string) => {
+      if (name === failingHeader) throw new Error("header unavailable");
+    });
+
+    await clearClientSession(
+      {} as APIOptions["req"],
+      { setHeader } as unknown as APIOptions["res"],
+      {},
+      undefined,
+    );
+
+    expect(setHeader).toHaveBeenCalledWith("front-token", "remove", false);
+    expect(setHeader).toHaveBeenCalledWith("Access-Control-Expose-Headers", "front-token", true);
+    expect(logDebugMessage).toHaveBeenCalledWith(expect.stringContaining(`step=set-header:${failingHeader}`));
+  },
+);
+
+it("clears the client session when reading the recovery tenant throws", async () => {
+  vi.doMock("supertokens-node/lib/build/recipe/session/cookieAndHeaders", () => ({}));
+  const { restoreSessionAfterFailedEmailChange } = await import("./email-change-session-recovery");
+  const setHeader = vi.fn();
+  await restoreSessionAfterFailedEmailChange({
+    error: new RowndEmailChangeSessionsRevokedError(new Error(), "user-id", "link-accounts", "recipe-id"),
+    session: {
+      getTenantId() { throw new Error("tenant unavailable"); },
+      revokeSession: vi.fn(),
+    } as unknown as SessionContainerInterface,
+    req: {} as APIOptions["req"],
+    res: { setHeader } as unknown as APIOptions["res"],
+    userContext: {},
+  });
+
+  expect(setHeader).toHaveBeenCalledWith("front-token", "remove", false);
+  expect(logDebugMessage).toHaveBeenCalledWith(expect.stringContaining("stage=read-tenant"));
+});

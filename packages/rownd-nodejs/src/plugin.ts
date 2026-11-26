@@ -1400,22 +1400,26 @@ export const init: (config: RowndPluginConfig) => SuperTokensPlugin =
                     } catch {
                       // The change is committed and every session revoked; the
                       // client must drop its dead session and sign in again.
-                      await Promise.allSettled([
-                        Session.revokeAllSessionsForUser(
+                      logDebugMessage(
+                        `email_change_replacement_session_failed userId=${verificationResult.userId}`,
+                      );
+                      try {
+                        await Session.revokeAllSessionsForUser(
                           verificationResult.userId,
                           true,
                           undefined,
                           input.userContext,
-                        ),
-                      ]);
+                        );
+                      } catch {
+                        logDebugMessage(
+                          `email_change_session_cleanup_failed step=revoke-all-sessions userId=${verificationResult.userId}`,
+                        );
+                      }
                       await clearClientSession(
                         input.options.req,
                         input.options.res,
                         input.userContext,
                         input.session,
-                      );
-                      logDebugMessage(
-                        `email_change_replacement_session_failed userId=${verificationResult.userId}`,
                       );
                       return {
                         status: "GENERAL_ERROR" as const,
