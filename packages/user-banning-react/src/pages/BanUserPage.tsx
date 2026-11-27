@@ -1,13 +1,11 @@
+import { Button, Callout, Card, TextInput, ThemeProvider } from "@shared/ui";
 import React from "react";
 import { useCallback, useState } from "react";
 import { SessionAuth } from "supertokens-auth-react/recipe/session";
 import { PermissionClaim } from "supertokens-auth-react/recipe/userroles";
 
 import { usePluginContext } from "../plugin";
-import { getErrorMessage, ThemeBase } from "../utils";
-
-// @ts-ignore
-import styles from "./style.css?inline";
+import { getErrorMessage } from "../utils";
 
 export function BanUserPage() {
   const { api, pluginConfig, t } = usePluginContext();
@@ -67,41 +65,32 @@ export function BanUserPage() {
     [tenantId, email]
   );
 
-  const onCheckStatus = useCallback(
-    (e: React.MouseEvent<HTMLButtonElement>) => {
-      e.preventDefault();
+  const onCheckStatus = useCallback(() => {
+    if (!email) {
+      setError("Email is required");
+      return;
+    }
 
-      if (!email) {
-        setError("Email is required");
-        return;
-      }
+    getBanStatus(email);
+  }, [getBanStatus, email]);
 
-      getBanStatus(email);
-    },
-    [getBanStatus, email]
-  );
+  const onBanUser = useCallback(() => {
+    if (!email) {
+      setError("Email is required");
+      return;
+    }
 
-  const onBanUser = useCallback(
-    (e: React.MouseEvent<HTMLButtonElement>) => {
-      e.preventDefault();
-      updateBanStatus(true);
-    },
-    [updateBanStatus]
-  );
+    updateBanStatus(true);
+  }, [updateBanStatus]);
 
-  const onUnbanUser = useCallback(
-    (e: React.MouseEvent<HTMLButtonElement>) => {
-      e.preventDefault();
+  const onUnbanUser = useCallback(() => {
+    if (!email) {
+      setError("Email is required");
+      return;
+    }
 
-      if (!email) {
-        setError("Email is required");
-        return;
-      }
-
-      updateBanStatus(false);
-    },
-    [updateBanStatus, email]
-  );
+    updateBanStatus(false);
+  }, [updateBanStatus, email]);
 
   return (
     <SessionAuth
@@ -112,87 +101,80 @@ export function BanUserPage() {
           onFailureRedirection: () => pluginConfig.onPermissionFailureRedirectPath,
         },
       ]}>
-      <ThemeBase userStyles={[styles]}>
-        <div className="supertokens-plugin-user-banning">
-          <div className="container">
-            <div className="row">
-              <div className="headerTitle">{t("PL_UB_BAN_PAGE_TITLE")}</div>
-              <p>{t("PL_UB_BAN_PAGE_DESCRIPTION")}</p>
+      <ThemeProvider>
+        <Card
+          title={t("PL_UB_BAN_PAGE_TITLE")}
+          description={t("PL_UB_BAN_PAGE_DESCRIPTION")}
+          style={{ width: "460px" }}>
+          {Boolean(error) && (
+            <Callout size="small" variant="danger" appearance="filled">
+              {error}
+            </Callout>
+          )}
+          <TextInput
+            id=""
+            required
+            label={t("PL_UB_BAN_PAGE_TENANT_ID_LABEL")}
+            value={tenantId}
+            onChange={(value) => {
+              setTenantId(value);
+              setBanStatus(null);
+            }}
+          />
+          <br />
+          <TextInput
+            id=""
+            required
+            label={t("PL_UB_BAN_PAGE_EMAIL_LABEL")}
+            value={email ?? ""}
+            placeholder="test@example.com"
+            onChange={(value) => {
+              setEmail(value);
+              setBanStatus(null);
+            }}
+          />
+          <br />
 
-              <div className="divider"></div>
+          {typeof banStatus === "boolean" && (
+            <>
+              {banStatus ? (
+                <Callout size="small" variant="danger" appearance="filled">
+                  {t("PL_UB_BAN_PAGE_BANNED_STATUS")}
+                </Callout>
+              ) : (
+                <Callout size="small" variant="success" appearance="filled">
+                  {t("PL_UB_BAN_PAGE_NOT_BANNED_STATUS")}
+                </Callout>
+              )}
+              <br />
+            </>
+          )}
 
-              {Boolean(error) && <div className="errorMessage">{error}</div>}
+          {typeof banStatus !== "boolean" && (
+            <>
+              <Button variant="brand" onClick={onCheckStatus} disabled={!tenantId || !email}>
+                {t("PL_UB_BAN_PAGE_CHECK_STATUS_BUTTON")}
+              </Button>
+              <br />
+            </>
+          )}
 
-              <form noValidate>
-                <div className="formRow">
-                  <div className="label">{t("PL_UB_BAN_PAGE_TENANT_ID_LABEL")}</div>
-                  <div className="inputContainer">
-                    <div className="inputWrapper">
-                      <input
-                        type="text"
-                        value={tenantId}
-                        autoComplete="on"
-                        placeholder={t("PL_UB_BAN_PAGE_TENANT_ID_PLACEHOLDER")}
-                        onChange={(e) => {
-                          setTenantId(e.target.value);
-                          setBanStatus(null);
-                        }}
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="formRow">
-                  <div className="label">{t("PL_UB_BAN_PAGE_EMAIL_LABEL")}</div>
-                  <div className="inputContainer">
-                    <div className="inputWrapper">
-                      <input
-                        type="email"
-                        value={email}
-                        disabled={!tenantId}
-                        autoComplete="on"
-                        placeholder={t("PL_UB_BAN_PAGE_EMAIL_PLACEHOLDER")}
-                        onChange={(e) => {
-                          setEmail(e.target.value);
-                          setBanStatus(null);
-                        }}
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {typeof banStatus === "boolean" && (
-                  <div className="formRow">
-                    {banStatus ? (
-                      <div className="errorMessage">{t("PL_UB_BAN_PAGE_BANNED_STATUS")}</div>
-                    ) : (
-                      <div className="successMessage">{t("PL_UB_BAN_PAGE_NOT_BANNED_STATUS")}</div>
-                    )}
-                  </div>
-                )}
-
-                <div className="formRow">
-                  <button className="button" onClick={onCheckStatus} disabled={!tenantId || !email}>
-                    {t("PL_UB_BAN_PAGE_CHECK_STATUS_BUTTON")}
-                  </button>
-                </div>
-
-                {typeof banStatus === "boolean" && (
-                  <div className="formRow" style={{ flexDirection: "row" }}>
-                    <button className="button" disabled={banStatus} onClick={onBanUser} style={{ marginRight: "20px" }}>
-                      {t("PL_UB_BAN_PAGE_BAN_BUTTON")}
-                    </button>
-
-                    <button className="button" disabled={!banStatus} onClick={onUnbanUser}>
-                      {t("PL_UB_BAN_PAGE_UNBAN_BUTTON")}
-                    </button>
-                  </div>
-                )}
-              </form>
-            </div>
-          </div>
-        </div>
-      </ThemeBase>
+          {typeof banStatus === "boolean" && (
+            <>
+              {banStatus ? (
+                <Button variant="brand" onClick={onUnbanUser}>
+                  {t("PL_UB_BAN_PAGE_UNBAN_BUTTON")}
+                </Button>
+              ) : (
+                <Button variant="brand" onClick={onBanUser}>
+                  {t("PL_UB_BAN_PAGE_BAN_BUTTON")}
+                </Button>
+              )}
+              <br />
+            </>
+          )}
+        </Card>
+      </ThemeProvider>
     </SessionAuth>
   );
 }
